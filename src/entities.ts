@@ -7,7 +7,7 @@
  *
  * Entity and RelKind are open by design:
  *   Entity  — the engine owns Relation; the SDK adds its entities
- *             (@apack/sdk's EARS) and packs declare theirs.
+ *             (@apackdev/sdk's EARS) and packs declare theirs.
  *   RelKind — the engine provides the Custom() helper and open type; the SDK
  *             and packs add their relation kinds.
  *

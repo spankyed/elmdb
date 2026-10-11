@@ -1,4 +1,4 @@
-// The engine is an instance: no module in @apack/ears keeps data at module scope. The installed engine (installed.ts)
+// The engine is an instance: no module in @apackdev/ears keeps data at module scope. The installed engine (installed.ts)
 // is the one exception: a reference to an engine, not data.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -45,7 +45,7 @@ export function moduleState(file: string, text: string): string[] {
   return found;
 }
 
-describe('@apack/ears module state', () => {
+describe('@apackdev/ears module state', () => {
   it('no engine module holds data at module scope', () => {
     const found = files(SRC).flatMap((file) => {
       const rel = path.relative(SRC, file);

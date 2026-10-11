@@ -1,5 +1,5 @@
 // The engine's benchmark: hydrating an app-sized graph, then queries, relation walks and write batches on it.
-// Run with `npm run bench -w @apack/ears`; the baseline and tolerance are in docs/goals/goal-package-boundaries.md (Phase 6).
+// Run with `npm run bench -w @apackdev/ears`; the baseline and tolerance are in docs/goals/goal-package-boundaries.md (Phase 6).
 import { bench, describe } from 'vitest';
 import { EARS, type PersistenceSink } from '../src/index.ts';
 import { freshEngine } from '../tests/engine/engine-under-test.ts';

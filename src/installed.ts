@@ -6,9 +6,9 @@ let installed: EarsQuery | undefined;
 
 /** The error an engine use with none installed throws */
 export const NO_ENGINE_INSTALLED =
-  'No EARS engine is installed: the app installs its engine when it binds (bindHost from @apack/sdk/runtime), ' +
-  'unit tests with startTestRuntime() from @apack/sdk/testing, and tooling with ' +
-  'installEngine(createEarsEngine({ isEntityType }).query) from @apack/ears';
+  'No EARS engine is installed: the app installs its engine when it binds (bindHost from @apackdev/sdk/runtime), ' +
+  'unit tests with startTestRuntime() from @apackdev/sdk/testing, and tooling with ' +
+  'installEngine(createEarsEngine({ isEntityType }).query) from @apackdev/ears';
 
 /**
  * Makes `engine` the one the free functions act on, or none with `undefined`. Returns the engine installed

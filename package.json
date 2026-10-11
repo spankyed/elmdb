@@ -1,5 +1,5 @@
 {
-  "name": "@apack/ears",
+  "name": "@apackdev/ears",
   "version": "0.1.0",
   "description": "EARS, the entity-attribute-relation store behind apack pack data",
   "license": "MIT",
@@ -27,13 +27,13 @@
   },
   "exports": {
     ".": {
-      "@apack/source": "./src/index.ts",
+      "@apackdev/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
     "./lmdb": {
-      "@apack/source": "./src/lmdb/index.ts",
+      "@apackdev/source": "./src/lmdb/index.ts",
       "types": "./dist/lmdb/index.d.ts",
       "default": "./dist/lmdb/index.js"
     }

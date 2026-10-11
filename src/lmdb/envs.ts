@@ -13,7 +13,7 @@ export type LmdbDbs = {
 };
 
 /**
- * How this version of `@apack/ears` encodes rows in LMDB (keys, attribute and relation records). An environment
+ * How this version of `@apackdev/ears` encodes rows in LMDB (keys, attribute and relation records). An environment
  * records the format it was written in; one in another format is refused rather than misread. Change the encoding,
  * and this number goes up with code that upgrades the older format.
  */

@@ -65,7 +65,7 @@ type NoInferType<T> = [T][T extends unknown ? 0 : never];
 
 /**
  * `S` is the entity shape map reads are typed against and `N` the entity names accepted as
- * arguments: `{}` and `string` (unchecked) from `@apack/ears`, the pack's `PackShapes` and
+ * arguments: `{}` and `string` (unchecked) from `@apackdev/ears`, the pack's `PackShapes` and
  * `EntityName` from its `#generated/ears`.
  *
  * Field parameters stay `keyof ShapeOf<S, E> & string` and picked rows `Pick<ShapeOf<S, E>, K>`:
@@ -164,7 +164,7 @@ export type FieldValues<S extends EntityShapes, E extends string> =
 /**
  * `E` and `S` type the writes: `tx` from a pack's `#generated/ears`, started from a declared entity
  * type or an id tagged with one, checks the values of declared fields. Started from a plain id (or
- * from `@apack/ears`) every write is unchecked.
+ * from `@apackdev/ears`) every write is unchecked.
  */
 export interface TransactionBuilder<E extends string = string, S extends EntityShapes = {}> {
   put<K extends string>(k: K, v: FieldValue<S, E, K>, allowMultiple?: boolean): TransactionBuilder<E, S>;

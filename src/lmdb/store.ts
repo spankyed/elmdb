@@ -72,7 +72,7 @@ export interface LmdbStoreOptions {
   /**
    * Told when a write is dropped, with the row it was for.
    *
-   * A port rather than a log line: `@apack/ears` is below `@apack/sdk`, so the engine reports the fact and
+   * A port rather than a log line: `@apackdev/ears` is below `@apackdev/sdk`, so the engine reports the fact and
    * the app decides what to do with it. Until this existed the only signal was `console.error`, and a
    * production app wrote 3,187 of them that nobody read.
    */

@@ -1,6 +1,6 @@
 /**
  * The LMDB store behind an app's EARS engine. It needs the `lmdb` package, an optional peer the app
- * installs; `@apack/ears` itself never loads it. Packs and pack tests don't use this entry.
+ * installs; `@apackdev/ears` itself never loads it. Packs and pack tests don't use this entry.
  *
  * @packageDocumentation
  */
