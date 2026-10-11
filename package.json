@@ -1,0 +1,59 @@
+{
+  "name": "@apack/ears",
+  "version": "0.1.0",
+  "description": "EARS, the entity-attribute-relation store behind apack pack data",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spankyed/apack.git",
+    "directory": "packages/apack-ears"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:package": "tsx ../../scripts/build-package.ts .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "bench": "vitest bench --run",
+    "api:build": "node -e \"require('fs').rmSync('.temp', { recursive: true, force: true })\" && tsc -p tsconfig.api-extractor.json",
+    "api:check": "npm run api:build && tsx ../../scripts/api-reports.ts .",
+    "api:update": "npm run api:build && tsx ../../scripts/api-reports.ts . --local"
+  },
+  "exports": {
+    ".": {
+      "@apack/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./lmdb": {
+      "@apack/source": "./src/lmdb/index.ts",
+      "types": "./dist/lmdb/index.d.ts",
+      "default": "./dist/lmdb/index.js"
+    }
+  },
+  "peerDependencies": {
+    "lmdb": "^3.4.2"
+  },
+  "peerDependenciesMeta": {
+    "lmdb": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@microsoft/api-extractor": "^7.59.1",
+    "lmdb": "^3.4.2",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

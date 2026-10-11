@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // `incremental` must not reach an emit: the build emits into a staging directory it has just created
+    // empty (scripts/build-package.ts) and tsc trusts its buildinfo over the filesystem, so a second build
+    // with nothing changed finds every file already emitted and writes none of them. It exits 0;
+    // `assertExportTargetsBuilt` is what fails, before the staged tree could be renamed over `dist`. An
+    // emit into an empty directory has nothing to reuse either way, so turning it off costs nothing.
+    "incremental": false,
+    "noEmit": false,
+    // A type error must not leave a half-written dist that looks like a build
+    "noEmitOnError": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    // The engine runs in Node and in the renderer: no Node types in the published source
+    "types": []
+  },
+  "include": ["src/**/*.ts"]
+}
