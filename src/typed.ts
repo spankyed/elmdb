@@ -1,6 +1,6 @@
 /**
  * EARS query helpers typed against an entity shape map. This is the only pack-facing way
- * to get them: `apack generate-entries` writes `#generated/ears` with
+ * to get them: `apack pack generate-entries` writes `#generated/ears` with
  * `defineEars<PackShapes>()` (the pack's entities plus its dependencies'). There is no
  * global registry, so each pack's typing depends only on what it declares.
  *
