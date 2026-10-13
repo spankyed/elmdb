@@ -171,6 +171,24 @@ describe('blueprints', () => {
 });
 
 describe('repository registry', () => {
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])('owns the repository named %s without inheriting or leaking its members', name => {
+    expect(() => e.query.repository[name]).toThrow('is not registered');
+    const value = { owner: 'candidate' };
+    e.query.registerRepository(name, value);
+    expect(e.query.repository[name]).toBe(value);
+    const snapshot = e.admin.repositories();
+    expect(Object.hasOwn(snapshot, name)).toBe(true);
+    expect(snapshot[name]).toBe(value);
+    expect(Object.getPrototypeOf(snapshot)).toBe(Object.prototype);
+    expect(() => e.query.repository.owner).toThrow('is not registered');
+    delete snapshot[name];
+    expect(e.query.repository[name]).toBe(value);
+    e.query.unregisterRepository(name);
+    expect(Object.hasOwn(e.admin.repositories(), name)).toBe(false);
+    expect(() => e.query.repository[name]).toThrow('is not registered');
+    expect(() => e.query.repository.owner).toThrow('is not registered');
+  });
+
   it('returns what was registered and names what wasn\'t', () => {
     const repo = { list: () => 1 };
     e.query.registerRepository('contractRepo', repo);
