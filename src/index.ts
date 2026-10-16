@@ -10,7 +10,7 @@ export type {
 export { isEntityType } from './runtime.ts';
 export { b64Encode, b64Decode, type QxStart } from './query.ts';
 export {
-  getEntitiesOfType, getAllEntityTypes, destroyEntity, removeRelationById,
+  entityTypeOf, getEntitiesOfType, getAllEntityTypes, destroyEntity, removeRelationById,
   getAll, getAllAttributeKinds, getAllRelationKinds, getAttributeStats, getSchemaStats,
   getRoles, grantRole, revokeRole,
 } from './attribute-storage.ts';

@@ -362,6 +362,9 @@ export type EntityShapes = {
     [entityType: string]: object;
 };
 
+// @public
+export const entityTypeOf: (id: EARS.EntityId) => EARS.Entity;
+
 // @public (undocumented)
 export function exists(id: EARS.EntityId): boolean;
 
