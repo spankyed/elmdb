@@ -1,10 +1,3 @@
-// @slow: one of its 48 cases is 1.7s of the file's 2.8s — 200 LMDB round-trips past the 126 reader-slot limit
-// `does not leak a reader slot per call` is deliberately past that limit, for the reason its own comment
-// gives: at 126 it passes whatever the implementation does, and the leak it guards cost a production app
-// 3,187 discarded writes. The 200 write transactions are where the time is, not the loop's turns —
-// measured 2026-10-06, 200 `setTimeout(resolve, 0)` turns are 235ms and 200 `setImmediate` turns are 3ms,
-// so the clamp is 13% of that case and swapping it leaves the file slow. The other 47 cases are ~1s
-// together, so this is one case's cost rather than the file's shape.
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import * as path from 'path';
 import * as os from 'os';
