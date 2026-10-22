@@ -1,5 +1,5 @@
 import type { Create } from './write.ts';
-import type { Qx } from './query.ts';
+import type { Query } from './query.ts';
 import { EARS } from './entities.ts';
 
 export interface Blueprint {
@@ -50,7 +50,7 @@ export const bp = (entity: EARS.Entity): BlueprintBuilder => {
 };
 
 /** An engine's blueprint spawning, over its writes */
-export function createSpawn({ create, qx }: { create: Create; qx: Qx }) {
+export function createSpawn({ create, query }: { create: Create; query: Query }) {
   function spawn(
     root: Blueprint,
     { dedupe = true } = {},
@@ -70,7 +70,7 @@ export function createSpawn({ create, qx }: { create: Create; qx: Qx }) {
         builder.grant(r);
       }
       for (const r of node.uniqueRoles ?? []) {
-        builder.grantExclusive(r, qx.all().ids());
+        builder.grantExclusive(r, query.all().ids());
       }
       for (const { kind, target, info } of node.rels ?? []) {
         const tgtId =

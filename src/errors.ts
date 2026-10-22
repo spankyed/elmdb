@@ -1,6 +1,6 @@
 /** Why the engine refused a call: each names a claim the caller made that the engine could not hold it to */
 export type EarsErrorCode =
-  /** `create`, `upsert` or `qx` was given a name that is not a registered entity type */
+  /** `create`, `upsert` or `query` was given a name that is not a registered entity type */
   | 'UNKNOWN_ENTITY_TYPE'
   /** `write` was given an id no entity in the engine has */
   | 'NO_SUCH_ENTITY'

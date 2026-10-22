@@ -19,11 +19,11 @@ describe('links', () => {
     expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
     expect(e.getAttr(rel.id, 'relationDetails')).toEqual({ sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
     expect(e.getEntitiesOfType('Relation')).toEqual([rel.id]);
-    expect(e.qx.ids(a).linksTo('blocks').ids()).toEqual([b]);
-    expect(e.qx.ids(b).linksTo('blocks', undefined, false).ids()).toEqual([a]);
-    expect(e.qx.ids(a).edgeIds()).toEqual([rel.id]);
-    expect(e.qx.ids(b).edgeIds('blocks', false)).toEqual([rel.id]);
-    expect(e.qx.ids(a).edgeIds('missing')).toEqual([]);
+    expect(e.query.ids(a).linksTo('blocks').ids()).toEqual([b]);
+    expect(e.query.ids(b).linksTo('blocks', undefined, false).ids()).toEqual([a]);
+    expect(e.query.ids(a).edgeIds()).toEqual([rel.id]);
+    expect(e.query.ids(b).edgeIds('blocks', false)).toEqual([rel.id]);
+    expect(e.query.ids(a).edgeIds('missing')).toEqual([]);
     expect(e.queryEntitiesByRelationTo('blocks', a, true)).toEqual([b]);
     expect(e.queryEntitiesByRelationTo('blocks', b)).toEqual([a]);
     expect(e.queryEntitiesInRelationTo(a)).toEqual([b]);
@@ -40,7 +40,7 @@ describe('links', () => {
     // No info given matches any edge between the ends
     e.write(a).link('blocks', b);
     expect(e.findRelations().map((r) => r.id)).toEqual([first, expect.any(String)]);
-    expect(e.qx.ids(a).linksTo('blocks').ids()).toEqual([b, c]);
+    expect(e.query.ids(a).linksTo('blocks').ids()).toEqual([b, c]);
     e.write(a).link('blocks', b, { info: { x: 2 } });
     expect(e.findRelations({ sourceEntity: a, targetEntity: b })).toHaveLength(2);
   });
@@ -106,13 +106,13 @@ describe('links', () => {
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { targetEntity: c, info: 4 });
     expect(edges()).toEqual([[a, 'refs', c, 4]]);
-    expect(e.qx.ids(b).linksTo('refs', undefined, false).ids()).toEqual([]);
-    expect(e.qx.ids(c).linksTo('refs', undefined, false).ids()).toEqual([a]);
+    expect(e.query.ids(b).linksTo('refs', undefined, false).ids()).toEqual([]);
+    expect(e.query.ids(c).linksTo('refs', undefined, false).ids()).toEqual([a]);
     e.updateRelation(rel, { sourceEntity: b, info: 5 });
     expect(edges()).toEqual([[b, 'refs', c, 5]]);
     expect(e.findRelations()[0].id).toBe(rel);
-    expect(e.qx.ids(a).linksTo('refs').ids()).toEqual([]);
-    expect(e.qx.ids(b).linksTo('refs').ids()).toEqual([c]);
+    expect(e.query.ids(a).linksTo('refs').ids()).toEqual([]);
+    expect(e.query.ids(b).linksTo('refs').ids()).toEqual([c]);
     e.updateRelation('Relation-missing' as Id, { info: 6 });
   });
 
@@ -130,7 +130,7 @@ describe('links', () => {
     e.write(a).link('peer', c, { symmetric: true, info: 'p' });
     expect(edges().filter(([, kind]) => kind === 'peer')).toEqual([[a, 'peer', c, 'p'], [c, 'peer', a, 'p']]);
     e.linkSymmetric(b, c, 'peer');
-    expect(e.qx.ids(c).linksTo('peer').ids()).toEqual([a, b]);
+    expect(e.query.ids(c).linksTo('peer').ids()).toEqual([a, b]);
   });
 });
 
@@ -166,10 +166,10 @@ describe('roles', () => {
     e.write(a).grant('lead').grant('lead').grant('owner');
     expect(e.getRoles(a)).toEqual(['lead', 'owner']);
     e.write(b).grant('lead');
-    expect(e.qx.all().withRole('lead').ids()).toEqual([a, b]);
+    expect(e.query.all().withRole('lead').ids()).toEqual([a, b]);
     expect(e.admin.queryEntitiesByRole('lead')).toEqual([a, b]);
-    e.write(c).grantExclusive('lead', e.qx('Task').ids());
-    expect(e.qx.all().withRole('lead').ids()).toEqual([c]);
+    e.write(c).grantExclusive('lead', e.query('Task').ids());
+    expect(e.query.all().withRole('lead').ids()).toEqual([c]);
     // Revokes only among the entities given, and grants once
     e.write(b).grant('owner');
     e.write(a).grantExclusive('owner', [c]);

@@ -78,7 +78,7 @@ type NoInferType<T> = [T][T extends unknown ? 0 : never];
  * that form is what gives editors field completions and lists the valid fields in a typo's error.
  * Wrapping them in conditional or mapped types keeps everything compiling and passing type tests
  * while breaking completions (TYPED-EARS.md, Incidents). For a union shape (Node rows) only shared
- * fields are accepted; a query over member-specific or runtime fields uses the untyped host `qx`.
+ * fields are accepted; a query over member-specific or runtime fields uses the untyped host `query`.
  */
 export interface QueryBuilder<E extends string = string, S extends EntityShapes = {}, N extends string = string> {
   ofType<T extends string>(t: EntityNameArg<N, T>): QueryBuilder<T, S, N>;

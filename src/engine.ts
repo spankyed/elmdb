@@ -6,7 +6,7 @@ import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
 import { createAttributeStorage } from './attribute-storage.ts';
 import { createEdgeStore, type EdgeStore } from './edge-store.ts';
-import { createQx, type Qx } from './query.ts';
+import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createQueryHelpers } from './query-helpers.ts';
@@ -20,7 +20,7 @@ import { createJournal } from './journal.ts';
 /** An engine's operations — its queries, writes, transactions and repository registry: what a program is handed */
 export interface Ears {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
-  qx: Qx;
+  query: Query;
   /** Creates an entity of a registered type, with a new id or the one given */
   create: Create;
   /** Writes to the entity with an id, creating it as the type when no entity has it */
@@ -131,7 +131,7 @@ export interface EarsEngine extends Ears {
 }
 
 /**
- * A new, empty engine. `isEntityType` says which names are entity types `create` and `qx` accept;
+ * A new, empty engine. `isEntityType` says which names are entity types `create` and `query` accept;
  * `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
@@ -140,23 +140,23 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const relations = createRelationIndex(journal);
   const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
   const edgeStore = createEdgeStore({ relations, storage });
-  const qx = createQx({ storage, relations, isEntityType });
-  const graph = createGraph({ qx, edgeStore });
+  const query = createQuery({ storage, relations, isEntityType });
+  const graph = createGraph({ query, edgeStore });
   const { create, upsert, write } = createWrites({ storage, edgeStore, graph, isEntityType });
-  const finders = createQueryHelpers(qx);
-  const counters = createEntityCounters(qx);
+  const finders = createQueryHelpers(query);
+  const counters = createEntityCounters(query);
   const writers = createTransactionHelpers({ create, write, counters });
   const relationReads = createRelationReads({ edgeStore, relations, storage });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
-    qx, create, upsert, write, transact, isEntityType,
+    query, create, upsert, write, transact, isEntityType,
     ...finders,
     ...writers,
     ...counters,
     ...relationReads,
     ...graph,
-    spawn: createSpawn({ create, qx }),
+    spawn: createSpawn({ create, query }),
     getAttr: storage.getAttr,
     getAttrs: storage.getAttrs,
     getAll: storage.getAll,

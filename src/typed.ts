@@ -20,11 +20,11 @@ import type { Ears } from './engine.ts';
 type Name<N extends string, E extends string> = EntityNameArg<N, E>;
 
 /**
- * The query entry points: `qx(type)` from a declared entity type (its name checked, its rows typed), `qx.ids`
- * from ids (typed by the entity an id is tagged with), `qx.all` from every entity. A name and an id are
+ * The query entry points: `query(type)` from a declared entity type (its name checked, its rows typed), `query.ids`
+ * from ids (typed by the entity an id is tagged with), `query.all` from every entity. A name and an id are
  * different arguments to different functions, so an id passed where a type is meant fails to compile.
  */
-export interface TypedQx<S extends EntityShapes, N extends string = string> {
+export interface TypedQuery<S extends EntityShapes, N extends string = string> {
   <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
   <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
   ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
@@ -111,7 +111,7 @@ export interface TypedUpdateEntity<S extends EntityShapes> {
 }
 
 export interface TypedEars<S extends EntityShapes, N extends string = string> {
-  qx: TypedQx<S, N>;
+  query: TypedQuery<S, N>;
   create: TypedCreate<S, N>;
   upsert: TypedUpsert<S, N>;
   write: TypedWrite<S>;
@@ -142,9 +142,9 @@ export function defineEars<S extends EntityShapes, N extends string = string>(en
   const on = <K extends keyof Ears>(name: K) =>
     ((...args: unknown[]) => (engine()[name] as (...a: unknown[]) => unknown)(...args));
   return {
-    qx: Object.assign(on('qx'), {
-      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().qx.ids(ids),
-      all: () => engine().qx.all(),
+    query: Object.assign(on('query'), {
+      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.ids(ids),
+      all: () => engine().query.all(),
     }),
     create: on('create'),
     upsert: on('upsert'),

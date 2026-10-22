@@ -76,7 +76,7 @@ describe('persistence sink', () => {
       ['onPutAttrArray', 'x', '#1', [4]],
       ['onDropAttr', 'x', '#1', 0, []],
     ]);
-    expect(e.qx.ids(a).linksTo('refs').ids()).toEqual([c]);
+    expect(e.query.ids(a).linksTo('refs').ids()).toEqual([c]);
   });
 });
 
@@ -100,9 +100,9 @@ describe('hydration', () => {
     expect(calls).toEqual([]);
     expect(e.getAllEntities()).toEqual([a, b, p, rel]);
     expect(e.findById(a)).toEqual({ id: a, entityType: 'Task', title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
-    expect(e.qx('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
-    expect(e.qx.all().withRole('current').ids()).toEqual([p]);
-    expect(e.qx.ids(p).linksTo('contains').ids()).toEqual([a]);
+    expect(e.query('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
+    expect(e.query.all().withRole('current').ids()).toEqual([p]);
+    expect(e.query.ids(p).linksTo('contains').ids()).toEqual([a]);
     expect(e.findRelations({ targetEntity: a })).toEqual([{ id: rel, sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } }]);
     expect(e.admin.edgeStore.find({ sourceEntity: p })).toEqual([{ sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } }]);
     expect(e.admin.edgeStore.relIds({})).toEqual([rel]);
@@ -111,9 +111,9 @@ describe('hydration', () => {
     e.write(b).link('contains', a);
     expect(calls.map(([method]) => method)).toEqual(['onAddRelation']);
     e.admin.removeFromIndex('contains', p, a, rel);
-    expect(e.qx.ids(p).linksTo('contains').ids()).toEqual([]);
+    expect(e.query.ids(p).linksTo('contains').ids()).toEqual([]);
     e.admin.updateIndex('contains', rel, p, a, b);
-    expect(e.qx.ids(b).linksTo('contains').ids()).toEqual([a]);
+    expect(e.query.ids(b).linksTo('contains').ids()).toEqual([a]);
 
     e.admin.clear();
     expect(e.getAllEntities()).toEqual([]);

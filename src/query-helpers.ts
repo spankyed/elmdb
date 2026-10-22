@@ -1,4 +1,4 @@
-import type { Qx } from './query.ts';
+import type { Query } from './query.ts';
 import type { QueryBuilder } from './runtime.ts';
 import type { EARS } from './entities.ts';
 
@@ -8,17 +8,17 @@ const isDeleted = (entity: any): boolean => entity?.deleted === true;
  * An engine's untyped finders, over its queries. Soft-deleted rows (`deleted: true`) are skipped except by
  * `findByIdRaw`. Pack code gets them typed from its #generated/ears (defineEars).
  */
-export function createQueryHelpers(qx: Qx) {
+export function createQueryHelpers(query: Query) {
   // A type known only at runtime: the finders are untyped, and so is the builder they start
-  const ofType = (entityType: EARS.Entity) => qx(entityType as never) as unknown as QueryBuilder;
+  const ofType = (entityType: EARS.Entity) => query(entityType as never) as unknown as QueryBuilder;
   function findById<T = unknown>(id: EARS.EntityId): T | undefined {
-    const entity = qx.ids(id).pickAll()[0] as any;
+    const entity = query.ids(id).pickAll()[0] as any;
     if (isDeleted(entity)) return undefined;
     return entity;
   }
 
   function findByIdRaw<T = unknown>(id: EARS.EntityId): T | undefined {
-    return qx.ids(id).pickAll()[0] as T | undefined;
+    return query.ids(id).pickAll()[0] as T | undefined;
   }
 
   function findAll<T = unknown>(entityType: EARS.Entity): T[] {
@@ -38,7 +38,7 @@ export function createQueryHelpers(qx: Qx) {
   }
 
   function findByIdWithFields<T>(id: EARS.EntityId, fields: string[]): T | undefined {
-    const entity = qx.ids(id).pick(fields)[0] as T | undefined;
+    const entity = query.ids(id).pick(fields)[0] as T | undefined;
     if (isDeleted(entity)) return undefined;
     return entity;
   }
@@ -48,7 +48,7 @@ export function createQueryHelpers(qx: Qx) {
   }
 
   function exists(id: EARS.EntityId): boolean {
-    return qx.ids(id).count() > 0;
+    return query.ids(id).count() > 0;
   }
 
   function findWithRole<T>(entityType: EARS.Entity, role: string): T[] {

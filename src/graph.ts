@@ -1,16 +1,16 @@
-import type { Qx } from './query.ts';
+import type { Query } from './query.ts';
 import type { EdgeStore } from './edge-store.ts';
 import { EARS } from './entities.ts';
 
 /** An engine's graph walks, over its queries and edge store */
-export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore }) {
+export function createGraph({ query, edgeStore }: { query: Query; edgeStore: EdgeStore }) {
   const neighbours = (
     id: EARS.EntityId,
     kinds: readonly EARS.RelKind[],
     asSource = true,
   ): EARS.EntityId[] =>
     kinds.flatMap(k =>
-      qx.ids(id).linksTo(k, undefined, asSource).ids(),
+      query.ids(id).linksTo(k, undefined, asSource).ids(),
     );
 
   function descendants(
@@ -22,7 +22,7 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
 
     while (stack.length) {
       const node = stack.pop()!;
-      for (const child of qx.ids(node).linksTo(relKind).ids()) {
+      for (const child of query.ids(node).linksTo(relKind).ids()) {
         if (!seen.has(child)) {
           seen.add(child);
           stack.push(child);
@@ -42,7 +42,7 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
 
     while (stack.length) {
       const node = stack.pop()!;
-      for (const parent of qx.ids(node)
+      for (const parent of query.ids(node)
         .linksTo(relKind, undefined, false)
         .ids()) {
         if (!seen.has(parent)) {
@@ -61,7 +61,7 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
   ): EARS.EntityId {
     let cur = start;
     while (true) {
-      const parent = qx.ids(cur)
+      const parent = query.ids(cur)
         .linksTo(relKind, undefined, false)
         .first();
       if (!parent) break;
@@ -111,7 +111,7 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
 
     const all = new Set<EARS.EntityId>(roots);
     const collect = (id: EARS.EntityId) => {
-      const kids = new Set<EARS.EntityId>(qx.ids(id).linksTo(kind, filterType).ids());
+      const kids = new Set<EARS.EntityId>(query.ids(id).linksTo(kind, filterType).ids());
       outgoing.set(id, kids);
       kids.forEach(k => {
         incoming.set(k, (incoming.get(k) ?? 0) + 1);
@@ -185,11 +185,11 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
     kind: EARS.RelKind,
     filterType?: EARS.Entity,
   ): EARS.EntityId[] {
-    const all = new Set<EARS.EntityId>((filterType ? qx(filterType as never) : qx.all()).ids());
+    const all = new Set<EARS.EntityId>((filterType ? query(filterType as never) : query.all()).ids());
     const hasOut = new Set<EARS.EntityId>();
 
     for (const id of all) {
-      if (qx.ids(id).linksTo(kind, filterType).exists()) {
+      if (query.ids(id).linksTo(kind, filterType).exists()) {
         hasOut.add(id);
       }
     }
@@ -206,7 +206,7 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
       let cur: EARS.EntityId | null = id;
       while (cur) {
         path.push(cur);
-        cur = qx.ids(cur)
+        cur = query.ids(cur)
           .linksTo(treeKind, undefined, false)
           .first();
       }

@@ -25,11 +25,11 @@ const liftOne = <F extends (...args: any[]) => any>(many: F) =>
   (...a: Parameters<F>) => (many as any)(...a)[0] ?? null;
 
 /**
- * The query entry points. `qx(type)` starts from every entity of a registered type, and refuses a name that
- * isn't one rather than finding nothing; `qx.ids` starts from the ids given that exist; `qx.all` from every
+ * The query entry points. `query(type)` starts from every entity of a registered type, and refuses a name that
+ * isn't one rather than finding nothing; `query.ids` starts from the ids given that exist; `query.all` from every
  * entity but the relations, which `findRelations` serves.
  */
-export interface Qx {
+export interface Query {
   <E extends string>(type: TypeName<E>): QueryBuilder<E>;
   <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
   ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
@@ -37,7 +37,7 @@ export interface Qx {
 }
 
 /** An engine's untyped query entry points, over its storage and relation index */
-export function createQx({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Qx {
+export function createQuery({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, removals, getAttr, getAttrs, getRoles,
     queryEntitiesInRelationTo, queryEntitiesByRelationTo, getAll,
@@ -61,8 +61,8 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
     if (unknown.length) {
       throw new EarsError(
         'UNKNOWN_ENTITY_TYPE',
-        `qx(${unknown.map((t) => JSON.stringify(t) ?? 'undefined').join(', ')}): not a registered entity type. ` +
-          'qx.ids(...) starts from ids, and qx.all() from every entity.',
+        `query(${unknown.map((t) => JSON.stringify(t) ?? 'undefined').join(', ')}): not a registered entity type. ` +
+          'query.ids(...) starts from ids, and query.all() from every entity.',
       );
     }
     return (types as EARS.Entity[]).flatMap((t) => getEntitiesOfType(t));
@@ -278,9 +278,9 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
     return self;
   };
 
-  const entry = ((start: unknown) => qxImpl(ofTypes(start))) as unknown as Qx;
+  const entry = ((start: unknown) => qxImpl(ofTypes(start))) as unknown as Query;
   entry.ids = ((start: EARS.EntityId | readonly EARS.EntityId[]) =>
-    qxImpl((Array.isArray(start) ? start : [start]).filter(hasEntity))) as Qx['ids'];
-  entry.all = (() => qxImpl(getAllEntities().filter((id) => !hasPrefix(EARS.Entity.Relation)(id)))) as Qx['all'];
+    qxImpl((Array.isArray(start) ? start : [start]).filter(hasEntity))) as Query['ids'];
+  entry.all = (() => qxImpl(getAllEntities().filter((id) => !hasPrefix(EARS.Entity.Relation)(id)))) as Query['all'];
   return entry;
 }

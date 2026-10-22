@@ -1,19 +1,19 @@
 import type { EARS } from './entities.ts';
-import type { Qx } from './query.ts';
+import type { Query } from './query.ts';
 
 export function getTimestamp(): number {
   return Date.now();
 }
 
 /** An engine's numbering of new entities, by how many of their type it holds */
-export function createEntityCounters(qx: Qx) {
+export function createEntityCounters(query: Query) {
   function generateShortCode(entityType: EARS.Entity, prefix: string): string {
-    const count = qx(entityType as never).count() + 1;
+    const count = query(entityType as never).count() + 1;
     return `${prefix}-${count}`;
   }
 
   function generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string {
-    const count = qx(entityType as never).count() + 1;
+    const count = query(entityType as never).count() + 1;
     return `${baseLabel} ${count}`;
   }
 

@@ -165,7 +165,7 @@ describe('destroy', () => {
     expect(e.getEntitiesOfType('Task')).toEqual([b]);
     expect(e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity])).toEqual([[c, 'contains', b]]);
     expect(e.getAllRelationKinds()).toEqual(['contains']);
-    expect(e.qx.ids(c).linksTo('contains').ids()).toEqual([b]);
+    expect(e.query.ids(c).linksTo('contains').ids()).toEqual([b]);
   });
 
   it('destroyEntity forgets an emptied type', () => {
@@ -207,7 +207,7 @@ describe('finders', () => {
     // `entityType` is read from the id, so it is on every row and in every read, and stored as no attribute
     expect(e.getAttr(a, 'entityType')).toBe('Task');
     expect(e.getAttrs(p, 'entityType')).toEqual(['Project']);
-    expect(e.qx.all().where('entityType', 'Task').ids()).toEqual([a]);
+    expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getAttr('Task-gone' as Id, 'entityType')).toBeNull();
     expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'title', 'tag', 'relationDetails']);
     expect(e.getAttributeStats('tag')).toEqual({ entityCount: 1, totalValues: 2 });

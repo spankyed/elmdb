@@ -11,7 +11,7 @@ export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
   EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues,
 } from './runtime.ts';
-export { b64Encode, b64Decode, type Qx } from './query.ts';
+export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf } from './attribute-storage.ts';
 export { prepareEntity } from './transaction-helpers.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
@@ -28,7 +28,7 @@ export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {
   defineEars,
-  type TypedEars, type TypedQx, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedFindFirst, type TypedCreateEntity,
+  type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedFindFirst, type TypedCreateEntity,
   type TypedGetAttr, type TypedGetAttrs, type TypedFindWithFields, type TypedFindByIdWithFields, type TypedFindWithRole,
   type TypedFindFirstWithRole, type TypedCreateEntityWithDefaults, type TypedUpdateEntity,
 } from './typed.ts';

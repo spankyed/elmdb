@@ -17,17 +17,17 @@ describe('defineEars', () => {
     const id = typed.create('Note').set('title', 'first').id();
     expect(first.findById(id)).toMatchObject({ title: 'first' });
     current = second;
-    expect(typed.qx('Note').ids()).toEqual([]);
-    expect(typed.qx.all().ids()).toEqual([]);
+    expect(typed.query('Note').ids()).toEqual([]);
+    expect(typed.query.all().ids()).toEqual([]);
     current = first;
     expect(typed.findAll('Note').map((row) => row.title)).toEqual(['first']);
-    expect(typed.qx.ids(id).count()).toBe(1);
+    expect(typed.query.ids(id).count()).toBe(1);
   });
 
   it('builds without an engine, so a facade can be defined before one exists', () => {
     const typed = defineEars(() => { throw new Error('no engine yet'); });
     expect(typed.createEntity('Note')).toMatch(/^Note-/);
-    expect(() => typed.qx('Note')).toThrow('no engine yet');
+    expect(() => typed.query('Note')).toThrow('no engine yet');
   });
 });
 
@@ -45,8 +45,8 @@ describe('two engines in one process', () => {
     two.create('Note').set('title', 'two');
     two.admin.bulkLoadAttr('Note-loaded' as EARS.EntityId, 'title', 'loaded');
 
-    expect(one.qx('Note').pick(['title']).map((row) => row.title)).toEqual(['one', null]);
-    expect(two.qx('Note').pick(['title']).map((row) => row.title)).toEqual(['two', 'loaded']);
+    expect(one.query('Note').pick(['title']).map((row) => row.title)).toEqual(['one', null]);
+    expect(two.query('Note').pick(['title']).map((row) => row.title)).toEqual(['two', 'loaded']);
     expect(one.findRelations()).toHaveLength(1);
     expect(two.findRelations()).toEqual([]);
     expect(two.admin.relationIndex).toEqual({});

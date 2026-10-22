@@ -252,13 +252,13 @@ export interface Ears {
     linkSymmetric(a: EARS.EntityId, b: EARS.EntityId, kind: EARS.RelKind, info?: unknown): void;
     // (undocumented)
     lowestCommonAncestor(a: EARS.EntityId, b: EARS.EntityId, treeKind: EARS.RelKind): EARS.EntityId | null;
+    query: Query;
     // (undocumented)
     queryEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
     // (undocumented)
     queryEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
     // (undocumented)
     queryEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
-    qx: Qx;
     // (undocumented)
     registerRepository(name: string, value: unknown): void;
     // (undocumented)
@@ -345,7 +345,7 @@ export class EarsError extends Error {
 
 // @public
 export type EarsErrorCode =
-/** `create`, `upsert` or `qx` was given a name that is not a registered entity type */
+/** `create`, `upsert` or `query` was given a name that is not a registered entity type */
 'UNKNOWN_ENTITY_TYPE'
 /** `write` was given an id no entity in the engine has */
 | 'NO_SUCH_ENTITY'
@@ -482,6 +482,18 @@ export function prepareEntity<T extends {
 }>(entityType: EARS.Entity, data: Partial<T>, defaults?: Partial<T>): Omit<T, 'id'>;
 
 // @public
+export interface Query {
+    // (undocumented)
+    <E extends string>(type: TypeName<E>): QueryBuilder<E>;
+    // (undocumented)
+    <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
+    // (undocumented)
+    all(): QueryBuilder<string>;
+    // (undocumented)
+    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
+}
+
+// @public
 export interface QueryBuilder<E extends string = string, S extends EntityShapes = {}, N extends string = string> {
     // (undocumented)
     count(): number;
@@ -552,18 +564,6 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     where<K extends keyof ShapeOf<S, E> & string>(k: K, v: ShapeOf<S, E>[K] | ((value: ShapeOf<S, E>[K]) => boolean)): QueryBuilder<E, S, N>;
     // (undocumented)
     withRole(r: string): QueryBuilder<E, S, N>;
-}
-
-// @public
-export interface Qx {
-    // (undocumented)
-    <E extends string>(type: TypeName<E>): QueryBuilder<E>;
-    // (undocumented)
-    <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
-    // (undocumented)
-    all(): QueryBuilder<string>;
-    // (undocumented)
-    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
 }
 
 // @public
@@ -691,7 +691,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     getAttrs: TypedGetAttrs<S>;
     // (undocumented)
-    qx: TypedQx<S, N>;
+    query: TypedQuery<S, N>;
     // (undocumented)
     transact: Ears['transact'];
     // (undocumented)
@@ -763,7 +763,7 @@ export interface TypedGetAttrs<S extends EntityShapes> {
 }
 
 // @public
-export interface TypedQx<S extends EntityShapes, N extends string = string> {
+export interface TypedQuery<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
     // (undocumented)

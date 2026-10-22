@@ -56,20 +56,20 @@ describe('hydrate', () => {
 });
 
 describe('queries', () => {
-  bench('qx by type with where and pickAll', () => {
-    engine.qx('Task').where('status', 'blocked').pickAll();
+  bench('query by type with where and pickAll', () => {
+    engine.query('Task').where('status', 'blocked').pickAll();
   }, { iterations: 20, time: 0 });
 
-  bench('1,000 qx.ids(id) lookups', () => {
-    for (let i = 0; i < 1000; i++) engine.qx.ids(task(i)).count();
+  bench('1,000 query.ids(id) lookups', () => {
+    for (let i = 0; i < 1000; i++) engine.query.ids(task(i)).count();
   }, { iterations: 20, time: 0 });
 
-  bench('qx by type with 3 chained steps', () => {
-    engine.qx('Task').ofType('Task').orderBy('rank').limit(10).ids();
+  bench('query by type with 3 chained steps', () => {
+    engine.query('Task').ofType('Task').orderBy('rank').limit(10).ids();
   }, { iterations: 20, time: 0 });
 
   bench('relation traversal (a project: its tasks, then their assignees)', () => {
-    engine.qx.ids(project(1)).linksTo('contains', 'Task').linksTo('assigned').count();
+    engine.query.ids(project(1)).linksTo('contains', 'Task').linksTo('assigned').count();
   }, { iterations: 30, time: 0 });
 });
 

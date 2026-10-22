@@ -89,10 +89,10 @@ describe('a unit that throws', () => {
   });
 
   it('leaves a query kept from before it finding what it found', () => {
-    const kept = e.qx('Task');
+    const kept = e.query('Task');
     expect(() => e.transact(() => { e.write(task).destroy(); throw new Error('stop'); })).toThrow();
     expect(kept.ids()).toEqual([task, other]);
-    expect(e.qx('Task').ids().sort()).toEqual([task, other].sort());
+    expect(e.query('Task').ids().sort()).toEqual([task, other].sort());
   });
 });
 
