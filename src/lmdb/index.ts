@@ -10,4 +10,4 @@ export { LMDB_FORMAT_VERSION, openEnvAt, openShardedEnvs, closeShardedEnvs, clos
 export { makeLmdbAdapter, type WriteFailure } from './adapter.ts';
 export { hydrateSharded } from './hydrate.ts';
 export { convertToFormat2, type FormatConversion } from './convert.ts';
-export { LmdbQuery, decodeAttr, type AttrRecord, type EntityMeta, type RelationRecord, type FindByAttrOpts } from './query.ts';
+export { LmdbReader, decodeAttr, type AttrRecord, type EntityMeta, type RelationRecord, type FindByAttrOpts } from './reader.ts';

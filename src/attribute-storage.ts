@@ -291,10 +291,10 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const hasEntity = (id: EARS.EntityId) =>
     entityIndex.get(entityTypeOf(id))?.has(id) ?? false;
 
-  const queryEntitiesByRole = (role: string) =>
+  const findEntitiesByRole = (role: string) =>
     getAllEntities().filter(id => getRoles(id).includes(role));
 
-  const queryEntitiesByAttribute = (
+  const findEntitiesByAttribute = (
     k: EARS.AttrKind,
     v?: unknown,
   ) =>
@@ -304,7 +304,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
           getAttrs(id, k).some(attr => attr === v),
         );
 
-  const queryEntitiesInRelationTo = (target: EARS.EntityId) => {
+  const findEntitiesInRelationTo = (target: EARS.EntityId) => {
     const out = new Set<EARS.EntityId>();
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
@@ -326,7 +326,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return [...out];
   };
 
-  const queryEntitiesByRelationTo = (
+  const findEntitiesByRelationTo = (
     relKind: string,
     id: EARS.EntityId,
     asSource = false,
@@ -401,7 +401,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     putAttr: put, addAttr: add, mergeAttr: merge, dropAttr: drop, deleteAttr, dropIf, updateAttr: put,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, getAttrs, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, removals: () => removals,
-    queryEntitiesByRole, queryEntitiesByAttribute, queryEntitiesInRelationTo, queryEntitiesByRelationTo,
+    findEntitiesByRole, findEntitiesByAttribute, findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }

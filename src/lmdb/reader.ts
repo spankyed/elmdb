@@ -87,7 +87,7 @@ export type FindByAttrOpts = {
   predicate?: (value: unknown, idx: number, entityId: string) => boolean;
 };
 
-export class LmdbQuery {
+export class LmdbReader {
   constructor(private dbs: LmdbDbs) { }
 
   // ───────────────────────────── Attributes ─────────────────────────────

@@ -7,7 +7,7 @@ import { makeShardedPersistence, type ShardedPersistence } from '../persistence/
 import { openShardedEnvs, closeShardedEnvs, deleteLmdbDirectories, type LmdbDbs, type LmdbPaths } from './envs.ts';
 import { makeLmdbAdapter, type WriteFailure } from './adapter.ts';
 import { hydrateSharded } from './hydrate.ts';
-import { LmdbQuery } from './query.ts';
+import { LmdbReader } from './reader.ts';
 
 /** An app's LMDB store: one environment per partition, and the sink that writes the engine's changes to them */
 export interface LmdbStore {
@@ -29,7 +29,7 @@ export interface LmdbStore {
   /** Loads the partitions the policy hydrates (and the volatile one with `includeVolatile`) into the store's engine */
   hydrate(options?: { includeVolatile?: boolean }): Promise<void>;
   /** Direct reads of a partition's environment, without hydrating it */
-  query(partition: Partition): LmdbQuery;
+  read(partition: Partition): LmdbReader;
   /**
    * Writes a consistent copy of `partition` into `targetDir` (as `data.mdb`, which the directory is created for).
    * LMDB copies one read transaction's worth of data, so the copy is the database as of a single moment even
@@ -213,7 +213,7 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
     isOpen: () => envs !== null,
     hydrate: ({ includeVolatile = false } = {}) =>
       hydrateSharded({ engine: engine(), envs: openEnvs(), policy, includeVolatile, shardedPersistence: sink, log }),
-    query: (partition) => new LmdbQuery(openEnvs()[partition]),
+    read: (partition) => new LmdbReader(openEnvs()[partition]),
     async copyTo(partition, targetDir) {
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });

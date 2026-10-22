@@ -4,7 +4,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { EARS } from '../../src/entities.ts';
-import { openEnvAt, makeLmdbAdapter, LmdbQuery, decodeAttr, type LmdbDbs } from '../../src/lmdb/index.ts';
+import { openEnvAt, makeLmdbAdapter, LmdbReader, decodeAttr, type LmdbDbs } from '../../src/lmdb/index.ts';
 import { makePolicy, makeShardedPersistence, type Partition, type PersistenceSink } from '../../src/index.ts';
 
 const Entity = {
@@ -93,7 +93,7 @@ describe('LMDB Adapter', () => {
     adapter.onPutAttrArray('tags', 'Doc-readers', ['a', 'b', 'c']);
     adapter.close?.();
 
-    const query = new LmdbQuery(dbs);
+    const query = new LmdbReader(dbs);
     for (let i = 0; i < 200; i++) {
       expect(query.getAttrLength('tags', 'Doc-readers'), `call ${i}`).toBe(3);
       // A write transaction between reads, as the app does: it is what makes a leaked slot unrecoverable
@@ -506,7 +506,7 @@ describe('Relation Updates', () => {
 describe('Query Layer', () => {
   let dbs: LmdbDbs;
   let dir: string;
-  let query: LmdbQuery;
+  let query: LmdbReader;
 
   beforeAll(() => {
     dir = tmpDir('query');
@@ -547,7 +547,7 @@ describe('Query Layer', () => {
     adapter.onPutAttrArray('Values', 'Helper-1', [1, 2, 3, 4, 5]);
 
     adapter.close?.(); // flush
-    query = new LmdbQuery(dbs);
+    query = new LmdbReader(dbs);
   });
 
   afterAll(() => {

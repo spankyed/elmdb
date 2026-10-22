@@ -81,7 +81,7 @@ describe('openLmdbStore', () => {
     expect(engine.getEntitiesOfType('Relation')).toHaveLength(1);
     // Only the primary partition is hydrated; the volatile one is read directly
     expect(getAttr(id('Trace-1'), 'step')).toBeNull();
-    expect(second.query('volatileBackup').getFirstAttr('step', 'Trace-1')).toBe('volatile');
+    expect(second.read('volatileBackup').getFirstAttr('step', 'Trace-1')).toBe('volatile');
 
     await second.hydrate({ includeVolatile: true });
     expect(getAttr(id('Trace-1'), 'step')).toBe('volatile');
@@ -100,8 +100,8 @@ describe('openLmdbStore', () => {
     expect(store.sink).toBe(sink);
     engine.create('Note', { id: id('Note-after') }).set('title', 'saved');
     await flushed();
-    expect(store.query('primary').getFirstAttr('title', 'Note-after')).toBe('saved');
-    expect(store.query('primary').getEntityMeta('Note-dropped')).toBeNull();
+    expect(store.read('primary').getFirstAttr('title', 'Note-after')).toBe('saved');
+    expect(store.read('primary').getEntityMeta('Note-dropped')).toBeNull();
   });
 
   it('reset deletes the files and opens the store empty', async () => {
@@ -110,7 +110,7 @@ describe('openLmdbStore', () => {
     await flushed();
     await store.reset();
     expect(store.isOpen()).toBe(true);
-    expect(store.query('primary').getEntityMeta('Note-1')).toBeNull();
+    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
     // The engine's memory is the caller's
     expect(getAttr(id('Note-1'), 'title')).toBe('gone');
   });
@@ -127,14 +127,14 @@ describe('openLmdbStore', () => {
     await resetting;
     await flushed();
 
-    expect(store.query('primary').getEntityMeta('Note-1')).toBeNull();
-    expect(store.query('primary').getFirstAttr('title', 'Note-2')).toBe('written during the reset');
+    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
+    expect(store.read('primary').getFirstAttr('title', 'Note-2')).toBe('written during the reset');
     // A store closed any other way still drops writes
     store.close();
     engine.create('Note', { id: id('Note-3') }).set('title', 'dropped');
     store.reopen();
     await flushed();
-    expect(store.query('primary').getEntityMeta('Note-3')).toBeNull();
+    expect(store.read('primary').getEntityMeta('Note-3')).toBeNull();
   });
 
   it("keeps a run's history link when the entity it ran is destroyed, and removes it with the run or an unlink", async () => {
@@ -159,7 +159,7 @@ describe('openLmdbStore', () => {
     // The run's record still says which node it ran; the node and its own relations are gone
     expect(stored(kept)).toMatchObject({ kind: 'instance_of', src: 'Trace-1', tgt: 'Note-1' });
     expect(stored(between)).toBeUndefined();
-    expect(store.query('primary').getEntityMeta('Note-1')).toBeNull();
+    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
     expect(stored(withRun)).toBeUndefined();
     expect(stored(unlinked)).toBeUndefined();
     // Memory drops it with the node
@@ -231,13 +231,13 @@ describe('openLmdbStore', () => {
     await flushed();
     // A relation is its row in the relations table, and no entity row
     expect(first.envs.primary.relations.get(rel)).toBeTruthy();
-    expect(first.query('primary').getEntityMeta(rel)).toBeNull();
+    expect(first.read('primary').getEntityMeta(rel)).toBeNull();
     // In the same synchronous block as its writes, before they're flushed
     engine.write(id('Note-2')).set('title', 'ghost again');
     engine.write(id('Note-2')).destroy();
     engine.removeRelationById(rel);
     await flushed();
-    expect(first.query('primary').getEntityMeta('Note-2')).toBeNull();
+    expect(first.read('primary').getEntityMeta('Note-2')).toBeNull();
     expect(first.envs.primary.relations.get(rel)).toBeUndefined();
     first.close();
 
@@ -269,7 +269,7 @@ describe('openLmdbStore', () => {
     expect(lines).toContain('[LMDB] Environment closed successfully');
 
     const reopened = openStore();
-    expect(reopened.query('primary').getFirstAttr('title', 'Note-1')).toBe('kept');
+    expect(reopened.read('primary').getFirstAttr('title', 'Note-1')).toBe('kept');
   });
 
   it('reports writes lost while it was closed for a reopen or a reset, not only this close\'s', async () => {
@@ -438,7 +438,7 @@ describe('the storage format', () => {
     const store = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'after');
     await flushed();
-    expect(store.query('primary').getFirstAttr('title', 'Note-1')).toBe('after');
+    expect(store.read('primary').getFirstAttr('title', 'Note-1')).toBe('after');
     expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
   });
 });

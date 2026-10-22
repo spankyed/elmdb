@@ -216,9 +216,9 @@ describe('finders', () => {
       attributes: { createdAt: 2, title: 1, tag: 2, relationDetails: 1 },
       relations: { contains: 1 },
     });
-    expect(e.queryEntitiesByAttribute('tag')).toEqual([a]);
-    expect(e.queryEntitiesByAttribute('title', 'A')).toEqual([a]);
-    expect(e.queryEntitiesByAttribute('title', 'Z')).toEqual([]);
+    expect(e.findEntitiesByAttribute('tag')).toEqual([a]);
+    expect(e.findEntitiesByAttribute('title', 'A')).toEqual([a]);
+    expect(e.findEntitiesByAttribute('title', 'Z')).toEqual([]);
   });
 
   it('isEntityType answers from the engine\'s checker', () => {

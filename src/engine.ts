@@ -66,9 +66,9 @@ export interface Ears {
   getAllRelationKinds(): string[];
   getAttributeStats(kind: EARS.AttrKind): { entityCount: number; totalValues: number };
   getSchemaStats(): { entities: Record<string, number>; attributes: Record<string, number>; relations: Record<string, number> };
-  queryEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
-  queryEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
-  queryEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
+  findEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
+  findEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
+  findEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
   destroyEntity(id: EARS.EntityId, skipPersistence?: boolean): void;
   removeRelationById(relId: EARS.EntityId): void;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
@@ -111,7 +111,7 @@ export interface EarsAdmin {
   updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
   updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
-  queryEntitiesByRole(role: string): EARS.EntityId[];
+  findEntitiesByRole(role: string): EARS.EntityId[];
   edgeStore: EdgeStore;
   /** The relation index, by kind (read it; write through the index functions) */
   readonly relationIndex: Readonly<RelationIndex>;
@@ -170,9 +170,9 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     getAllRelationKinds: storage.getAllRelationKinds,
     getAttributeStats: storage.getAttributeStats,
     getSchemaStats: storage.getSchemaStats,
-    queryEntitiesByAttribute: storage.queryEntitiesByAttribute,
-    queryEntitiesByRelationTo: storage.queryEntitiesByRelationTo,
-    queryEntitiesInRelationTo: storage.queryEntitiesInRelationTo,
+    findEntitiesByAttribute: storage.findEntitiesByAttribute,
+    findEntitiesByRelationTo: storage.findEntitiesByRelationTo,
+    findEntitiesInRelationTo: storage.findEntitiesInRelationTo,
     destroyEntity: storage.destroyEntity,
     removeRelationById: storage.removeRelationById,
     updateRelation: (relId, { sourceEntity, targetEntity, info }) => storage.updateRelation(relId, sourceEntity, targetEntity, info),
@@ -194,7 +194,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     updateAttr: storage.updateAttr,
     addRelation: storage.addRelation,
     updateRelation: storage.updateRelation,
-    queryEntitiesByRole: storage.queryEntitiesByRole,
+    findEntitiesByRole: storage.findEntitiesByRole,
     edgeStore,
     relationIndex: relations.index,
     addToIndex: relations.addToIndex,

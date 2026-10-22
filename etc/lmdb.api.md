@@ -78,7 +78,7 @@ export type LmdbDbs = {
 export type LmdbPaths = Record<Partition, string>;
 
 // @public (undocumented)
-export class LmdbQuery {
+export class LmdbReader {
     constructor(dbs: LmdbDbs);
     bfs(startId: string, opts?: {
         maxDepth?: number;
@@ -140,7 +140,7 @@ export interface LmdbStore {
     isOpen(): boolean;
     readonly paths: Readonly<LmdbPaths>;
     readonly policy: PartitionPolicy;
-    query(partition: Partition): LmdbQuery;
+    read(partition: Partition): LmdbReader;
     readonly readOnly: boolean;
     reopen(): void;
     reset(): Promise<void>;

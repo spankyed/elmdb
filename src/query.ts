@@ -40,7 +40,7 @@ export interface Query {
 export function createQuery({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, removals, getAttr, getAttrs, getRoles,
-    queryEntitiesInRelationTo, queryEntitiesByRelationTo, getAll,
+    findEntitiesInRelationTo, findEntitiesByRelationTo, getAll,
   } = storage;
   const relationIndex = relations.index;
 
@@ -107,12 +107,12 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
       withRole: (r: string) => setIds(ids.filter(i => getRoles(i).includes(r))),
 
       relatedTo: (target: EARS.EntityId) => {
-        const related = new Set(queryEntitiesInRelationTo(target));
+        const related = new Set(findEntitiesInRelationTo(target));
         return setIds(ids.filter(i => related.has(i)));
       },
 
       related: (kind: string, other: EARS.EntityId, asSrc = false) => {
-        const related = new Set(queryEntitiesByRelationTo(kind, other, asSrc));
+        const related = new Set(findEntitiesByRelationTo(kind, other, asSrc));
         return setIds(ids.filter(i => related.has(i)));
       },
 
@@ -127,7 +127,7 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
 
         const out = new Set<EARS.EntityId>();
         for (const src of ids) for (const k of kinds) {
-          queryEntitiesByRelationTo(k, src, asSrc)
+          findEntitiesByRelationTo(k, src, asSrc)
             .filter(matches)
             .forEach(i => {
               if (i !== src) out.add(i);
@@ -148,7 +148,7 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
 
         const out: Array<{ relation: K; id: EARS.EntityId }> = [];
         for (const src of ids) for (const k of kinds)
-          queryEntitiesByRelationTo(k, src, asSrc)
+          findEntitiesByRelationTo(k, src, asSrc)
             .filter(matches)
             .forEach(id => out.push({ relation: k as K, id }));
 

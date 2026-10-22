@@ -195,6 +195,12 @@ export interface Ears {
     // (undocumented)
     findByIdWithFields<T>(id: EARS.EntityId, fields: string[]): T | undefined;
     // (undocumented)
+    findEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
+    // (undocumented)
+    findEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
+    // (undocumented)
+    findEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
+    // (undocumented)
     findFirst<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T | undefined;
     // (undocumented)
     findFirstWithRole<T>(entityType: EARS.Entity, role: string): T | undefined;
@@ -254,12 +260,6 @@ export interface Ears {
     lowestCommonAncestor(a: EARS.EntityId, b: EARS.EntityId, treeKind: EARS.RelKind): EARS.EntityId | null;
     query: Query;
     // (undocumented)
-    queryEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
-    // (undocumented)
-    queryEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
-    // (undocumented)
-    queryEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
-    // (undocumented)
     registerRepository(name: string, value: unknown): void;
     // (undocumented)
     removeRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId?: EARS.EntityId): void;
@@ -310,14 +310,14 @@ export interface EarsAdmin {
     dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
     // (undocumented)
     edgeStore: EdgeStore;
+    // (undocumented)
+    findEntitiesByRole(role: string): EARS.EntityId[];
     getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
     isEntityType(name: string): boolean;
     // (undocumented)
     mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
     // (undocumented)
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    // (undocumented)
-    queryEntitiesByRole(role: string): EARS.EntityId[];
     readonly relationIndex: Readonly<RelationIndex>;
     // (undocumented)
     removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;

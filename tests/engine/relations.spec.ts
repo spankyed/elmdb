@@ -24,9 +24,9 @@ describe('links', () => {
     expect(e.query.ids(a).edgeIds()).toEqual([rel.id]);
     expect(e.query.ids(b).edgeIds('blocks', false)).toEqual([rel.id]);
     expect(e.query.ids(a).edgeIds('missing')).toEqual([]);
-    expect(e.queryEntitiesByRelationTo('blocks', a, true)).toEqual([b]);
-    expect(e.queryEntitiesByRelationTo('blocks', b)).toEqual([a]);
-    expect(e.queryEntitiesInRelationTo(a)).toEqual([b]);
+    expect(e.findEntitiesByRelationTo('blocks', a, true)).toEqual([b]);
+    expect(e.findEntitiesByRelationTo('blocks', b)).toEqual([a]);
+    expect(e.findEntitiesInRelationTo(a)).toEqual([b]);
     expect(e.getRelationStats('blocks')).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
     expect(e.getRelationStats('none')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
     expect(e.admin.relationIndex).toEqual({ blocks: { bySource: { [a]: [rel.id] }, byTarget: { [b]: [rel.id] } } });
@@ -167,7 +167,7 @@ describe('roles', () => {
     expect(e.getRoles(a)).toEqual(['lead', 'owner']);
     e.write(b).grant('lead');
     expect(e.query.all().withRole('lead').ids()).toEqual([a, b]);
-    expect(e.admin.queryEntitiesByRole('lead')).toEqual([a, b]);
+    expect(e.admin.findEntitiesByRole('lead')).toEqual([a, b]);
     e.write(c).grantExclusive('lead', e.query('Task').ids());
     expect(e.query.all().withRole('lead').ids()).toEqual([c]);
     // Revokes only among the entities given, and grants once
