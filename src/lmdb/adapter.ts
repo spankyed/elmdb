@@ -1,6 +1,5 @@
 import type { LmdbDbs } from './envs.ts';
 import type { PersistenceSink } from '../runtime.ts';
-import { EARS } from '../entities.ts';
 
 type Encoded = { t: string; v: any };
 
@@ -38,8 +37,6 @@ function arrayRewriteKey(kind: string, entityId: string) {
   return `${kind}${SEP}${entityId}`;
 }
 
-const entTypeOf = (id: string) => id.split('-')[0] ?? id;
-
 /** The attribute kinds stored in `attrs`: keys sort by kind, so each lookup skips past the kind before it */
 function* storedKinds(attrs: LmdbDbs['attrs']): Iterable<string> {
   let start = '';
@@ -71,12 +68,10 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
 
   // Keyed buffers for coalescing writes
   const arrayRewrites = new Map<string, unknown[]>(); // kind\x1FentityId -> final array
-  const ensureBuf = new Set<string>();
   const relUpserts = new Map<string, any>();
   const relDeletes = new Set<string>();
-  const entityUpdates = new Map<string, any>();
-  // Rows of relations whose details were dropped: a relation's id has an entity row while it exists
-  const entityRemovals = new Set<string>();
+  // An entity's row holds its type, written once, when the entity is created
+  const createdRows = new Map<string, string>();
   
   let scheduled = false;
   let closed = false;
@@ -95,26 +90,10 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
    * go in one transaction — and on failure it lets each be retried alone.
    */
   function takeSteps(): Array<{ op: string; key: string; run: () => void }> {
-    const ts = Date.now();
     const steps: Array<{ op: string; key: string; run: () => void }> = [];
 
-    for (const id of ensureBuf) {
-      if (id) steps.push({ op: 'entity', key: id, run: () => {
-        if (!entities.doesExist(id)) entities.put(id, { type: entTypeOf(id), createdAt: ts });
-      } });
-    }
-    ensureBuf.clear();
-
-    for (const [id, patch] of entityUpdates) {
-      steps.push({ op: 'entity', key: id, run: () => {
-        const existing = entities.get(id);
-        entities.put(id, existing ? { ...existing, ...patch } : { type: patch.type ?? entTypeOf(id), createdAt: ts, ...patch });
-      } });
-    }
-    entityUpdates.clear();
-
-    for (const id of entityRemovals) steps.push({ op: 'entity-remove', key: id, run: () => { entities.remove(id); } });
-    entityRemovals.clear();
+    for (const [id, type] of createdRows) steps.push({ op: 'entity', key: id, run: () => { entities.put(id, { type }); } });
+    createdRows.clear();
 
     for (const [key, arr] of arrayRewrites) {
       const [kind, entityId] = key.split(SEP);
@@ -209,29 +188,19 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     const key = arrayRewriteKey(kind, entityId);
     // Store only the final state of the array
     arrayRewrites.set(key, [...array]); // Clone to avoid mutations
-    if (array.length) {
-      ensureBuf.add(entityId);
-      entityRemovals.delete(entityId);
-    } else if (kind === EARS.AttrKind.RelationDetails) {
-      // The relation is gone, and with it its id's row
-      ensureBuf.delete(entityId);
-      entityUpdates.delete(entityId);
-      entityRemovals.add(entityId);
-    }
     scheduleFlush();
   }
 
   /** Drops the writes buffered for an entity, so a flush after its hard delete doesn't write it back */
   function discardBuffered(entityId: string) {
-    ensureBuf.delete(entityId);
-    entityUpdates.delete(entityId);
+    createdRows.delete(entityId);
     for (const key of arrayRewrites.keys()) {
       if (key.slice(key.indexOf(SEP) + 1) === entityId) arrayRewrites.delete(key);
     }
   }
 
   const buffered = () =>
-    ensureBuf.size + entityUpdates.size + entityRemovals.size + arrayRewrites.size + relDeletes.size + relUpserts.size > 0;
+    createdRows.size + arrayRewrites.size + relDeletes.size + relUpserts.size > 0;
 
   function close() {
     if (closed) return;
@@ -255,13 +224,9 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
   }
 
   return {
-    onCreateEntity(entityId: string, type?: string) {
+    onCreateEntity(entityId: string, type: string) {
       if (closed) return;
-      ensureBuf.add(entityId);
-      // The row takes its type from the id's prefix; only a type that differs is written over it
-      if (type && type !== entTypeOf(entityId)) {
-        entityUpdates.set(entityId, { type });
-      }
+      createdRows.set(entityId, type);
       scheduleFlush();
     },
 
@@ -336,8 +301,6 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
         return;
       }
       
-      ensureBuf.add(src);
-      ensureBuf.add(tgt);
       // A relation written again (routed here after a reopen) keeps when it was created
       const createdAt = relDeletes.has(relId) ? undefined : (relUpserts.get(relId) ?? relations.get(relId))?.createdAt;
       relDeletes.delete(relId); // Cancel any pending delete
@@ -364,7 +327,6 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
           dropRelation(relId, `Invalid src format in onUpdateRelation: relId=${relId}, src="${patch.src}" (missing hyphen)`);
           return;
         }
-        ensureBuf.add(patch.src);
         updated.src = patch.src;
       }
       if (patch.tgt) {
@@ -377,7 +339,6 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
           dropRelation(relId, `Invalid tgt format in onUpdateRelation: relId=${relId}, tgt="${patch.tgt}" (missing hyphen)`);
           return;
         }
-        ensureBuf.add(patch.tgt);
         updated.tgt = patch.tgt;
       }
       if ('info' in patch) {

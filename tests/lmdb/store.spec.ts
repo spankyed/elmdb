@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createEarsEngine, installEngine, makePolicy, untypedCreate, untypedWrite, getEntitiesOfType, type EARS, type EarsEngine } from '../../src/index.ts';
 import { open as openEnv } from 'lmdb';
-import { LMDB_FORMAT_VERSION, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
+import { LMDB_FORMAT_VERSION, convertToFormat2, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
 const policy = makePolicy({ excludedEntityTypes: new Set(['Trace']) });
@@ -231,14 +231,16 @@ describe('openLmdbStore', () => {
     untypedCreate('Note', { id: id('Note-2') }).set('title', 'ghost');
     const rel = engine.admin.addRelation(id('Note-1'), 'mentions', id('Note-1'));
     await flushed();
-    expect(first.query('primary').getEntityMeta(rel)).not.toBeNull();
+    // A relation is its row in the relations table, and no entity row
+    expect(first.envs.primary.relations.get(rel)).toBeTruthy();
+    expect(first.query('primary').getEntityMeta(rel)).toBeNull();
     // In the same synchronous block as its writes, before they're flushed
     untypedWrite(id('Note-2')).set('title', 'ghost again');
     untypedWrite(id('Note-2')).destroy();
     engine.query.removeRelationById(rel);
     await flushed();
     expect(first.query('primary').getEntityMeta('Note-2')).toBeNull();
-    expect(first.query('primary').getEntityMeta(rel)).toBeNull();
+    expect(first.envs.primary.relations.get(rel)).toBeUndefined();
     first.close();
 
     const second = openStore();
@@ -372,43 +374,33 @@ describe('the storage format', () => {
     expect(storedFormat(paths.volatileBackup)).toBe(LMDB_FORMAT_VERSION);
   });
 
-  it('is recorded in files that predate it, once a version that records it writes them', async () => {
+  it('refuses files that predate it, which are format 1, until they are converted', async () => {
     const store = openStore();
     untypedCreate('Note', { id: id('Note-1') }).set('title', 'kept');
     await flushed();
     store.close();
-    // Files from before the format was recorded
+    // Files from before the format was recorded, holding data
     writeFormat(paths.primary);
+
+    const format1 = /storage format 1, but this version reads format 2: convert a copy of it with scripts\/ears-format-2\.ts/;
+    expect(() => openStore({ readOnly: true, log: () => {} })).toThrow(format1);
+    expect(() => openStore()).toThrow(format1);
     expect(storedFormat(paths.primary)).toBeUndefined();
 
-    // Reading them records nothing
-    openStore({ readOnly: true, log: () => {} }).close();
-    expect(storedFormat(paths.primary)).toBeUndefined();
-
-    openStore().close();
+    convertToFormat2(paths.primary);
     expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
+    const converted = openStore({ log: () => {} });
+    await converted.hydrate();
+    expect(getAttr(id('Note-1'), 'title')).toBe('kept');
   });
 
-  it('reads a database written before formats were recorded, which has no meta database at all', async () => {
-    // An older version's files: the three databases it wrote, and nothing else
-    const root = openEnv({ path: paths.primary, maxDbs: 8, compression: true });
-    root.openDB({ name: 'entities', encoding: 'json' }).putSync('Note-1', { type: 'Note', createdAt: 1 });
-    root.openDB({ name: 'attrs', encoding: 'json' });
-    root.openDB({ name: 'relations', encoding: 'json' });
-    root.close();
-    const volatile = openEnv({ path: paths.volatileBackup, maxDbs: 8, compression: true });
-    volatile.openDB({ name: 'entities', encoding: 'json' });
-    volatile.openDB({ name: 'attrs', encoding: 'json' });
-    volatile.openDB({ name: 'relations', encoding: 'json' });
-    volatile.close();
-
-    // Reading them records nothing, and they read as this format
-    const readOnly = openStore({ readOnly: true, log: () => {} });
-    await readOnly.hydrate();
-    expect(readOnly.query('primary').getEntityMeta('Note-1')).toMatchObject({ type: 'Note' });
-    readOnly.close();
-    expect(storedFormat(paths.primary)).toBeUndefined();
-
+  it('records the format in new, empty files, which hold nothing to misread', () => {
+    // A version that recorded no format, and wrote nothing
+    for (const dir of [paths.primary, paths.volatileBackup]) {
+      const root = openEnv({ path: dir, maxDbs: 8, compression: true });
+      for (const name of ['entities', 'attrs', 'relations']) root.openDB({ name, encoding: 'json' });
+      root.close();
+    }
     openStore().close();
     expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
   });
@@ -441,7 +433,7 @@ describe('the storage format', () => {
     expect(() => openStore({ readOnly: true })).toThrow(newer);
 
     writeFormat(paths.primary, 'nonsense');
-    expect(() => openStore()).toThrow(/storage format "nonsense", but this version reads format 1$/);
+    expect(() => openStore()).toThrow(new RegExp(`storage format "nonsense", but this version reads format ${LMDB_FORMAT_VERSION}$`));
 
     // The environment it opened is closed, so the files can be replaced and opened again
     fs.rmSync(paths.primary, { recursive: true, force: true });

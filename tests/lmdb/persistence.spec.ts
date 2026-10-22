@@ -48,7 +48,7 @@ describe('LMDB Adapter', () => {
   it("hard-deletes an entity's row and its attributes of every kind, and nothing of another entity", () => {
     const adapter = makeLmdbAdapter(dbs);
     for (const id of ['Task-1', 'Task-10', 'Note-1']) {
-      adapter.onCreateEntity(id);
+      adapter.onCreateEntity(id, id.split('-')[0]);
       adapter.onPutAttrArray('title', id, [`${id} title`]);
       adapter.onPutAttrArray('tags', id, ['a', 'b']);
     }
@@ -67,14 +67,15 @@ describe('LMDB Adapter', () => {
     expect(dbs.entities.get('Task-10')).toBeTruthy();
   });
 
-  it("types an entity's row by its id's prefix, unless it's created with another type", () => {
+  it("writes an entity's row, holding only its type, when it is created and never for an attribute or a relation", () => {
     const adapter = makeLmdbAdapter(dbs);
     adapter.onCreateEntity('Task-typed', 'Task');
-    adapter.onCreateEntity('Task-special', 'Special');
+    adapter.onPutAttrArray('title', 'Task-attr-only', ['no row']);
+    adapter.onAddRelation('Relation-rows', 'refs', 'Task-src-end', 'Task-tgt-end', undefined);
     adapter.close?.();
 
-    expect(dbs.entities.get('Task-typed').type).toBe('Task');
-    expect(dbs.entities.get('Task-special').type).toBe('Special');
+    expect(dbs.entities.get('Task-typed')).toEqual({ type: 'Task' });
+    for (const id of ['Task-attr-only', 'Task-src-end', 'Task-tgt-end', 'Relation-rows']) expect(dbs.entities.get(id), id).toBeUndefined();
   });
 
   /**
@@ -88,7 +89,7 @@ describe('LMDB Adapter', () => {
    */
   it('does not leak a reader slot per call, however many times it is asked', async () => {
     const adapter = makeLmdbAdapter(dbs);
-    adapter.onCreateEntity('Doc-readers');
+    adapter.onCreateEntity('Doc-readers', 'Doc');
     adapter.onPutAttrArray('tags', 'Doc-readers', ['a', 'b', 'c']);
     adapter.close?.();
 
@@ -188,10 +189,10 @@ describe('LMDB Adapter, a unit', () => {
     const dropped: Array<{ op: string; key: string }> = [];
     const adapter = makeLmdbAdapter(guarded, ({ op, key }) => dropped.push({ op, key }));
 
-    adapter.onCreateEntity('Document-before');
+    adapter.onCreateEntity('Document-before', 'Document');
     adapter.onUnitStart();
-    adapter.onCreateEntity('Document-ok');
-    adapter.onCreateEntity('Document-poison');
+    adapter.onCreateEntity('Document-ok', 'Document');
+    adapter.onCreateEntity('Document-poison', 'Document');
     adapter.onUnitEnd();
 
     expect(live.entities.get('Document-before'), 'written before the unit, on its own').toBeTruthy();
@@ -204,6 +205,7 @@ describe('LMDB Adapter, a unit', () => {
   it('deletes an entity at the end of the unit, not when the destroy is made', () => {
     const { live, guarded, done } = guardedEnv('unit-destroy', 'none');
     const adapter = makeLmdbAdapter(guarded);
+    adapter.onCreateEntity('Document-1', 'Document');
     adapter.onPutAttrArray('title', 'Document-1', ['kept']);
     adapter.close?.();
     const reopened = makeLmdbAdapter(guarded);
@@ -240,6 +242,7 @@ describe('LMDB Adapter error stats', () => {
   // row and an attribute row, and a caller that is told "1" when two rows are gone has been misinformed.
   it('counts every row it could not write when the sink closes, and names the last', () => {
     const adapter = makeLmdbAdapter(failing());
+    adapter.onCreateEntity('Document-1', 'Document');
     adapter.onPutAttrArray('title', 'Document-1', ['kept']);
     adapter.close?.();
     expect(adapter.getErrorStats?.()).toMatchObject({
@@ -268,9 +271,9 @@ describe('LMDB Adapter error stats', () => {
     } as unknown as LmdbDbs;
 
     const adapter = makeLmdbAdapter(guarded, ({ op, key }) => dropped.push({ op, key }));
-    adapter.onCreateEntity('Document-ok-1');
-    adapter.onCreateEntity(poisoned);
-    adapter.onCreateEntity('Document-ok-2');
+    adapter.onCreateEntity('Document-ok-1', 'Document');
+    adapter.onCreateEntity(poisoned, 'Document');
+    adapter.onCreateEntity('Document-ok-2', 'Document');
     adapter.close?.();
 
     expect(dropped, 'only the row that refused').toEqual([{ op: 'entity', key: poisoned }]);
@@ -619,8 +622,8 @@ describe('Partition Routing', () => {
   });
 
   it('routes Document -> primary and TNode -> volatileBackup', () => {
-    expect(policy.routeEntity('Document-1')).toBe('primary');
-    expect(policy.routeEntity('TNode-1')).toBe('volatileBackup');
+    expect(policy.routeEntity('Document')).toBe('primary');
+    expect(policy.routeEntity('TNode')).toBe('volatileBackup');
   });
 
   it('routes relations based on endpoint types', () => {

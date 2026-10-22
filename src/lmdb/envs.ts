@@ -14,43 +14,62 @@ export type LmdbDbs = {
 
 /**
  * How this version of `@apackdev/ears` encodes rows in LMDB (keys, attribute and relation records). An environment
- * records the format it was written in; one in another format is refused rather than misread. Change the encoding,
- * and this number goes up with code that upgrades the older format.
+ * records the format it was written in; one in another format is refused rather than misread.
+ *
+ * Format 2 keeps one record of each fact: an entity's row holds only its type, written when it is created; a
+ * relation is its row in the relations table, with no attribute copy and no entity row; `entityType` is read from
+ * the id rather than stored. Format 1 also stored those copies, and they had drifted apart. There is no upgrade in
+ * the app: `scripts/ears-format-2.ts` converts a copy of a format 1 data dir, once, explicitly.
  */
-export const LMDB_FORMAT_VERSION = 1;
+export const LMDB_FORMAT_VERSION = 2;
 
 /** The environment's own records, beside its data: its storage format */
 const META_DB = 'meta';
 const FORMAT_KEY = 'format';
 
 /**
- * Checks the environment's storage format, and records it in one that has none (written before formats were
- * recorded, which is format 1) unless it's read-only. Throws for any other format.
+ * Checks the environment's storage format, and records it in a new, empty one unless it's read-only. Data that
+ * records no format was written before formats were recorded, which is format 1. Throws for any format but this
+ * one.
  */
 function checkFormat(root: RootDatabase, basePath: string, readOnly: boolean): void {
   // A read-only environment has no database the writer never created, and one written before formats were recorded
   // has none either
   const meta = root.openDB({ name: META_DB, encoding: 'json' }) as Database<unknown> | undefined;
-  const format = meta?.get(FORMAT_KEY);
+  let format = meta?.get(FORMAT_KEY);
   if (format === undefined) {
-    // Recording it is what a writer can do for the next reader, not a condition of opening: a full disk mustn't
-    // stop an app opening a database it could read before
-    if (!readOnly && meta) {
-      try {
-        meta.putSync(FORMAT_KEY, LMDB_FORMAT_VERSION);
-      } catch (error) {
-        console.warn(`[LMDB] Couldn't record the storage format of ${basePath}:`, (error as Error).message);
+    if (holdsData(root)) {
+      format = 1;
+    } else {
+      // Recording it is what a writer can do for the next reader, not a condition of opening: a full disk mustn't
+      // stop an app opening a database it could read before
+      if (!readOnly && meta) {
+        try {
+          meta.putSync(FORMAT_KEY, LMDB_FORMAT_VERSION);
+        } catch (error) {
+          console.warn(`[LMDB] Couldn't record the storage format of ${basePath}:`, (error as Error).message);
+        }
       }
+      return;
     }
-    return;
   }
   if (format !== LMDB_FORMAT_VERSION) {
     const newer = typeof format === 'number' && format > LMDB_FORMAT_VERSION;
     throw new Error(
       `The database at ${basePath} is in storage format ${JSON.stringify(format)}, but this version reads format ${LMDB_FORMAT_VERSION}` +
-      (newer ? ': it was written by a newer apack, so update this one' : ''),
+      (newer ? ': it was written by a newer apack, so update this one'
+        : format === 1 ? ': convert a copy of it with scripts/ears-format-2.ts' : ''),
     );
   }
+}
+
+/** Whether any of the environment's data databases holds a row */
+function holdsData(root: RootDatabase): boolean {
+  for (const name of ['entities', 'attrs', 'relations']) {
+    const db = root.openDB({ name, encoding: 'json' }) as Database<unknown> | undefined;
+    if (db) for (const _key of db.getKeys({ limit: 1 })) return true;
+  }
+  return false;
 }
 
 /**

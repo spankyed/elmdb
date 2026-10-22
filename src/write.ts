@@ -144,7 +144,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType }: {
     requireType(type, 'create');
     let id: EARS.EntityId;
     if (given !== undefined) {
-      // The index files an entity under its id's prefix, so an id must name its own type
+      // An id is the record of its entity's type (`entityTypeOf`), so it must name the type it is created as
       if (entityTypeOf(given) !== type) {
         throw new EarsError('TYPE_MISMATCH', `create(${JSON.stringify(type)}, { id: ${JSON.stringify(given)} }): the id names another type`);
       }
@@ -156,7 +156,6 @@ export function createWrites({ storage, edgeStore, graph, isEntityType }: {
       id = createEntity(type);
     }
     entityCreated(id, type);
-    putAttr(id, attr('entityType'), type);
     putAttr(id, attr('createdAt'), createdAt ?? Date.now());
     return builder(id);
   }) as Create;

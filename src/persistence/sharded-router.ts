@@ -1,4 +1,5 @@
 import { EARS } from '../entities.ts';
+import { entityTypeOf } from '../attribute-storage.ts';
 import type { PersistenceSink } from '../runtime.ts';
 import type { PartitionPolicy, Partition } from './policy.ts';
 
@@ -8,12 +9,12 @@ export interface ShardedPersistence extends PersistenceSink {
   getRelMeta(): Map<string, { kind: string; src: string; tgt: string }>;
 }
 
+/** An id's entity type, refusing one that can't name an entity */
 const entTypeOf = (id: string): EARS.Entity => {
   if (typeof id !== 'string' || id.length === 0) {
     throw new Error(`[Sharded] Invalid entity id for routing: ${JSON.stringify(id)} (${typeof id})`);
   }
-  const dash = id.indexOf('-');
-  return (dash === -1 ? id : id.slice(0, dash)) as EARS.Entity;
+  return entityTypeOf(id as EARS.EntityId);
 };
 
 /** A relation's details as the engine holds them, or null (`admin`'s relation details reader) */
@@ -41,8 +42,7 @@ export function makeShardedPersistence(
     } : null;
   }
 
-  const pickEntity = (entityId: string, entityType?: EARS.Entity) =>
-    policy.routeEntity(entityId, entityType);
+  const pickEntity = (entityId: string) => policy.routeEntity(entTypeOf(entityId));
 
   const pickRel = (src: string, tgt: string) =>
     policy.routeRelation({ srcType: entTypeOf(src), tgtType: entTypeOf(tgt) });
@@ -65,8 +65,8 @@ export function makeShardedPersistence(
   }
 
   return {
-    onCreateEntity(entityId: string, entityType?: string) {
-      const p = pickEntity(entityId, entityType as EARS.Entity);
+    onCreateEntity(entityId: string, entityType: string) {
+      const p = pickEntity(entityId);
       sinks[p].onCreateEntity(entityId, entityType);
     },
 

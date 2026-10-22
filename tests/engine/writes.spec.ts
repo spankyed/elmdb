@@ -204,11 +204,16 @@ describe('finders', () => {
     const p = e.query.create('Project').id();
     e.query.write(p).link('contains', a);
     expect(e.query.getAll(a)).toEqual({ entityType: 'Task', createdAt: NOW, title: 'A', tag: [1, 2] });
-    expect(e.query.getAllAttributeKinds()).toEqual(['entityType', 'createdAt', 'title', 'tag', 'relationDetails']);
+    // `entityType` is read from the id, so it is on every row and in every read, and stored as no attribute
+    expect(e.query.getAttr(a, 'entityType')).toBe('Task');
+    expect(e.query.getAttrs(p, 'entityType')).toEqual(['Project']);
+    expect(e.query.qx.all().where('entityType', 'Task').ids()).toEqual([a]);
+    expect(e.query.getAttr('Task-gone' as Id, 'entityType')).toBeNull();
+    expect(e.query.getAllAttributeKinds()).toEqual(['createdAt', 'title', 'tag', 'relationDetails']);
     expect(e.query.getAttributeStats('tag')).toEqual({ entityCount: 1, totalValues: 2 });
     expect(e.query.getSchemaStats()).toEqual({
       entities: { Task: 1, Project: 1, Relation: 1 },
-      attributes: { entityType: 2, createdAt: 2, title: 1, tag: 2, relationDetails: 1 },
+      attributes: { createdAt: 2, title: 1, tag: 2, relationDetails: 1 },
       relations: { contains: 1 },
     });
     expect(e.query.queryEntitiesByAttribute('tag')).toEqual([a]);

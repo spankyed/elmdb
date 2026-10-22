@@ -70,9 +70,8 @@ describe('links', () => {
     e.query.write(a).unlink('blocks', c).unlink('refs', c);
     expect(edges()).toEqual([]);
     expect(e.query.getAllRelationKinds()).toEqual([]);
-    // A removed relation's id stays in the type index, with no attributes
-    expect(e.query.getEntitiesOfType('Relation')).toHaveLength(4);
-    expect(e.query.qx('Relation').pickAll().map((row) => Object.keys(row))).toEqual([['id'], ['id'], ['id'], ['id']]);
+    // A relation is its details: a removed one leaves no entity behind
+    expect(e.query.getEntitiesOfType('Relation')).toEqual([]);
 
     e.query.write(a).link('blocks', b).link('blocks', c).link('refs', c);
     e.query.write(a).unlink('blocks');

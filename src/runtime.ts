@@ -12,7 +12,8 @@ import { installedEngine } from './installed.ts';
 // ─── PersistenceSink interface ─────────────────────────────────────────
 
 export interface PersistenceSink {
-  onCreateEntity(entityId: string, entityType?: string): void;
+  /** An entity was created, as `entityType`: the one call that gives it a row */
+  onCreateEntity(entityId: string, entityType: string): void;
   onDestroyEntity(entityId: string): void;
   onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]): void;
   /** An attribute's values after a write, whole: the sink stores them in place of what it had */

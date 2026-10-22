@@ -14,10 +14,13 @@ import { installedEngine } from './installed.ts';
 export const createEntity = <E extends EARS.Entity>(t: E): EARS.EntityId =>
   `${t}-${idSuffix()}` as EARS.EntityId;
 
+const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
+
 /**
- * An entity's type, from its id, which is where an entity's type actually lives: `createEntity` builds
- * `<Type>-<suffix>` and `entityIndex` is keyed by this. The `entityType` attribute is a denormalised copy
- * of it, so the two must never disagree — `tx` stamps the attribute from this.
+ * An entity's type, from its id: the one record of it. `createEntity` builds `<Type>-<suffix>`, `create`
+ * refuses an id naming another type, and the id is the wire's record too — a frontend opens an entity by
+ * it, and reference nodes keep ids inside stored documents — so nothing else stores the type. `entityIndex`
+ * is keyed by this, and the `entityType` field every row carries is read from it.
  */
 export const entityTypeOf = (id: EARS.EntityId) => {
   const dash = id.indexOf('-');
@@ -29,6 +32,9 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue[]>>();
   const entityIndex = new Map<EARS.Entity, Set<EARS.EntityId>>();
   const relationIndex = relations.index;
+  // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
+  // what hydration rebuilds the attribute from; storing the attribute too would be a second record of it
+  const persisted = (kind: EARS.AttrKind) => kind !== EARS.AttrKind.RelationDetails;
   // Counts the writes that take entities out of the engine, so a query kept across them knows to check its ids
   let removals = 0;
 
@@ -73,6 +79,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       };
     });
 
+  /** Takes the entity out of the type index, and its type with it once it holds no other */
+  const unindexEntity = (id: EARS.EntityId) => {
+    const type = entityTypeOf(id);
+    const ids = entityIndex.get(type);
+    if (!ids?.has(id)) return;
+    touchIndexed(id);
+    ids.delete(id);
+    if (ids.size === 0) entityIndex.delete(type);
+  };
+
   const indexEntity = (id: EARS.EntityId) => {
     touchIndexed(id);
     const type = entityTypeOf(id);
@@ -104,21 +120,21 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     touchValues(id, kind);
     const list = valuesOf(id, kind);
     list.push(val as EARS.AttributeValue);
-    persistence.onPutAttrArray(kind, id, list);
+    if (persisted(kind)) persistence.onPutAttrArray(kind, id, list);
   };
 
   const put = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
     touchValues(id, kind);
     bucket(kind).set(id, [val as EARS.AttributeValue]);
     indexEntity(id);
-    persistence.onPutAttrArray(kind, id, [val]);
+    if (persisted(kind)) persistence.onPutAttrArray(kind, id, [val]);
   };
 
   const merge = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown, idx = 0) => {
     touchValues(id, kind);
     const list = valuesOf(id, kind);
     mergeAt(list, val, idx);
-    persistence.onPutAttrArray(kind, id, list);
+    if (persisted(kind)) persistence.onPutAttrArray(kind, id, list);
   };
 
   const drop = (id: EARS.EntityId, kind: EARS.AttrKind, idx = 0) => {
@@ -126,7 +142,9 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     if (!list?.length) return;
     touchValues(id, kind);
     list.splice(idx, 1);
-    if (!list.length) {
+    if (!persisted(kind)) {
+      if (!list.length) bucket(kind).delete(id);
+    } else if (!list.length) {
       bucket(kind).delete(id);
       persistence.onDropAttr(kind, id, idx, []);
     } else {
@@ -139,7 +157,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     if (!bucket(kind).get(id)?.length) return;
     touchValues(id, kind);
     bucket(kind).delete(id);
-    persistence.onDropAttr(kind, id, 0, []);
+    if (persisted(kind)) persistence.onDropAttr(kind, id, 0, []);
   };
 
   const dropIf = (id: EARS.EntityId, kind: EARS.AttrKind, crit: unknown) => {
@@ -234,20 +252,23 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     if (d)
       relations.removeFromIndex(d.relationType, d.sourceEntity, d.targetEntity, relId);
     drop(relId, EARS.AttrKind.RelationDetails);
+    // A relation is its details: with them gone, so is the relation's entity
+    unindexEntity(relId);
     if (destroyed) persistence.onRemoveRelation(relId, destroyed);
     else persistence.onRemoveRelation(relId);
   };
   const removeRelationById = (relId: EARS.EntityId) => removeRelation(relId);
 
+  // `entityType` is read from the id rather than stored, so every row carries it and none can disagree
   const getAttr  = (id: EARS.EntityId, k: EARS.AttrKind, i = 0) =>
-    bucket(k).get(id)?.[i] ?? null;
-  const getAttrs = (id: EARS.EntityId, k: EARS.AttrKind) =>
-    bucket(k).get(id) ?? [];
+    k === ENTITY_TYPE ? (i === 0 && hasEntity(id) ? entityTypeOf(id) : null) : bucket(k).get(id)?.[i] ?? null;
+  const getAttrs = (id: EARS.EntityId, k: EARS.AttrKind): EARS.AttributeValue[] =>
+    k === ENTITY_TYPE ? (hasEntity(id) ? [entityTypeOf(id)] : []) : bucket(k).get(id) ?? [];
   const getRoles = (id: EARS.EntityId) =>
     getAttrs(id, EARS.AttrKind.Role) as string[];
 
   const getAll = (id: EARS.EntityId) => {
-    const out: Record<string, unknown> = {};
+    const out: Record<string, unknown> = hasEntity(id) ? { [ENTITY_TYPE]: entityTypeOf(id) } : {};
     for (const [k, b] of store)
       if (b.get(id))
         out[k] = b.get(id)!.length === 1 ? b.get(id)![0] : b.get(id);
@@ -339,14 +360,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       touchValues(id, k);
       b.delete(id);
     }
-    touchIndexed(id);
-    const entitySet = entityIndex.get(entityTypeOf(id));
-    if (entitySet) {
-      entitySet.delete(id);
-      if (entitySet.size === 0) {
-        entityIndex.delete(entityTypeOf(id));
-      }
-    }
+    unindexEntity(id);
     if (!skipPersistence) {
       persistence.onDestroyEntity(id);
     }
@@ -365,8 +379,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return { entityCount: b.size, totalValues };
   };
 
-  /** Tells the sink an entity was created, with its type when the creator knows it */
-  const entityCreated = (id: EARS.EntityId, entityType?: EARS.Entity) => persistence.onCreateEntity(id, entityType);
+  /** Tells the sink an entity was created */
+  const entityCreated = (id: EARS.EntityId, entityType: EARS.Entity) => persistence.onCreateEntity(id, entityType);
 
   function getSchemaStats() {
     return {

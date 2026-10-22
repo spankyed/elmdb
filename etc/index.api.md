@@ -522,7 +522,7 @@ export type Partition = 'primary' | 'volatileBackup';
 // @public (undocumented)
 export interface PartitionPolicy {
     readonly hydrate: ReadonlySet<Partition>;
-    routeEntity(entityId: string, entityType?: EARS.Entity): Partition;
+    routeEntity(entityType: EARS.Entity): Partition;
     routeRelation(params: {
         srcType: EARS.Entity;
         tgtType: EARS.Entity;
@@ -545,8 +545,7 @@ export interface PersistenceSink {
     getErrorStats?(): PersistenceErrorStats;
     // (undocumented)
     onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown): void;
-    // (undocumented)
-    onCreateEntity(entityId: string, entityType?: string): void;
+    onCreateEntity(entityId: string, entityType: string): void;
     // (undocumented)
     onDestroyEntity(entityId: string): void;
     // (undocumented)
