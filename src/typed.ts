@@ -14,7 +14,7 @@ import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { CreateOptions, QueryBuilder, WriteBuilder } from './runtime.ts';
 import { createEntity } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './transaction-helpers.ts';
-import type { EarsQuery } from './engine.ts';
+import type { Ears } from './engine.ts';
 
 /** An entity name argument: a declared name, or a name only known at runtime (see EntityNameArg) */
 type Name<N extends string, E extends string> = EntityNameArg<N, E>;
@@ -115,7 +115,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
   create: TypedCreate<S, N>;
   upsert: TypedUpsert<S, N>;
   write: TypedWrite<S>;
-  transact: EarsQuery['transact'];
+  transact: Ears['transact'];
   findById: TypedFindById<S>;
   findByIdRaw: TypedFindById<S>;
   findAll: TypedFindAll<S, N>;
@@ -138,8 +138,8 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
  * before its engine exists, which is the case for every pack: its `#generated/ears` passes the SDK's
  * `boundEars`.
  */
-export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => EarsQuery): TypedEars<S, N> {
-  const on = <K extends keyof EarsQuery>(name: K) =>
+export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => Ears): TypedEars<S, N> {
+  const on = <K extends keyof Ears>(name: K) =>
     ((...args: unknown[]) => (engine()[name] as (...a: unknown[]) => unknown)(...args));
   return {
     qx: Object.assign(on('qx'), {

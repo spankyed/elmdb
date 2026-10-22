@@ -89,7 +89,7 @@ export interface CreateOptions {
 }
 
 // @public
-export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => EarsQuery): TypedEars<S, N>;
+export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => Ears): TypedEars<S, N>;
 
 // @public (undocumented)
 export namespace EARS {
@@ -170,73 +170,7 @@ export namespace EARS {
 }
 
 // @public
-export interface EarsAdmin {
-    // (undocumented)
-    addAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    // (undocumented)
-    addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
-    addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
-    bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
-    clear(): void;
-    deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-    // (undocumented)
-    dropAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): void;
-    // (undocumented)
-    dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
-    // (undocumented)
-    edgeStore: EdgeStore;
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
-    isEntityType(name: string): boolean;
-    // (undocumented)
-    mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
-    // (undocumented)
-    putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    // (undocumented)
-    queryEntitiesByRole(role: string): EARS.EntityId[];
-    readonly relationIndex: Readonly<RelationIndex>;
-    // (undocumented)
-    removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
-    repositories(): Record<string, unknown>;
-    // (undocumented)
-    updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    // (undocumented)
-    updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
-    // (undocumented)
-    updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
-}
-
-// @public
-export interface EarsEngine {
-    // (undocumented)
-    admin: EarsAdmin;
-    // (undocumented)
-    query: EarsQuery;
-}
-
-// @public
-export class EarsError extends Error {
-    constructor(code: EarsErrorCode, message: string);
-    // (undocumented)
-    readonly code: EarsErrorCode;
-}
-
-// @public
-export type EarsErrorCode =
-/** `create`, `upsert` or `qx` was given a name that is not a registered entity type */
-'UNKNOWN_ENTITY_TYPE'
-/** `write` was given an id no entity in the engine has */
-| 'NO_SUCH_ENTITY'
-/** `create` was given an id an entity already has */
-| 'ID_IN_USE'
-/** `upsert` or `create` named a type the id's entity doesn't have */
-| 'TYPE_MISMATCH'
-/** A write named an attribute the engine owns */
-| 'RESERVED_ATTRIBUTE'
-/** A `where` was given no value to compare with */
-| 'NO_VALUE';
-
-// @public
-export interface EarsQuery {
+export interface Ears {
     // (undocumented)
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
@@ -359,6 +293,70 @@ export interface EarsQuery {
     wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
+
+// @public
+export interface EarsAdmin {
+    // (undocumented)
+    addAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    // (undocumented)
+    addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
+    addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
+    bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
+    clear(): void;
+    deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
+    // (undocumented)
+    dropAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): void;
+    // (undocumented)
+    dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
+    // (undocumented)
+    edgeStore: EdgeStore;
+    getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
+    isEntityType(name: string): boolean;
+    // (undocumented)
+    mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
+    // (undocumented)
+    putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    // (undocumented)
+    queryEntitiesByRole(role: string): EARS.EntityId[];
+    readonly relationIndex: Readonly<RelationIndex>;
+    // (undocumented)
+    removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
+    repositories(): Record<string, unknown>;
+    // (undocumented)
+    updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    // (undocumented)
+    updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
+    // (undocumented)
+    updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
+}
+
+// @public
+export interface EarsEngine extends Ears {
+    // (undocumented)
+    admin: EarsAdmin;
+}
+
+// @public
+export class EarsError extends Error {
+    constructor(code: EarsErrorCode, message: string);
+    // (undocumented)
+    readonly code: EarsErrorCode;
+}
+
+// @public
+export type EarsErrorCode =
+/** `create`, `upsert` or `qx` was given a name that is not a registered entity type */
+'UNKNOWN_ENTITY_TYPE'
+/** `write` was given an id no entity in the engine has */
+| 'NO_SUCH_ENTITY'
+/** `create` was given an id an entity already has */
+| 'ID_IN_USE'
+/** `upsert` or `create` named a type the id's entity doesn't have */
+| 'TYPE_MISMATCH'
+/** A write named an attribute the engine owns */
+| 'RESERVED_ATTRIBUTE'
+/** A `where` was given no value to compare with */
+| 'NO_VALUE';
 
 // @public
 export interface EARSRuntimeDeps {
@@ -695,7 +693,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     qx: TypedQx<S, N>;
     // (undocumented)
-    transact: EarsQuery['transact'];
+    transact: Ears['transact'];
     // (undocumented)
     updateEntity: TypedUpdateEntity<S>;
     // (undocumented)

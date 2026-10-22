@@ -1,5 +1,6 @@
-// An EARS engine: its stores, indexes and caches, and the two faces over them. Holding the engine is the
-// capability: `query` is what a program is handed, `admin` stays with whoever created it.
+// An EARS engine: its stores, indexes and caches, and the operations over them as the engine's own members, with the
+// creator's privileges beside them in `admin`. A program is handed the engine typed as `Ears`, which has no `admin`:
+// the faces define the contract, not a security boundary (packs run in-process).
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
@@ -16,8 +17,8 @@ import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
 
-/** An engine's queries, writes, transactions and repository registry: what a program is handed */
-export interface EarsQuery {
+/** An engine's operations — its queries, writes, transactions and repository registry: what a program is handed */
+export interface Ears {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
   qx: Qx;
   /** Creates an entity of a registered type, with a new id or the one given */
@@ -124,15 +125,14 @@ export interface EarsAdmin {
   repositories(): Record<string, unknown>;
 }
 
-/** An EARS engine */
-export interface EarsEngine {
-  query: EarsQuery;
+/** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
+export interface EarsEngine extends Ears {
   admin: EarsAdmin;
 }
 
 /**
  * A new, empty engine. `isEntityType` says which names are entity types `create` and `qx` accept;
- * `persistence` receives every write (nothing by default). Whoever holds the engine uses it through its faces;
+ * `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
 export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSRuntimeDeps): EarsEngine {
@@ -149,7 +149,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const relationReads = createRelationReads({ edgeStore, relations, storage });
   const repositories = createRepositoryRegistry();
 
-  const query: EarsQuery = {
+  const operations: Ears = {
     qx, create, upsert, write, transact, isEntityType,
     ...finders,
     ...writers,
@@ -204,5 +204,5 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     repositories: repositories.entries,
   };
 
-  return { query, admin };
+  return { ...operations, admin };
 }

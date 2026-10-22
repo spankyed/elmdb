@@ -1,8 +1,8 @@
-// The EARS engine: an instance you create and hold, with its operations as its members (`engine.query`) and the
-// creator's privileges beside them (`engine.admin`). Nothing here acts on an engine you didn't pass: the app's
+// The EARS engine: an instance you create and hold, with its operations as its members (`engine.create(...)`) and
+// the creator's privileges beside them (`engine.admin`). Nothing here acts on an engine you didn't pass: the app's
 // engine, and the operations over it that pack code calls, are the SDK's (`@apackdev/sdk/ears`).
 export {
-  createEarsEngine, type EarsEngine, type EarsQuery, type EarsAdmin,
+  createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,
 } from './engine.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
