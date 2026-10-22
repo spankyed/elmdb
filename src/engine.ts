@@ -14,6 +14,7 @@ import { createTransactionHelpers, type CreatedEntityFields } from './transactio
 import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
 import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
+import { createJournal } from './journal.ts';
 
 /** An engine's queries, transactions and repository registry: what packs use, through the installed engine */
 export interface EarsQuery {
@@ -21,6 +22,12 @@ export interface EarsQuery {
   qx: typeof qx;
   /** Writes to the engine: creates an entity of a type, or changes the entity with an id */
   tx: typeof tx;
+  /**
+   * Runs `fn` as one unit: if it throws, every write it made is undone and none reaches persistence; if it
+   * returns, persistence receives them together. Reads inside see its own writes. `fn` must be synchronous,
+   * and a unit inside another commits into it.
+   */
+  transact<T>(fn: () => T): T;
   /** Whether `name` is an entity type the engine's creator registered */
   isEntityType(name: string): boolean;
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
@@ -121,8 +128,9 @@ export interface EarsEngine {
  * through the free functions once its query face is installed (`installEngine`).
  */
 export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSRuntimeDeps): EarsEngine {
-  const relations = createRelationIndex();
-  const storage = createAttributeStorage({ relations, persistence });
+  const { journal, unitSink, transact } = createJournal(persistence);
+  const relations = createRelationIndex(journal);
+  const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
   const edgeStore = createEdgeStore({ relations, storage });
   const qx = createQx({ storage, relations, isEntityType });
   const graph = createGraph({ qx, edgeStore });
@@ -134,7 +142,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const repositories = createRepositoryRegistry();
 
   const query: EarsQuery = {
-    qx, tx, isEntityType,
+    qx, tx, transact, isEntityType,
     ...finders,
     ...writers,
     ...counters,

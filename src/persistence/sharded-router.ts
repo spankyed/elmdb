@@ -195,6 +195,16 @@ export function makeShardedPersistence(
       }
     },
 
+    // Each partition stores its share of a unit together; two partitions are two environments, which can't
+    // commit as one
+    onUnitStart() {
+      for (const sink of Object.values(sinks)) sink.onUnitStart();
+    },
+
+    onUnitEnd() {
+      for (const sink of Object.values(sinks)) sink.onUnitEnd();
+    },
+
     close() {
       // Close all sinks, not just hardcoded ones
       for (const sink of Object.values(sinks)) {

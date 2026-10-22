@@ -39,6 +39,8 @@ export function recordingSink(): { sink: PersistenceSink; calls: SinkCall[] } {
     onAddRelation: record('onAddRelation'),
     onUpdateRelation: record('onUpdateRelation'),
     onRemoveRelation: record('onRemoveRelation'),
+    onUnitStart: record('onUnitStart'),
+    onUnitEnd: record('onUnitEnd'),
   };
   return { sink, calls };
 }

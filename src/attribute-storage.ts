@@ -1,6 +1,7 @@
 import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject } from './utils.ts';
+import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
 import { installedEngine } from './installed.ts';
 
@@ -24,7 +25,7 @@ export const entityTypeOf = (id: EARS.EntityId) => {
 };
 
 /** An engine's attributes (by kind, then entity), its entity index by type, and the writes and reads over them */
-export function createAttributeStorage({ relations, persistence }: { relations: RelationIndexStore; persistence: PersistenceSink }) {
+export function createAttributeStorage({ relations, persistence, journal }: { relations: RelationIndexStore; persistence: PersistenceSink; journal: Journal }) {
   const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue[]>>();
   const entityIndex = new Map<EARS.Entity, Set<EARS.EntityId>>();
   const relationIndex = relations.index;
@@ -32,6 +33,7 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
   let removals = 0;
 
   function clear() {
+    if (journal.open) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
     removals++;
     store.clear();
     entityIndex.clear();
@@ -43,7 +45,36 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
     return store.get(k)!;
   };
 
+  /** Records how to put back the entity's values of a kind (a copy, since writes change the list in place) */
+  const touchValues = (id: EARS.EntityId, kind: EARS.AttrKind) =>
+    journal.open && journal.touch(`a\x1F${kind}\x1F${id}`, () => {
+      const before = store.get(kind)?.get(id);
+      const copy = before?.map((v) => (isPlainObject(v) ? { ...v } : v)) as EARS.AttributeValue[] | undefined;
+      return () => {
+        if (copy) bucket(kind).set(id, copy);
+        else store.get(kind)?.delete(id);
+      };
+    });
+
+  /** Records whether the entity was in the index, to put that back */
+  const touchIndexed = (id: EARS.EntityId) =>
+    journal.open && journal.touch(`e\x1F${id}`, () => {
+      const type = entityTypeOf(id);
+      const was = entityIndex.get(type)?.has(id) ?? false;
+      return () => {
+        const ids = entityIndex.get(type);
+        if (was) {
+          if (ids) ids.add(id);
+          else entityIndex.set(type, new Set([id]));
+        } else if (ids?.delete(id)) {
+          removals++;
+          if (ids.size === 0) entityIndex.delete(type);
+        }
+      };
+    });
+
   const indexEntity = (id: EARS.EntityId) => {
+    touchIndexed(id);
     const type = entityTypeOf(id);
     const ids = entityIndex.get(type);
     if (ids) ids.add(id);
@@ -70,18 +101,21 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
   };
 
   const add = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
+    touchValues(id, kind);
     const list = valuesOf(id, kind);
     list.push(val as EARS.AttributeValue);
     persistence.onPutAttrArray(kind, id, list);
   };
 
   const put = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
+    touchValues(id, kind);
     bucket(kind).set(id, [val as EARS.AttributeValue]);
     indexEntity(id);
     persistence.onPutAttrArray(kind, id, [val]);
   };
 
   const merge = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown, idx = 0) => {
+    touchValues(id, kind);
     const list = valuesOf(id, kind);
     mergeAt(list, val, idx);
     persistence.onPutAttrArray(kind, id, list);
@@ -90,6 +124,7 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
   const drop = (id: EARS.EntityId, kind: EARS.AttrKind, idx = 0) => {
     const list = bucket(kind).get(id);
     if (!list?.length) return;
+    touchValues(id, kind);
     list.splice(idx, 1);
     if (!list.length) {
       bucket(kind).delete(id);
@@ -165,6 +200,8 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
       EARS.AttrKind.RelationDetails,
     ) as EARS.RelationDetail | null;
     if (!d) return;
+    // Before `d` changes in place below
+    touchValues(relId, EARS.AttrKind.RelationDetails);
     const { sourceEntity: oS, targetEntity: oT, relationType: k } = d;
     if (newS) d.sourceEntity = newS;
     if (newT) d.targetEntity = newT;
@@ -289,10 +326,14 @@ export function createAttributeStorage({ relations, persistence }: { relations: 
       const relIds = [...(bySource[id] ?? []), ...(byTarget[id] ?? [])];
       // Every link to or from the entity goes from memory; the sink is told it's because `id` is being deleted
       for (const relId of relIds) removeRelation(relId, id);
-      delete bySource[id];
-      delete byTarget[id];
+      relations.forgetEntity(k, id);
     }
-    for (const [_k, b] of store) b.delete(id);
+    for (const [k, b] of store) {
+      if (!b.has(id)) continue;
+      touchValues(id, k);
+      b.delete(id);
+    }
+    touchIndexed(id);
     const entitySet = entityIndex.get(entityTypeOf(id));
     if (entitySet) {
       entitySet.delete(id);

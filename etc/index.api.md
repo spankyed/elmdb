@@ -323,6 +323,7 @@ export interface EarsQuery {
     }): EARS.EntityId;
     // (undocumented)
     topoSort(roots: EARS.EntityId[], kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
+    transact<T>(fn: () => T): T;
     tx: typeof untypedTx;
     // (undocumented)
     unregisterRepository(name: string): void;
@@ -502,6 +503,9 @@ export interface PersistenceSink {
     onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]): void;
     onPutAttrArray(kind: string, entityId: string, values: unknown[]): void;
     onRemoveRelation(relId: string, destroyed?: string): void;
+    // (undocumented)
+    onUnitEnd(): void;
+    onUnitStart(): void;
     // (undocumented)
     onUpdateRelation(relId: string, patch: {
         src?: string;
@@ -726,6 +730,9 @@ export function spawn(root: Blueprint, input?: {
 export function topoSort(roots: EARS.EntityId[], kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
 
 // @public
+export function transact<T>(fn: () => T): T;
+
+// @public
 export interface TransactionBuilder<E extends string = string, S extends EntityShapes = {}> {
     // (undocumented)
     add<K extends string>(k: K, v: FieldValue<S, E, K>): TransactionBuilder<E, S>;
@@ -823,6 +830,8 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     getAttrs: TypedGetAttrs<S>;
     // (undocumented)
     qx: TypedQx<S, N>;
+    // (undocumented)
+    transact: EarsQuery['transact'];
     // (undocumented)
     tx: TypedTx<S, N>;
     // (undocumented)

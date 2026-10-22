@@ -2,6 +2,7 @@ export {
   createEarsEngine, type EarsEngine, type EarsQuery, type EarsAdmin,
 } from './engine.ts';
 export { installEngine, installedEngine } from './installed.ts';
+export { transact } from './transaction.ts';
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {

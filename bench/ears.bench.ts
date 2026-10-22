@@ -14,7 +14,7 @@ const types = new Set(['Task', 'Project', 'Person', 'Note', 'Relation']);
 // A sink that does nothing, as the LMDB store's does between flushes
 const sink: PersistenceSink = {
   onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttrArray() {},
-  onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {},
+  onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
 const engine = freshEngine({ isEntityType: (name) => types.has(name), persistence: sink });
 const { query, admin } = engine;
@@ -76,5 +76,12 @@ describe('queries', () => {
 describe('writes', () => {
   bench('tx batch of 1,000 creates', () => {
     for (let i = 0; i < 1000; i++) query.tx('Note').put('title', `Note ${i}`).put('status', 'open');
+  }, { iterations: 50, time: 0 });
+
+  // The same writes as one unit: what the journal costs
+  bench('transact: 1,000 creates as one unit', () => {
+    query.transact(() => {
+      for (let i = 0; i < 1000; i++) query.tx('Note').put('title', `Note ${i}`).put('status', 'open');
+    });
   }, { iterations: 50, time: 0 });
 });

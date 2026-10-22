@@ -46,6 +46,27 @@ afterEach(() => {
 afterAll(() => fs.rmSync(root, { recursive: true, force: true }));
 
 describe('openLmdbStore', () => {
+  it('stores nothing of a unit that throws, a destroy included, and all of one that returns', async () => {
+    const first = openStore();
+    untypedTx(id('Note-1'), true).put('title', 'kept');
+    await flushed();
+
+    expect(() => engine.query.transact(() => {
+      untypedTx(id('Note-1')).destroy();
+      untypedTx(id('Note-2'), true).put('title', 'never');
+      throw new Error('stop');
+    })).toThrow('stop');
+    engine.query.transact(() => { untypedTx(id('Note-3'), true).put('title', 'committed'); });
+    await flushed();
+    first.close();
+
+    const second = openStore();
+    await second.hydrate();
+    expect(getAttr(id('Note-1'), 'title')).toBe('kept');
+    expect(getAttr(id('Note-2'), 'title')).toBeNull();
+    expect(getAttr(id('Note-3'), 'title')).toBe('committed');
+  });
+
   it('persists writes across a close and a new store on the same paths', async () => {
     const first = openStore();
     untypedTx(id('Note-1'), true).put('title', 'kept');

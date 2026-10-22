@@ -109,6 +109,7 @@ export interface TypedUpdateEntity<S extends EntityShapes> {
 export interface TypedEars<S extends EntityShapes, N extends string = string> {
   qx: TypedQx<S, N>;
   tx: TypedTx<S, N>;
+  transact: EarsQuery['transact'];
   findById: TypedFindById<S>;
   findByIdRaw: TypedFindById<S>;
   findAll: TypedFindAll<S, N>;
@@ -137,6 +138,7 @@ export function defineEars<S extends EntityShapes, N extends string = string>():
   return {
     qx: onInstalled('qx'),
     tx: onInstalled('tx'),
+    transact: onInstalled('transact'),
     findById: onInstalled('findById'),
     findByIdRaw: onInstalled('findByIdRaw'),
     findAll: onInstalled('findAll'),

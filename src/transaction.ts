@@ -198,3 +198,8 @@ export function createTx({ storage, edgeStore, qx, graph, isEntityType: isEntity
 export function tx(typeOrId: EARS.Entity | EARS.EntityId, useProvidedId = false): TransactionBuilder {
   return installedEngine().tx(typeOrId, useProvidedId);
 }
+
+/** Runs `fn` as one unit on the installed engine (`EarsQuery.transact`) */
+export function transact<T>(fn: () => T): T {
+  return installedEngine().transact(fn);
+}

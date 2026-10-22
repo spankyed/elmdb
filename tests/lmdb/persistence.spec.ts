@@ -162,6 +162,63 @@ describe('LMDB Adapter', () => {
   });
 });
 
+describe('LMDB Adapter, a unit', () => {
+  /** A real environment where writing `poisoned`'s row fails */
+  function guardedEnv(label: string, poisoned: string) {
+    const dir = tmpDir(label);
+    const live = openEnvAt(dir);
+    const guarded = {
+      ...live,
+      entities: Object.assign(Object.create(Object.getPrototypeOf(live.entities)), live.entities, {
+        put: (key: string, value: unknown) => {
+          if (key === poisoned) throw new Error('refused');
+          return (live.entities as any).put(key, value);
+        },
+      }),
+    } as unknown as LmdbDbs;
+    const done = () => {
+      try { live.entities.close(); live.attrs.close(); live.relations.close(); live.root.close(); } catch {}
+      fs.rmSync(dir, { recursive: true, force: true });
+    };
+    return { live, guarded, done };
+  }
+
+  it('is stored whole or not at all: one row refusing loses the unit, and reports each of its rows', () => {
+    const { live, guarded, done } = guardedEnv('unit-whole', 'Document-poison');
+    const dropped: Array<{ op: string; key: string }> = [];
+    const adapter = makeLmdbAdapter(guarded, ({ op, key }) => dropped.push({ op, key }));
+
+    adapter.onCreateEntity('Document-before');
+    adapter.onUnitStart();
+    adapter.onCreateEntity('Document-ok');
+    adapter.onCreateEntity('Document-poison');
+    adapter.onUnitEnd();
+
+    expect(live.entities.get('Document-before'), 'written before the unit, on its own').toBeTruthy();
+    expect(live.entities.get('Document-ok'), 'part of the unit that failed').toBeUndefined();
+    expect(dropped).toEqual([{ op: 'entity', key: 'Document-ok' }, { op: 'entity', key: 'Document-poison' }]);
+    adapter.close?.();
+    done();
+  });
+
+  it('deletes an entity at the end of the unit, not when the destroy is made', () => {
+    const { live, guarded, done } = guardedEnv('unit-destroy', 'none');
+    const adapter = makeLmdbAdapter(guarded);
+    adapter.onPutAttrArray('title', 'Document-1', ['kept']);
+    adapter.close?.();
+    const reopened = makeLmdbAdapter(guarded);
+
+    reopened.onUnitStart();
+    reopened.onDestroyEntity('Document-1');
+    expect(live.entities.get('Document-1'), 'still there inside the unit').toBeTruthy();
+    reopened.onUnitEnd();
+    expect(live.entities.get('Document-1')).toBeUndefined();
+    expect(live.attrs.get(`title\x1FDocument-1\x1F0`)).toBeUndefined();
+    reopened.close?.();
+    done();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // B. Sharded Router
 // ---------------------------------------------------------------------------

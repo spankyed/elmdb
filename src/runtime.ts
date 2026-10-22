@@ -26,6 +26,12 @@ export interface PersistenceSink {
    * - `destroyed` is undefined when the link itself was removed (an unlink): the sink deletes it.
    */
   onRemoveRelation(relId: string, destroyed?: string): void;
+  /**
+   * A committed unit (`transact`) begins: the calls up to `onUnitEnd` are its writes, and the sink stores them
+   * together or not at all. Calls outside a unit are each their own.
+   */
+  onUnitStart(): void;
+  onUnitEnd(): void;
   close?(): void;
   getErrorStats?(): PersistenceErrorStats;
 }
@@ -45,6 +51,8 @@ export const noopSink: PersistenceSink = {
   onAddRelation() {},
   onUpdateRelation() {},
   onRemoveRelation() {},
+  onUnitStart() {},
+  onUnitEnd() {},
 };
 
 /** What an engine is created with (`createEarsEngine`) */

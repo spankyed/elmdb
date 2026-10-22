@@ -55,7 +55,7 @@ function* storedKinds(attrs: LmdbDbs['attrs']): Iterable<string> {
 
 /** What the app is told when a write is dropped. The engine reports; the app decides what to do about it. */
 export interface WriteFailure {
-  /** `entity` | `entity-remove` | `attrs` | `relation` | `relation-remove` */
+  /** `entity` | `entity-remove` | `attrs` | `relation` | `relation-remove`, or `destroy` for a unit's destroy */
   op: string;
   /** The row the dropped write was for, which is what a diagnosis needs and the logs never had */
   key: string;
@@ -80,6 +80,9 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
   
   let scheduled = false;
   let closed = false;
+  // A committed unit (`onUnitStart` to `onUnitEnd`): its destroys wait with its other writes, in order
+  let inUnit = false;
+  const unitDestroys: string[] = [];
 
   /**
    * The pending writes as independent steps, each naming the row it touches, with the buffers taken so new
@@ -164,6 +167,29 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     }
   }
 
+  /** Runs a unit's steps in one transaction: a unit is stored whole or not at all, so a failure has no retry */
+  function runUnit(steps: Array<{ op: string; key: string; run: () => void }>): void {
+    if (steps.length === 0) return;
+    try {
+      entities.transactionSync(() => { for (const step of steps) step.run(); });
+    } catch (error) {
+      for (const step of steps) {
+        errorCount++;
+        lastError = { op: step.op, key: step.key, error };
+        onWriteFailure?.({ op: step.op, key: step.key, error });
+      }
+    }
+  }
+
+  /** An entity's row and its attributes, read per kind (keys are kind␟id␟index); its relations went before */
+  function removeEntityRows(entityId: string): void {
+    entities.remove(entityId);
+    // `storedKinds` reads the same store this loop removes from, inside one transaction, so it is materialised
+    // for the same reason `removeAttrRange` materialises: a live cursor the body invalidates
+    // eslint-disable-next-line no-useless-spread
+    for (const kind of [...storedKinds(attrs)]) removeAttrRange(kind, entityId);
+  }
+
   function scheduleFlush() {
     if (scheduled || closed) return;
     scheduled = true;
@@ -243,21 +269,33 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
       if (closed) return;
 
       discardBuffered(entityId);
-      // Deleted now: the entity's row and its attributes, read per kind (keys are kind␟id␟index).
-      // Its relations are removed before this, each with onRemoveRelation.
+      if (inUnit) {
+        unitDestroys.push(entityId);
+        return;
+      }
+      // Deleted now, outside a unit. Its relations were removed before this, each with onRemoveRelation.
       try {
-        entities.transactionSync(() => {
-          entities.remove(entityId);
-          // `storedKinds` reads the same store this loop removes from, inside one `transactionSync`, so it
-          // is materialised for the same reason `removeAttrRange` materialises: a live cursor the body invalidates
-          // eslint-disable-next-line no-useless-spread
-          for (const kind of [...storedKinds(attrs)]) removeAttrRange(kind, entityId);
-        });
+        entities.transactionSync(() => removeEntityRows(entityId));
       } catch (error) {
         errorCount++;
         lastError = { op: 'destroy', key: entityId, error };
         console.error(`[LMDB] Failed to delete entity ${entityId}:`, error);
       }
+    },
+
+    onUnitStart() {
+      if (closed) return;
+      // What was buffered before the unit is not part of it, and keeps its own row-by-row isolation
+      runSteps(takeSteps(), 'flush');
+      inUnit = true;
+    },
+
+    onUnitEnd() {
+      inUnit = false;
+      if (closed) return;
+      // Destroys first: a write after a destroy in the unit (an id created again) lands after it
+      const destroys = unitDestroys.splice(0).map((id) => ({ op: 'destroy', key: id, run: () => removeEntityRows(id) }));
+      runUnit([...destroys, ...takeSteps()]);
     },
 
     onPutAttrArray(kind: string, entityId: string, values: unknown[]) {
