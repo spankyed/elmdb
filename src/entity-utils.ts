@@ -1,5 +1,5 @@
 import type { EARS } from './entities.ts';
-import type { qx as Qx } from './query.ts';
+import type { Qx } from './query.ts';
 import { installedEngine } from './installed.ts';
 
 export function getTimestamp(): number {
@@ -7,14 +7,14 @@ export function getTimestamp(): number {
 }
 
 /** An engine's numbering of new entities, by how many of their type it holds */
-export function createEntityCounters(qx: typeof Qx) {
+export function createEntityCounters(qx: Qx) {
   function generateShortCode(entityType: EARS.Entity, prefix: string): string {
-    const count = qx(entityType).count() + 1;
+    const count = qx(entityType as never).count() + 1;
     return `${prefix}-${count}`;
   }
 
   function generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string {
-    const count = qx(entityType).count() + 1;
+    const count = qx(entityType as never).count() + 1;
     return `${baseLabel} ${count}`;
   }
 

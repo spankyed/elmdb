@@ -29,10 +29,10 @@ let task: Id, other: Id, project: Id, rel: Id;
 beforeEach(() => {
   const recording = recordingSink();
   e = engine(recording.sink);
-  task = e.query.tx('Task').put('title', 'a').add('tags', 'x').put('meta', { n: 1 }).grant('owner').id();
-  other = e.query.tx('Task').put('title', 'b').id();
-  project = e.query.tx('Project').put('name', 'p').id();
-  e.query.tx(project).link('contains', task, { pos: 1 });
+  task = e.query.create('Task').set('title', 'a').add('tags', 'x').set('meta', { n: 1 }).grant('owner').id();
+  other = e.query.create('Task').set('title', 'b').id();
+  project = e.query.create('Project').set('name', 'p').id();
+  e.query.write(project).link('contains', task, { info: { pos: 1 } });
   rel = e.query.findRelations({ sourceEntity: project, relationType: 'contains' })[0].id;
   calls = recording.calls;
   calls.length = 0;
@@ -40,27 +40,31 @@ beforeEach(() => {
 
 /** Each write the engine has, made inside a unit that then throws */
 const writes: Record<string, () => void> = {
-  'create': () => e.query.tx('Task').put('title', 'new'),
-  'create with an id': () => e.query.tx('Task-given' as Id, true).put('title', 'new'),
-  'put': () => e.query.tx(task).put('title', 'changed'),
-  'put on a new attribute': () => e.query.tx(task).put('fresh', 1),
-  'add': () => e.query.tx(task).add('tags', 'y'),
-  'merge': () => e.query.tx(task).merge('meta', { m: 2 }),
-  'drop': () => e.query.tx(task).drop('tags'),
-  'dropIf': () => e.query.tx(task).dropIf('tags', 'x'),
-  'grant': () => e.query.tx(other).grant('owner'),
-  'revoke': () => e.query.tx(task).revoke('owner'),
-  'ensure': () => e.query.tx(other).ensure('owner'),
-  'link': () => e.query.tx(other).link('blocks', task),
-  'linkOne': () => e.query.tx(project).linkOne('contains', task, { pos: 2 }),
-  'safeLink symmetric': () => e.query.tx(other).safeLink('peer', task, { symmetric: true }),
-  'relPatch': () => e.query.tx(project).relPatch(rel, { targetEntity: other, info: { pos: 9 } }),
-  'patchLink': () => e.query.tx(project).patchLink('contains', task, { newTarget: other }),
-  'unlink': () => e.query.tx(project).unlink(rel),
-  'unlinkIf': () => e.query.tx(project).unlinkIf('contains'),
-  'destroy': () => e.query.tx(task).destroy(),
-  'destroy without persistence': () => e.query.tx(task).destroy(true),
-  'destroy then create the same id': () => { e.query.tx(task).destroy(); e.query.tx(task, true).put('title', 'again'); },
+  'create': () => e.query.create('Task').set('title', 'new'),
+  'create with an id': () => e.query.create('Task', { id: 'Task-given' as Id }).set('title', 'new'),
+  'upsert creating': () => e.query.upsert('Task', 'Task-upserted' as Id).set('title', 'new'),
+  'set': () => e.query.write(task).set('title', 'changed'),
+  'set on a new attribute': () => e.query.write(task).set('fresh', 1),
+  'setMany': () => e.query.write(task).setMany({ title: 'changed', fresh: 1 }),
+  'add': () => e.query.write(task).add('tags', 'y'),
+  'merge': () => e.query.write(task).merge('meta', { m: 2 }),
+  'delete': () => e.query.write(task).delete('tags'),
+  'deleteAt': () => e.query.write(task).deleteAt('tags', 0),
+  'deleteValue': () => e.query.write(task).deleteValue('tags', 'x'),
+  'grant': () => e.query.write(other).grant('owner'),
+  'revoke': () => e.query.write(task).revoke('owner'),
+  'grantExclusive': () => e.query.write(other).grantExclusive('owner', [task]),
+  'link': () => e.query.write(other).link('blocks', task),
+  'link with replace': () => e.query.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
+  'link symmetric': () => e.query.write(other).link('peer', task, { symmetric: true }),
+  'updateRelation': () => e.query.updateRelation(rel, { targetEntity: other, info: { pos: 9 } }),
+  'removeRelationById': () => e.query.removeRelationById(rel),
+  'unlink': () => e.query.write(project).unlink('contains'),
+  'unlinkAll': () => e.query.write(project).unlinkAll(),
+  'updateEntity': () => e.query.updateEntity(task, { title: 'changed', meta: null }),
+  'destroy': () => e.query.write(task).destroy(),
+  'destroy keeping it stored': () => e.query.write(task).destroy({ keepStored: true }),
+  'destroy then create the same id': () => { e.query.write(task).destroy(); e.query.create('Task', { id: task }).set('title', 'again'); },
 };
 
 describe('a unit that throws', () => {
@@ -86,7 +90,7 @@ describe('a unit that throws', () => {
 
   it('leaves a query kept from before it finding what it found', () => {
     const kept = e.query.qx('Task');
-    expect(() => e.query.transact(() => { e.query.tx(task).destroy(); throw new Error('stop'); })).toThrow();
+    expect(() => e.query.transact(() => { e.query.write(task).destroy(); throw new Error('stop'); })).toThrow();
     expect(kept.ids()).toEqual([task, other]);
     expect(e.query.qx('Task').ids().sort()).toEqual([task, other].sort());
   });
@@ -95,7 +99,7 @@ describe('a unit that throws', () => {
 describe('a unit that returns', () => {
   it('returns what fn returned, and reads inside it see its own writes', () => {
     const made = e.query.transact(() => {
-      const id = e.query.tx('Task').put('title', 'inside').id();
+      const id = e.query.create('Task').set('title', 'inside').id();
       expect(e.query.findById(id)).toMatchObject({ title: 'inside' });
       return id;
     });
@@ -104,8 +108,8 @@ describe('a unit that returns', () => {
 
   it('sends the sink its writes after it returns, between onUnitStart and onUnitEnd', () => {
     e.query.transact(() => {
-      e.query.tx(task).put('title', 'one');
-      e.query.tx(other).put('title', 'two');
+      e.query.write(task).set('title', 'one');
+      e.query.write(other).set('title', 'two');
       expect(calls).toEqual([]);
     });
     expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttrArray', 'onPutAttrArray', 'onUnitEnd']);
@@ -120,7 +124,7 @@ describe('a unit that returns', () => {
 describe('a unit inside another', () => {
   it('commits into the outer one: nothing reaches the sink until the outer returns', () => {
     e.query.transact(() => {
-      e.query.transact(() => e.query.tx(task).put('title', 'inner'));
+      e.query.transact(() => e.query.write(task).set('title', 'inner'));
       expect(calls).toEqual([]);
     });
     expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttrArray', 'onUnitEnd']);
@@ -128,8 +132,8 @@ describe('a unit inside another', () => {
 
   it('that throws undoes only its own writes, and the outer keeps going', () => {
     e.query.transact(() => {
-      e.query.tx(task).put('title', 'outer');
-      expect(() => e.query.transact(() => { e.query.tx(task).put('title', 'inner'); e.query.tx(other).destroy(); throw new Error('stop'); })).toThrow();
+      e.query.write(task).set('title', 'outer');
+      expect(() => e.query.transact(() => { e.query.write(task).set('title', 'inner'); e.query.write(other).destroy(); throw new Error('stop'); })).toThrow();
       expect(e.query.findById(task)).toMatchObject({ title: 'outer' });
       expect(e.query.findById(other)).toMatchObject({ title: 'b' });
     });
@@ -140,8 +144,8 @@ describe('a unit inside another', () => {
   it('that commits is undone with the outer when the outer throws', () => {
     const before = state();
     expect(() => e.query.transact(() => {
-      e.query.tx(task).put('title', 'outer');
-      e.query.transact(() => { e.query.tx(task).put('title', 'inner'); e.query.tx('Task').put('title', 'new'); });
+      e.query.write(task).set('title', 'outer');
+      e.query.transact(() => { e.query.write(task).set('title', 'inner'); e.query.create('Task').set('title', 'new'); });
       throw new Error('stop');
     })).toThrow();
     expect(state()).toEqual(before);
@@ -152,7 +156,7 @@ describe('a unit inside another', () => {
 describe('what transact refuses', () => {
   it('an async function, undoing what it wrote before its first await', () => {
     const before = state();
-    expect(() => e.query.transact(async () => { e.query.tx(task).put('title', 'sync part'); })).toThrow(/synchronous/);
+    expect(() => e.query.transact(async () => { e.query.write(task).set('title', 'sync part'); })).toThrow(/synchronous/);
     expect(state()).toEqual(before);
     expect(calls).toEqual([]);
   });

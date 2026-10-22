@@ -1,4 +1,5 @@
-import type { tx as Tx } from './transaction.ts';
+import type { Create } from './write.ts';
+import type { Qx } from './query.ts';
 import { EARS } from './entities.ts';
 import { installedEngine } from './installed.ts';
 
@@ -49,8 +50,8 @@ export const bp = (entity: EARS.Entity): BlueprintBuilder => {
   };
 };
 
-/** An engine's blueprint spawning, over its transactions */
-export function createSpawn(tx: typeof Tx) {
+/** An engine's blueprint spawning, over its writes */
+export function createSpawn({ create, qx }: { create: Create; qx: Qx }) {
   function spawn(
     root: Blueprint,
     { dedupe = true } = {},
@@ -61,23 +62,21 @@ export function createSpawn(tx: typeof Tx) {
       if (cache?.has(node)) {
         return cache.get(node)!;
       }
-      const builder = tx(node.entity);
+      const builder = create(node.entity as never);
       const id = builder.id();
       cache?.set(node, id);
 
-      for (const [k, v] of Object.entries(node.attrs ?? {})) {
-        builder.put(k, v);
-      }
+      builder.setMany(node.attrs ?? {});
       for (const r of node.roles ?? []) {
         builder.grant(r);
       }
       for (const r of node.uniqueRoles ?? []) {
-        builder.ensure(r);
+        builder.grantExclusive(r, qx.all().ids());
       }
       for (const { kind, target, info } of node.rels ?? []) {
         const tgtId =
           typeof target === "object" ? go(target as Blueprint) : target;
-        builder.linkOne(kind, tgtId, info as any);
+        builder.link(kind, tgtId, { info, replace: true });
       }
 
       return id;

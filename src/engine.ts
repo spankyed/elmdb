@@ -5,9 +5,9 @@ import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
 import { createAttributeStorage } from './attribute-storage.ts';
 import { createEdgeStore, type EdgeStore } from './edge-store.ts';
-import { createQx, type qx } from './query.ts';
+import { createQx, type Qx } from './query.ts';
 import { createGraph } from './graph.ts';
-import { createTx, type tx } from './transaction.ts';
+import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createQueryHelpers } from './query-helpers.ts';
 import { createEntityCounters } from './entity-utils.ts';
 import { createTransactionHelpers, type CreatedEntityFields } from './transaction-helpers.ts';
@@ -19,9 +19,13 @@ import { createJournal } from './journal.ts';
 /** An engine's queries, transactions and repository registry: what packs use, through the installed engine */
 export interface EarsQuery {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
-  qx: typeof qx;
-  /** Writes to the engine: creates an entity of a type, or changes the entity with an id */
-  tx: typeof tx;
+  qx: Qx;
+  /** Creates an entity of a registered type, with a new id or the one given */
+  create: Create;
+  /** Writes to the entity with an id, creating it as the type when no entity has it */
+  upsert: Upsert;
+  /** Writes to the entity with an id, which must exist */
+  write: Write;
   /**
    * Runs `fn` as one unit: if it throws, every write it made is undone and none reaches persistence; if it
    * returns, persistence receives them together. Reads inside see its own writes. `fn` must be synchronous,
@@ -66,6 +70,8 @@ export interface EarsQuery {
   queryEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
   destroyEntity(id: EARS.EntityId, skipPersistence?: boolean): void;
   removeRelationById(relId: EARS.EntityId): void;
+  /** Moves a relation to new ends, or replaces its info, keeping its id */
+  updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
   getRelationStats(kind: EARS.RelKind): RelationStats;
   descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
@@ -99,6 +105,8 @@ export interface EarsAdmin {
   mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
   dropAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): void;
   dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
+  /** Removes every value of an attribute */
+  deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
   updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
   updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
@@ -123,7 +131,7 @@ export interface EarsEngine {
 }
 
 /**
- * A new, empty engine. `isEntityType` tells an entity type from an id (`tx('Note')` creates a Note);
+ * A new, empty engine. `isEntityType` says which names are entity types `create` and `qx` accept;
  * `persistence` receives every write (nothing by default). The engine is used through its faces, or
  * through the free functions once its query face is installed (`installEngine`).
  */
@@ -134,21 +142,21 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const edgeStore = createEdgeStore({ relations, storage });
   const qx = createQx({ storage, relations, isEntityType });
   const graph = createGraph({ qx, edgeStore });
-  const tx = createTx({ storage, edgeStore, qx, graph, isEntityType });
+  const { create, upsert, write } = createWrites({ storage, edgeStore, graph, isEntityType });
   const finders = createQueryHelpers(qx);
   const counters = createEntityCounters(qx);
-  const writers = createTransactionHelpers({ tx, counters });
+  const writers = createTransactionHelpers({ create, write, counters });
   const relationReads = createRelationReads({ edgeStore, relations, storage });
   const repositories = createRepositoryRegistry();
 
   const query: EarsQuery = {
-    qx, tx, transact, isEntityType,
+    qx, create, upsert, write, transact, isEntityType,
     ...finders,
     ...writers,
     ...counters,
     ...relationReads,
     ...graph,
-    spawn: createSpawn(tx),
+    spawn: createSpawn({ create, qx }),
     getAttr: storage.getAttr,
     getAttrs: storage.getAttrs,
     getAll: storage.getAll,
@@ -167,6 +175,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     queryEntitiesInRelationTo: storage.queryEntitiesInRelationTo,
     destroyEntity: storage.destroyEntity,
     removeRelationById: storage.removeRelationById,
+    updateRelation: (relId, { sourceEntity, targetEntity, info }) => storage.updateRelation(relId, sourceEntity, targetEntity, info),
     repository: repositories.repository,
     registerRepository: repositories.registerRepository,
     unregisterRepository: repositories.unregisterRepository,
@@ -181,6 +190,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     mergeAttr: storage.mergeAttr,
     dropAttr: storage.dropAttr,
     dropIf: storage.dropIf,
+    deleteAttr: storage.deleteAttr,
     updateAttr: storage.updateAttr,
     addRelation: storage.addRelation,
     updateRelation: storage.updateRelation,

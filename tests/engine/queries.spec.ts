@@ -10,45 +10,53 @@ let p: Id;
 
 beforeEach(() => {
   e = engine();
-  const task = (fields: Record<string, unknown>) => e.query.tx('Task').batchPut(fields).id();
+  const task = (fields: Record<string, unknown>) => e.query.create('Task').setMany(fields).id();
   t = {
     a: task({ title: 'banana', rank: 2, status: 'open' }),
     b: task({ title: 'apple', rank: 10, status: 'done' }),
     c: task({ title: 'cherry', status: 'open' }),
     d: task({ title: 'apple', rank: 1, status: 'open' }),
   };
-  p = e.query.tx('Project').put('title', 'P').id();
-  e.query.tx(p).link('contains', t.a).link('contains', t.b).link('owns', t.c);
-  e.query.tx(t.a).grant('focus');
+  p = e.query.create('Project').set('title', 'P').id();
+  e.query.write(p).link('contains', t.a).link('contains', t.b).link('owns', t.c);
+  e.query.write(t.a).grant('focus');
 });
 
 describe('starts', () => {
-  it('no start, a type, types, an id, ids, and unknown ones', () => {
-    expect(e.query.qx().count()).toBe(8);
+  it('a type, types, ids, and every entity but the relations', () => {
     expect(e.query.qx('Task').ids()).toEqual([t.a, t.b, t.c, t.d]);
     expect(e.query.qx(['Project', 'Task']).ids()).toEqual([p, t.a, t.b, t.c, t.d]);
-    expect(e.query.qx(t.b).ids()).toEqual([t.b]);
-    expect(e.query.qx([t.c, 'Task-none' as Id, t.a]).ids()).toEqual([t.c, t.a]);
-    expect(e.query.qx('Task-none' as Id).ids()).toEqual([]);
-    // Deliberate: a name the engine doesn't know as a type is read as an id, so it finds nothing rather than
-    // throwing. A start can't be told apart from a typo or a type whose pack isn't installed — the engine has no
-    // way to know which was meant — and the case below pins the other side of it, an id with no type prefix.
-    expect(e.query.qx('Memo').ids()).toEqual([]);
-    expect(e.query.qx(undefined).count()).toBe(8);
+    expect(e.query.qx.ids(t.b).ids()).toEqual([t.b]);
+    expect(e.query.qx.ids([t.c, 'Task-none' as Id, t.a]).ids()).toEqual([t.c, t.a]);
+    expect(e.query.qx.ids('Task-none' as Id).ids()).toEqual([]);
+    expect(e.query.qx.all().ids()).toEqual([t.a, t.b, t.c, t.d, p]);
+    expect(e.query.getEntitiesOfType('Relation')).toHaveLength(3);
+  });
+
+  /**
+   * A type and an id are claims made to different functions, so each can be held to its own: a name that isn't a
+   * registered type is a mistake to report, where one start taking both had to read it as an id that matched
+   * nothing, and `undefined` (a namespace lookup that missed) used to start from the whole database.
+   */
+  it('refuses a name that is not a registered type, undefined and a list holding one included', () => {
+    for (const start of ['Memo', undefined, 'Task-1', ['Task', 'Memo']]) {
+      expect(() => e.query.qx(start as never)).toThrow(expect.objectContaining({ code: 'UNKNOWN_ENTITY_TYPE' }));
+    }
+    expect(() => e.query.qx(['Task', 'Memo'] as never)).toThrow('qx("Memo"): not a registered entity type');
   });
 
   it('an id or ids start finds only entities still in the engine', () => {
-    e.query.tx(t.b).destroy();
-    expect(e.query.qx(t.b).ids()).toEqual([]);
-    expect(e.query.qx([t.a, t.b, t.c]).ids()).toEqual([t.a, t.c]);
+    e.query.write(t.b).destroy();
+    expect(e.query.qx.ids(t.b).ids()).toEqual([]);
+    expect(e.query.qx.ids([t.a, t.b, t.c]).ids()).toEqual([t.a, t.c]);
     // An id without a type prefix, and a type's id that was never created
-    expect(e.query.qx('nodash' as Id).ids()).toEqual([]);
-    expect(e.query.qx(['Project-none' as Id, p]).ids()).toEqual([p]);
+    expect(e.query.qx.ids('nodash' as Id).ids()).toEqual([]);
+    expect(e.query.qx.ids(['Project-none' as Id, p]).ids()).toEqual([p]);
   });
 
   it('a builder kept across writes drops, at its next step, the ids destroyed since', () => {
     const tasks = e.query.qx('Task');
-    e.query.tx(t.b).destroy();
+    e.query.write(t.b).destroy();
     expect(tasks.limit(10).ids()).toEqual([t.a, t.c, t.d]);
     expect(tasks.ofType('Task').count()).toBe(3);
     expect(tasks.orderBy('title').ids()).toEqual([t.d, t.a, t.c]);
@@ -56,59 +64,62 @@ describe('starts', () => {
 });
 
 describe('filters', () => {
-  it('ofType, inIds, where with and without a value, withRole, related and relatedTo', () => {
-    expect(e.query.qx().ofType('Project').ids()).toEqual([p]);
+  it('ofType, inIds, where, has, lacks, withRole, related and relatedTo', () => {
+    expect(e.query.qx.all().ofType('Project').ids()).toEqual([p]);
     expect(e.query.qx('Task').inIds([t.d, t.a]).ids()).toEqual([t.a, t.d]);
     expect(e.query.qx('Task').where('status', 'open').ids()).toEqual([t.a, t.c, t.d]);
-    expect(e.query.qx('Task').where('rank').ids()).toEqual([t.a, t.b, t.d]);
+    expect(e.query.qx('Task').has('rank').ids()).toEqual([t.a, t.b, t.d]);
+    expect(e.query.qx('Task').lacks('rank').ids()).toEqual([t.c]);
     expect(e.query.qx('Task').where('rank', 10).ids()).toEqual([t.b]);
+    expect(e.query.qx('Task').where('rank', (rank) => (rank as number) < 3).ids()).toEqual([t.a, t.d]);
+    expect(() => e.query.qx('Task').where('rank', undefined as never)).toThrow(expect.objectContaining({ code: 'NO_VALUE' }));
     // A value among several of the attribute's, within what the query already holds
-    e.query.tx(t.c).add('tag', 'x').add('tag', 'y');
-    e.query.tx(t.d).add('tag', 'y');
+    e.query.write(t.c).add('tag', 'x').add('tag', 'y');
+    e.query.write(t.d).add('tag', 'y');
+    e.query.write(t.a).set('tag', { k: 'y' });
     expect(e.query.qx('Task').where('tag', 'y').ids()).toEqual([t.c, t.d]);
-    expect(e.query.qx([t.d, t.c]).where('tag', 'y').ids()).toEqual([t.d, t.c]);
+    expect(e.query.qx.ids([t.d, t.c]).where('tag', 'y').ids()).toEqual([t.d, t.c]);
+    // An object is matched by a predicate, never by ===
+    expect(e.query.qx('Task').where('tag', { k: 'y' }).ids()).toEqual([]);
+    expect(e.query.qx('Task').where('tag', (tag) => (tag as { k?: string }).k === 'y').ids()).toEqual([t.a]);
     expect(e.query.qx('Project').where('tag', 'y').ids()).toEqual([]);
-    expect(e.query.qx().withRole('focus').ids()).toEqual([t.a]);
+    expect(e.query.qx.all().withRole('focus').ids()).toEqual([t.a]);
     expect(e.query.qx('Task').related('contains', p, true).ids()).toEqual([t.a, t.b]);
     expect(e.query.qx('Project').related('contains', t.a).ids()).toEqual([p]);
     expect(e.query.qx('Task').relatedTo(p).ids()).toEqual([t.a, t.b, t.c]);
   });
 
   it('linksTo navigates, by kinds and target types, and links, linksPick return the links', () => {
-    expect(e.query.qx(p).linksTo(['contains', 'owns']).ids()).toEqual([t.a, t.b, t.c]);
-    expect(e.query.qx(p).linksTo('contains', 'Project').ids()).toEqual([]);
-    expect(e.query.qx(p).linksTo('contains', ['Task']).ids()).toEqual([t.a, t.b]);
-    expect(e.query.qx([t.a, t.b]).linksTo('contains', undefined, false).ids()).toEqual([p]);
-    expect(e.query.qx(p).links(['owns', 'contains'])).toEqual([
+    expect(e.query.qx.ids(p).linksTo(['contains', 'owns']).ids()).toEqual([t.a, t.b, t.c]);
+    expect(e.query.qx.ids(p).linksTo('contains', 'Project').ids()).toEqual([]);
+    expect(e.query.qx.ids(p).linksTo('contains', ['Task']).ids()).toEqual([t.a, t.b]);
+    expect(e.query.qx.ids([t.a, t.b]).linksTo('contains', undefined, false).ids()).toEqual([p]);
+    expect(e.query.qx.ids(p).links(['owns', 'contains'])).toEqual([
       { relation: 'owns', id: t.c }, { relation: 'contains', id: t.a }, { relation: 'contains', id: t.b },
     ]);
-    expect(e.query.qx(p).links('contains', 'Project')).toEqual([]);
+    expect(e.query.qx.ids(p).links('contains', 'Project')).toEqual([]);
     // A link to an id that isn't in the engine is followed by links, not by linksTo
-    e.query.tx(p).link('refers', 'Task-ghost' as Id).link('refers', t.d);
-    expect(e.query.qx(p).links('refers')).toEqual([{ relation: 'refers', id: 'Task-ghost' }, { relation: 'refers', id: t.d }]);
-    expect(e.query.qx(p).linksTo('refers').ids()).toEqual([t.d]);
-    expect(e.query.qx(p).linksPick('contains', ['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
-    expect(e.query.qx(p).linksPick(['contains', 'owns'], ['rank'], 'Task')).toEqual([
+    e.query.write(p).link('refers', 'Task-ghost' as Id).link('refers', t.d);
+    expect(e.query.qx.ids(p).links('refers')).toEqual([{ relation: 'refers', id: 'Task-ghost' }, { relation: 'refers', id: t.d }]);
+    expect(e.query.qx.ids(p).linksTo('refers').ids()).toEqual([t.d]);
+    expect(e.query.qx.ids(p).linksPick('contains', ['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
+    expect(e.query.qx.ids(p).linksPick(['contains', 'owns'], ['rank'], 'Task')).toEqual([
       { relation: 'contains', id: t.a, rank: 2 }, { relation: 'contains', id: t.b, rank: 10 }, { relation: 'owns', id: t.c, rank: null },
     ]);
   });
 });
 
 describe('ordering', () => {
-  it('orderBy numbers and strings, missing values last, reverse, limit and page', () => {
+  it('orderBy numbers and strings, missing values last, reverse and limit', () => {
     expect(e.query.qx('Task').orderBy('rank').ids()).toEqual([t.d, t.a, t.b, t.c]);
     expect(e.query.qx('Task').orderBy('rank', 'desc').ids()).toEqual([t.c, t.b, t.a, t.d]);
     expect(e.query.qx('Task').orderBy('title').ids()).toEqual([t.b, t.d, t.a, t.c]);
     expect(e.query.qx('Task').reverse().ids()).toEqual([t.d, t.c, t.b, t.a]);
     expect(e.query.qx('Task').limit(2).ids()).toEqual([t.a, t.b]);
-    const first = e.query.qx('Task').page(3);
-    expect(first).toEqual({ items: [t.a, t.b, t.c], nextCursor: btoa('3') });
-    expect(e.query.qx('Task').page(3, first.nextCursor)).toEqual({ items: [t.d], nextCursor: null });
-    expect(e.query.qx('Task').page(2, 'not base64!')).toEqual({ items: [t.a, t.b], nextCursor: btoa('2') });
   });
 
   it('distinct and groupBy', () => {
-    expect(e.query.qx([t.a, t.a, t.b]).distinct().ids()).toEqual([t.a, t.b]);
+    expect(e.query.qx.ids([t.a, t.a, t.b]).distinct().ids()).toEqual([t.a, t.b]);
     expect(e.query.qx('Task').distinct('title').ids()).toEqual([t.a, t.b, t.c]);
     const groups = e.query.qx('Task').groupBy('status');
     expect([...groups.keys()]).toEqual(['open', 'done']);
@@ -137,7 +148,7 @@ describe('terminals', () => {
     expect(e.query.qx('Task').where('rank', 1).pick(['id', 'title', 'nope'])).toEqual([{ id: t.d, title: 'apple', nope: null }]);
     expect(e.query.qx('Task').pickOne(['title'])).toEqual({ id: t.a, title: 'banana' });
     expect(e.query.qx('Task').where('rank', 99).pickOne(['title'])).toBeNull();
-    expect(e.query.qx(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: 'focus' }]);
+    expect(e.query.qx.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: 'focus' }]);
   });
 });
 
@@ -157,15 +168,15 @@ describe('blueprints', () => {
     });
     const id = e.query.spawn(plan);
     expect(e.query.findById(id)).toMatchObject({ title: 'Plan', role: 'current' });
-    const [owner] = e.query.qx(id).linksTo('owner').ids();
-    expect(e.query.qx(id).linksTo('lead').ids()).toEqual([owner]);
+    const [owner] = e.query.qx.ids(id).linksTo('owner').ids();
+    expect(e.query.qx.ids(id).linksTo('lead').ids()).toEqual([owner]);
     expect(e.query.findById(owner)).toMatchObject({ name: 'Sam', role: 'member' });
     expect(e.query.findRelations({ sourceEntity: id, relationType: 'lead' })[0].info).toEqual({ since: 1 });
-    expect(e.query.qx(id).linksTo('about').ids()).toEqual([t.a]);
+    expect(e.query.qx.ids(id).linksTo('about').ids()).toEqual([t.a]);
 
     const again = e.query.spawn(plan, { dedupe: false });
-    expect(e.query.qx().withRole('current').ids()).toEqual([again]);
-    expect(e.query.qx(again).linksTo(['owner', 'lead']).count()).toBe(2);
+    expect(e.query.qx.all().withRole('current').ids()).toEqual([again]);
+    expect(e.query.qx.ids(again).linksTo(['owner', 'lead']).count()).toBe(2);
     expect(e.query.getEntitiesOfType('Person')).toHaveLength(3);
   });
 });

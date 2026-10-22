@@ -60,8 +60,8 @@ describe('queries', () => {
     query.qx('Task').where('status', 'blocked').pickAll();
   }, { iterations: 20, time: 0 });
 
-  bench('1,000 qx(id) lookups', () => {
-    for (let i = 0; i < 1000; i++) query.qx(task(i)).count();
+  bench('1,000 qx.ids(id) lookups', () => {
+    for (let i = 0; i < 1000; i++) query.qx.ids(task(i)).count();
   }, { iterations: 20, time: 0 });
 
   bench('qx by type with 3 chained steps', () => {
@@ -69,19 +69,19 @@ describe('queries', () => {
   }, { iterations: 20, time: 0 });
 
   bench('relation traversal (a project: its tasks, then their assignees)', () => {
-    query.qx(project(1)).linksTo('contains', 'Task').linksTo('assigned').count();
+    query.qx.ids(project(1)).linksTo('contains', 'Task').linksTo('assigned').count();
   }, { iterations: 30, time: 0 });
 });
 
 describe('writes', () => {
-  bench('tx batch of 1,000 creates', () => {
-    for (let i = 0; i < 1000; i++) query.tx('Note').put('title', `Note ${i}`).put('status', 'open');
+  bench('1,000 creates', () => {
+    for (let i = 0; i < 1000; i++) query.create('Note').set('title', `Note ${i}`).set('status', 'open');
   }, { iterations: 50, time: 0 });
 
   // The same writes as one unit: what the journal costs
   bench('transact: 1,000 creates as one unit', () => {
     query.transact(() => {
-      for (let i = 0; i < 1000; i++) query.tx('Note').put('title', `Note ${i}`).put('status', 'open');
+      for (let i = 0; i < 1000; i++) query.create('Note').set('title', `Note ${i}`).set('status', 'open');
     });
   }, { iterations: 50, time: 0 });
 });

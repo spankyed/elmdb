@@ -2,14 +2,15 @@ export {
   createEarsEngine, type EarsEngine, type EarsQuery, type EarsAdmin,
 } from './engine.ts';
 export { installEngine, installedEngine } from './installed.ts';
-export { transact } from './transaction.ts';
+export { transact, updateRelation, untypedCreate, untypedUpsert, untypedWrite, type Create, type Upsert, type Write, type TypeName } from './write.ts';
+export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
-  EARSRuntimeDeps, QueryBuilder, TransactionBuilder, SafeLinkOptions, FieldValue, FieldValues,
+  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues,
 } from './runtime.ts';
 export { isEntityType } from './runtime.ts';
-export { b64Encode, b64Decode, type QxStart } from './query.ts';
+export { b64Encode, b64Decode, type Qx } from './query.ts';
 export {
   entityTypeOf, getEntitiesOfType, getAllEntityTypes, destroyEntity, removeRelationById,
   getAll, getAllAttributeKinds, getAllRelationKinds, getAttributeStats, getSchemaStats,
@@ -28,12 +29,6 @@ export { getAllEntities, queryEntitiesByAttribute, queryEntitiesByRelationTo, qu
  * a union shape's members (TYPED-EARS.md).
  */
 export { qx as untypedQx } from './query.ts';
-/**
- * The untyped write, the twin of `untypedQx`: entity names and field values aren't checked. Pack code writes
- * with the typed `tx` from #generated/ears; this is for an entity named at runtime — a migration walking every
- * type, an applier, tooling — where there is no name for the compiler to check against.
- */
-export { tx as untypedTx } from './transaction.ts';
 // Types that appear in the signatures above, so pack authors can name them.
 export type { CreatedEntityFields } from './transaction-helpers.ts';
 export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
@@ -44,7 +39,7 @@ export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {
   defineEars,
-  type TypedEars, type TypedQx, type TypedTx, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedFindFirst, type TypedCreateEntity,
+  type TypedEars, type TypedQx, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedFindFirst, type TypedCreateEntity,
   type TypedGetAttr, type TypedGetAttrs, type TypedFindWithFields, type TypedFindByIdWithFields, type TypedFindWithRole,
   type TypedFindFirstWithRole, type TypedCreateEntityWithDefaults, type TypedUpdateEntity,
 } from './typed.ts';

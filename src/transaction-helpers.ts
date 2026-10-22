@@ -1,4 +1,4 @@
-import type { tx as Tx } from './transaction.ts';
+import type { Create, Write } from './write.ts';
 import { getTimestamp } from './entity-utils.ts';
 import type { createEntityCounters } from './entity-utils.ts';
 import { EARS } from './entities.ts';
@@ -29,8 +29,8 @@ export interface CreatedEntityFields {
   updatedAt: number;
 }
 
-/** An engine's entity and relation helpers, over its transactions */
-export function createTransactionHelpers({ tx, counters }: { tx: typeof Tx; counters: ReturnType<typeof createEntityCounters> }) {
+/** An engine's entity and relation helpers, over its writes */
+export function createTransactionHelpers({ create, write, counters }: { create: Create; write: Write; counters: ReturnType<typeof createEntityCounters> }) {
   /**
    * T is the caller's own attribute shape — it need not declare the fields this
    * function fills in (entityType, shortCode, label, timestamps); those are added
@@ -46,20 +46,10 @@ export function createTransactionHelpers({ tx, counters }: { tx: typeof Tx; coun
     const shortCode = data.shortCode || counters.generateShortCode(entityType, prefix || entityType.substring(0, 3).toUpperCase());
     const label = data.label || counters.generateLabelWithCount(`New ${entityType}`, entityType);
 
-    const entity: Omit<T, 'id'> = {
-      ...data,
-      entityType,
-      shortCode,
-      label,
-      createdAt: ts,
-      updatedAt: ts,
-    } as Omit<T, 'id'>;
+    const fields = { ...data, shortCode, label, updatedAt: ts };
+    const id = create(entityType as never, { id: providedId, createdAt: ts }).setMany(fields).id();
 
-    const id = providedId
-      ? tx(providedId, true).batchPut(entity).id()
-      : tx(entityType).batchPut(entity).id();
-
-    return { ...entity, id } as unknown as T & CreatedEntityFields;
+    return { ...fields, entityType, createdAt: ts, id } as unknown as T & CreatedEntityFields;
   }
 
   function updateEntity(
@@ -67,22 +57,16 @@ export function createTransactionHelpers({ tx, counters }: { tx: typeof Tx; coun
     updates: Record<string, unknown>,
     skipTimestamp?: boolean
   ): void {
-    const transaction = tx(id);
+    const builder = write(id);
 
     if (!skipTimestamp) {
-      transaction.merge('updatedAt', getTimestamp());
+      builder.set('updatedAt', getTimestamp());
     }
 
     Object.entries(updates).forEach(([key, value]) => {
       if (value === undefined) return;
-      if (value === null) {
-        transaction.drop(EARS.AttrKind.Custom(key));
-      } else if (Array.isArray(value)) {
-        transaction.drop(EARS.AttrKind.Custom(key));
-        transaction.put(key, value);
-      } else {
-        transaction.update(EARS.AttrKind.Custom(key), value);
-      }
+      if (value === null) builder.delete(key);
+      else builder.set(key, value);
     });
   }
 
@@ -91,7 +75,7 @@ export function createTransactionHelpers({ tx, counters }: { tx: typeof Tx; coun
     relationType: EARS.RelKind,
     targetId: EARS.EntityId
   ): void {
-    tx(sourceId).link(relationType, targetId);
+    write(sourceId).link(relationType, targetId);
   }
 
   function removeRelation(
@@ -99,7 +83,7 @@ export function createTransactionHelpers({ tx, counters }: { tx: typeof Tx; coun
     relationType: EARS.RelKind,
     targetId?: EARS.EntityId
   ): void {
-    tx(sourceId).unlinkIf(relationType, targetId);
+    write(sourceId).unlink(relationType, targetId);
   }
 
   return { createEntityWithDefaults, updateEntity, createRelation, removeRelation };

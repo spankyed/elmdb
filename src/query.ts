@@ -3,6 +3,8 @@ import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
 import type { QueryBuilder } from './runtime.ts';
 import { installedEngine } from './installed.ts';
+import { EarsError } from './errors.ts';
+import type { TypeName } from './write.ts';
 
 type MaybeArr<T> = T | readonly T[];
 function asArr<T>(v: MaybeArr<T>): readonly T[] {
@@ -23,22 +25,25 @@ export const b64Decode = (s: string) => {
 const liftOne = <F extends (...args: any[]) => any>(many: F) =>
   (...a: Parameters<F>) => (many as any)(...a)[0] ?? null;
 
-export type QxStart =
-  | EARS.EntityId
-  | EARS.Entity
-  | readonly EARS.Entity[]
-  | readonly EARS.EntityId[];
+/**
+ * The query entry points. `qx(type)` starts from every entity of a registered type, and refuses a name that
+ * isn't one rather than finding nothing; `qx.ids` starts from the ids given that exist; `qx.all` from every
+ * entity but the relations, which `findRelations` serves.
+ */
+export interface Qx {
+  <E extends string>(type: TypeName<E>): QueryBuilder<E>;
+  <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
+  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
+  all(): QueryBuilder<string>;
+}
 
-/** An engine's untyped query entry point, over its storage and relation index */
-export function createQx({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): typeof qx {
+/** An engine's untyped query entry points, over its storage and relation index */
+export function createQx({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Qx {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, removals, getAttr, getAttrs, getRoles,
     queryEntitiesInRelationTo, queryEntitiesByRelationTo, getAll,
   } = storage;
   const relationIndex = relations.index;
-
-  const isEntity = (v: unknown): v is EARS.Entity =>
-    typeof v === 'string' && isEntityType(v);
 
   const prefixCache = new Map<EARS.Entity, (id: EARS.EntityId) => boolean>();
   const hasPrefix = (t: EARS.Entity) => {
@@ -50,29 +55,28 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
     return fn;
   };
 
-  // A start from the caller is resolved against the engine; `known` ids (a chained step's result) were
-  // checked against it when the step ran
-  const qxImpl = (start?: QxStart, known?: EARS.EntityId[]) => {
-    const resolvedAt = removals();
-    const resolveStart = (): EARS.EntityId[] => {
-      if (start === undefined) return [...getAllEntities()];
-      if (Array.isArray(start)) {
-        if ((start as readonly unknown[]).every(isEntity)) {
-          return (start as readonly EARS.Entity[]).flatMap(t => getEntitiesOfType(t));
-        }
-        return (start as readonly EARS.EntityId[]).filter(hasEntity);
-      }
-      if (typeof start !== 'string') return [];
-      if (isEntity(start)) return [...getEntitiesOfType(start)];
-      const id = start as EARS.EntityId;
-      return hasEntity(id) ? [id] : [];
-    };
+  /** Every entity of the types; refuses a name that isn't a registered type */
+  const ofTypes = (start: unknown): EARS.EntityId[] => {
+    const types = Array.isArray(start) ? start as unknown[] : [start];
+    const unknown = types.filter((t) => typeof t !== 'string' || !isEntityType(t));
+    if (unknown.length) {
+      throw new EarsError(
+        'UNKNOWN_ENTITY_TYPE',
+        `qx(${unknown.map((t) => JSON.stringify(t) ?? 'undefined').join(', ')}): not a registered entity type. ` +
+          'qx.ids(...) starts from ids, and qx.all() from every entity.',
+      );
+    }
+    return (types as EARS.Entity[]).flatMap((t) => getEntitiesOfType(t));
+  };
 
-    const ids: EARS.EntityId[] = known ?? resolveStart();
+  // `known` ids are a chained step's result, already checked against the engine when the step ran
+  const qxImpl = (known: EARS.EntityId[]) => {
+    const resolvedAt = removals();
+    const ids: EARS.EntityId[] = known;
 
     // A builder may be kept across writes: a step after an entity left the engine drops the ids no longer in it
     const setIds = (next: EARS.EntityId[]) =>
-      qxImpl(undefined, removals() === resolvedAt ? next : next.filter(hasEntity));
+      qxImpl(removals() === resolvedAt ? next : next.filter(hasEntity));
 
     const self = {
       ofType: (t: EARS.Entity) => setIds(ids.filter(hasPrefix(t))),
@@ -82,12 +86,23 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
         return setIds(ids.filter(i => subSet.has(i)));
       },
 
-      where: (k: EARS.AttrKind | string, v?: unknown) => {
-        const kind = typeof k === "string" ? EARS.AttrKind.Custom(k) : k;
-        const matches = v === undefined
-          ? (i: EARS.EntityId) => getAttrs(i, kind).length > 0
-          : (i: EARS.EntityId) => getAttrs(i, kind).some(attr => attr === v);
-        return setIds(ids.filter(matches));
+      where: (k: string, v: unknown) => {
+        if (v === undefined) {
+          throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
+        }
+        const kind = EARS.AttrKind.Custom(k);
+        const test = typeof v === 'function' ? v as (value: unknown) => boolean : (value: unknown) => value === v;
+        return setIds(ids.filter(i => getAttrs(i, kind).some(test)));
+      },
+
+      has: (k: string) => {
+        const kind = EARS.AttrKind.Custom(k);
+        return setIds(ids.filter(i => getAttrs(i, kind).length > 0));
+      },
+
+      lacks: (k: string) => {
+        const kind = EARS.AttrKind.Custom(k);
+        return setIds(ids.filter(i => getAttrs(i, kind).length === 0));
       },
 
       withRole: (r: string) => setIds(ids.filter(i => getRoles(i).includes(r))),
@@ -120,7 +135,7 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
             });
         }
         // A relation's target may not be in the engine
-        return qxImpl(undefined, [...out].filter(hasEntity));
+        return qxImpl([...out].filter(hasEntity));
       },
 
       links: <K extends string>(
@@ -184,7 +199,7 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
         const manyKinds = Array.isArray(relKinds) && relKinds.length > 1;
         return self.links(relKinds, tgtType)
           .map(({ relation, id }) => {
-            const picked = qxImpl(id).pickOne(fields);
+            const picked = qxImpl([id]).pickOne(fields);
             if (!picked) return null;
             return {
               ...(manyKinds ? { relation } : {}),
@@ -216,15 +231,6 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
       reverse: () => setIds([...ids].reverse()),
 
       limit: (n: number) => setIds(ids.slice(0, n)),
-
-      page: (size: number, cursor?: string | null) => {
-        const start       = cursor ? b64Decode(cursor) : 0;
-        const end         = start + size;
-        const sliceIds    = ids.slice(start, end);
-        const nextCursor  = end < ids.length ? b64Encode(end) : null;
-
-        return { items: sliceIds, nextCursor } as const;
-      },
 
       distinct: (field?: string) => {
         let next: EARS.EntityId[];
@@ -273,26 +279,18 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
     return self;
   };
 
-  return ((start?: QxStart) => qxImpl(start)) as unknown as typeof qx;
+  const entry = ((start: unknown) => qxImpl(ofTypes(start))) as unknown as Qx;
+  entry.ids = ((start: EARS.EntityId | readonly EARS.EntityId[]) =>
+    qxImpl((Array.isArray(start) ? start : [start]).filter(hasEntity))) as Qx['ids'];
+  entry.all = (() => qxImpl(getAllEntities().filter((id) => !hasPrefix(EARS.Entity.Relation)(id)))) as Qx['all'];
+  return entry;
 }
 
-/**
- * Query entry point: the entities it starts from.
- *
- * Overloads exist so an entity type threads its name into `QueryBuilder<E>`
- * (and from there into the shape registry), while id starts stay untyped. The
- * id overload precedes the entity-type one because `EntityId` is a template
- * literal and `EARS.Entity` is an open string.
- */
-export function qx(): QueryBuilder<string>;
-// A branded id carries its entity type, so it threads through like an entity-type start.
-// An unbranded `EARS.EntityId` is `EntityId<string>`, which yields QueryBuilder<string>.
-export function qx<E extends string>(start: EARS.EntityId<E>): QueryBuilder<E>;
-export function qx<E extends string>(start: readonly EARS.EntityId<E>[]): QueryBuilder<E>;
-export function qx<E extends EARS.Entity>(start: E): QueryBuilder<E>;
-export function qx(start: readonly EARS.Entity[]): QueryBuilder<string>;
-// Catch-all for starts that may be undefined at the call site.
-export function qx(start?: QxStart): QueryBuilder<string>;
-export function qx(start?: QxStart): QueryBuilder<string> {
-  return installedEngine().qx(start);
-}
+/** The installed engine's query entry points, untyped (a pack's `#generated/ears` types them) */
+export const qx: Qx = Object.assign(
+  ((start: unknown) => installedEngine().qx(start as never)) as unknown as Qx,
+  {
+    ids: ((start: EARS.EntityId | readonly EARS.EntityId[]) => installedEngine().qx.ids(start)) as Qx['ids'],
+    all: (() => installedEngine().qx.all()) as Qx['all'],
+  },
+);

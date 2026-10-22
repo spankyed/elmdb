@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { QueryBuilder, TransactionBuilder } from './runtime.ts';
+import type { CreateOptions, QueryBuilder, WriteBuilder } from './runtime.ts';
 import { createEntity } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './transaction-helpers.ts';
 import type { EarsQuery } from './engine.ts';
@@ -20,26 +20,31 @@ import { installedEngine } from './installed.ts';
 /** An entity name argument: a declared name, or a name only known at runtime (see EntityNameArg) */
 type Name<N extends string, E extends string> = EntityNameArg<N, E>;
 
-// Name starts come before id starts: editors offer the entity names in qx('…') only then, and it's the
-// order the runtime resolves a start in (a registered entity type first, then an id). An id can't match
-// a name overload, so ids still take theirs.
+/**
+ * The query entry points: `qx(type)` from a declared entity type (its name checked, its rows typed), `qx.ids`
+ * from ids (typed by the entity an id is tagged with), `qx.all` from every entity. A name and an id are
+ * different arguments to different functions, so an id passed where a type is meant fails to compile.
+ */
 export interface TypedQx<S extends EntityShapes, N extends string = string> {
-  (): QueryBuilder<string, S, N>;
-  <E extends string>(start: Name<N, E>): QueryBuilder<E, S, N>;
-  <E extends string>(start: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
-  <E extends string>(start: EARS.EntityId<E>): QueryBuilder<E, S, N>;
-  <E extends string>(start: readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
-  // Starts that may be undefined at the call site
-  <E extends string>(start: Name<N, E> | readonly Name<N, E>[] | EARS.EntityId | readonly EARS.EntityId[] | undefined): QueryBuilder<string, S, N>;
+  <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
+  <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
+  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
+  all(): QueryBuilder<string, S, N>;
 }
 
-/**
- * A transaction on an entity. Started from an id tagged with its entity type, or from a declared entity
- * type (which creates the entity), writes to declared fields are checked; a plain id leaves them unchecked.
- */
-export interface TypedTx<S extends EntityShapes, N extends string = string> {
-  <E extends string>(id: EARS.EntityId<E>, useProvidedId?: boolean): TransactionBuilder<E, S>;
-  <E extends string>(entityType: Name<N, E>, useProvidedId?: boolean): TransactionBuilder<E, S>;
+/** Creates an entity of a declared type; writes to its declared fields are checked */
+export interface TypedCreate<S extends EntityShapes, N extends string = string> {
+  <E extends string>(type: Name<N, E>, options?: CreateOptions): WriteBuilder<E, S>;
+}
+
+/** Writes to the entity with `id`, creating it as `type` when no entity has it */
+export interface TypedUpsert<S extends EntityShapes, N extends string = string> {
+  <E extends string>(type: Name<N, E>, id: EARS.EntityId): WriteBuilder<E, S>;
+}
+
+/** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
+export interface TypedWrite<S extends EntityShapes> {
+  <E extends string>(id: EARS.EntityId<E>): WriteBuilder<E, S>;
 }
 
 export interface TypedFindById<S extends EntityShapes> {
@@ -108,7 +113,9 @@ export interface TypedUpdateEntity<S extends EntityShapes> {
 
 export interface TypedEars<S extends EntityShapes, N extends string = string> {
   qx: TypedQx<S, N>;
-  tx: TypedTx<S, N>;
+  create: TypedCreate<S, N>;
+  upsert: TypedUpsert<S, N>;
+  write: TypedWrite<S>;
   transact: EarsQuery['transact'];
   findById: TypedFindById<S>;
   findByIdRaw: TypedFindById<S>;
@@ -136,8 +143,13 @@ const onInstalled = <K extends keyof EarsQuery>(name: K) =>
  */
 export function defineEars<S extends EntityShapes, N extends string = string>(): TypedEars<S, N> {
   return {
-    qx: onInstalled('qx'),
-    tx: onInstalled('tx'),
+    qx: Object.assign(onInstalled('qx'), {
+      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => installedEngine().qx.ids(ids),
+      all: () => installedEngine().qx.all(),
+    }),
+    create: onInstalled('create'),
+    upsert: onInstalled('upsert'),
+    write: onInstalled('write'),
     transact: onInstalled('transact'),
     findById: onInstalled('findById'),
     findByIdRaw: onInstalled('findByIdRaw'),

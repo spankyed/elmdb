@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   createEarsEngine, defineEars, findRelations, getAllEntities, installEngine, installedEngine, isEntityType,
-  registerRepository, unregisterRepository, repository, spawn, untypedTx, untypedQx, bp, type EARS, type PersistenceSink,
+  registerRepository, unregisterRepository, repository, spawn, untypedCreate, untypedUpsert, untypedWrite, untypedQx, transact, bp, type EARS, type PersistenceSink,
 } from '../src/index.ts';
 import { recordingSink } from './engine/helpers.ts';
 
@@ -16,9 +16,16 @@ describe('with no engine installed', () => {
     const typed = defineEars<{ Note: { title: string } }, 'Note'>();
     const uses: Array<[string, () => unknown]> = [
       ['qx', () => untypedQx('Note')],
-      ['untypedTx', () => untypedTx('Note')],
+      ['qx.ids', () => untypedQx.ids('Note-1' as EARS.EntityId)],
+      ['qx.all', () => untypedQx.all()],
+      ['untypedCreate', () => untypedCreate('Note')],
+      ['untypedUpsert', () => untypedUpsert('Note', 'Note-1' as EARS.EntityId)],
+      ['untypedWrite', () => untypedWrite('Note-1' as EARS.EntityId)],
+      ['transact', () => transact(() => 1)],
       ['typed qx', () => typed.qx('Note')],
-      ['typed tx', () => typed.tx('Note')],
+      ['typed qx.all', () => typed.qx.all()],
+      ['typed create', () => typed.create('Note')],
+      ['typed write', () => typed.write('Note-1' as EARS.EntityId<'Note'>)],
       ['typed findAll', () => typed.findAll('Note')],
       ['repository', () => repository.noteQueries],
       ['registerRepository', () => registerRepository('noteQueries', {})],
@@ -45,7 +52,7 @@ describe('installEngine', () => {
     const first = newEngine();
     const second = newEngine();
     expect(installEngine(first.query)).toBeUndefined();
-    const id = untypedTx('Note').put('title', 'first').id();
+    const id = untypedCreate('Note').set('title', 'first').id();
     expect(installEngine(second.query)).toBe(first.query);
     expect(untypedQx('Note').ids()).toEqual([]);
     expect(installedEngine()).toBe(second.query);
@@ -62,11 +69,11 @@ describe('two engines in one process', () => {
     const one = newEngine(a.sink);
     const two = newEngine(b.sink);
 
-    const x = one.query.tx('Note').put('title', 'one').id();
-    const y = one.query.tx('Note').id();
-    one.query.tx(x).link('refs', y);
+    const x = one.query.create('Note').set('title', 'one').id();
+    const y = one.query.create('Note').id();
+    one.query.write(x).link('refs', y);
     one.query.registerRepository('noteQueries', { name: 'one' });
-    two.query.tx('Note').put('title', 'two');
+    two.query.create('Note').set('title', 'two');
     two.admin.bulkLoadAttr('Note-loaded' as EARS.EntityId, 'title', 'loaded');
 
     expect(one.query.qx('Note').pick(['title']).map((row) => row.title)).toEqual(['one', null]);

@@ -134,6 +134,14 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     }
   };
 
+  /** Removes every value of the kind */
+  const deleteAttr = (id: EARS.EntityId, kind: EARS.AttrKind) => {
+    if (!bucket(kind).get(id)?.length) return;
+    touchValues(id, kind);
+    bucket(kind).delete(id);
+    persistence.onDropAttr(kind, id, 0, []);
+  };
+
   const dropIf = (id: EARS.EntityId, kind: EARS.AttrKind, crit: unknown) => {
     const list = bucket(kind).get(id);
     if (!list) return;
@@ -170,10 +178,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       for (const existingRelId of fromSource) {
         if (fromTarget.has(existingRelId)) {
           const existingRel = getAttr(existingRelId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail;
-          if (info === undefined || JSON.stringify(existingRel.info) === JSON.stringify(info)) {
-            console.warn(`[Relation] Duplicate relation link attempted (${kind}) between ${src} and ${tgt}. Reusing existing relation.`);
-            return existingRelId;
-          }
+          // The same edge: linking it again is a no-op, which keeps its id and its place among its siblings
+          if (info === undefined || JSON.stringify(existingRel.info) === JSON.stringify(info)) return existingRelId;
         }
       }
     }
@@ -379,7 +385,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   return {
     clear, bulkLoadAttr,
-    putAttr: put, addAttr: add, mergeAttr: merge, dropAttr: drop, dropIf, updateAttr: put,
+    putAttr: put, addAttr: add, mergeAttr: merge, dropAttr: drop, deleteAttr, dropIf, updateAttr: put,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, getAttrs, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, removals: () => removals,
     queryEntitiesByRole, queryEntitiesByAttribute, queryEntitiesInRelationTo, queryEntitiesByRelationTo,

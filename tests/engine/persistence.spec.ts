@@ -13,16 +13,16 @@ describe('persistence sink', () => {
   it('receives each write, in order, with its payload: a created entity with its type, a relation a destroy removes with the destroyed end', () => {
     const { sink, calls } = recordingSink();
     const e = engine(sink);
-    const a = e.query.tx('Task').put('title', 'A').add('tag', 'x').add('tag', 'y').id();
-    const b = e.query.tx('Project').batchPut({ title: 'P' }).id();
-    e.query.tx(a).merge('meta', { k: 1 }).drop('tag', 0).dropIf('tag', 'y').grant('lead');
-    e.query.tx(b).link('contains', a, { order: 1 });
+    const a = e.query.create('Task').set('title', 'A').add('tag', 'x').add('tag', 'y').id();
+    const b = e.query.create('Project').setMany({ title: 'P' }).id();
+    e.query.write(a).merge('meta', { k: 1 }).deleteAt('tag', 0).deleteValue('tag', 'y').grant('lead');
+    e.query.write(b).link('contains', a, { info: { order: 1 } });
     const rel = e.query.findRelations()[0].id;
-    e.query.tx(b).relPatch(rel, { info: { order: 2 } });
-    e.query.tx(b).linkOne('contains', a);
+    e.query.updateRelation(rel, { info: { order: 2 } });
+    e.query.write(b).link('contains', a, { replace: true });
     e.query.updateEntity(a, { title: 'B', gone: null });
-    e.query.tx(a).destroy();
-    e.query.tx(b).destroy(true);
+    e.query.write(a).destroy();
+    e.query.write(b).destroy({ keepStored: true });
 
     expect(calls).toEqual([
       ['onCreateEntity', '#1', 'Task'],
@@ -58,7 +58,7 @@ describe('persistence sink', () => {
   it('receives a moved relation\'s new ends, and the direct attribute and relation writes', () => {
     const { sink, calls } = recordingSink();
     const e = engine(sink);
-    const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.query.tx(type).id());
+    const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.query.create(type).id());
     const rel = e.admin.addRelation(a, 'refs', b);
     e.admin.updateRelation(rel, undefined, c, 'why');
     e.admin.updateRelation('Relation-none' as Id, a);
@@ -85,7 +85,7 @@ describe('persistence sink', () => {
       ['onPutAttrArray', 'x', '#1', [4]],
       ['onDropAttr', 'x', '#1', 0, []],
     ]);
-    expect(e.query.qx(a).linksTo('refs').ids()).toEqual([c]);
+    expect(e.query.qx.ids(a).linksTo('refs').ids()).toEqual([c]);
   });
 });
 
@@ -110,19 +110,19 @@ describe('hydration', () => {
     expect(e.query.getAllEntities()).toEqual([a, b, p, rel]);
     expect(e.query.findById(a)).toEqual({ id: a, title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
     expect(e.query.qx('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
-    expect(e.query.qx().withRole('current').ids()).toEqual([p]);
-    expect(e.query.qx(p).linksTo('contains').ids()).toEqual([a]);
+    expect(e.query.qx.all().withRole('current').ids()).toEqual([p]);
+    expect(e.query.qx.ids(p).linksTo('contains').ids()).toEqual([a]);
     expect(e.query.findRelations({ targetEntity: a })).toEqual([{ id: rel, sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } }]);
     expect(e.admin.edgeStore.find({ sourceEntity: p })).toEqual([{ sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } }]);
     expect(e.admin.edgeStore.relIds({})).toEqual([rel]);
 
     // Writes after hydration reach the sink
-    e.query.tx(b).link('contains', a);
+    e.query.write(b).link('contains', a);
     expect(calls.map(([method]) => method)).toEqual(['onPutAttrArray', 'onAddRelation']);
     e.admin.removeFromIndex('contains', p, a, rel);
-    expect(e.query.qx(p).linksTo('contains').ids()).toEqual([]);
+    expect(e.query.qx.ids(p).linksTo('contains').ids()).toEqual([]);
     e.admin.updateIndex('contains', rel, p, a, b);
-    expect(e.query.qx(b).linksTo('contains').ids()).toEqual([a]);
+    expect(e.query.qx.ids(b).linksTo('contains').ids()).toEqual([a]);
 
     e.admin.clear();
     expect(e.query.getAllEntities()).toEqual([]);
@@ -133,7 +133,7 @@ describe('hydration', () => {
 
   it('edgeStore links, patches and unlinks', () => {
     const e = engine();
-    const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.query.tx(type).id());
+    const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.query.create(type).id());
     e.admin.edgeStore.linkOne(a, 'refs', b, 1);
     const rel = e.admin.edgeStore.linkOne(a, 'refs', b, 2);
     expect(e.admin.edgeStore.relIds({ sourceEntity: a, targetEntity: b })).toEqual([rel]);
