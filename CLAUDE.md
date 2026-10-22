@@ -48,6 +48,24 @@ Each dropped row is reported through `onWriteFailure` (`openLmdbStore`'s port) w
 `errorCount` counts rows, not batches. The app binds the port; the engine has no opinion about what to do.
 | `utils.ts` | Private helpers (`isPlainObject`, the id suffix) |
 
+## Naming: a name carries the operation, structure carries the rest
+
+Four facts describe an engine operation, and only one of them belongs in its name
+([`ears-naming-axes.md`](../../docs/plans/ears-naming-axes.md) has why each other place is the wrong one):
+
+| fact | carried by | not by |
+|---|---|---|
+| **operation** — what it does | the name: `create`, `write`, `transact` | — |
+| **capability** — anyone, or the engine's creator | the `admin` sub-object beside the operations | a second face with a name of its own |
+| **binding** — which engine | who you ask: `engine.create(...)`, or the SDK's bound engine | a free function per operation, or a twin of one |
+| **checkedness** — checked against a pack's shapes | the `untyped` prefix, on the SDK's pack-facing surface only | anything in this package |
+
+**Give a new operation a name that says what it does, and nothing else.** A name that also says who may call
+it, which engine it acts on or whether it was checked is a fact welded into the wrong place, and the next one
+is welded beside it. The one place a shorter name earns its keep is where people type by hand: the Database
+console injects its own vocabulary (`READ_HELPER_NAMES`, `@apackdev/sdk/database-console`), and a terse name
+lives there rather than in the library.
+
 ## The engine
 
 - **An instance.** `createEarsEngine({ persistence, isEntityType })` returns a new, empty engine that owns its stores, indexes, caches and repository registry. Each module is a factory closing over its state (`createAttributeStorage`, `createRelationIndex`, `createQx`, `createTx`, …), and `engine.ts` passes each its dependencies (the sink, the relation index, the entity-type checker). No module keeps data at module scope; the one module-level variable is the installed engine, a reference. `persistence` defaults to `noopSink`. `isEntityType` says which names are entity types.
