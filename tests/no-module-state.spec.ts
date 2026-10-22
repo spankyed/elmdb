@@ -1,14 +1,11 @@
-// The engine is an instance: no module in @apackdev/ears keeps data at module scope. The installed engine (installed.ts)
-// is the one exception: a reference to an engine, not data.
+// The engine is an instance: no module in @apackdev/ears keeps anything at module scope, not even a reference to an
+// engine. Which engine a process acts on is the SDK's (`@apackdev/sdk/ears`), one layer up.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 const SRC = path.resolve(import.meta.dirname, '..', 'src');
-const ALLOWED: Record<string, string> = {
-  'installed.ts:installed': 'the installed engine: a reference, not data',
-};
 
 const files = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
   const full = path.join(dir, entry.name);
@@ -50,7 +47,7 @@ describe('@apackdev/ears module state', () => {
     const found = files(SRC).flatMap((file) => {
       const rel = path.relative(SRC, file);
       return moduleState(file, fs.readFileSync(file, 'utf-8')).map((name) => `${rel}:${name}`);
-    }).filter((entry) => !(entry in ALLOWED));
+    });
     expect(found, 'keep state in the engine (createEarsEngine) or the object a factory returns').toEqual([]);
   });
 

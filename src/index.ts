@@ -1,37 +1,26 @@
+// The EARS engine: an instance you create and hold, with its operations as its members (`engine.query`) and the
+// creator's privileges beside them (`engine.admin`). Nothing here acts on an engine you didn't pass: the app's
+// engine, and the operations over it that pack code calls, are the SDK's (`@apackdev/sdk/ears`).
 export {
   createEarsEngine, type EarsEngine, type EarsQuery, type EarsAdmin,
 } from './engine.ts';
-export { installEngine, installedEngine } from './installed.ts';
-export { transact, updateRelation, untypedCreate, untypedUpsert, untypedWrite, type Create, type Upsert, type Write, type TypeName } from './write.ts';
+export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
   EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues,
 } from './runtime.ts';
-export { isEntityType } from './runtime.ts';
 export { b64Encode, b64Decode, type Qx } from './query.ts';
-export {
-  entityTypeOf, getEntitiesOfType, getAllEntityTypes, destroyEntity, removeRelationById,
-  getAll, getAllAttributeKinds, getAllRelationKinds, getAttributeStats, getSchemaStats,
-  getRoles, grantRole, revokeRole,
-} from './attribute-storage.ts';
-export { repository, registerRepository, unregisterRepository, type Repository } from './repository.ts';
-export { hasIdCollision, exists, countEntities } from './query-helpers.ts';
-export { createRelation, removeRelation, prepareEntity } from './transaction-helpers.ts';
+export { entityTypeOf } from './attribute-storage.ts';
+export { prepareEntity } from './transaction-helpers.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
-export { getTimestamp, generateShortCode, generateLabelWithCount, filterSystemFields } from './entity-utils.ts';
-export { findRelations, getRelationStats, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
-export { getAllEntities, queryEntitiesByAttribute, queryEntitiesByRelationTo, queryEntitiesInRelationTo } from './attribute-storage.ts';
-/**
- * The untyped query: entity names and fields aren't checked. Pack code queries with the typed `qx`
- * from #generated/ears; this is the escape hatch for fields only known at runtime or that vary across
- * a union shape's members (TYPED-EARS.md).
- */
-export { qx as untypedQx } from './query.ts';
+export { getTimestamp, filterSystemFields } from './entity-utils.ts';
+export type { RelationMatch, RelationRow, RelationStats } from './relations.ts';
 // Types that appear in the signatures above, so pack authors can name them.
 export type { CreatedEntityFields } from './transaction-helpers.ts';
 export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
+export { noopSink } from './runtime.ts';
 // The persistence port: partitions, their policy, and the sink routing writes to each partition's sink
 export { makePolicy, type Partition, type PartitionPolicy } from './persistence/policy.ts';
 export { makeShardedPersistence, type ShardedPersistence, type RelationDetailsReader } from './persistence/sharded-router.ts';
@@ -43,8 +32,4 @@ export {
   type TypedGetAttr, type TypedGetAttrs, type TypedFindWithFields, type TypedFindByIdWithFields, type TypedFindWithRole,
   type TypedFindFirstWithRole, type TypedCreateEntityWithDefaults, type TypedUpdateEntity,
 } from './typed.ts';
-export { bp, spawn, type Blueprint, type BlueprintBuilder } from './blueprint.ts';
-export {
-  descendants, ancestors, rootParent, linkSymmetric, wouldCreateCycle,
-  topoSort, shortestPath, leaves, lowestCommonAncestor,
-} from './graph.ts';
+export { bp, type Blueprint, type BlueprintBuilder } from './blueprint.ts';

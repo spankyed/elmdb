@@ -2,7 +2,6 @@ import { EARS } from './entities.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { RelationIndexStore } from './relation-index.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
-import { installedEngine } from './installed.ts';
 
 /** Which relations to match: any combination of source, relation kind and target */
 export interface RelationMatch {
@@ -43,17 +42,4 @@ export function createRelationReads({ edgeStore, relations, storage }: { edgeSto
   }
 
   return { findRelations, getRelationStats };
-}
-
-/**
- * The relations matching `match`, with their ids and info (e.g. a flow edge's handles). An empty
- * match returns every relation. `qx(id).links(...)` returns linked ids; this returns the relations.
- */
-export function findRelations(match: RelationMatch = {}): RelationRow[] {
-  return installedEngine().findRelations(match);
-}
-
-/** How many relations of `kind` exist, and between how many distinct sources and targets */
-export function getRelationStats(kind: EARS.RelKind): RelationStats {
-  return installedEngine().getRelationStats(kind);
 }

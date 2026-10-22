@@ -1,7 +1,6 @@
 import type { Qx } from './query.ts';
 import type { EdgeStore } from './edge-store.ts';
 import { EARS } from './entities.ts';
-import { installedEngine } from './installed.ts';
 
 /** An engine's graph walks, over its queries and edge store */
 export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore }) {
@@ -223,71 +222,4 @@ export function createGraph({ qx, edgeStore }: { qx: Qx; edgeStore: EdgeStore })
     descendants, ancestors, rootParent, wouldCreateCycle, linkSymmetric,
     topoSort, shortestPath, leaves, lowestCommonAncestor,
   };
-}
-
-// The installed engine's graph walks (see installed.ts)
-
-export function descendants(
-  start: EARS.EntityId,
-  relKind: EARS.RelKind,
-): EARS.EntityId[] {
-  return installedEngine().descendants(start, relKind);
-}
-
-export function ancestors(
-  start: EARS.EntityId,
-  relKind: EARS.RelKind,
-): EARS.EntityId[] {
-  return installedEngine().ancestors(start, relKind);
-}
-
-export function rootParent(
-  start: EARS.EntityId,
-  relKind: EARS.RelKind,
-): EARS.EntityId {
-  return installedEngine().rootParent(start, relKind);
-}
-
-export function wouldCreateCycle(
-  src: EARS.EntityId,
-  tgt: EARS.EntityId,
-  kinds: readonly EARS.RelKind[],
-): boolean {
-  return installedEngine().wouldCreateCycle(src, tgt, kinds);
-}
-
-export function linkSymmetric(
-  a: EARS.EntityId,
-  b: EARS.EntityId,
-  kind: EARS.RelKind,
-  info?: unknown,
-) {
-  installedEngine().linkSymmetric(a, b, kind, info);
-}
-
-export function topoSort(
-  roots: EARS.EntityId[],
-  kind: EARS.RelKind,
-  filterType?: EARS.Entity,
-): EARS.EntityId[] {
-  return installedEngine().topoSort(roots, kind, filterType);
-}
-
-export function shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null {
-  return installedEngine().shortestPath(src, tgt, kinds);
-}
-
-export function leaves(
-  kind: EARS.RelKind,
-  filterType?: EARS.Entity,
-): EARS.EntityId[] {
-  return installedEngine().leaves(kind, filterType);
-}
-
-export function lowestCommonAncestor(
-  a: EARS.EntityId,
-  b: EARS.EntityId,
-  treeKind: EARS.RelKind,
-): EARS.EntityId | null {
-  return installedEngine().lowestCommonAncestor(a, b, treeKind);
 }

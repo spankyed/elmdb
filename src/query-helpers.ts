@@ -1,7 +1,6 @@
 import type { Qx } from './query.ts';
 import type { QueryBuilder } from './runtime.ts';
 import type { EARS } from './entities.ts';
-import { installedEngine } from './installed.ts';
 
 const isDeleted = (entity: any): boolean => entity?.deleted === true;
 
@@ -69,18 +68,4 @@ export function createQueryHelpers(qx: Qx) {
     findById, findByIdRaw, findAll, findWhere, findFirst, findWithFields, findByIdWithFields,
     countEntities, exists, findWithRole, findFirstWithRole, hasIdCollision,
   };
-}
-
-// The installed engine's finders that packs import untyped (see installed.ts)
-
-export function countEntities(entityType: EARS.Entity): number {
-  return installedEngine().countEntities(entityType);
-}
-
-export function exists(id: EARS.EntityId): boolean {
-  return installedEngine().exists(id);
-}
-
-export function hasIdCollision(providedId: string | undefined): boolean {
-  return installedEngine().hasIdCollision(providedId);
 }

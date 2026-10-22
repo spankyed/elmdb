@@ -2,7 +2,6 @@ import type { AttributeStorage } from './attribute-storage.ts';
 import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
 import type { QueryBuilder } from './runtime.ts';
-import { installedEngine } from './installed.ts';
 import { EarsError } from './errors.ts';
 import type { TypeName } from './write.ts';
 
@@ -285,12 +284,3 @@ export function createQx({ storage, relations, isEntityType }: { storage: Attrib
   entry.all = (() => qxImpl(getAllEntities().filter((id) => !hasPrefix(EARS.Entity.Relation)(id)))) as Qx['all'];
   return entry;
 }
-
-/** The installed engine's query entry points, untyped (a pack's `#generated/ears` types them) */
-export const qx: Qx = Object.assign(
-  ((start: unknown) => installedEngine().qx(start as never)) as unknown as Qx,
-  {
-    ids: ((start: EARS.EntityId | readonly EARS.EntityId[]) => installedEngine().qx.ids(start)) as Qx['ids'],
-    all: (() => installedEngine().qx.all()) as Qx['all'],
-  },
-);

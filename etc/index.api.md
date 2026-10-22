@@ -5,9 +5,6 @@
 ```ts
 
 // @public (undocumented)
-export function ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-
-// @public (undocumented)
 export const b64Decode: (s: string) => number;
 
 // @public (undocumented)
@@ -60,9 +57,6 @@ export interface BlueprintBuilder {
 // @public (undocumented)
 export const bp: (entity: EARS.Entity) => BlueprintBuilder;
 
-// @public (undocumented)
-export function countEntities(entityType: EARS.Entity): number;
-
 // @public
 export interface Create {
     // (undocumented)
@@ -94,17 +88,8 @@ export interface CreateOptions {
     id?: EARS.EntityId;
 }
 
-// @public (undocumented)
-export function createRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId: EARS.EntityId): void;
-
 // @public
-export function defineEars<S extends EntityShapes, N extends string = string>(): TypedEars<S, N>;
-
-// @public (undocumented)
-export function descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-
-// @public (undocumented)
-export function destroyEntity(id: EARS.EntityId, skipPersistence?: boolean): void;
+export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => EarsQuery): TypedEars<S, N>;
 
 // @public (undocumented)
 export namespace EARS {
@@ -408,9 +393,6 @@ export type EntityShapes = {
 // @public
 export const entityTypeOf: (id: EARS.EntityId) => EARS.Entity;
 
-// @public (undocumented)
-export function exists(id: EARS.EntityId): boolean;
-
 // @public
 export type FieldValue<S extends EntityShapes, E extends string, K extends string> = [
 E
@@ -426,72 +408,8 @@ E
 // @public (undocumented)
 export function filterSystemFields<T extends object>(updates: T, additionalExcludes?: string[]): Partial<T>;
 
-// @public
-export function findRelations(match?: RelationMatch): RelationRow[];
-
-// @public (undocumented)
-export function generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
-
-// @public (undocumented)
-export function generateShortCode(entityType: EARS.Entity, prefix: string): string;
-
-// @public (undocumented)
-export const getAll: (id: EARS.EntityId) => Record<string, unknown>;
-
-// @public (undocumented)
-export const getAllAttributeKinds: () => EARS.AttrKind[];
-
-// @public (undocumented)
-export const getAllEntities: () => `${string}-${string}`[];
-
-// @public (undocumented)
-export const getAllEntityTypes: () => EARS.Entity[];
-
-// @public (undocumented)
-export const getAllRelationKinds: () => string[];
-
-// @public (undocumented)
-export const getAttributeStats: (kind: EARS.AttrKind) => {
-    entityCount: number;
-    totalValues: number;
-};
-
-// @public (undocumented)
-export const getEntitiesOfType: (t: EARS.Entity) => `${string}-${string}`[];
-
-// @public
-export function getRelationStats(kind: EARS.RelKind): RelationStats;
-
-// @public (undocumented)
-export const getRoles: (id: EARS.EntityId) => string[];
-
-// @public (undocumented)
-export function getSchemaStats(): {
-    entities: Record<string, number>;
-    attributes: Record<string, number>;
-    relations: Record<string, number>;
-};
-
 // @public (undocumented)
 export function getTimestamp(): number;
-
-// @public (undocumented)
-export const grantRole: (id: EARS.EntityId, role: string) => void;
-
-// @public (undocumented)
-export function hasIdCollision(providedId: string | undefined): boolean;
-
-// @public
-export function installedEngine(): EarsQuery;
-
-// @public
-export function installEngine(engine: EarsQuery | undefined): EarsQuery | undefined;
-
-// @public
-export function isEntityType(name: string): boolean;
-
-// @public (undocumented)
-export function leaves(kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
 
 // @public
 export interface LinkOptions {
@@ -501,12 +419,6 @@ export interface LinkOptions {
     symmetric?: boolean;
 }
 
-// @public (undocumented)
-export function linkSymmetric(a: EARS.EntityId, b: EARS.EntityId, kind: EARS.RelKind, info?: unknown): void;
-
-// @public (undocumented)
-export function lowestCommonAncestor(a: EARS.EntityId, b: EARS.EntityId, treeKind: EARS.RelKind): EARS.EntityId | null;
-
 // @public
 export function makePolicy(config: {
     excludedEntityTypes: ReadonlySet<EARS.Entity>;
@@ -515,6 +427,9 @@ export function makePolicy(config: {
 
 // @public
 export function makeShardedPersistence(policy: PartitionPolicy, sinks: Record<Partition, PersistenceSink>, relationDetails?: RelationDetailsReader): ShardedPersistence;
+
+// @public
+export const noopSink: PersistenceSink;
 
 // @public
 export type Partition = 'primary' | 'volatileBackup';
@@ -641,15 +556,6 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     withRole(r: string): QueryBuilder<E, S, N>;
 }
 
-// @public (undocumented)
-export const queryEntitiesByAttribute: (k: EARS.AttrKind, v?: unknown) => `${string}-${string}`[];
-
-// @public (undocumented)
-export const queryEntitiesByRelationTo: (relKind: string, id: EARS.EntityId, asSource?: boolean) => `${string}-${string}`[];
-
-// @public (undocumented)
-export const queryEntitiesInRelationTo: (target: EARS.EntityId) => `${string}-${string}`[];
-
 // @public
 export interface Qx {
     // (undocumented)
@@ -661,9 +567,6 @@ export interface Qx {
     // (undocumented)
     ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
 }
-
-// @public
-export function registerRepository(name: string, value: unknown): void;
 
 // @public
 export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | null;
@@ -703,18 +606,6 @@ export interface RelationStats {
 }
 
 // @public (undocumented)
-export function removeRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId?: EARS.EntityId): void;
-
-// @public
-export const removeRelationById: (relId: EARS.EntityId) => void;
-
-// @public (undocumented)
-export type Repository = typeof repository;
-
-// @public
-export const repository: Record<string, unknown>;
-
-// @public (undocumented)
 export class RepositoryError extends Error {
     constructor(message: string, code?: RepositoryErrorCode, details?: unknown | undefined);
     // (undocumented)
@@ -740,12 +631,6 @@ export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof Reposi
 // @public
 export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "role", "relationDetails"];
 
-// @public (undocumented)
-export const revokeRole: (id: EARS.EntityId, role: string) => void;
-
-// @public (undocumented)
-export function rootParent(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId;
-
 // @public
 export type ShapeOf<S extends EntityShapes, E extends string> = [
 E
@@ -764,20 +649,6 @@ export interface ShardedPersistence extends PersistenceSink {
     // (undocumented)
     hydrateRelationMetadata(relId: string, kind: string, src: string, tgt: string): void;
 }
-
-// @public (undocumented)
-export function shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null;
-
-// @public (undocumented)
-export function spawn(root: Blueprint, input?: {
-    dedupe?: boolean | undefined;
-}): EARS.EntityId;
-
-// @public (undocumented)
-export function topoSort(roots: EARS.EntityId[], kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
-
-// @public
-export function transact<T>(fn: () => T): T;
 
 // @public
 export interface TypedCreate<S extends EntityShapes, N extends string = string> {
@@ -929,35 +800,10 @@ export interface TypedWrite<S extends EntityShapes> {
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
 
 // @public
-export function unregisterRepository(name: string): void;
-
-// @public
-export const untypedCreate: Create;
-
-// @public
-export const untypedQx: Qx;
-
-// @public
-export const untypedUpsert: Upsert;
-
-// @public
-export const untypedWrite: Write;
-
-// @public
-export function updateRelation(relId: EARS.EntityId, patch: {
-    sourceEntity?: EARS.EntityId;
-    targetEntity?: EARS.EntityId;
-    info?: unknown;
-}): void;
-
-// @public
 export interface Upsert {
     // (undocumented)
     <E extends string>(type: TypeName<E>, id: EARS.EntityId): WriteBuilder<E>;
 }
-
-// @public (undocumented)
-export function wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
 
 // @public
 export interface Write {

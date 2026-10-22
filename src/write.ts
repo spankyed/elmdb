@@ -7,7 +7,6 @@ import type { createGraph } from './graph.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
 import type { CreateOptions, LinkOptions, WriteBuilder } from './runtime.ts';
-import { installedEngine } from './installed.ts';
 
 const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn', 'symmetric'] satisfies Array<keyof LinkOptions>;
 
@@ -177,27 +176,4 @@ export function createWrites({ storage, edgeStore, graph, isEntityType }: {
   }) as Upsert;
 
   return { create, upsert, write };
-}
-
-// The installed engine's writes: the untyped twins of a pack's typed `create`, `upsert` and `write`
-
-/** `create` on the installed engine, unchecked against any pack's shapes */
-export const untypedCreate: Create = ((type: string, options?: CreateOptions) =>
-  installedEngine().create(type as never, options)) as unknown as Create;
-
-/** `upsert` on the installed engine, unchecked against any pack's shapes */
-export const untypedUpsert: Upsert = ((type: string, id: EARS.EntityId) =>
-  installedEngine().upsert(type as never, id)) as unknown as Upsert;
-
-/** `write` on the installed engine, unchecked against any pack's shapes */
-export const untypedWrite: Write = ((id: EARS.EntityId) => installedEngine().write(id)) as Write;
-
-/** Moves a relation to new ends, or replaces its info, keeping its id, on the installed engine */
-export function updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void {
-  installedEngine().updateRelation(relId, patch);
-}
-
-/** Runs `fn` as one unit on the installed engine (`EarsQuery.transact`) */
-export function transact<T>(fn: () => T): T {
-  return installedEngine().transact(fn);
 }

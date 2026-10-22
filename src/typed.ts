@@ -15,7 +15,6 @@ import type { CreateOptions, QueryBuilder, WriteBuilder } from './runtime.ts';
 import { createEntity } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './transaction-helpers.ts';
 import type { EarsQuery } from './engine.ts';
-import { installedEngine } from './installed.ts';
 
 /** An entity name argument: a declared name, or a name only known at runtime (see EntityNameArg) */
 type Name<N extends string, E extends string> = EntityNameArg<N, E>;
@@ -133,37 +132,37 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
   getAttrs: TypedGetAttrs<S>;
 }
 
-/** Calls `name` on the installed engine */
-const onInstalled = <K extends keyof EarsQuery>(name: K) =>
-  ((...args: unknown[]) => (installedEngine()[name] as (...a: unknown[]) => unknown)(...args));
-
 /**
- * The EARS query helpers typed against `S`, taking the entity names `N` (any string when omitted).
- * Every pack gets functions acting on the installed engine; only their types differ.
+ * The EARS query helpers typed against `S`, taking the entity names `N` (any string when omitted), each acting on
+ * the engine `engine` returns when it is called. A getter rather than an engine, so a facade can be defined
+ * before its engine exists, which is the case for every pack: its `#generated/ears` passes the SDK's
+ * `boundEars`.
  */
-export function defineEars<S extends EntityShapes, N extends string = string>(): TypedEars<S, N> {
+export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => EarsQuery): TypedEars<S, N> {
+  const on = <K extends keyof EarsQuery>(name: K) =>
+    ((...args: unknown[]) => (engine()[name] as (...a: unknown[]) => unknown)(...args));
   return {
-    qx: Object.assign(onInstalled('qx'), {
-      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => installedEngine().qx.ids(ids),
-      all: () => installedEngine().qx.all(),
+    qx: Object.assign(on('qx'), {
+      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().qx.ids(ids),
+      all: () => engine().qx.all(),
     }),
-    create: onInstalled('create'),
-    upsert: onInstalled('upsert'),
-    write: onInstalled('write'),
-    transact: onInstalled('transact'),
-    findById: onInstalled('findById'),
-    findByIdRaw: onInstalled('findByIdRaw'),
-    findAll: onInstalled('findAll'),
-    findWhere: onInstalled('findWhere'),
-    findFirst: onInstalled('findFirst'),
-    findWithFields: onInstalled('findWithFields'),
-    findByIdWithFields: onInstalled('findByIdWithFields'),
-    findWithRole: onInstalled('findWithRole'),
-    findFirstWithRole: onInstalled('findFirstWithRole'),
+    create: on('create'),
+    upsert: on('upsert'),
+    write: on('write'),
+    transact: on('transact'),
+    findById: on('findById'),
+    findByIdRaw: on('findByIdRaw'),
+    findAll: on('findAll'),
+    findWhere: on('findWhere'),
+    findFirst: on('findFirst'),
+    findWithFields: on('findWithFields'),
+    findByIdWithFields: on('findByIdWithFields'),
+    findWithRole: on('findWithRole'),
+    findFirstWithRole: on('findFirstWithRole'),
     createEntity,
-    createEntityWithDefaults: onInstalled('createEntityWithDefaults'),
-    updateEntity: onInstalled('updateEntity'),
-    getAttr: onInstalled('getAttr'),
-    getAttrs: onInstalled('getAttrs'),
+    createEntityWithDefaults: on('createEntityWithDefaults'),
+    updateEntity: on('updateEntity'),
+    getAttr: on('getAttr'),
+    getAttrs: on('getAttrs'),
   } as unknown as TypedEars<S, N>;
 }

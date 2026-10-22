@@ -7,7 +7,6 @@
  * Read packages/apack-sdk/TYPED-EARS.md (the contract and the pre-change checklist) first.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import { installedEngine } from './installed.ts';
 
 // ─── PersistenceSink interface ─────────────────────────────────────────
 
@@ -64,8 +63,6 @@ export interface EARSRuntimeDeps {
   isEntityType: (v: string) => boolean;
 }
 
-/** Whether `name` is an entity type the running app has registered: the SDK's and every registered pack's */
-export function isEntityType(name: string): boolean { return installedEngine().isEntityType(name); }
 
 // ─── QueryBuilder fluent interface ─────────────────────────────────────
 

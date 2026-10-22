@@ -1,6 +1,5 @@
 import type { EARS } from './entities.ts';
 import type { Qx } from './query.ts';
-import { installedEngine } from './installed.ts';
 
 export function getTimestamp(): number {
   return Date.now();
@@ -19,14 +18,6 @@ export function createEntityCounters(qx: Qx) {
   }
 
   return { generateShortCode, generateLabelWithCount };
-}
-
-export function generateShortCode(entityType: EARS.Entity, prefix: string): string {
-  return installedEngine().generateShortCode(entityType, prefix);
-}
-
-export function generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string {
-  return installedEngine().generateLabelWithCount(baseLabel, entityType);
 }
 
 export function filterSystemFields<T extends object>(

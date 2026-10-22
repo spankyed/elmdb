@@ -3,7 +3,6 @@ import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
-import { installedEngine } from './installed.ts';
 
 /**
  * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this
@@ -408,58 +407,3 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 }
 
 export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
-
-// The installed engine's reads and writes (see installed.ts)
-
-export const grantRole  = (id: EARS.EntityId, role: string) =>
-  installedEngine().grantRole(id, role);
-export const revokeRole = (id: EARS.EntityId, role: string) =>
-  installedEngine().revokeRole(id, role);
-
-/** Removes one relation by its own id. See transaction-helpers.removeRelation
- *  for the source/kind/target form that pairs with createRelation. */
-export const removeRelationById = (relId: EARS.EntityId) =>
-  installedEngine().removeRelationById(relId);
-
-export const getRoles = (id: EARS.EntityId) =>
-  installedEngine().getRoles(id);
-
-export const getAll = (id: EARS.EntityId) =>
-  installedEngine().getAll(id);
-
-export const getAllEntities = () =>
-  installedEngine().getAllEntities();
-
-export const getEntitiesOfType = (t: EARS.Entity) =>
-  installedEngine().getEntitiesOfType(t);
-
-export const queryEntitiesByAttribute = (
-  k: EARS.AttrKind,
-  v?: unknown,
-) =>
-  installedEngine().queryEntitiesByAttribute(k, v);
-
-export const queryEntitiesInRelationTo = (target: EARS.EntityId) =>
-  installedEngine().queryEntitiesInRelationTo(target);
-
-export const queryEntitiesByRelationTo = (
-  relKind: string,
-  id: EARS.EntityId,
-  asSource = false,
-) =>
-  installedEngine().queryEntitiesByRelationTo(relKind, id, asSource);
-
-export function destroyEntity(id: EARS.EntityId, skipPersistence = false) {
-  installedEngine().destroyEntity(id, skipPersistence);
-}
-
-export const getAllAttributeKinds = (): EARS.AttrKind[] => installedEngine().getAllAttributeKinds();
-export const getAllRelationKinds = (): string[] => installedEngine().getAllRelationKinds();
-export const getAllEntityTypes = (): EARS.Entity[] => installedEngine().getAllEntityTypes();
-
-export const getAttributeStats = (kind: EARS.AttrKind) =>
-  installedEngine().getAttributeStats(kind);
-
-export function getSchemaStats() {
-  return installedEngine().getSchemaStats();
-}

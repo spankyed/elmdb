@@ -1,7 +1,6 @@
 import type { Create } from './write.ts';
 import type { Qx } from './query.ts';
 import { EARS } from './entities.ts';
-import { installedEngine } from './installed.ts';
 
 export interface Blueprint {
   entity: EARS.Entity;
@@ -85,11 +84,4 @@ export function createSpawn({ create, qx }: { create: Create; qx: Qx }) {
     return go(root);
   }
   return spawn;
-}
-
-export function spawn(
-  root: Blueprint,
-  { dedupe = true } = {},
-): EARS.EntityId {
-  return installedEngine().spawn(root, { dedupe });
 }

@@ -1,5 +1,5 @@
 // An EARS engine: its stores, indexes and caches, and the two faces over them. Holding the engine is the
-// capability: `query` is what packs reach (through the installed engine), `admin` stays with whoever created it.
+// capability: `query` is what a program is handed, `admin` stays with whoever created it.
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
@@ -16,7 +16,7 @@ import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
 
-/** An engine's queries, transactions and repository registry: what packs use, through the installed engine */
+/** An engine's queries, writes, transactions and repository registry: what a program is handed */
 export interface EarsQuery {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
   qx: Qx;
@@ -132,8 +132,8 @@ export interface EarsEngine {
 
 /**
  * A new, empty engine. `isEntityType` says which names are entity types `create` and `qx` accept;
- * `persistence` receives every write (nothing by default). The engine is used through its faces, or
- * through the free functions once its query face is installed (`installEngine`).
+ * `persistence` receives every write (nothing by default). Whoever holds the engine uses it through its faces;
+ * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
 export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSRuntimeDeps): EarsEngine {
   const { journal, unitSink, transact } = createJournal(persistence);

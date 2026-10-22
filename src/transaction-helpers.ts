@@ -2,7 +2,6 @@ import type { Create, Write } from './write.ts';
 import { getTimestamp } from './entity-utils.ts';
 import type { createEntityCounters } from './entity-utils.ts';
 import { EARS } from './entities.ts';
-import { installedEngine } from './installed.ts';
 
 export function prepareEntity<T extends { entityType: EARS.Entity }>(
   entityType: EARS.Entity,
@@ -87,22 +86,4 @@ export function createTransactionHelpers({ create, write, counters }: { create: 
   }
 
   return { createEntityWithDefaults, updateEntity, createRelation, removeRelation };
-}
-
-// The installed engine's relation helpers packs import (see installed.ts)
-
-export function createRelation(
-  sourceId: EARS.EntityId,
-  relationType: EARS.RelKind,
-  targetId: EARS.EntityId
-): void {
-  installedEngine().createRelation(sourceId, relationType, targetId);
-}
-
-export function removeRelation(
-  sourceId: EARS.EntityId,
-  relationType: EARS.RelKind,
-  targetId?: EARS.EntityId
-): void {
-  installedEngine().removeRelation(sourceId, relationType, targetId);
 }
