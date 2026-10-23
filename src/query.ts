@@ -1,5 +1,4 @@
 import type { AttributeStorage } from './attribute-storage.ts';
-import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
 import type { QueryBuilder } from './runtime.ts';
 import { EarsError } from './errors.ts';
@@ -55,13 +54,12 @@ export interface Query extends QueryEntries {
   trashed<E extends string>(type: TypeName<E>): QueryBuilder<E>;
 }
 
-/** An engine's untyped query entry points, over its storage and relation index */
-export function createQuery({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Query {
+/** An engine's untyped query entry points, over its storage (which reads the relation index for them) */
+export function createQuery({ storage, isEntityType }: { storage: AttributeStorage; isEntityType: (name: string) => boolean }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, removals, getAttr, hasAttr,
     findEntitiesInRelationTo, findEntitiesByRelationTo, getRow,
   } = storage;
-  const relationIndex = relations.index;
 
   const prefixCache = new Map<EARS.Entity, (id: EARS.EntityId) => boolean>();
   const hasPrefix = (t: EARS.Entity) => {
@@ -119,10 +117,37 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
       const setIds = (next: EARS.EntityId[]) =>
         qxImpl(removals() === resolvedAt ? next : next.filter(alive));
 
+      /** Whether an entity at an edge's far end is of one of the types, when any are given */
+      const ofTypes = (type?: MaybeArr<EARS.Entity>) => {
+        const types = type ? asArr(type) : [];
+        return (id: EARS.EntityId) => !types.length || types.some((t) => hasPrefix(t)(id));
+      };
+
+      /** The entities at the far end of the set's edges of the kinds, out or in; never an entity of the set itself */
+      const walk = (kinds: MaybeArr<string>, type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
+        const matches = ofTypes(type);
+        const reached = new Set<EARS.EntityId>();
+        for (const from of cur()) for (const k of asArr(kinds)) {
+          for (const i of findEntitiesByRelationTo(k, from, outward)) if (i !== from && matches(i)) reached.add(i);
+        }
+        // A relation's far end may not be in the engine, or be in the trash
+        return qxImpl([...reached].filter(alive));
+      };
+
+      /** Each edge of the kinds, out or in: its kind and the entity at its far end */
+      const edges = <K extends string>(kinds: K | readonly K[], type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
+        const matches = ofTypes(type);
+        const rows: Array<{ kind: K; id: EARS.EntityId }> = [];
+        for (const from of cur()) for (const k of asArr(kinds)) {
+          for (const id of findEntitiesByRelationTo(k, from, outward)) if (matches(id) && alive(id)) rows.push({ kind: k, id });
+        }
+        return rows;
+      };
+
       const self = {
         ofType: (t: EARS.Entity) => setIds(cur().filter(hasPrefix(t))),
 
-        inIds: (sub: readonly EARS.EntityId[]) => {
+        within: (sub: readonly EARS.EntityId[]) => {
           const subSet = new Set(sub);
           return setIds(cur().filter(i => subSet.has(i)));
         },
@@ -152,68 +177,26 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
 
         withRole: (r: string) => setIds(holding(EARS.AttrKind.Role, r)),
 
-        relatedTo: (target: EARS.EntityId) => {
-          const related = new Set(findEntitiesInRelationTo(target));
-          return setIds(cur().filter(i => related.has(i)));
+        linkedWith: (other: EARS.EntityId) => {
+          const linked = new Set(findEntitiesInRelationTo(other));
+          return setIds(cur().filter(i => linked.has(i)));
         },
 
-        related: (kind: string, other: EARS.EntityId, asSrc = false) => {
-          const related = new Set(findEntitiesByRelationTo(kind, other, asSrc));
-          return setIds(cur().filter(i => related.has(i)));
+        linkedTo: (kind: string, other: EARS.EntityId) => {
+          const linked = new Set(findEntitiesByRelationTo(kind, other));
+          return setIds(cur().filter(i => linked.has(i)));
         },
 
-        linksTo: (
-          relKinds: MaybeArr<string>,
-          tgtType?: MaybeArr<EARS.Entity>,
-          asSrc = true,
-        ) => {
-          const kinds = asArr(relKinds);
-          const targets = tgtType ? asArr(tgtType) : [];
-          const matches = (id: EARS.EntityId) => !targets.length || targets.some(t => hasPrefix(t)(id));
-
-          const out = new Set<EARS.EntityId>();
-          for (const src of cur()) for (const k of kinds) {
-            findEntitiesByRelationTo(k, src, asSrc)
-              .filter(matches)
-              .forEach(i => {
-                if (i !== src) out.add(i);
-              });
-          }
-          // A relation's target may not be in the engine, or be in the trash
-          return qxImpl([...out].filter(alive));
+        linkedFrom: (kind: string, other: EARS.EntityId) => {
+          const linked = new Set(findEntitiesByRelationTo(kind, other, true));
+          return setIds(cur().filter(i => linked.has(i)));
         },
 
-        links: <K extends string>(
-          relKinds: K | readonly K[],
-          tgtType?: MaybeArr<EARS.Entity>,
-          asSrc = true,
-        ): Array<{ relation: K; id: EARS.EntityId }> => {
-          const kinds = asArr(relKinds);
-          const targets = tgtType ? asArr(tgtType) : [];
-          const matches = (id: EARS.EntityId) => !targets.length || targets.some(t => hasPrefix(t)(id));
+        out: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, true),
+        in: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, false),
 
-          const out: Array<{ relation: K; id: EARS.EntityId }> = [];
-          for (const src of cur()) for (const k of kinds)
-            findEntitiesByRelationTo(k, src, asSrc)
-              .filter(id => matches(id) && alive(id))
-              .forEach(id => out.push({ relation: k as K, id }));
-
-          return out;
-        },
-
-        edgeIds: (
-          kinds?: string | readonly string[],
-          asSrc = true,
-        ): EARS.EntityId[] => {
-          const ksInput = kinds ? asArr(kinds) : (Object.keys(relationIndex) as readonly string[]);
-          const ks = ksInput.filter(k => relationIndex[k] !== undefined);
-          const out = new Set<EARS.EntityId>();
-          for (const i of cur()) for (const k of ks) {
-            const dir = relationIndex[k]!;
-            (asSrc ? dir.bySource[i] : dir.byTarget[i])?.forEach(r => out.add(r));
-          }
-          return [...out];
-        },
+        outEdges: <K extends string>(kinds: K | readonly K[], type?: MaybeArr<EARS.Entity>) => edges(kinds, type, true),
+        inEdges: <K extends string>(kinds: K | readonly K[], type?: MaybeArr<EARS.Entity>) => edges(kinds, type, false),
 
         pick: <A extends readonly string[]>(fields: A) =>
           cur().map(i => {
@@ -230,24 +213,6 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
 
         // A step's ids are in the engine, so each has a row
         pickAll: () => cur().map((i) => getRow(i)!),
-
-        linksPick: <K extends string, A extends readonly string[]>(
-          relKinds: K | readonly K[],
-          fields: A,
-          tgtType?: MaybeArr<EARS.Entity>,
-        ) => {
-          const manyKinds = Array.isArray(relKinds) && relKinds.length > 1;
-          return self.links(relKinds, tgtType)
-            .map(({ relation, id }) => {
-              const picked = qxImpl([id]).pickOne(fields);
-              if (!picked) return null;
-              return {
-                ...(manyKinds ? { relation } : {}),
-                ...picked,
-              };
-            })
-            .filter(Boolean);
-        },
 
         orderBy: (
           field: string,
@@ -305,7 +270,6 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
         },
 
         ids: () => [...cur()],
-        id: () => self.first(),
         count: () => cur().length,
         first: () => cur()[0] ?? null,
         last: () => (cur().length ? cur()[cur().length - 1] : null),

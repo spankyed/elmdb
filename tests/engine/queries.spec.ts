@@ -64,9 +64,9 @@ describe('starts', () => {
 });
 
 describe('filters', () => {
-  it('ofType, inIds, where, has, lacks, withRole, related and relatedTo', () => {
+  it('ofType, within, where, has, lacks, withRole, linkedTo, linkedFrom and linkedWith', () => {
     expect(e.query.all().ofType('Project').ids()).toEqual([p]);
-    expect(e.query('Task').inIds([t.d, t.a]).ids()).toEqual([t.a, t.d]);
+    expect(e.query('Task').within([t.d, t.a]).ids()).toEqual([t.a, t.d]);
     expect(e.query('Task').where('status', 'open').ids()).toEqual([t.a, t.c, t.d]);
     expect(e.query('Task').has('rank').ids()).toEqual([t.a, t.b, t.d]);
     expect(e.query('Task').lacks('rank').ids()).toEqual([t.c]);
@@ -84,30 +84,33 @@ describe('filters', () => {
     expect(e.query('Task').where('tag', (tag) => (tag as { k?: string }).k === 'y').ids()).toEqual([t.a]);
     expect(e.query('Project').where('tag', 'y').ids()).toEqual([]);
     expect(e.query.all().withRole('focus').ids()).toEqual([t.a]);
-    expect(e.query('Task').related('contains', p, true).ids()).toEqual([t.a, t.b]);
-    expect(e.query('Project').related('contains', t.a).ids()).toEqual([p]);
-    expect(e.query('Task').relatedTo(p).ids()).toEqual([t.a, t.b, t.c]);
+    expect(e.query('Task').linkedFrom('contains', p).ids()).toEqual([t.a, t.b]);
+    expect(e.query('Project').linkedTo('contains', t.a).ids()).toEqual([p]);
+    expect(e.query('Task').linkedWith(p).ids()).toEqual([t.a, t.b, t.c]);
   });
 
-  it('linksTo navigates, by kinds and target types, and links, linksPick return the links', () => {
-    expect(e.query.ids(p).linksTo(['contains', 'owns']).ids()).toEqual([t.a, t.b, t.c]);
-    expect(e.query.ids(p).linksTo('contains', 'Project').ids()).toEqual([]);
-    expect(e.query.ids(p).linksTo('contains', ['Task']).ids()).toEqual([t.a, t.b]);
-    expect(e.query.ids([t.a, t.b]).linksTo('contains', undefined, false).ids()).toEqual([p]);
-    expect(e.query.ids(p).links(['owns', 'contains'])).toEqual([
-      { relation: 'owns', id: t.c }, { relation: 'contains', id: t.a }, { relation: 'contains', id: t.b },
+  it('out and in walk edges, by kinds and target types, and outEdges and inEdges return them', () => {
+    expect(e.query.ids(p).out(['contains', 'owns']).ids()).toEqual([t.a, t.b, t.c]);
+    expect(e.query.ids(p).out('contains', 'Project').ids()).toEqual([]);
+    expect(e.query.ids(p).out('contains', ['Task']).ids()).toEqual([t.a, t.b]);
+    expect(e.query.ids([t.a, t.b]).in('contains').ids()).toEqual([p]);
+    expect(e.query.ids(p).outEdges(['owns', 'contains'])).toEqual([
+      { kind: 'owns', id: t.c }, { kind: 'contains', id: t.a }, { kind: 'contains', id: t.b },
     ]);
-    expect(e.query.ids(p).links('contains', 'Project')).toEqual([]);
+    expect(e.query.ids(p).outEdges('contains', 'Project')).toEqual([]);
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
-    // one — is stepped around by links as by linksTo: neither reaches an entity a query couldn't start from
+    // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
     e.admin.addRelation(p, 'refers', 'Task-ghost' as Id);
     e.write(p).link('refers', t.d);
-    expect(e.query.ids(p).links('refers')).toEqual([{ relation: 'refers', id: t.d }]);
-    expect(e.query.ids(p).linksTo('refers').ids()).toEqual([t.d]);
-    expect(e.query.ids(p).linksPick('contains', ['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
-    expect(e.query.ids(p).linksPick(['contains', 'owns'], ['rank'], 'Task')).toEqual([
-      { relation: 'contains', id: t.a, rank: 2 }, { relation: 'contains', id: t.b, rank: 10 }, { relation: 'owns', id: t.c, rank: null },
+    expect(e.query.ids(p).outEdges('refers')).toEqual([{ kind: 'refers', id: t.d }]);
+    expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);
+    expect(e.query.ids(p).out('contains').pick(['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
+    expect(e.query.ids(p).out(['contains', 'owns'], 'Task').pick(['rank'])).toEqual([
+      { id: t.a, rank: 2 }, { id: t.b, rank: 10 }, { id: t.c, rank: null },
     ]);
+    // Walking in is the same walk the other way
+    expect(e.query.ids(t.a).in('contains').ids()).toEqual([p]);
+    expect(e.query.ids(t.a).inEdges('contains')).toEqual([{ kind: 'contains', id: p }]);
   });
 });
 
@@ -131,11 +134,11 @@ describe('ordering', () => {
 });
 
 describe('terminals', () => {
-  it('count, first, last, id, exists, map, forEach, reduce', () => {
+  it('count, first, last, exists, map, forEach, reduce', () => {
     const q = e.query('Task').where('status', 'open');
-    expect([q.count(), q.first(), q.last(), q.id(), q.exists()]).toEqual([3, t.a, t.d, t.a, true]);
+    expect([q.count(), q.first(), q.last(), q.exists()]).toEqual([3, t.a, t.d, true]);
     const none = e.query('Task').where('status', 'gone');
-    expect([none.count(), none.first(), none.last(), none.id(), none.exists()]).toEqual([0, null, null, null, false]);
+    expect([none.count(), none.first(), none.last(), none.exists()]).toEqual([0, null, null, false]);
     expect(q.map((id) => id.length > 0)).toEqual([true, true, true]);
     const seen: Id[] = [];
     expect(q.forEach((id) => seen.push(id)).count()).toBe(3);
@@ -170,15 +173,15 @@ describe('blueprints', () => {
     });
     const id = e.spawn(plan);
     expect(e.findById(id)).toMatchObject({ title: 'Plan', role: ['current'] });
-    const [owner] = e.query.ids(id).linksTo('owner').ids();
-    expect(e.query.ids(id).linksTo('lead').ids()).toEqual([owner]);
+    const [owner] = e.query.ids(id).out('owner').ids();
+    expect(e.query.ids(id).out('lead').ids()).toEqual([owner]);
     expect(e.findById(owner)).toMatchObject({ name: 'Sam', role: ['member'] });
     expect(e.findRelations({ sourceEntity: id, relationType: 'lead' })[0].info).toEqual({ since: 1 });
-    expect(e.query.ids(id).linksTo('about').ids()).toEqual([t.a]);
+    expect(e.query.ids(id).out('about').ids()).toEqual([t.a]);
 
     const again = e.spawn(plan, { dedupe: false });
     expect(e.query.all().withRole('current').ids()).toEqual([again]);
-    expect(e.query.ids(again).linksTo(['owner', 'lead']).count()).toBe(2);
+    expect(e.query.ids(again).out(['owner', 'lead']).count()).toBe(2);
     expect(e.admin.getEntitiesOfType('Person')).toHaveLength(3);
   });
 });

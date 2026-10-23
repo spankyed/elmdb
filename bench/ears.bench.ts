@@ -82,7 +82,7 @@ describe('queries', () => {
   }, { iterations: 20, time: 0 });
 
   bench('relation traversal (a project: its tasks, then their assignees)', () => {
-    engine.query.ids(project(1)).linksTo('contains', 'Task').linksTo('assigned').count();
+    engine.query.ids(project(1)).out('contains', 'Task').out('assigned').count();
   }, { iterations: 30, time: 0 });
 });
 

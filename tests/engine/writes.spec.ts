@@ -270,7 +270,7 @@ describe('destroy', () => {
     expect(e.admin.getEntitiesOfType('Task')).toEqual([b]);
     expect(e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity])).toEqual([[c, 'contains', b]]);
     expect(e.getAllRelationKinds()).toEqual(['contains']);
-    expect(e.query.ids(c).linksTo('contains').ids()).toEqual([b]);
+    expect(e.query.ids(c).out('contains').ids()).toEqual([b]);
   });
 
   it('destroy forgets an emptied type', () => {
@@ -292,10 +292,10 @@ describe('trash', () => {
     expect(e.query('Task').ids()).toEqual([kept]);
     expect(e.query.ids([kept, binned]).ids()).toEqual([kept]);
     expect(e.query.all().ofType('Task').ids()).toEqual([kept]);
-    expect(e.query.ids(project).linksTo('contains').ids()).toEqual([kept]);
-    expect(e.query.ids(project).links('contains').map(({ id }) => id)).toEqual([kept]);
+    expect(e.query.ids(project).out('contains').ids()).toEqual([kept]);
+    expect(e.query.ids(project).outEdges('contains').map(({ id }) => id)).toEqual([kept]);
     expect(e.query.withTrashed('Task').ids()).toEqual([kept, binned]);
-    expect(e.query.withTrashed.ids(project).linksTo('contains').ids()).toEqual([kept, binned]);
+    expect(e.query.withTrashed.ids(project).out('contains').ids()).toEqual([kept, binned]);
     expect(e.query.trashed('Task').pickAll()).toEqual([expect.objectContaining({ id: binned, title: 'binned', trashedAt: 5 })]);
     // Its edges stay, and a write still reaches it
     expect(e.findRelations({ targetEntity: binned })).toHaveLength(1);
