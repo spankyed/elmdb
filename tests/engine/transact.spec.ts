@@ -112,7 +112,7 @@ describe('a unit that returns', () => {
       e.write(other).set('title', 'two');
       expect(calls).toEqual([]);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttrArray', 'onPutAttrArray', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
   });
 
   it('sends nothing, not even the bracket, when it wrote nothing', () => {
@@ -127,7 +127,7 @@ describe('a unit inside another', () => {
       e.transact(() => e.write(task).set('title', 'inner'));
       expect(calls).toEqual([]);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttrArray', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onUnitEnd']);
   });
 
   it('that throws undoes only its own writes, and the outer keeps going', () => {
@@ -137,7 +137,7 @@ describe('a unit inside another', () => {
       expect(e.findById(task)).toMatchObject({ title: 'outer' });
       expect(e.findById(other)).toMatchObject({ title: 'b' });
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttrArray', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onUnitEnd']);
     expect(e.findById(task)).toMatchObject({ title: 'outer' });
   });
 
@@ -146,8 +146,8 @@ describe('a unit inside another', () => {
       e.write(task).add('tags', 'a');
       expect(() => e.transact(() => { e.write(task).add('tags', 'b'); throw new Error('stop'); })).toThrow();
     });
-    expect(e.getAttrs(task, 'tags')).toEqual(['x', 'a']);
-    const sent = calls.filter(([method, kind]) => method === 'onPutAttrArray' && kind === 'tags');
+    expect(e.getAttr(task, 'tags')).toEqual(['x', 'a']);
+    const sent = calls.filter(([method, kind]) => method === 'onPutAttr' && kind === 'tags');
     expect(sent.at(-1)?.[3]).toEqual(['x', 'a']);
   });
 

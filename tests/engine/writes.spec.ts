@@ -129,38 +129,61 @@ describe('upsert', () => {
 });
 
 describe('attribute writes', () => {
-  it('set replaces, add appends, setMany sets each', () => {
-    const id = e.create('Task').set('tag', 'a').id();
+  it('set replaces, add appends to a list, setMany sets each; a read gives back exactly what was written', () => {
+    const id = e.create('Task').set('tag', ['a']).id();
     e.write(id).add('tag', 'b').add('tag', 'c');
-    expect(e.getAttrs(id, 'tag')).toEqual(['a', 'b', 'c']);
+    expect(e.getAttr(id, 'tag')).toEqual(['a', 'b', 'c']);
     expect(e.findById(id)).toMatchObject({ tag: ['a', 'b', 'c'] });
     e.write(id).set('tag', 'z');
-    expect(e.getAttrs(id, 'tag')).toEqual(['z']);
+    expect(e.getAttr(id, 'tag')).toBe('z');
     e.write(id).setMany({ tag: 'x', other: 1 });
     expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, tag: 'x', other: 1 });
   });
 
-  it('merge combines objects at an index and fills gaps with null', () => {
-    const id = e.create('Task').set('meta', { a: 1, b: 1 }).id();
-    e.write(id).merge('meta', { b: 2, c: 3 }).merge('meta', 'second', 2);
-    expect(e.getAttrs(id, 'meta')).toEqual([{ a: 1, b: 2, c: 3 }, null, 'second']);
-    e.write(id).merge('meta', 'plain', 0);
-    expect(e.getAttr(id, 'meta')).toBe('plain');
-    e.write(id).merge('fresh', 'v', 1);
-    expect(e.getAttrs(id, 'fresh')).toEqual([null, 'v']);
+  it('a one-element list reads as a list, whichever write made it', () => {
+    const id = e.create('Task').set('written', ['only']).add('added', 'only').id();
+    expect(e.getAll(id)).toMatchObject({ written: ['only'], added: ['only'] });
+    expect(e.query('Task').pickAll()[0]).toMatchObject({ written: ['only'], added: ['only'] });
   });
 
-  it('deleteAt removes by index, deleteValue by value or by matching object fields, delete every value', () => {
-    const id = e.create('Task').set('tag', 'a').add('tag', 'b').add('tag', { k: 1, x: 2 }).add('tag', 'c').id();
+  it('add, deleteAt and deleteValue refuse a value that is not a list', () => {
+    const id = e.create('Task').set('title', 'one').id();
+    for (const attempt of [() => e.write(id).add('title', 'two'), () => e.write(id).deleteAt('title', 0), () => e.write(id).deleteValue('title', 'one')]) {
+      expect(attempt).toThrow(expect.objectContaining({ code: 'NOT_A_LIST' }));
+    }
+    expect(e.getAttr(id, 'title')).toBe('one');
+  });
+
+  it('merge combines objects, and sets the value when either is not one', () => {
+    const id = e.create('Task').set('meta', { a: 1, b: 1 }).id();
+    e.write(id).merge('meta', { b: 2, c: 3 });
+    expect(e.getAttr(id, 'meta')).toEqual({ a: 1, b: 2, c: 3 });
+    e.write(id).merge('meta', 'plain');
+    expect(e.getAttr(id, 'meta')).toBe('plain');
+    e.write(id).merge('fresh', { v: 1 });
+    expect(e.getAttr(id, 'fresh')).toEqual({ v: 1 });
+  });
+
+  it('deleteAt removes by index, deleteValue by value or by matching object fields, delete the attribute', () => {
+    const id = e.create('Task').set('tag', ['a', 'b', { k: 1, x: 2 }, 'c']).id();
     e.write(id).deleteAt('tag', 1);
-    expect(e.getAttrs(id, 'tag')).toEqual(['a', { k: 1, x: 2 }, 'c']);
+    expect(e.getAttr(id, 'tag')).toEqual(['a', { k: 1, x: 2 }, 'c']);
     e.write(id).deleteValue('tag', { k: 1 });
-    expect(e.getAttrs(id, 'tag')).toEqual(['a', 'c']);
-    e.write(id).deleteValue('tag', 'missing').delete('absent');
+    expect(e.getAttr(id, 'tag')).toEqual(['a', 'c']);
+    e.write(id).deleteValue('tag', 'missing').deleteAt('tag', 5).delete('absent');
+    expect(e.getAttr(id, 'tag')).toEqual(['a', 'c']);
+    e.write(id).deleteValue('tag', 'a').deleteValue('tag', 'c');
+    expect(e.getAttr(id, 'tag')).toEqual([]);
     e.write(id).delete('tag');
-    expect(e.getAttrs(id, 'tag')).toEqual([]);
     expect(e.getAttr(id, 'tag')).toBeNull();
     expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW });
+  });
+
+  it('never changes a list a read handed out', () => {
+    const id = e.create('Task').set('tag', ['a']).id();
+    const read = e.getAttr(id, 'tag');
+    e.write(id).add('tag', 'b').deleteAt('tag', 0);
+    expect(read).toEqual(['a']);
   });
 
   it.each(['id', 'entityType', 'createdAt', 'role', 'relationDetails'])('refuses %s, which only the engine writes', (name) => {
@@ -236,13 +259,13 @@ describe('finders', () => {
   });
 
   it('read every field of a row, attribute kinds and stats', () => {
-    const a = e.create('Task').set('title', 'A').add('tag', 1).add('tag', 2).id();
+    const a = e.create('Task').set('title', 'A').set('tag', [1, 2]).id();
     const p = e.create('Project').id();
     e.write(p).link('contains', a);
     expect(e.getAll(a)).toEqual({ entityType: 'Task', createdAt: NOW, title: 'A', tag: [1, 2] });
     // `entityType` is read from the id, so it is on every row and in every read, and stored as no attribute
     expect(e.getAttr(a, 'entityType')).toBe('Task');
-    expect(e.getAttrs(p, 'entityType')).toEqual(['Project']);
+    expect(e.getAttr(p, 'entityType')).toBe('Project');
     expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getAttr('Task-gone' as Id, 'entityType')).toBeNull();
     expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'title', 'tag', 'relationDetails']);

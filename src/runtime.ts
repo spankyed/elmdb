@@ -14,9 +14,10 @@ export interface PersistenceSink {
   /** An entity was created, as `entityType`: the one call that gives it a row */
   onCreateEntity(entityId: string, entityType: string): void;
   onDestroyEntity(entityId: string): void;
-  onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]): void;
-  /** An attribute's values after a write, whole: the sink stores them in place of what it had */
-  onPutAttrArray(kind: string, entityId: string, values: unknown[]): void;
+  /** An attribute was removed */
+  onDropAttr(kind: string, entityId: string): void;
+  /** An attribute's value after a write, whole (a list is one array value): the sink stores it in place of what it had */
+  onPutAttr(kind: string, entityId: string, value: unknown): void;
   onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown): void;
   onUpdateRelation(relId: string, patch: { src?: string; tgt?: string; info?: unknown }): void;
   /**
@@ -47,7 +48,7 @@ export const noopSink: PersistenceSink = {
   onCreateEntity() {},
   onDestroyEntity() {},
   onDropAttr() {},
-  onPutAttrArray() {},
+  onPutAttr() {},
   onAddRelation() {},
   onUpdateRelation() {},
   onRemoveRelation() {},
@@ -184,6 +185,9 @@ export interface CreateOptions {
 export type FieldValue<S extends EntityShapes, E extends string, K extends string> =
   [E] extends [keyof S] ? (K extends keyof ShapeOf<S, E> ? ShapeOf<S, E>[K] : unknown) : unknown;
 
+/** An element of a declared list field (`T[]`), and anything for a field that isn't declared as one */
+export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+
 /** Fields for a batch write: declared fields take their declared types, other fields anything */
 export type FieldValues<S extends EntityShapes, E extends string> =
   [E] extends [keyof S] ? { [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K] } & Record<string, unknown> : Record<string, unknown>;
@@ -195,20 +199,20 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * `entityType`, `createdAt`, `role`, `relationDetails`) are refused by every attribute write.
  */
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
-  /** Replaces the attribute's values with `v` */
+  /** Replaces the attribute's value with `v` (a list is one array value) */
   set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
   /** `set` for each field; refuses them all, writing none, when one is the engine's */
   setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S>;
-  /** Appends `v` to the attribute's values */
-  add<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
-  /** Merges `v` into the object at `index` (the first by default), or sets it there */
-  merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>, index?: number): WriteBuilder<E, S>;
-  /** Removes the attribute, every value of it */
+  /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
+  add<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+  /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
+  merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+  /** Removes the attribute */
   delete(k: string): WriteBuilder<E, S>;
-  /** Removes the value at `index` */
+  /** Removes the list's element at `index`; refuses a value that isn't a list */
   deleteAt(k: string, index: number): WriteBuilder<E, S>;
-  /** Removes the first value equal to `v` (for an object, the first holding each of `v`'s fields) */
-  deleteValue<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
+  /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
+  deleteValue<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
   /**
    * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
    * none is given) is the same edge, and linking it again changes nothing.

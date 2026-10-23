@@ -77,17 +77,12 @@ export function makeShardedPersistence(
       sinks[p].onDestroyEntity(entityId);
     },
 
-    onPutAttrArray(kind: string, entityId: string, values: unknown[]) {
-      sinks[pickEntity(entityId)].onPutAttrArray(kind, entityId, values);
+    onPutAttr(kind: string, entityId: string, value: unknown) {
+      sinks[pickEntity(entityId)].onPutAttr(kind, entityId, value);
     },
 
-    onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]) {
-      // Enforce entireArray requirement for consistency
-      if (!entireArray) {
-        throw new Error('[Sharded] onDropAttr requires entireArray parameter to avoid index drift');
-      }
-      const p = pickEntity(entityId);
-      sinks[p].onDropAttr(kind, entityId, idx, entireArray);
+    onDropAttr(kind: string, entityId: string) {
+      sinks[pickEntity(entityId)].onDropAttr(kind, entityId);
     },
 
     onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown) {

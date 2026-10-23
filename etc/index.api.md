@@ -216,7 +216,6 @@ export interface Ears {
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
     // (undocumented)
     generateShortCode(entityType: EARS.Entity, prefix: string): string;
-    // (undocumented)
     getAll(id: EARS.EntityId): Record<string, unknown>;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
@@ -226,15 +225,12 @@ export interface Ears {
     getAllEntityTypes(): EARS.Entity[];
     // (undocumented)
     getAllRelationKinds(): string[];
-    // (undocumented)
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
+    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     // (undocumented)
     getAttributeStats(kind: EARS.AttrKind): {
         entityCount: number;
         totalValues: number;
     };
-    // (undocumented)
-    getAttrs(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue[];
     // (undocumented)
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     // (undocumented)
@@ -297,33 +293,22 @@ export interface Ears {
 // @public
 export interface EarsAdmin {
     // (undocumented)
-    addAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    // (undocumented)
     addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
     addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
-    bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
+    bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-    // (undocumented)
-    dropAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): void;
-    // (undocumented)
-    dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
     // (undocumented)
     edgeStore: EdgeStore;
     // (undocumented)
     findEntitiesByRole(role: string): EARS.EntityId[];
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
+    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     isEntityType(name: string): boolean;
-    // (undocumented)
-    mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
-    // (undocumented)
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     readonly relationIndex: Readonly<RelationIndex>;
     // (undocumented)
     removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
     repositories(): Record<string, unknown>;
-    // (undocumented)
-    updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     // (undocumented)
     updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
     // (undocumented)
@@ -356,7 +341,9 @@ export type EarsErrorCode =
 /** A write named an attribute the engine owns */
 | 'RESERVED_ATTRIBUTE'
 /** A `where` was given no value to compare with */
-| 'NO_VALUE';
+| 'NO_VALUE'
+/** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
+| 'NOT_A_LIST';
 
 // @public
 export interface EARSRuntimeDeps {
@@ -418,6 +405,9 @@ export interface LinkOptions {
 }
 
 // @public
+export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+
+// @public
 export function makePolicy(config: {
     excludedEntityTypes: ReadonlySet<EARS.Entity>;
     hydratePartitions?: ReadonlySet<Partition>;
@@ -461,9 +451,8 @@ export interface PersistenceSink {
     onCreateEntity(entityId: string, entityType: string): void;
     // (undocumented)
     onDestroyEntity(entityId: string): void;
-    // (undocumented)
-    onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]): void;
-    onPutAttrArray(kind: string, entityId: string, values: unknown[]): void;
+    onDropAttr(kind: string, entityId: string): void;
+    onPutAttr(kind: string, entityId: string, value: unknown): void;
     onRemoveRelation(relId: string, destroyed?: string): void;
     // (undocumented)
     onUnitEnd(): void;
@@ -689,8 +678,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     getAttr: TypedGetAttr<S>;
     // (undocumented)
-    getAttrs: TypedGetAttrs<S>;
-    // (undocumented)
     query: TypedQuery<S, N>;
     // (undocumented)
     transact: Ears['transact'];
@@ -749,17 +736,9 @@ export type TypedFindWithRole<S extends EntityShapes, N extends string = string>
 // @public
 export interface TypedGetAttr<S extends EntityShapes> {
     // (undocumented)
-    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K, index?: number): ShapeOf<S, E>[K] | null;
+    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | null;
     // (undocumented)
-    (id: EARS.EntityId, field: string, index?: number): unknown;
-}
-
-// @public
-export interface TypedGetAttrs<S extends EntityShapes> {
-    // (undocumented)
-    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K][];
-    // (undocumented)
-    (id: EARS.EntityId, field: string): unknown[];
+    (id: EARS.EntityId, field: string): unknown;
 }
 
 // @public
@@ -811,10 +790,10 @@ export interface Write {
 
 // @public
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
-    add<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
+    add<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     delete(k: string): WriteBuilder<E, S>;
     deleteAt(k: string, index: number): WriteBuilder<E, S>;
-    deleteValue<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
+    deleteValue<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     destroy(options?: {
         keepStored?: boolean;
     }): void;
@@ -824,7 +803,7 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     // (undocumented)
     id(): EARS.EntityId<E>;
     link(kind: string, target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, S>;
-    merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>, index?: number): WriteBuilder<E, S>;
+    merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     // (undocumented)
     revoke(role: string): WriteBuilder<E, S>;
     set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;

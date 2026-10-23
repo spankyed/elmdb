@@ -13,7 +13,7 @@ import * as path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createEarsEngine, makePolicy, type EARS, type EarsEngine } from '../../src/index.ts';
 import { open as openEnv } from 'lmdb';
-import { LMDB_FORMAT_VERSION, convertToFormat2, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
+import { LMDB_FORMAT_VERSION, convertToCurrentFormat, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
 const policy = makePolicy({ excludedEntityTypes: new Set(['Trace']) });
@@ -82,10 +82,24 @@ describe('openLmdbStore', () => {
     expect(engine.getEntitiesOfType('Relation')).toHaveLength(1);
     // Only the primary partition is hydrated; the volatile one is read directly
     expect(getAttr(id('Trace-1'), 'step')).toBeNull();
-    expect(second.read('volatileBackup').getFirstAttr('step', 'Trace-1')).toBe('volatile');
+    expect(second.read('volatileBackup').getAttr('step', 'Trace-1')).toBe('volatile');
 
     await second.hydrate({ includeVolatile: true });
     expect(getAttr(id('Trace-1'), 'step')).toBe('volatile');
+  });
+
+  it('reads back every value as it was written, a one-element list, a grown list and roles included', async () => {
+    const first = openStore();
+    const note = engine.create('Note', { id: id('Note-1') })
+      .set('tags', ['only']).add('grown', 'a').add('grown', 'b').set('meta', { k: [1] }).set('nothing', null)
+      .grant('current').id();
+    await flushed();
+    const written = engine.getAll(note);
+    first.close();
+
+    await openStore().hydrate();
+    expect(engine.getAll(note)).toEqual(written);
+    expect(written).toMatchObject({ tags: ['only'], grown: ['a', 'b'], meta: { k: [1] }, nothing: null, role: ['current'] });
   });
 
   it('keeps one sink across a reopen, and drops writes while closed', async () => {
@@ -101,7 +115,7 @@ describe('openLmdbStore', () => {
     expect(store.sink).toBe(sink);
     engine.create('Note', { id: id('Note-after') }).set('title', 'saved');
     await flushed();
-    expect(store.read('primary').getFirstAttr('title', 'Note-after')).toBe('saved');
+    expect(store.read('primary').getAttr('title', 'Note-after')).toBe('saved');
     expect(store.read('primary').getEntityMeta('Note-dropped')).toBeNull();
   });
 
@@ -129,7 +143,7 @@ describe('openLmdbStore', () => {
     await flushed();
 
     expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
-    expect(store.read('primary').getFirstAttr('title', 'Note-2')).toBe('written during the reset');
+    expect(store.read('primary').getAttr('title', 'Note-2')).toBe('written during the reset');
     // A store closed any other way still drops writes
     store.close();
     engine.create('Note', { id: id('Note-3') }).set('title', 'dropped');
@@ -271,7 +285,7 @@ describe('openLmdbStore', () => {
     expect(lines).toContain('[LMDB] Environment closed successfully');
 
     const reopened = openStore();
-    expect(reopened.read('primary').getFirstAttr('title', 'Note-1')).toBe('kept');
+    expect(reopened.read('primary').getAttr('title', 'Note-1')).toBe('kept');
   });
 
   it('reports writes lost while it was closed for a reopen or a reset, not only this close\'s', async () => {
@@ -375,19 +389,20 @@ describe('the storage format', () => {
   });
 
   it('refuses files that predate it, which are format 1, until they are converted', async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'kept');
-    await flushed();
-    store.close();
-    // Files from before the format was recorded, holding data
+    openStore().close();
+    // Files from before the format was recorded, holding data: an attribute row per list index
     writeFormat(paths.primary);
+    const root = openEnv({ path: paths.primary, maxDbs: 8, compression: true });
+    root.openDB({ name: 'entities', encoding: 'json' }).putSync('Note-1', { type: 'Note', createdAt: 1 });
+    root.openDB({ name: 'attrs', encoding: 'json' }).putSync('title\x1FNote-1\x1F0', { t: 'string', v: 'kept' });
+    root.close();
 
-    const format1 = /storage format 1, but this version reads format 2: convert a copy of it with scripts\/ears-format-2\.ts/;
+    const format1 = new RegExp(`storage format 1, but this version reads format ${LMDB_FORMAT_VERSION}: convert a copy of it with scripts/ears-convert\\.ts`);
     expect(() => openStore({ readOnly: true, log: () => {} })).toThrow(format1);
     expect(() => openStore()).toThrow(format1);
     expect(storedFormat(paths.primary)).toBeUndefined();
 
-    convertToFormat2(paths.primary);
+    convertToCurrentFormat(paths.primary);
     expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
     const converted = openStore({ log: () => {} });
     await converted.hydrate();
@@ -440,7 +455,7 @@ describe('the storage format', () => {
     const store = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'after');
     await flushed();
-    expect(store.read('primary').getFirstAttr('title', 'Note-1')).toBe('after');
+    expect(store.read('primary').getAttr('title', 'Note-1')).toBe('after');
     expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
   });
 });

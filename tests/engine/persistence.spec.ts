@@ -26,23 +26,23 @@ describe('persistence sink', () => {
 
     expect(calls).toEqual([
       ['onCreateEntity', '#1', 'Task'],
-      ['onPutAttrArray', 'createdAt', '#1', [1000]],
-      ['onPutAttrArray', 'title', '#1', ['A']],
-      ['onPutAttrArray', 'tag', '#1', ['x']],
-      ['onPutAttrArray', 'tag', '#1', ['x', 'y']],
+      ['onPutAttr', 'createdAt', '#1', 1000],
+      ['onPutAttr', 'title', '#1', 'A'],
+      ['onPutAttr', 'tag', '#1', ['x']],
+      ['onPutAttr', 'tag', '#1', ['x', 'y']],
       ['onCreateEntity', '#2', 'Project'],
-      ['onPutAttrArray', 'createdAt', '#2', [1000]],
-      ['onPutAttrArray', 'title', '#2', ['P']],
-      ['onPutAttrArray', 'meta', '#1', [{ k: 1 }]],
-      ['onPutAttrArray', 'tag', '#1', ['y']],
-      ['onDropAttr', 'tag', '#1', 0, []],
-      ['onPutAttrArray', 'role', '#1', ['lead']],
+      ['onPutAttr', 'createdAt', '#2', 1000],
+      ['onPutAttr', 'title', '#2', 'P'],
+      ['onPutAttr', 'meta', '#1', { k: 1 }],
+      ['onPutAttr', 'tag', '#1', ['y']],
+      ['onPutAttr', 'tag', '#1', []],
+      ['onPutAttr', 'role', '#1', ['lead']],
       ['onAddRelation', '#3', 'contains', '#2', '#1', { order: 1 }],
       ['onUpdateRelation', '#3', { info: { order: 2 } }],
       ['onRemoveRelation', '#3'],
       ['onAddRelation', '#4', 'contains', '#2', '#1', undefined],
-      ['onPutAttrArray', 'updatedAt', '#1', [1000]],
-      ['onPutAttrArray', 'title', '#1', ['B']],
+      ['onPutAttr', 'updatedAt', '#1', 1000],
+      ['onPutAttr', 'title', '#1', 'B'],
       ['onRemoveRelation', '#4', '#1'],
       ['onDestroyEntity', '#1'],
     ]);
@@ -56,25 +56,22 @@ describe('persistence sink', () => {
     e.admin.updateRelation(rel, undefined, c, 'why');
     e.admin.updateRelation('Relation-none' as Id, a);
     e.admin.putAttr(a, 'x', 1);
-    e.admin.addAttr(a, 'x', 2);
-    e.admin.mergeAttr(a, 'x', 3, 1);
-    e.admin.updateAttr(a, 'x', 4);
-    e.admin.dropIf(a, 'x', 4);
-    e.admin.dropAttr(a, 'x');
+    e.admin.putAttr(a, 'x', [1, 2]);
+    e.admin.deleteAttr(a, 'x');
+    e.admin.deleteAttr(a, 'x');
     // Each create: the entity with its type, then its createdAt; `entityType` is the id's, never stored
     expect(calls.slice(0, 2)).toEqual([
       ['onCreateEntity', '#1', 'Task'],
-      ['onPutAttrArray', 'createdAt', '#1', [1000]],
+      ['onPutAttr', 'createdAt', '#1', 1000],
     ]);
     // A relation's details reach the sink as its row (onAddRelation, onUpdateRelation), never as an attribute
     expect(calls.slice(6)).toEqual([
       ['onAddRelation', '#4', 'refs', '#1', '#2', undefined],
       ['onUpdateRelation', '#4', { tgt: '#3', info: 'why' }],
-      ['onPutAttrArray', 'x', '#1', [1]],
-      ['onPutAttrArray', 'x', '#1', [1, 2]],
-      ['onPutAttrArray', 'x', '#1', [1, 3]],
-      ['onPutAttrArray', 'x', '#1', [4]],
-      ['onDropAttr', 'x', '#1', 0, []],
+      ['onPutAttr', 'x', '#1', 1],
+      ['onPutAttr', 'x', '#1', [1, 2]],
+      // Removing what isn't there tells the sink nothing
+      ['onDropAttr', 'x', '#1'],
     ]);
     expect(e.query.ids(a).linksTo('refs').ids()).toEqual([c]);
   });
@@ -86,13 +83,11 @@ describe('hydration', () => {
     const e = engine(sink);
     const [a, b, p, rel] = ['Task-a1', 'Task-b1', 'Project-p1', 'Relation-r1'] as Id[];
     e.admin.bulkLoadAttr(a, 'title', 'A');
-    e.admin.bulkLoadAttr(a, 'tag', 'second', 1);
-    e.admin.bulkLoadAttr(a, 'tag', 'first', 0);
-    e.admin.bulkLoadAttr(a, 'meta', { x: 1 });
-    e.admin.bulkLoadAttr(a, 'meta', { y: 2 });
+    e.admin.bulkLoadAttr(a, 'tag', ['first', 'second']);
+    e.admin.bulkLoadAttr(a, 'meta', { x: 1, y: 2 });
     e.admin.bulkLoadAttr(b, 'title', 'B');
     e.admin.bulkLoadAttr(p, 'title', 'P');
-    e.admin.bulkLoadAttr(p, EARS.AttrKind.Role, 'current');
+    e.admin.bulkLoadAttr(p, EARS.AttrKind.Role, ['current']);
     e.admin.bulkLoadAttr(rel, EARS.AttrKind.RelationDetails, { sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } });
     e.admin.addToIndex('contains', p, a, rel);
     e.admin.addToIndex('contains', p, a, rel);

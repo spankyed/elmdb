@@ -4,6 +4,7 @@ import { EARS } from './entities.ts';
 import type { QueryBuilder } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import { SEQUENCE_TYPE } from './entity-utils.ts';
+import { holds } from './attribute-storage.ts';
 import type { TypeName } from './write.ts';
 
 type MaybeArr<T> = T | readonly T[];
@@ -40,7 +41,7 @@ export interface Query {
 /** An engine's untyped query entry points, over its storage and relation index */
 export function createQuery({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Query {
   const {
-    getAllEntities, getEntitiesOfType, hasEntity, removals, getAttr, getAttrs, getRoles,
+    getAllEntities, getEntitiesOfType, hasEntity, removals, getAttr, hasAttr, getRoles,
     findEntitiesInRelationTo, findEntitiesByRelationTo, getAll,
   } = storage;
   const relationIndex = relations.index;
@@ -91,18 +92,21 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
           throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
         }
         const kind = EARS.AttrKind.Custom(k);
-        const test = typeof v === 'function' ? v as (value: unknown) => boolean : (value: unknown) => value === v;
-        return setIds(ids.filter(i => getAttrs(i, kind).some(test)));
+        // A value matches itself or a list holding it; a predicate is given the whole value
+        const test = typeof v === 'function'
+          ? (i: EARS.EntityId) => hasAttr(i, kind) && (v as (value: unknown) => boolean)(getAttr(i, kind))
+          : (i: EARS.EntityId) => holds(getAttr(i, kind), v);
+        return setIds(ids.filter(test));
       },
 
       has: (k: string) => {
         const kind = EARS.AttrKind.Custom(k);
-        return setIds(ids.filter(i => getAttrs(i, kind).length > 0));
+        return setIds(ids.filter(i => hasAttr(i, kind)));
       },
 
       lacks: (k: string) => {
         const kind = EARS.AttrKind.Custom(k);
-        return setIds(ids.filter(i => getAttrs(i, kind).length === 0));
+        return setIds(ids.filter(i => !hasAttr(i, kind)));
       },
 
       withRole: (r: string) => setIds(ids.filter(i => getRoles(i).includes(r))),

@@ -43,14 +43,10 @@ export async function hydrateSharded(params: {
     // Hydrate attributes
     let attrCount = 0;
     for (const { key, value } of env.attrs.getRange()) {
+      // kind␟entityId: one row per attribute
       const keyStr = String(key);
-      const sep1 = keyStr.indexOf(SEP);
-      const sep2 = keyStr.indexOf(SEP, sep1 + 1);
-      const kind = keyStr.substring(0, sep1);
-      const entityId = keyStr.substring(sep1 + 1, sep2);
-
-      const idx = Number(keyStr.substring(sep2 + 1));
-      engine.bulkLoadAttr(entityId as EARS.EntityId, kind as EARS.AttrKind, dec(value), idx);
+      const sep = keyStr.indexOf(SEP);
+      engine.bulkLoadAttr(keyStr.substring(sep + 1) as EARS.EntityId, keyStr.substring(0, sep) as EARS.AttrKind, dec(value));
       attrCount++;
     }
 

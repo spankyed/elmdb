@@ -3,6 +3,7 @@ import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
+import { EarsError } from './errors.ts';
 
 /**
  * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this
@@ -14,6 +15,9 @@ export const createEntity = <E extends EARS.Entity>(t: E): EARS.EntityId =>
   `${t}-${idSuffix()}` as EARS.EntityId;
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
+
+/** No value: an attribute an entity doesn't hold, which `null`, a value, can't say */
+const ABSENT = Symbol('absent');
 
 /**
  * An entity's type, from its id: the one record of it. `createEntity` builds `<Type>-<suffix>`, `create`
@@ -28,7 +32,9 @@ export const entityTypeOf = (id: EARS.EntityId) => {
 
 /** An engine's attributes (by kind, then entity), its entity index by type, and the writes and reads over them */
 export function createAttributeStorage({ relations, persistence, journal }: { relations: RelationIndexStore; persistence: PersistenceSink; journal: Journal }) {
-  const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue[]>>();
+  // One value per attribute: a list is an array value. A stored value is never changed in place, so the value an
+  // undo or a held sink call keeps is the value that was there
+  const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue>>();
   const entityIndex = new Map<EARS.Entity, Set<EARS.EntityId>>();
   const relationIndex = relations.index;
   // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
@@ -50,15 +56,18 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return store.get(k)!;
   };
 
-  /** Records how to put back the entity's values of a kind (a copy, since writes change the list in place) */
-  const touchValues = (id: EARS.EntityId, kind: EARS.AttrKind) =>
+  /** Memory's one write of an attribute: `next`, or nothing when it is `ABSENT`. Undo goes through it too */
+  const place = (id: EARS.EntityId, kind: EARS.AttrKind, next: EARS.AttributeValue | typeof ABSENT) => {
+    if (next === ABSENT) store.get(kind)?.delete(id);
+    else bucket(kind).set(id, next);
+  };
+
+  /** Records how to put back the entity's value of a kind */
+  const touchValue = (id: EARS.EntityId, kind: EARS.AttrKind) =>
     journal.open && journal.touch(`a\x1F${kind}\x1F${id}`, () => {
-      const before = store.get(kind)?.get(id);
-      const copy = before?.map((v) => (isPlainObject(v) ? { ...v } : v)) as EARS.AttributeValue[] | undefined;
-      return () => {
-        if (copy) bucket(kind).set(id, copy);
-        else store.get(kind)?.delete(id);
-      };
+      const b = store.get(kind);
+      const before = b?.has(id) ? b.get(id)! : ABSENT;
+      return () => place(id, kind, before);
     });
 
   /** Records whether the entity was in the index, to put that back */
@@ -89,98 +98,92 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   };
 
   const indexEntity = (id: EARS.EntityId) => {
-    touchIndexed(id);
     const type = entityTypeOf(id);
     const ids = entityIndex.get(type);
+    if (ids?.has(id)) return;
+    touchIndexed(id);
     if (ids) ids.add(id);
     else entityIndex.set(type, new Set([id]));
   };
 
-  /** The entity's values of a kind, created (and the entity indexed) on the first */
-  const valuesOf = (id: EARS.EntityId, kind: EARS.AttrKind) => {
-    const b = bucket(kind);
-    let list = b.get(id);
-    if (!list) {
-      list = [];
-      b.set(id, list);
-      indexEntity(id);
-    }
-    return list;
+  /** Every write of an attribute: journaled, in memory, and told to persistence */
+  const assign = (id: EARS.EntityId, kind: EARS.AttrKind, next: EARS.AttributeValue | typeof ABSENT) => {
+    if (next === ABSENT && !store.get(kind)?.has(id)) return;
+    touchValue(id, kind);
+    place(id, kind, next);
+    if (next !== ABSENT) indexEntity(id);
+    if (!persisted(kind)) return;
+    if (next === ABSENT) persistence.onDropAttr(kind, id);
+    else persistence.onPutAttr(kind, id, next);
   };
 
-  /** Sets the value at `idx`, merging it into a plain object already there */
-  const mergeAt = (list: EARS.AttributeValue[], val: unknown, idx: number) => {
-    while (list.length < idx) list.push(null as unknown as EARS.AttributeValue);
-    const cur = list[idx];
-    list[idx] = cur && isPlainObject(cur) && isPlainObject(val) ? { ...cur, ...val } : val as EARS.AttributeValue;
+  const current = (id: EARS.EntityId, kind: EARS.AttrKind) => {
+    const b = store.get(kind);
+    return b?.has(id) ? b.get(id) : ABSENT;
   };
 
-  const add = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
-    touchValues(id, kind);
-    const list = valuesOf(id, kind);
-    list.push(val as EARS.AttributeValue);
-    if (persisted(kind)) persistence.onPutAttrArray(kind, id, list);
+  /** The attribute's list, refusing a value that isn't one */
+  const listOf = (id: EARS.EntityId, kind: EARS.AttrKind, via: string): readonly unknown[] => {
+    const value = current(id, kind);
+    if (value === ABSENT) return [];
+    if (Array.isArray(value)) return value;
+    throw new EarsError('NOT_A_LIST', `${via}('${kind}'): ${id}'s value is not a list`);
   };
 
-  const put = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
-    touchValues(id, kind);
-    bucket(kind).set(id, [val as EARS.AttributeValue]);
-    indexEntity(id);
-    if (persisted(kind)) persistence.onPutAttrArray(kind, id, [val]);
+  const put = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) =>
+    assign(id, kind, val as EARS.AttributeValue);
+
+  /** Appends `val` to the attribute's list, starting one when there is none */
+  const append = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) =>
+    assign(id, kind, [...listOf(id, kind, 'add'), val] as unknown as EARS.AttributeValue);
+
+  /** Merges `val` into the attribute's object, or sets it when either isn't a plain object */
+  const merge = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
+    const cur = current(id, kind);
+    const next = cur !== ABSENT && isPlainObject(cur) && isPlainObject(val) ? { ...cur, ...val } : val;
+    assign(id, kind, next as EARS.AttributeValue);
   };
 
-  const merge = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown, idx = 0) => {
-    touchValues(id, kind);
-    const list = valuesOf(id, kind);
-    mergeAt(list, val, idx);
-    if (persisted(kind)) persistence.onPutAttrArray(kind, id, list);
+  /** Removes the list's element at `idx` */
+  const removeAt = (id: EARS.EntityId, kind: EARS.AttrKind, idx: number) => {
+    const list = listOf(id, kind, 'deleteAt');
+    if (idx < 0 || idx >= list.length) return;
+    assign(id, kind, list.filter((_, i) => i !== idx) as unknown as EARS.AttributeValue);
   };
 
-  const drop = (id: EARS.EntityId, kind: EARS.AttrKind, idx = 0) => {
-    const list = bucket(kind).get(id);
-    if (!list?.length) return;
-    touchValues(id, kind);
-    list.splice(idx, 1);
-    if (!persisted(kind)) {
-      if (!list.length) bucket(kind).delete(id);
-    } else if (!list.length) {
-      bucket(kind).delete(id);
-      persistence.onDropAttr(kind, id, idx, []);
-    } else {
-      persistence.onPutAttrArray(kind, id, list);
-    }
-  };
-
-  /** Removes every value of the kind */
-  const deleteAttr = (id: EARS.EntityId, kind: EARS.AttrKind) => {
-    if (!bucket(kind).get(id)?.length) return;
-    touchValues(id, kind);
-    bucket(kind).delete(id);
-    if (persisted(kind)) persistence.onDropAttr(kind, id, 0, []);
-  };
-
-  const dropIf = (id: EARS.EntityId, kind: EARS.AttrKind, crit: unknown) => {
-    const list = bucket(kind).get(id);
-    if (!list) return;
+  /** Removes the list's first element equal to `crit` (for an object, the first holding each of its fields) */
+  const removeValue = (id: EARS.EntityId, kind: EARS.AttrKind, crit: unknown) => {
+    const list = listOf(id, kind, 'deleteValue');
     const i = list.findIndex(
       v =>
         v === crit ||
         (isPlainObject(v) &&
           isPlainObject(crit) &&
-          Object.entries(crit).every(([k, v0]) => (v as any)[k] === v0)),
+          Object.entries(crit).every(([k, v0]) => (v as Record<string, unknown>)[k] === v0)),
     );
-    if (i !== -1) drop(id, kind, i);
+    if (i !== -1) assign(id, kind, list.filter((_, j) => j !== i) as unknown as EARS.AttributeValue);
   };
 
+  /** Removes the attribute */
+  const deleteAttr = (id: EARS.EntityId, kind: EARS.AttrKind) => assign(id, kind, ABSENT);
+
   /** A stored value, loaded without telling persistence */
-  function bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, val: unknown, idx = 0) {
-    mergeAt(valuesOf(id, kind), val, idx);
+  function bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) {
+    place(id, kind, val as EARS.AttributeValue);
+    indexEntity(id);
   }
 
-  const grantRole  = (id: EARS.EntityId, role: string) =>
-    add(id, EARS.AttrKind.Role, role);
-  const revokeRole = (id: EARS.EntityId, role: string) =>
-    dropIf(id, EARS.AttrKind.Role, role);
+  // Roles are one list; an entity with none holds no role attribute
+  const grantRole = (id: EARS.EntityId, role: string) => {
+    const roles = getRoles(id);
+    if (!roles.includes(role)) assign(id, EARS.AttrKind.Role, [...roles, role] as unknown as EARS.AttributeValue);
+  };
+  const revokeRole = (id: EARS.EntityId, role: string) => {
+    const roles = getRoles(id);
+    if (!roles.includes(role)) return;
+    const rest = roles.filter((r) => r !== role);
+    assign(id, EARS.AttrKind.Role, rest.length ? rest as unknown as EARS.AttributeValue : ABSENT);
+  };
 
   function addRelation(
     src: EARS.EntityId,
@@ -223,15 +226,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       EARS.AttrKind.RelationDetails,
     ) as EARS.RelationDetail | null;
     if (!d) return;
-    // Before `d` changes in place below
-    touchValues(relId, EARS.AttrKind.RelationDetails);
     const { sourceEntity: oS, targetEntity: oT, relationType: k } = d;
-    if (newS) d.sourceEntity = newS;
-    if (newT) d.targetEntity = newT;
-    if (info !== undefined) d.info = info;
-    merge(relId, EARS.AttrKind.RelationDetails, d);
+    const next: EARS.RelationDetail = {
+      ...d,
+      ...(newS && { sourceEntity: newS }),
+      ...(newT && { targetEntity: newT }),
+      ...(info !== undefined && { info }),
+    };
+    put(relId, EARS.AttrKind.RelationDetails, next);
     if (newS || newT)
-      relations.updateIndex(k, relId, oS, oT, d.sourceEntity, d.targetEntity);
+      relations.updateIndex(k, relId, oS, oT, next.sourceEntity, next.targetEntity);
     const patch: any = {};
     if (newS) patch.src = newS;
     if (newT) patch.tgt = newT;
@@ -250,7 +254,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     ) as EARS.RelationDetail | null;
     if (d)
       relations.removeFromIndex(d.relationType, d.sourceEntity, d.targetEntity, relId);
-    drop(relId, EARS.AttrKind.RelationDetails);
+    deleteAttr(relId, EARS.AttrKind.RelationDetails);
     // A relation is its details: with them gone, so is the relation's entity
     unindexEntity(relId);
     if (destroyed) persistence.onRemoveRelation(relId, destroyed);
@@ -259,18 +263,23 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const removeRelationById = (relId: EARS.EntityId) => removeRelation(relId);
 
   // `entityType` is read from the id rather than stored, so every row carries it and none can disagree
-  const getAttr  = (id: EARS.EntityId, k: EARS.AttrKind, i = 0) =>
-    k === ENTITY_TYPE ? (i === 0 && hasEntity(id) ? entityTypeOf(id) : null) : bucket(k).get(id)?.[i] ?? null;
-  const getAttrs = (id: EARS.EntityId, k: EARS.AttrKind): EARS.AttributeValue[] =>
-    k === ENTITY_TYPE ? (hasEntity(id) ? [entityTypeOf(id)] : []) : bucket(k).get(id) ?? [];
-  const getRoles = (id: EARS.EntityId) =>
-    getAttrs(id, EARS.AttrKind.Role) as string[];
+  const getAttr = (id: EARS.EntityId, k: EARS.AttrKind): EARS.AttributeValue | null => {
+    if (k === ENTITY_TYPE) return hasEntity(id) ? entityTypeOf(id) : null;
+    const value = current(id, k);
+    return value === ABSENT ? null : value;
+  };
+  /** Whether the entity holds the attribute, `null` included */
+  const hasAttr = (id: EARS.EntityId, k: EARS.AttrKind) =>
+    k === ENTITY_TYPE ? hasEntity(id) : store.get(k)?.has(id) ?? false;
+  const getRoles = (id: EARS.EntityId): string[] => {
+    const roles = current(id, EARS.AttrKind.Role);
+    return roles === ABSENT ? [] : roles as unknown as string[];
+  };
 
+  /** Every attribute the entity holds, each exactly as it was written */
   const getAll = (id: EARS.EntityId) => {
     const out: Record<string, unknown> = hasEntity(id) ? { [ENTITY_TYPE]: entityTypeOf(id) } : {};
-    for (const [k, b] of store)
-      if (b.get(id))
-        out[k] = b.get(id)!.length === 1 ? b.get(id)![0] : b.get(id);
+    for (const [k, b] of store) if (b.has(id)) out[k] = b.get(id);
     return out;
   };
 
@@ -294,15 +303,9 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const findEntitiesByRole = (role: string) =>
     getAllEntities().filter(id => getRoles(id).includes(role));
 
-  const findEntitiesByAttribute = (
-    k: EARS.AttrKind,
-    v?: unknown,
-  ) =>
-    v === undefined
-      ? getAllEntities().filter(id => getAttrs(id, k).length)
-      : getAllEntities().filter(id =>
-          getAttrs(id, k).some(attr => attr === v),
-        );
+  /** Entities holding the attribute, or, given a value, holding it or a list containing it */
+  const findEntitiesByAttribute = (k: EARS.AttrKind, v?: unknown) =>
+    getAllEntities().filter(id => v === undefined ? hasAttr(id, k) : holds(getAttr(id, k), v));
 
   const findEntitiesInRelationTo = (target: EARS.EntityId) => {
     const out = new Set<EARS.EntityId>();
@@ -356,8 +359,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     }
     for (const [k, b] of store) {
       if (!b.has(id)) continue;
-      touchValues(id, k);
-      b.delete(id);
+      touchValue(id, k);
+      place(id, k, ABSENT);
     }
     unindexEntity(id);
     if (!skipPersistence) {
@@ -369,12 +372,11 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const getAllRelationKinds = (): string[] => Object.keys(relationIndex);
   const getAllEntityTypes = (): EARS.Entity[] => Array.from(entityIndex.keys());
 
+  /** How many entities hold the attribute, and how many values they hold (a list's elements each count) */
   const getAttributeStats = (kind: EARS.AttrKind) => {
     const b = bucket(kind);
     let totalValues = 0;
-    for (const values of b.values()) {
-      totalValues += values.length;
-    }
+    for (const value of b.values()) totalValues += Array.isArray(value) ? value.length : 1;
     return { entityCount: b.size, totalValues };
   };
 
@@ -398,12 +400,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   return {
     clear, bulkLoadAttr,
-    putAttr: put, addAttr: add, mergeAttr: merge, dropAttr: drop, deleteAttr, dropIf, updateAttr: put,
+    putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
-    getAttr, getAttrs, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, removals: () => removals,
+    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, removals: () => removals,
     findEntitiesByRole, findEntitiesByAttribute, findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }
 
 export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
+
+/** Whether a stored value is `v`, or a list containing it: what `where(k, v)` matches */
+export const holds = (value: unknown, v: unknown) =>
+  value === v || (Array.isArray(value) && value.includes(v));

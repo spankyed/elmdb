@@ -20,7 +20,13 @@ export function closeEnv(dbs: LmdbDbs, log?: (message: string) => void): void;
 export function closeShardedEnvs(envs: Record<Partition, LmdbDbs>, log?: (message: string) => void): void;
 
 // @public
+export function convertToCurrentFormat(basePath: string): FormatSteps;
+
+// @public
 export function convertToFormat2(basePath: string): FormatConversion;
+
+// @public
+export function convertToFormat3(basePath: string): Format3Conversion;
 
 // @public
 export function decodeAttr(rec?: AttrRecord | null): unknown;
@@ -40,8 +46,14 @@ export type FindByAttrOpts = {
     limit?: number;
     equals?: unknown;
     deepEquals?: boolean;
-    predicate?: (value: unknown, idx: number, entityId: string) => boolean;
+    predicate?: (value: unknown, entityId: string) => boolean;
 };
+
+// @public
+export interface Format3Conversion {
+    joinedLists: number;
+    singleValues: number;
+}
 
 // @public
 export interface FormatConversion {
@@ -54,6 +66,15 @@ export interface FormatConversion {
 }
 
 // @public
+export type FormatSteps = Array<{
+    to: 2;
+    result: FormatConversion;
+} | {
+    to: 3;
+    result: Format3Conversion;
+}>;
+
+// @public
 export function hydrateSharded(params: {
     engine: EarsAdmin;
     envs: Record<Partition, LmdbDbs>;
@@ -64,7 +85,7 @@ export function hydrateSharded(params: {
 }): Promise<void>;
 
 // @public
-export const LMDB_FORMAT_VERSION = 2;
+export const LMDB_FORMAT_VERSION = 3;
 
 // @public
 export type LmdbDbs = {
@@ -89,16 +110,8 @@ export class LmdbReader {
     entitiesOfType(type: string): Iterable<string>;
     findEntitiesByAttr(kind: string, opts?: FindByAttrOpts): string[];
     findEntitiesByAttrIter(kind: string, opts?: FindByAttrOpts): Iterable<string>;
-    getAttr(kind: string, entityId: string, idx?: number): unknown;
-    getAttrArray(kind: string, entityId: string): unknown[];
-    getAttrCount(kind: string, entityId: string): number;
-    getAttrLength(kind: string, entityId: string): number;
+    getAttr(kind: string, entityId: string): unknown;
     getEntityMeta(entityId: string): EntityMeta | null;
-    getFirstAttr(kind: string, entityId: string): unknown;
-    iterAttr(kind: string, entityId: string): Iterable<{
-        idx: number;
-        value: unknown;
-    }>;
     neighbors(id: string, opts?: {
         kind?: string;
         direction?: 'out' | 'in' | 'both';

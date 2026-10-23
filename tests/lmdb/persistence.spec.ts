@@ -36,7 +36,7 @@ describe('LMDB Adapter', () => {
   it('close() flushes pending writes synchronously', () => {
     const adapter = makeLmdbAdapter(dbs);
     adapter.onCreateEntity('Entity-flush', 'TestType');
-    adapter.onPutAttrArray('attr1', 'Entity-flush', ['v1', 'v2']);
+    adapter.onPutAttr('attr1', 'Entity-flush', ['v1', 'v2']);
     adapter.close?.();
 
     // Data should be readable after close
@@ -49,10 +49,10 @@ describe('LMDB Adapter', () => {
     const adapter = makeLmdbAdapter(dbs);
     for (const id of ['Task-1', 'Task-10', 'Note-1']) {
       adapter.onCreateEntity(id, id.split('-')[0]);
-      adapter.onPutAttrArray('title', id, [`${id} title`]);
-      adapter.onPutAttrArray('tags', id, ['a', 'b']);
+      adapter.onPutAttr('title', id, [`${id} title`]);
+      adapter.onPutAttr('tags', id, ['a', 'b']);
     }
-    adapter.onPutAttrArray('zeta', 'Task-1', ['last kind']);
+    adapter.onPutAttr('zeta', 'Task-1', 'last kind');
     adapter.close?.();
 
     const deleting = makeLmdbAdapter(dbs);
@@ -62,15 +62,15 @@ describe('LMDB Adapter', () => {
     const keysOf = (id: string) => [...dbs.attrs.getKeys()].map(String).filter((key) => key.split('\x1F')[1] === id);
     expect(dbs.entities.get('Task-1')).toBeUndefined();
     expect(keysOf('Task-1')).toEqual([]);
-    expect(keysOf('Task-10')).toHaveLength(3);
-    expect(keysOf('Note-1')).toHaveLength(3);
+    expect(keysOf('Task-10')).toEqual(['tags\x1FTask-10', 'title\x1FTask-10']);
+    expect(keysOf('Note-1')).toHaveLength(2);
     expect(dbs.entities.get('Task-10')).toBeTruthy();
   });
 
   it("writes an entity's row, holding only its type, when it is created and never for an attribute or a relation", () => {
     const adapter = makeLmdbAdapter(dbs);
     adapter.onCreateEntity('Task-typed', 'Task');
-    adapter.onPutAttrArray('title', 'Task-attr-only', ['no row']);
+    adapter.onPutAttr('title', 'Task-attr-only', 'no row');
     adapter.onAddRelation('Relation-rows', 'refs', 'Task-src-end', 'Task-tgt-end', undefined);
     adapter.close?.();
 
@@ -80,8 +80,8 @@ describe('LMDB Adapter', () => {
 
   /**
    * An lmdb range is a live cursor holding a read transaction, and an environment has 126 reader slots.
-   * `getAttrLength` used to read the first entry with `it[Symbol.iterator]().next()`, which never releases
-   * the cursor, so every call that found a row leaked a slot. The 127th throws `MDB_READERS_FULL`, and from
+   * A read that stops early must release its cursor: one that reads the first entry with
+   * `it[Symbol.iterator]().next()` never does, so every call that finds a row leaks a slot. The 127th throws `MDB_READERS_FULL`, and from
    * then on every read fails with "No transaction to renew" and every write with EINVAL — for the life of
    * the process. A production app discarded 3,187 writes that way and lost the user's notes.
    *
@@ -90,12 +90,12 @@ describe('LMDB Adapter', () => {
   it('does not leak a reader slot per call, however many times it is asked', async () => {
     const adapter = makeLmdbAdapter(dbs);
     adapter.onCreateEntity('Doc-readers', 'Doc');
-    adapter.onPutAttrArray('tags', 'Doc-readers', ['a', 'b', 'c']);
+    adapter.onPutAttr('tags', 'Doc-readers', ['a', 'b', 'c']);
     adapter.close?.();
 
     const query = new LmdbReader(dbs);
     for (let i = 0; i < 200; i++) {
-      expect(query.getAttrLength('tags', 'Doc-readers'), `call ${i}`).toBe(3);
+      expect([...query.entitiesHavingAttr('tags', 1)], `call ${i}`).toEqual(['Doc-readers']);
       // A write transaction between reads, as the app does: it is what makes a leaked slot unrecoverable
       dbs.entities.transactionSync(() => { dbs.entities.put('Doc-readers-probe', { v: i }); });
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -105,7 +105,7 @@ describe('LMDB Adapter', () => {
 
   it('rejects forbidden \\x1F separator in keys', () => {
     const adapter = makeLmdbAdapter(dbs);
-    expect(() => adapter.onPutAttrArray('bad\x1Fkey', 'Entity-1', ['v']))
+    expect(() => adapter.onPutAttr('bad\x1Fkey', 'Entity-1', ['v']))
       .toThrow('forbidden separator');
     adapter.close?.();
   });
@@ -206,7 +206,7 @@ describe('LMDB Adapter, a unit', () => {
     const { live, guarded, done } = guardedEnv('unit-destroy', 'none');
     const adapter = makeLmdbAdapter(guarded);
     adapter.onCreateEntity('Document-1', 'Document');
-    adapter.onPutAttrArray('title', 'Document-1', ['kept']);
+    adapter.onPutAttr('title', 'Document-1', 'kept');
     adapter.close?.();
     const reopened = makeLmdbAdapter(guarded);
 
@@ -215,7 +215,7 @@ describe('LMDB Adapter, a unit', () => {
     expect(live.entities.get('Document-1'), 'still there inside the unit').toBeTruthy();
     reopened.onUnitEnd();
     expect(live.entities.get('Document-1')).toBeUndefined();
-    expect(live.attrs.get(`title\x1FDocument-1\x1F0`)).toBeUndefined();
+    expect(live.attrs.get(`title\x1FDocument-1`)).toBeUndefined();
     reopened.close?.();
     done();
   });
@@ -243,7 +243,7 @@ describe('LMDB Adapter error stats', () => {
   it('counts every row it could not write when the sink closes, and names the last', () => {
     const adapter = makeLmdbAdapter(failing());
     adapter.onCreateEntity('Document-1', 'Document');
-    adapter.onPutAttrArray('title', 'Document-1', ['kept']);
+    adapter.onPutAttr('title', 'Document-1', 'kept');
     adapter.close?.();
     expect(adapter.getErrorStats?.()).toMatchObject({
       errorCount: 2,
@@ -320,11 +320,6 @@ describe('Sharded Router', () => {
     for (const d of Object.values(dirs)) {
       fs.rmSync(d, { recursive: true, force: true });
     }
-  });
-
-  it('onDropAttr throws without entireArray', () => {
-    expect(() => (sharded as any).onDropAttr('kind', 'Document-1', 0))
-      .toThrow('onDropAttr requires entireArray');
   });
 
   it('onUpdateRelation throws on null/empty src or tgt in patch', () => {
@@ -513,21 +508,16 @@ describe('Query Layer', () => {
     dbs = openEnvAt(dir);
     const adapter = makeLmdbAdapter(dbs);
 
-    // Given
-    // Corrupt index key — use transactionSync to avoid unhandled async rejections
-    dbs.entities.transactionSync(() => {
-      dbs.attrs.put(`TestKind\x1FEntity-123\x1FnotANumber`, { t: 'string', v: 'corrupt' });
-    });
-    adapter.onPutAttrArray('TestKind', 'Entity-123', ['valid1', 'valid2', 'valid3']);
+    adapter.onPutAttr('TestKind', 'Entity-123', ['valid1', 'valid2', 'valid3']);
 
     // Date attr
     const now = new Date('2025-06-01T00:00:00.000Z');
     adapter.onCreateEntity('Entity-456', 'TestEntity');
-    adapter.onPutAttrArray('CreatedAt', 'Entity-456', [now]);
+    adapter.onPutAttr('CreatedAt', 'Entity-456', now);
 
     // Complex object attr
     adapter.onCreateEntity('Entity-789', 'TestEntity');
-    adapter.onPutAttrArray('Config', 'Entity-789', [{ nested: { value: 42 }, arr: [1, 2, 3] }]);
+    adapter.onPutAttr('Config', 'Entity-789', { nested: { value: 42 }, arr: [1, 2, 3] });
 
     // Entities + relations for neighbor tests
     adapter.onCreateEntity('Doc-1', 'Document');
@@ -539,12 +529,8 @@ describe('Query Layer', () => {
     // Pagination entities
     for (let i = 0; i < 10; i++) {
       adapter.onCreateEntity(`Page-${i}`, 'Page');
-      adapter.onPutAttrArray('Index', `Page-${i}`, [i]);
+      adapter.onPutAttr('Index', `Page-${i}`, i);
     }
-
-    // Helper test
-    adapter.onCreateEntity('Helper-1', 'Helper');
-    adapter.onPutAttrArray('Values', 'Helper-1', [1, 2, 3, 4, 5]);
 
     adapter.close?.(); // flush
     query = new LmdbReader(dbs);
@@ -555,9 +541,15 @@ describe('Query Layer', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('getAttrArray skips corrupt non-numeric index keys', () => {
-    const arr = query.getAttrArray('TestKind', 'Entity-123');
-    expect(arr).toEqual(['valid1', 'valid2', 'valid3']);
+  it('getAttr reads an attribute\'s one value, a list whole', () => {
+    expect(query.getAttr('TestKind', 'Entity-123')).toEqual(['valid1', 'valid2', 'valid3']);
+    expect(query.getAttr('Index', 'Page-4')).toBe(4);
+    expect(query.getAttr('Index', 'Page-none')).toBeNull();
+  });
+
+  it('findEntitiesByAttr matches a value or an element of a list, and a predicate sees the whole value', () => {
+    expect(query.findEntitiesByAttr('TestKind', { equals: 'valid2' })).toEqual(['Entity-123']);
+    expect(query.findEntitiesByAttr('Index', { predicate: (value) => (value as number) > 7 })).toEqual(['Page-8', 'Page-9']);
   });
 
   it('findEntitiesByAttr Date equality (instance + timestamp)', () => {
@@ -595,14 +587,6 @@ describe('Query Layer', () => {
     let relCount = 0;
     for (const _ of query.relations({ limit: 1 })) relCount++;
     expect(relCount).toBeLessThanOrEqual(1);
-  });
-
-  it('getAttrCount() and getFirstAttr() helpers', () => {
-    const count = query.getAttrCount('Values', 'Helper-1');
-    expect(count).toBe(5);
-
-    const first = query.getFirstAttr('Values', 'Helper-1');
-    expect(first).toBe(1);
   });
 
   it('decodeAttr() is exported and decodes dates', () => {

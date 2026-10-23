@@ -150,7 +150,7 @@ describe('terminals', () => {
     expect(e.query('Task').where('rank', 1).pick(['id', 'title', 'nope'])).toEqual([{ id: t.d, title: 'apple', nope: null }]);
     expect(e.query('Task').pickOne(['title'])).toEqual({ id: t.a, title: 'banana' });
     expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeNull();
-    expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: 'focus' }]);
+    expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
   });
 });
 
@@ -169,10 +169,10 @@ describe('blueprints', () => {
       rels: [{ kind: 'owner', target: shared, info: undefined }, { kind: 'lead', target: shared, info: { since: 1 } }, { kind: 'about', target: t.a, info: undefined }],
     });
     const id = e.spawn(plan);
-    expect(e.findById(id)).toMatchObject({ title: 'Plan', role: 'current' });
+    expect(e.findById(id)).toMatchObject({ title: 'Plan', role: ['current'] });
     const [owner] = e.query.ids(id).linksTo('owner').ids();
     expect(e.query.ids(id).linksTo('lead').ids()).toEqual([owner]);
-    expect(e.findById(owner)).toMatchObject({ name: 'Sam', role: 'member' });
+    expect(e.findById(owner)).toMatchObject({ name: 'Sam', role: ['member'] });
     expect(e.findRelations({ sourceEntity: id, relationType: 'lead' })[0].info).toEqual({ since: 1 });
     expect(e.query.ids(id).linksTo('about').ids()).toEqual([t.a]);
 

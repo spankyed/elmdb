@@ -31,15 +31,6 @@ export function decodeAttr(rec?: AttrRecord | null): unknown {
 }
 
 /**
- * Parse numeric index from key suffix, with guards against corrupt data.
- * Returns null if index is not a valid finite number >= 0.
- */
-function toIndex(key: string, prefix: string): number | null {
-  const idx = Number(key.slice(prefix.length));
-  return Number.isFinite(idx) && idx >= 0 ? idx : null;
-}
-
-/**
  * Smart equality comparison with support for Dates, ISO strings, and optional deep equality.
  */
 function eq(a: unknown, b: unknown, deep = false): boolean {
@@ -64,27 +55,22 @@ function eq(a: unknown, b: unknown, deep = false): boolean {
   return a === b;
 }
 
-function attrKey(kind: string, entityId: string, idx: number) {
-  return `${kind}${US}${entityId}${US}${idx}`;
+/** An attribute's row: one per `(kind, entityId)` */
+function attrKey(kind: string, entityId: string) {
+  return `${kind}${US}${entityId}`;
 }
-
-function attrPrefix(kind: string, entityId: string) {
-  const p = `${kind}${US}${entityId}${US}`;
-  return { start: p, end: p + '\xFF', prefix: p };
-}
-
 
 export type FindByAttrOpts = {
   /** optional: only return entities of this type (uses the entities DB) */
   entityType?: string;
   /** return at most N unique entityIds */
   limit?: number;
-  /** shortcut equality check instead of predicate */
+  /** shortcut equality check instead of predicate: the value, or an element of a list value */
   equals?: unknown;
   /** opt-in deep equality for object/array comparisons */
   deepEquals?: boolean;
-  /** custom predicate (value, idx, entityId) -> boolean */
-  predicate?: (value: unknown, idx: number, entityId: string) => boolean;
+  /** custom predicate over the whole value (value, entityId) -> boolean */
+  predicate?: (value: unknown, entityId: string) => boolean;
 };
 
 export class LmdbReader {
@@ -92,188 +78,50 @@ export class LmdbReader {
 
   // ───────────────────────────── Attributes ─────────────────────────────
 
-  /** Get a single attribute value by (kind, entityId, idx) */
-  getAttr(kind: string, entityId: string, idx = 0): unknown {
+  /** An attribute's value, or null */
+  getAttr(kind: string, entityId: string): unknown {
     assertKeySafe(kind, 'kind');
     assertKeySafe(entityId, 'entityId');
-    const rec = this.dbs.attrs.get(attrKey(kind, entityId, idx)) as AttrRecord | undefined;
+    const rec = this.dbs.attrs.get(attrKey(kind, entityId)) as AttrRecord | undefined;
     return decodeAttr(rec ?? null);
   }
 
-  /** Get the first attribute value for (kind, entityId) - fast path without range scan */
-  getFirstAttr(kind: string, entityId: string): unknown {
-    assertKeySafe(kind, 'kind');
-    assertKeySafe(entityId, 'entityId');
-    return this.getAttr(kind, entityId, 0);
-  }
-
-  /** Count attributes without materializing the array */
-  getAttrCount(kind: string, entityId: string): number {
-    assertKeySafe(kind, 'kind');
-    assertKeySafe(entityId, 'entityId');
-    const { start, end } = attrPrefix(kind, entityId);
-    let count = 0;
-    for (const _ of this.dbs.attrs.getRange({ start, end })) {
-      count++;
-    }
-    return count;
-  }
-
-  /** Get logical array length using reverse scan (more semantically correct than row count) */
-  getAttrLength(kind: string, entityId: string): number {
-    assertKeySafe(kind, 'kind');
-    assertKeySafe(entityId, 'entityId');
-    const { prefix, start, end } = attrPrefix(kind, entityId);
-    // One reverse scan to find the last row.
-    //
-    // **A reverse range starts at the high bound.** Passing it forward-style (`start: prefix`) walks away
-    // from the data and yields nothing, so this returned 0 for every array it was ever asked about —
-    // measured, not reasoned about. It has no caller in the repo, which is why nothing noticed.
-    //
-    // `for…of` rather than taking the iterator by hand: an lmdb range is a live cursor holding a read
-    // transaction, and the language calls `return()` on the way out, which releases it. Reading the first
-    // entry with `it[Symbol.iterator]().next()` releases nothing, and an environment has 126 reader slots —
-    // measured, the 127th call throws `MDB_READERS_FULL` and every later read and write fails for the life
-    // of the process. Harmless here only while the range stays empty, which is the bug above.
-    for (const { key } of this.dbs.attrs.getRange({ start: end, end: start, reverse: true, limit: 1 }) as Iterable<{ key: string | Buffer }>) {
-      const idx = toIndex(String(key), prefix);
-      return idx === null ? 0 : idx + 1;
-    }
-    return 0;
-  }
-
-  /** Get the entire attribute array for (kind, entityId) */
-  getAttrArray(kind: string, entityId: string): unknown[] {
-    assertKeySafe(kind, 'kind');
-    assertKeySafe(entityId, 'entityId');
-    const { prefix, start, end } = attrPrefix(kind, entityId);
-    const out: unknown[] = [];
-    for (const { key, value } of this.dbs.attrs.getRange({ start, end })) {
-      const idx = toIndex(String(key), prefix);
-      if (idx === null) continue; // skip corrupt/out-of-format rows
-      out[idx] = decodeAttr(value as AttrRecord);
-    }
-    // normalize holes to nulls for parity with your in-memory representation
-    for (let i = 0; i < out.length; i++) if (out[i] === undefined) out[i] = null;
-    return out;
-  }
-
-  /** Iterate all (idx, value) pairs for (kind, entityId) without building an array */
-  *iterAttr(kind: string, entityId: string): Iterable<{ idx: number; value: unknown }> {
-    assertKeySafe(kind, 'kind');
-    assertKeySafe(entityId, 'entityId');
-    const { prefix, start, end } = attrPrefix(kind, entityId);
-    for (const { key, value } of this.dbs.attrs.getRange({ start, end })) {
-      const idx = toIndex(String(key), prefix);
-      if (idx === null) continue; // skip corrupt/out-of-format rows
-      yield { idx, value: decodeAttr(value as AttrRecord) };
-    }
-  }
-
-  /** List all entityIds that have *any* value for the given kind (across all entities) */
+  /** The entityIds holding the attribute, in key order */
   *entitiesHavingAttr(kind: string, limit = Infinity): Iterable<string> {
     assertKeySafe(kind, 'kind');
-    const seen = new Set<string>();
     let count = 0;
     const start = `${kind}${US}`, end = start + '\xFF';
     for (const { key } of this.dbs.attrs.getRange({ start, end })) {
-      // key format: kind␟entityId␟idx
-      // Note: assumes no US in entityId (validated upstream)
-      const [, entityId] = String(key).split(US);
-      if (!seen.has(entityId)) {
-        seen.add(entityId);
-        yield entityId;
-        if (++count >= limit) break;
-      }
+      if (count++ >= limit) break;
+      yield String(key).slice(start.length);
     }
   }
 
   /**
-   * Find entityIds by attribute content.
-   * Scans all rows for a given kind and filters by equals/predicate and (optional) entityType.
-   * Note: O(#rows for kind) - consider secondary indexes for hot queries.
+   * Finds entityIds by attribute content: scans the kind's rows, filtering by equals/predicate and (optionally)
+   * entityType. O(#rows for kind).
    */
   findEntitiesByAttr(kind: string, opts: FindByAttrOpts = {}): string[] {
-    assertKeySafe(kind, 'kind');
-    const { entityType, equals, deepEquals = false, predicate, limit = Infinity } = opts;
-    const out: string[] = [];
-    const seen = new Set<string>();
-    const typeCache = new Map<string, string | undefined>();
-
-    const start = `${kind}${US}`, end = start + '\xFF';
-    for (const { key, value } of this.dbs.attrs.getRange({ start, end })) {
-      const rec = value as AttrRecord;
-      const val = decodeAttr(rec);
-      const parts = String(key).split(US); // [kind, entityId, idx]
-      const entityId = parts[1];
-      const idxStr = parts[2];
-      const idx = Number(idxStr);
-      
-      // Skip if index is corrupt
-      if (!Number.isFinite(idx) || idx < 0) continue;
-
-      // optional value test
-      const pass = equals !== undefined ? eq(val, equals, deepEquals)
-                 : predicate ? !!predicate(val, idx, entityId)
-                 : true;
-      if (!pass) continue;
-
-      // optional entity type check
-      if (entityType) {
-        let t = typeCache.get(entityId);
-        if (t === undefined) {
-          t = (this.dbs.entities.get(entityId) as EntityMeta | undefined)?.type;
-          typeCache.set(entityId, t);
-        }
-        if (t !== entityType) continue;
-      }
-
-      if (!seen.has(entityId)) {
-        seen.add(entityId);
-        out.push(entityId);
-        if (out.length >= limit) break;
-      }
-    }
-    return out;
+    return [...this.findEntitiesByAttrIter(kind, opts)];
   }
 
-  /**
-   * Streaming version of findEntitiesByAttr for memory efficiency and early exit.
-   */
+  /** `findEntitiesByAttr`, streamed for early exit */
   *findEntitiesByAttrIter(kind: string, opts: FindByAttrOpts = {}): Iterable<string> {
     assertKeySafe(kind, 'kind');
     const { entityType, equals, deepEquals = false, predicate, limit = Infinity } = opts;
-    const seen = new Set<string>();
-    const typeCache = new Map<string, string | undefined>();
     const start = `${kind}${US}`, end = start + '\xFF';
     let count = 0;
 
     for (const { key, value } of this.dbs.attrs.getRange({ start, end })) {
       if (count >= limit) break;
-      const parts = String(key).split(US);
-      const entityId = parts[1];
-      if (seen.has(entityId)) continue;
-
-      const idx = Number(parts[2]);
-      if (!Number.isFinite(idx) || idx < 0) continue;
+      const entityId = String(key).slice(start.length);
+      if (entityType && (this.dbs.entities.get(entityId) as EntityMeta | undefined)?.type !== entityType) continue;
 
       const val = decodeAttr(value as AttrRecord);
-
-      if (entityType) {
-        let t = typeCache.get(entityId);
-        if (t === undefined) {
-          t = (this.dbs.entities.get(entityId) as EntityMeta | undefined)?.type;
-          typeCache.set(entityId, t);
-        }
-        if (t !== entityType) continue;
-      }
-
-      const pass = equals !== undefined ? eq(val, equals, deepEquals)
-                 : predicate ? !!predicate(val, idx, entityId)
+      const pass = equals !== undefined ? eq(val, equals, deepEquals) || (Array.isArray(val) && val.some((v) => eq(v, equals, deepEquals)))
+                 : predicate ? !!predicate(val, entityId)
                  : true;
       if (!pass) continue;
-
-      seen.add(entityId);
       yield entityId;
       count++;
     }
@@ -383,7 +231,7 @@ export class LmdbReader {
 
   /**
    * Scan a raw key range from any DB.
-   * Example: scan all Tag rows for a specific entity with prefix "Tag␟Doc-1␟".
+   * Example: scan every row of the attribute `tags` with prefix "tags␟".
    */
   scan(dbName: keyof LmdbDbs, opts: { start: string; end: string; limit?: number; reverse?: boolean }) {
     const db = this.dbs[dbName] as any;

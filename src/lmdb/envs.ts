@@ -16,12 +16,13 @@ export type LmdbDbs = {
  * How this version of `@apackdev/ears` encodes rows in LMDB (keys, attribute and relation records). An environment
  * records the format it was written in; one in another format is refused rather than misread.
  *
- * Format 2 keeps one record of each fact: an entity's row holds only its type, written when it is created; a
- * relation is its row in the relations table, with no attribute copy and no entity row; `entityType` is read from
- * the id rather than stored. Format 1 also stored those copies, and they had drifted apart. There is no upgrade in
- * the app: `scripts/ears-format-2.ts` converts a copy of a format 1 data dir, once, explicitly.
+ * Format 3 keeps one record of each fact, and one row per attribute: an entity's row holds only its type, written
+ * when it is created; an attribute is one row keyed `kind␟entityId` holding its one value (a list is one array
+ * value); a relation is its row in the relations table, with no attribute copy and no entity row; `entityType` is
+ * read from the id rather than stored. There is no upgrade in the app: `scripts/ears-convert.ts` converts a copy of
+ * an older data dir, once, explicitly (`convertToCurrentFormat`).
  */
-export const LMDB_FORMAT_VERSION = 2;
+export const LMDB_FORMAT_VERSION = 3;
 
 /** The environment's own records, beside its data: its storage format */
 const META_DB = 'meta';
@@ -59,7 +60,7 @@ function checkFormat(root: RootDatabase, basePath: string, readOnly: boolean): v
     throw new Error(
       `The database at ${basePath} is in storage format ${JSON.stringify(format)}, but this version reads format ${LMDB_FORMAT_VERSION}` +
       (newer ? ': it was written by a newer apack, so update this one'
-        : format === 1 ? ': convert a copy of it with scripts/ears-format-2.ts' : ''),
+        : typeof format === 'number' && format < LMDB_FORMAT_VERSION ? ': convert a copy of it with scripts/ears-convert.ts' : ''),
     );
   }
 }

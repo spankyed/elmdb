@@ -15,26 +15,20 @@ function enc(value: unknown): Encoded {
 // Use same separator throughout for consistency
 const SEP = '\x1F';
 
-function attrKey(kind: string, entityId: string, idx: number) {
+/** A buffered attribute write that removes the row */
+const DROPPED = Symbol('dropped');
+
+/** An attribute's row: one per `(kind, entityId)`, holding its one value */
+function attrKey(kind: string, entityId: string) {
   validateKey(kind, 'kind');
   validateKey(entityId, 'entityId');
-  return `${kind}${SEP}${entityId}${SEP}${idx}`;
+  return `${kind}${SEP}${entityId}`;
 }
 
 function validateKey(value: string, name: string) {
   if (value.includes(SEP)) {
     throw new Error(`Invalid ${name}: contains forbidden separator character \\x1F`);
   }
-}
-
-function prefix(kind: string, entityId: string) {
-  const p = `${kind}${SEP}${entityId}${SEP}`;
-  // End bound: any key with this prefix sorts before prefix+\xFF
-  return { start: p, end: p + '\xFF' };
-}
-
-function arrayRewriteKey(kind: string, entityId: string) {
-  return `${kind}${SEP}${entityId}`;
 }
 
 /** The attribute kinds stored in `attrs`: keys sort by kind, so each lookup skips past the kind before it */
@@ -45,7 +39,7 @@ function* storedKinds(attrs: LmdbDbs['attrs']): Iterable<string> {
     if (key === undefined) return;
     const kind = String(key).split(SEP)[0];
     yield kind;
-    // Past every `kind␟…` key (ids sort below \xFF, as in prefix())
+    // Past every `kind␟…` key (ids sort below \xFF)
     start = `${kind}${SEP}\xFF`;
   }
 }
@@ -66,8 +60,8 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
   let errorCount = 0;
   let lastError: { op: string; key?: string; error: any } | null = null;
 
-  // Keyed buffers for coalescing writes
-  const arrayRewrites = new Map<string, unknown[]>(); // kind\x1FentityId -> final array
+  // Keyed buffers for coalescing writes: an attribute row's last value, or DROPPED
+  const attrWrites = new Map<string, unknown>();
   const relUpserts = new Map<string, any>();
   const relDeletes = new Set<string>();
   // An entity's row holds its type, written once, when the entity is created
@@ -95,14 +89,13 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     for (const [id, type] of createdRows) steps.push({ op: 'entity', key: id, run: () => { entities.put(id, { type }); } });
     createdRows.clear();
 
-    for (const [key, arr] of arrayRewrites) {
-      const [kind, entityId] = key.split(SEP);
+    for (const [key, value] of attrWrites) {
       steps.push({ op: 'attrs', key, run: () => {
-        removeAttrRange(kind, entityId);
-        for (let i = 0; i < arr.length; i++) attrs.put(attrKey(kind, entityId, i), enc(arr[i]));
+        if (value === DROPPED) attrs.remove(key);
+        else attrs.put(key, enc(value));
       } });
     }
-    arrayRewrites.clear();
+    attrWrites.clear();
 
     for (const id of relDeletes) steps.push({ op: 'relation-remove', key: id, run: () => { relations.remove(id); } });
     relDeletes.clear();
@@ -111,19 +104,6 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     relUpserts.clear();
 
     return steps;
-  }
-
-  /**
-   * Every attribute row of one `(kind, entityId)`.
-   *
-   * The copy is the point: the body removes exactly the keys this walks, and an lmdb range is a live cursor.
-   * `onDestroyEntity` said so in a comment of its own; saying it twice in one file is how the two drifted.
-   */
-  function removeAttrRange(kind: string, entityId: string): void {
-    // The spread is the whole point, so the lint rule calling it useless is wrong here: an lmdb range is a
-    // live cursor, and the body removes exactly the keys it walks
-    // eslint-disable-next-line no-useless-spread
-    for (const key of [...attrs.getKeys(prefix(kind, entityId))]) attrs.remove(key);
   }
 
   /** Runs the steps in one transaction, falling back to one transaction each so a failure is isolated. */
@@ -160,13 +140,13 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     }
   }
 
-  /** An entity's row and its attributes, read per kind (keys are kind␟id␟index); its relations went before */
+  /** An entity's row and its attributes, one row per kind (keys are kind␟id); its relations went before */
   function removeEntityRows(entityId: string): void {
     entities.remove(entityId);
-    // `storedKinds` reads the same store this loop removes from, inside one transaction, so it is materialised
-    // for the same reason `removeAttrRange` materialises: a live cursor the body invalidates
+    // `storedKinds` reads the same store this loop removes from, inside one transaction, so it is materialised:
+    // an lmdb range is a live cursor the body would invalidate
     // eslint-disable-next-line no-useless-spread
-    for (const kind of [...storedKinds(attrs)]) removeAttrRange(kind, entityId);
+    for (const kind of [...storedKinds(attrs)]) attrs.remove(attrKey(kind, entityId));
   }
 
   function scheduleFlush() {
@@ -180,27 +160,22 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     });
   }
 
-  function bufferArrayRewrite(kind: string, entityId: string, array: unknown[]) {
-    // Validate keys early to fail fast
-    validateKey(kind, 'kind');
-    validateKey(entityId, 'entityId');
-    
-    const key = arrayRewriteKey(kind, entityId);
-    // Store only the final state of the array
-    arrayRewrites.set(key, [...array]); // Clone to avoid mutations
+  /** Buffers an attribute row's value (or its removal), keeping only the last; the key is checked now, to fail fast */
+  function bufferAttr(kind: string, entityId: string, value: unknown) {
+    attrWrites.set(attrKey(kind, entityId), value);
     scheduleFlush();
   }
 
   /** Drops the writes buffered for an entity, so a flush after its hard delete doesn't write it back */
   function discardBuffered(entityId: string) {
     createdRows.delete(entityId);
-    for (const key of arrayRewrites.keys()) {
-      if (key.slice(key.indexOf(SEP) + 1) === entityId) arrayRewrites.delete(key);
+    for (const key of attrWrites.keys()) {
+      if (key.slice(key.indexOf(SEP) + 1) === entityId) attrWrites.delete(key);
     }
   }
 
   const buffered = () =>
-    createdRows.size + arrayRewrites.size + relDeletes.size + relUpserts.size > 0;
+    createdRows.size + attrWrites.size + relDeletes.size + relUpserts.size > 0;
 
   function close() {
     if (closed) return;
@@ -263,20 +238,14 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
       runUnit([...destroys, ...takeSteps()]);
     },
 
-    onPutAttrArray(kind: string, entityId: string, values: unknown[]) {
+    onPutAttr(kind: string, entityId: string, value: unknown) {
       if (closed) return;
-      bufferArrayRewrite(kind, entityId, values);
+      bufferAttr(kind, entityId, value);
     },
 
-    onDropAttr(kind: string, entityId: string, idx: number, entireArray?: unknown[]) {
+    onDropAttr(kind: string, entityId: string) {
       if (closed) return;
-      // Always rewrite the entire array after drop
-      if (entireArray !== undefined) {
-        bufferArrayRewrite(kind, entityId, entireArray);
-      } else {
-        // Fallback: delete everything for this (kind, entityId)
-        bufferArrayRewrite(kind, entityId, []);
-      }
+      bufferAttr(kind, entityId, DROPPED);
     },
 
     onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown) {

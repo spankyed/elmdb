@@ -1,10 +1,11 @@
-// convertToFormat2: a format 1 environment keeps one record of each fact afterwards, and loses nothing else
+// The conversions: a format 1 environment keeps one record of each fact afterwards (format 2), a format 2 one keeps
+// one row per attribute (format 3), and neither loses anything else
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { convertToFormat2 } from '../../src/lmdb/index.ts';
+import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION } from '../../src/lmdb/index.ts';
 
 const SEP = '\x1F';
 const dirs: string[] = [];
@@ -41,6 +42,7 @@ function read(dir: string) {
     const rows = (name: string) => Object.fromEntries([...root.openDB({ name, encoding: 'json' }).getRange()].map(({ key, value }) => [String(key), value]));
     return {
       entities: rows('entities'),
+      attrs: rows('attrs') as Record<string, { t: string; v: unknown }>,
       attrKeys: Object.keys(rows('attrs')).sort(),
       relations: Object.keys(rows('relations')),
       format: root.openDB({ name: 'meta', encoding: 'json' }).get('format'),
@@ -55,7 +57,7 @@ it('removes the second record of each fact, keeps the first, and records format 
   expect(convertToFormat2(dir)).toEqual({
     entityTypeAttrs: 1, relationDetailAttrs: 1, relationRows: 1, orphanRows: 1, rewrittenRows: 1, addedRows: 1,
   });
-  expect(read(dir)).toEqual({
+  expect(read(dir)).toMatchObject({
     entities: { 'Note-1': { type: 'Note' }, 'Note-2': { type: 'Note' } },
     attrKeys: [`createdAt${SEP}Note-1${SEP}0`, `createdAt${SEP}Note-2${SEP}0`, `title${SEP}Note-1${SEP}0`],
     relations: ['Relation-1'],
@@ -63,10 +65,57 @@ it('removes the second record of each fact, keeps the first, and records format 
   });
 });
 
-it('refuses an environment that records a format other than 1, changing nothing', () => {
+it('refuses an environment that records another format than the step converts, changing nothing', () => {
   const dir = format1();
   convertToFormat2(dir);
   const before = read(dir);
-  expect(() => convertToFormat2(dir)).toThrow('records storage format 2; only format 1 converts');
+  expect(() => convertToFormat2(dir)).toThrow('records storage format 2; this step converts format 1');
   expect(read(dir)).toEqual(before);
+  convertToFormat3(dir);
+  expect(() => convertToFormat3(dir)).toThrow('records storage format 3; this step converts format 2');
+});
+
+/** A format 2 environment: one attribute row per list index */
+function format2(rows: Record<string, unknown>): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-format-2-'));
+  dirs.push(dir);
+  const root = open({ path: dir, maxDbs: 8, compression: true });
+  root.openDB({ name: 'meta', encoding: 'json' }).putSync('format', 2);
+  root.openDB({ name: 'entities', encoding: 'json' }).putSync('Note-1', { type: 'Note' });
+  root.openDB({ name: 'relations', encoding: 'json' });
+  const attrs = root.openDB({ name: 'attrs', encoding: 'json' });
+  for (const [key, value] of Object.entries(rows)) {
+    attrs.putSync(key.replaceAll('|', SEP), { t: Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value, v: value });
+  }
+  root.close();
+  return dir;
+}
+
+it('joins each attribute\'s rows into one: a single row is its value, several rows or a role one list', () => {
+  const dir = format2({
+    'title|Note-1|0': 'kept',
+    'tags|Note-1|0': ['a', 'b'],
+    'tag|Note-1|1': 'second', 'tag|Note-1|0': 'first',
+    'role|Note-1|0': 'current',
+    'gap|Note-1|1': 'after a hole',
+    'meta|Note-1|0': { k: 1 },
+  });
+  expect(convertToFormat3(dir)).toEqual({ singleValues: 3, joinedLists: 3 });
+  const { attrs, format } = read(dir);
+  expect(format).toBe(3);
+  expect(Object.fromEntries(Object.entries(attrs).map(([key, { v }]) => [key.replace(SEP, '|'), v]))).toEqual({
+    'title|Note-1': 'kept',
+    'tags|Note-1': ['a', 'b'],
+    'tag|Note-1': ['first', 'second'],
+    'role|Note-1': ['current'],
+    'gap|Note-1': [null, 'after a hole'],
+    'meta|Note-1': { k: 1 },
+  });
+});
+
+it('converts to the current format a step at a time, and leaves a current one alone', () => {
+  const dir = format1();
+  expect(convertToCurrentFormat(dir).map(({ to }) => to)).toEqual([2, 3]);
+  expect(read(dir)).toMatchObject({ attrKeys: [`createdAt${SEP}Note-1`, `createdAt${SEP}Note-2`, `title${SEP}Note-1`], format: LMDB_FORMAT_VERSION });
+  expect(convertToCurrentFormat(dir)).toEqual([]);
 });

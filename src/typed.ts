@@ -75,14 +75,8 @@ export type TypedCreateEntity<S extends EntityShapes, N extends string = string>
 
 /** A field's value on an entity whose id names its type; `unknown` when the id isn't branded. */
 export interface TypedGetAttr<S extends EntityShapes> {
-  <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K, index?: number): ShapeOf<S, E>[K] | null;
-  (id: EARS.EntityId, field: string, index?: number): unknown;
-}
-
-/** Every value stored under a field (multi-valued attributes such as roles). */
-export interface TypedGetAttrs<S extends EntityShapes> {
-  <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K][];
-  (id: EARS.EntityId, field: string): unknown[];
+  <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | null;
+  (id: EARS.EntityId, field: string): unknown;
 }
 
 export type TypedFindWithFields<S extends EntityShapes, N extends string = string> =
@@ -129,7 +123,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
   createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
   updateEntity: TypedUpdateEntity<S>;
   getAttr: TypedGetAttr<S>;
-  getAttrs: TypedGetAttrs<S>;
 }
 
 /**
@@ -163,6 +156,5 @@ export function defineEars<S extends EntityShapes, N extends string = string>(en
     createEntityWithDefaults: on('createEntityWithDefaults'),
     updateEntity: on('updateEntity'),
     getAttr: on('getAttr'),
-    getAttrs: on('getAttrs'),
   } as unknown as TypedEars<S, N>;
 }

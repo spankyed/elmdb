@@ -48,8 +48,7 @@ export function createJournal(sink: PersistenceSink) {
     },
   };
 
-  // A held call copies its value lists: the storage passes its live list, which a later write in the unit — or
-  // a nested unit that then rolls back — would otherwise change before the call is sent
+  // A held call copies an array it carries: the caller who wrote it may still change it before the unit commits
   const hold = <A extends unknown[]>(write: (...args: A) => void) => (...args: A): void => {
     if (levels.length === 0) return write(...args);
     const copied = args.map((arg) => (Array.isArray(arg) ? [...arg] : arg)) as A;
@@ -61,7 +60,7 @@ export function createJournal(sink: PersistenceSink) {
     onCreateEntity: hold((...args) => sink.onCreateEntity(...args)),
     onDestroyEntity: hold((...args) => sink.onDestroyEntity(...args)),
     onDropAttr: hold((...args) => sink.onDropAttr(...args)),
-    onPutAttrArray: hold((...args) => sink.onPutAttrArray(...args)),
+    onPutAttr: hold((...args) => sink.onPutAttr(...args)),
     onAddRelation: hold((...args) => sink.onAddRelation(...args)),
     onUpdateRelation: hold((...args) => sink.onUpdateRelation(...args)),
     onRemoveRelation: hold((...args) => sink.onRemoveRelation(...args)),

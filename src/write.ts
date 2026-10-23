@@ -39,7 +39,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
 }) {
   const {
     destroyEntity, entityCreated, hasEntity,
-    putAttr, addAttr, mergeAttr, dropAttr, deleteAttr, dropIf,
+    putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
     grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr,
   } = storage;
 
@@ -86,12 +86,12 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
       },
       add(k, v) {
         refuseReserved(k, 'add');
-        addAttr(id, attr(k), v);
+        appendAttr(id, attr(k), v);
         return self;
       },
-      merge(k, v, index) {
+      merge(k, v) {
         refuseReserved(k, 'merge');
-        mergeAttr(id, attr(k), v, index);
+        mergeAttr(id, attr(k), v);
         return self;
       },
       delete(k) {
@@ -101,12 +101,12 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
       },
       deleteAt(k, index) {
         refuseReserved(k, 'deleteAt');
-        dropAttr(id, attr(k), index);
+        removeAt(id, attr(k), index);
         return self;
       },
       deleteValue(k, v) {
         refuseReserved(k, 'deleteValue');
-        dropIf(id, attr(k), v);
+        removeValue(id, attr(k), v);
         return self;
       },
 

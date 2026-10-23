@@ -13,7 +13,7 @@ type Id = EARS.EntityId;
 const types = new Set(['Task', 'Project', 'Person', 'Note', 'Relation']);
 // A sink that does nothing, as the LMDB store's does between flushes
 const sink: PersistenceSink = {
-  onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttrArray() {},
+  onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttr() {},
   onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
 const engine = freshEngine({ isEntityType: (name) => types.has(name), persistence: sink });

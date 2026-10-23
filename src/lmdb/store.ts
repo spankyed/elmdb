@@ -189,7 +189,7 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
     onCreateEntity: (...args) => write((s) => s.onCreateEntity(...args)),
     onDestroyEntity: (...args) => write((s) => s.onDestroyEntity(...args)),
     onDropAttr: (...args) => write((s) => s.onDropAttr(...args)),
-    onPutAttrArray: (...args) => write((s) => s.onPutAttrArray(...args)),
+    onPutAttr: (...args) => write((s) => s.onPutAttr(...args)),
     onAddRelation: (...args) => write((s) => s.onAddRelation(...args)),
     onUpdateRelation: (...args) => write((s) => s.onUpdateRelation(...args)),
     onRemoveRelation: (...args) => write((s) => s.onRemoveRelation(...args)),

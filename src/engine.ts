@@ -53,8 +53,9 @@ export interface Ears {
   updateEntity(id: EARS.EntityId, updates: Record<string, unknown>, skipTimestamp?: boolean): void;
   createRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId: EARS.EntityId): void;
   removeRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId?: EARS.EntityId): void;
-  getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
-  getAttrs(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue[];
+  /** An attribute's value, exactly as written, or null */
+  getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
+  /** Every attribute the entity holds, each exactly as written, with its `entityType` */
   getAll(id: EARS.EntityId): Record<string, unknown>;
   getRoles(id: EARS.EntityId): string[];
   grantRole(id: EARS.EntityId, role: string): void;
@@ -97,18 +98,14 @@ export interface Ears {
 export interface EarsAdmin {
   /** Empties the engine's attributes, entity index and relation index */
   clear(): void;
-  /** An attribute's value at an index (the first by default), or null */
-  getAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): EARS.AttributeValue | null;
-  /** Loads a stored attribute value (merging objects at an index), without telling persistence */
-  bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
+  /** An attribute's value, or null */
+  getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
+  /** Loads a stored attribute value, without telling persistence */
+  bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+  /** Writes an attribute's value, any kind the engine owns included */
   putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-  addAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-  mergeAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown, index?: number): void;
-  dropAttr(id: EARS.EntityId, kind: EARS.AttrKind, index?: number): void;
-  dropIf(id: EARS.EntityId, kind: EARS.AttrKind, criterion: unknown): void;
-  /** Removes every value of an attribute */
+  /** Removes an attribute */
   deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-  updateAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
   updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
   findEntitiesByRole(role: string): EARS.EntityId[];
@@ -158,7 +155,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     ...graph,
     spawn: createSpawn({ create, query }),
     getAttr: storage.getAttr,
-    getAttrs: storage.getAttrs,
     getAll: storage.getAll,
     getRoles: storage.getRoles,
     grantRole: storage.grantRole,
@@ -186,12 +182,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     getAttr: storage.getAttr,
     bulkLoadAttr: storage.bulkLoadAttr,
     putAttr: storage.putAttr,
-    addAttr: storage.addAttr,
-    mergeAttr: storage.mergeAttr,
-    dropAttr: storage.dropAttr,
-    dropIf: storage.dropIf,
     deleteAttr: storage.deleteAttr,
-    updateAttr: storage.updateAttr,
     addRelation: storage.addRelation,
     updateRelation: storage.updateRelation,
     findEntitiesByRole: storage.findEntitiesByRole,

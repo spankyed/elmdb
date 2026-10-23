@@ -9,7 +9,7 @@ export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts'
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
-  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues,
+  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues, ListElement,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf } from './attribute-storage.ts';
@@ -29,7 +29,7 @@ export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entitie
 export {
   defineEars,
   type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedFindFirst, type TypedCreateEntity,
-  type TypedGetAttr, type TypedGetAttrs, type TypedFindWithFields, type TypedFindByIdWithFields, type TypedFindWithRole,
+  type TypedGetAttr, type TypedFindWithFields, type TypedFindByIdWithFields, type TypedFindWithRole,
   type TypedFindFirstWithRole, type TypedCreateEntityWithDefaults, type TypedUpdateEntity,
 } from './typed.ts';
 export { bp, type Blueprint, type BlueprintBuilder } from './blueprint.ts';

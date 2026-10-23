@@ -11,7 +11,9 @@ export type EarsErrorCode =
   /** A write named an attribute the engine owns */
   | 'RESERVED_ATTRIBUTE'
   /** A `where` was given no value to compare with */
-  | 'NO_VALUE';
+  | 'NO_VALUE'
+  /** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
+  | 'NOT_A_LIST';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {
