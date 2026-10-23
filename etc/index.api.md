@@ -381,6 +381,13 @@ export function makeShardedPersistence(policy: PartitionPolicy, sinks: Record<Pa
 export const noopSink: PersistenceSink;
 
 // @public
+export type OptionalField<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? Extract<{
+    [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
+}[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
+
+// @public
 export type Partition = 'primary' | 'volatileBackup';
 
 // @public (undocumented)
@@ -493,7 +500,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
     reverse(): QueryBuilder<E, S, N>;
-    where<K extends keyof ShapeOf<S, E> & string>(k: K, v: ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean)): QueryBuilder<E, S, N>;
+    where<K extends keyof ShapeOf<S, E> & string>(k: K, v: WhereValue<S, E, K>): QueryBuilder<E, S, N>;
     within(ids: readonly EARS.EntityId[]): QueryBuilder<E, S, N>;
     // (undocumented)
     withRole(r: string): QueryBuilder<E, S, N>;
@@ -655,9 +662,7 @@ export interface TypedFindById<S extends EntityShapes> {
 // @public (undocumented)
 export interface TypedFindWhere<S extends EntityShapes, N extends string = string> {
     // (undocumented)
-    <E extends string>(entityType: Name<N, E>, field: string, value: unknown): ShapeOf<S, E>[];
-    // (undocumented)
-    <T, E extends string = string>(entityType: Name<N, E>, field: string, value: unknown): T[];
+    <E extends string, K extends keyof ShapeOf<S, E> & string>(entityType: Name<N, E>, field: K, value: WhereValue<S, E, K>): ShapeOf<S, E>[];
 }
 
 // @public
@@ -698,6 +703,9 @@ export interface Upsert {
 }
 
 // @public
+export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);
+
+// @public
 export type WritableField<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
@@ -711,7 +719,7 @@ export interface Write {
 // @public
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
     add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
-    delete(k: WritableField<S, E>): WriteBuilder<E, S>;
+    delete(k: OptionalField<S, E>): WriteBuilder<E, S>;
     deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S>;
     deleteValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     destroy(options?: {

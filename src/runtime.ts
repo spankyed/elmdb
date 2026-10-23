@@ -90,10 +90,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
    * The entities whose `k` is `v` (`===`) or a list holding it, or for which `v`, a function, answers true given the
    * whole value. A primitive `v` is answered by the value index. `v` is required: `has` and `lacks` ask about presence.
    */
-  where<K extends keyof ShapeOf<S, E> & string>(
-    k: K,
-    v: ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean),
-  ): QueryBuilder<E, S, N>;
+  where<K extends keyof ShapeOf<S, E> & string>(k: K, v: WhereValue<S, E, K>): QueryBuilder<E, S, N>;
   /** The entities with a value of `k` */
   has<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N>;
   /** The entities with no value of `k` */
@@ -188,6 +185,21 @@ export interface WriteOptions {
 export type WritableField<S extends EntityShapes, E extends string> =
   [E] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
 
+/**
+ * The fields a write may remove: a declared shape's optional writable fields, since removing a required one would
+ * leave a row its shape misdescribes (`set` replaces it); any name otherwise
+ */
+export type OptionalField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? Extract<{ [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never }[keyof ShapeOf<S, E>], WritableField<S, E>>
+    : string;
+
+/** What `where(k, v)` and `findWhere` match field `K` against: a value, one element of a list field, or a predicate */
+export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> =
+  | ShapeOf<S, E>[K]
+  | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never)
+  | ((value: ShapeOf<S, E>[K]) => boolean);
+
 /** What a write may store under field `K`: the declared field's type when `S` declares `E`'s shape, anything otherwise */
 export type FieldValue<S extends EntityShapes, E extends string, K extends string> =
   [E] extends [keyof S] ? (K extends keyof ShapeOf<S, E> ? ShapeOf<S, E>[K] : unknown) : unknown;
@@ -220,8 +232,8 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
   add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
   /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
   merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
-  /** Removes the attribute */
-  delete(k: WritableField<S, E>): WriteBuilder<E, S>;
+  /** Removes the attribute; a declared shape's required fields can't be removed, only replaced with `set` */
+  delete(k: OptionalField<S, E>): WriteBuilder<E, S>;
   /** Removes the list's element at `index`; refuses a value that isn't a list */
   deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S>;
   /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */

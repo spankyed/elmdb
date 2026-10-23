@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateOptions, QueryBuilder, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { CreateOptions, QueryBuilder, WhereValue, WriteBuilder, WriteOptions } from './runtime.ts';
 import { createEntity } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './entity-helpers.ts';
 import type { Ears } from './engine.ts';
@@ -66,8 +66,7 @@ export interface TypedFindAll<S extends EntityShapes, N extends string = string>
 }
 
 export interface TypedFindWhere<S extends EntityShapes, N extends string = string> {
-  <E extends string>(entityType: Name<N, E>, field: string, value: unknown): ShapeOf<S, E>[];
-  <T, E extends string = string>(entityType: Name<N, E>, field: string, value: unknown): T[];
+  <E extends string, K extends keyof ShapeOf<S, E> & string>(entityType: Name<N, E>, field: K, value: WhereValue<S, E, K>): ShapeOf<S, E>[];
 }
 
 /** Brands the id with the entity type when `S` declares its shape; other types stay unbranded. */
