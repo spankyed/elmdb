@@ -39,6 +39,8 @@ export interface Ears {
   isRole(name: string): boolean;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
   getRow(id: EARS.EntityId): EntityRow | undefined;
+  /** One field of the entity's row, read as `getRow` reads it (the trash included), or undefined when it holds none */
+  getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
   getRoles(id: EARS.EntityId): string[];
   getAllEntityTypes(): EARS.Entity[];
   getAllAttributeKinds(): EARS.AttrKind[];
@@ -120,6 +122,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     ...relationReads,
     ...graph,
     getRow: storage.getRow,
+    getAttr: (id, field) => (storage.hasAttr(id, field) ? storage.getAttr(id, field) : undefined),
     getRoles: storage.getRoles,
     getAllEntityTypes: storage.getAllEntityTypes,
     getAllAttributeKinds: storage.getAllAttributeKinds,

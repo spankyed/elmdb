@@ -407,6 +407,17 @@ describe('rows', () => {
     expect(e.query.ids(a).pickOne(['title'])).toEqual({ id: a, title: 'A' });
   });
 
+  it("getAttr is one field of the row, as getRow reads it: through the trash, undefined when unset, a stored null as null", () => {
+    const id = e.create('Task', { title: 'A' }).set('status', null).id();
+    expect(e.getAttr(id, 'title')).toBe('A');
+    expect(e.getAttr(id, 'status')).toBeNull();
+    expect(e.getAttr(id, 'nope')).toBeUndefined();
+    expect(e.getAttr(id, 'entityType')).toBe('Task');
+    e.write(id).trash(9);
+    expect(e.getAttr(id, 'title')).toBe('A');
+    expect(e.getAttr('Task-gone' as Id, 'title')).toBeUndefined();
+  });
+
   it("row() is a write's entity as its writes left it, a create's included", () => {
     const id = e.create('Task', { title: 'A' }).set('status', 'open').id();
     expect(e.create('Task', { title: 'B' }).row()).toMatchObject({ entityType: 'Task', title: 'B', createdAt: NOW, updatedAt: NOW });

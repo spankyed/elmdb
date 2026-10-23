@@ -125,6 +125,7 @@ export interface Ears {
     // (undocumented)
     getAllRelationKinds(): string[];
     getAllRoles(): string[];
+    getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
     // (undocumented)
     getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
@@ -521,6 +522,8 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
     // (undocumented)
+    getAttr: TypedGetAttr<S>;
+    // (undocumented)
     newId: TypedNewId<S, N>;
     // (undocumented)
     query: TypedQuery<S, N, R, O>;
@@ -530,6 +533,14 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     upsert: TypedUpsert<S, N, R, O>;
     // (undocumented)
     write: TypedWrite<S, R, O>;
+}
+
+// @public
+export interface TypedGetAttr<S extends EntityShapes> {
+    // (undocumented)
+    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | undefined;
+    // (undocumented)
+    (id: EARS.EntityId, field: string): unknown;
 }
 
 // @public
