@@ -9,7 +9,7 @@ export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts'
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
-  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, WriteOptions, FieldValue, FieldValues, ListElement,
+  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, WriteOptions, FieldValue, FieldValues, ListElement, WritableField,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, type EntityRow, type SchemaStats } from './attribute-storage.ts';

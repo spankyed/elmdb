@@ -61,7 +61,7 @@ export function createSpawn({ create, query }: { create: Create; query: Query })
       if (cache?.has(node)) {
         return cache.get(node)!;
       }
-      const builder = create(node.entity as never);
+      const builder = create(node.entity);
       const id = builder.id();
       cache?.set(node, id);
 

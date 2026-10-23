@@ -351,8 +351,8 @@ E
 export type FieldValues<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? {
-    [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K];
-} & Record<string, unknown> : Record<string, unknown>;
+    [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K];
+} : Record<string, unknown>;
 
 // @public (undocumented)
 export function getTimestamp(): number;
@@ -698,6 +698,11 @@ export interface Upsert {
 }
 
 // @public
+export type WritableField<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
+
+// @public
 export interface Write {
     // (undocumented)
     <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
@@ -705,10 +710,10 @@ export interface Write {
 
 // @public
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
-    add<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
-    delete(k: string): WriteBuilder<E, S>;
-    deleteAt(k: string, index: number): WriteBuilder<E, S>;
-    deleteValue<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+    add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+    delete(k: WritableField<S, E>): WriteBuilder<E, S>;
+    deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S>;
+    deleteValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     destroy(options?: {
         keepStored?: boolean;
     }): void;
@@ -718,11 +723,11 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     // (undocumented)
     id(): EARS.EntityId<E>;
     link(kind: string, target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, S>;
-    merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+    merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
     restore(): WriteBuilder<E, S>;
     // (undocumented)
     revoke(role: string): WriteBuilder<E, S>;
-    set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
+    set<K extends WritableField<S, E>>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
     setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S>;
     trash(at?: number): WriteBuilder<E, S>;
     unlink(kind: string, target?: EARS.EntityId): WriteBuilder<E, S>;

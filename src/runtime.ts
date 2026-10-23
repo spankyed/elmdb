@@ -7,6 +7,7 @@
  * Read packages/apack-sdk/TYPED-EARS.md (the contract and the pre-change checklist) first.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
+import type { RESERVED_ATTRIBUTES } from './errors.ts';
 
 // ─── PersistenceSink interface ─────────────────────────────────────────
 
@@ -181,23 +182,29 @@ export interface WriteOptions {
 }
 
 /**
- * What a write may store under field `K`: the declared field's type when `S` declares `E`'s shape
- * and the field, anything otherwise (an undeclared field, or an id with no entity type).
+ * The fields a write may name: when `S` declares `E`'s shape, its declared fields but the engine's own
+ * (`RESERVED_ATTRIBUTES`), and any name otherwise (an id with no entity type, or an untyped write)
  */
+export type WritableField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
+
+/** What a write may store under field `K`: the declared field's type when `S` declares `E`'s shape, anything otherwise */
 export type FieldValue<S extends EntityShapes, E extends string, K extends string> =
   [E] extends [keyof S] ? (K extends keyof ShapeOf<S, E> ? ShapeOf<S, E>[K] : unknown) : unknown;
 
 /** An element of a declared list field (`T[]`), and anything for a field that isn't declared as one */
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
-/** Fields for a batch write: declared fields take their declared types, other fields anything */
+/** Fields for a batch write: a declared shape's writable fields with their declared types, any fields otherwise */
 export type FieldValues<S extends EntityShapes, E extends string> =
-  [E] extends [keyof S] ? { [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K] } & Record<string, unknown> : Record<string, unknown>;
+  [E] extends [keyof S]
+    ? { [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K] }
+    : Record<string, unknown>;
 
 /**
  * The writes to one entity, from `create`, `upsert` or `write`. `E` and `S` type them: started from a
- * declared entity type or an id tagged with one, the values of declared fields are checked; from a plain
- * id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
+ * declared entity type or an id tagged with one, a write names only the shape's declared fields and stores
+ * their declared types; from a plain id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
  * `entityType`, `createdAt`, `updatedAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write, and
  * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
  */
@@ -206,19 +213,19 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
    * Replaces the attribute's value with `v` (a list is one array value). `null` is a value; `undefined` is refused,
    * since `delete(k)` is what removes an attribute
    */
-  set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
+  set<K extends WritableField<S, E>>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
   /** `set` for each field, leaving one whose value is `undefined` as it is; refuses them all, writing none, when one is the engine's */
   setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S>;
   /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
-  add<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+  add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
   /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
-  merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+  merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
   /** Removes the attribute */
-  delete(k: string): WriteBuilder<E, S>;
+  delete(k: WritableField<S, E>): WriteBuilder<E, S>;
   /** Removes the list's element at `index`; refuses a value that isn't a list */
-  deleteAt(k: string, index: number): WriteBuilder<E, S>;
+  deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S>;
   /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
-  deleteValue<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+  deleteValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
   /**
    * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
    * none is given) is the same edge, and linking it again changes nothing.
