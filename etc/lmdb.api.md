@@ -44,14 +44,6 @@ export type FindByAttrOpts = {
 };
 
 // @public
-export interface FindByOptions {
-    cursor?: string;
-    // (undocumented)
-    limit?: number;
-    reverse?: boolean;
-}
-
-// @public
 export interface Format3Conversion {
     joinedLists: number;
     singleValues: number;
@@ -175,7 +167,9 @@ export function openEnvAt(basePath: string, input?: {
 export function openLmdbStore(input: LmdbStoreOptions): LmdbStore;
 
 // @public
-export function openRecordStore<R extends StoredRecord = StoredRecord>(input: RecordStoreOptions): RecordStore<R>;
+export function openRecordStore<R extends {
+    id: string;
+} = StoredRecord>(input: RecordStoreOptions<R>): RecordStore<R>;
 
 // @public
 export const RECORD_STORE_FORMAT_VERSION = 1;
@@ -183,28 +177,11 @@ export const RECORD_STORE_FORMAT_VERSION = 1;
 // @public (undocumented)
 export const RECORD_STORE_KIND = "records";
 
-// @public
-export interface RecordStore<R extends StoredRecord = StoredRecord> {
-    // (undocumented)
-    close(): void;
-    copyTo(targetDir: string): Promise<void>;
-    delete(id: string): void;
-    findBy(index: string, value: string | number | boolean, options?: FindByOptions): R[];
-    get(id: string): R | undefined;
-    newId(prefix: string): string;
-    // (undocumented)
-    readonly path: string;
-    put(record: R): void;
-    // (undocumented)
-    readonly readOnly: boolean;
-    // (undocumented)
-    reopen(): void;
-    reset(): Promise<void>;
-}
-
 // @public (undocumented)
-export interface RecordStoreOptions {
-    indexes: readonly string[];
+export interface RecordStoreOptions<R extends {
+    id: string;
+} = StoredRecord> {
+    indexes: RecordIndexes<R>;
     path: string;
     // (undocumented)
     readOnly?: boolean;
@@ -218,11 +195,6 @@ export type RelationRecord = {
     info?: any;
     createdAt: number;
 };
-
-// @public
-export type StoredRecord = {
-    id: string;
-} & Record<string, unknown>;
 
 // @public
 export interface WriteFailure {

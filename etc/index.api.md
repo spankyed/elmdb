@@ -42,6 +42,13 @@ E
 } : Record<string, unknown>;
 
 // @public
+export function createMemoryRecordStore<R extends {
+    id: string;
+} = StoredRecord>(input: {
+    indexes: RecordIndexes<R>;
+}): RecordStore<R>;
+
+// @public
 export function defineEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string>(engine: () => Ears): TypedEars<S, N, R, O>;
 
 // @public (undocumented)
@@ -227,8 +234,27 @@ E
     [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
 
+// @public
+export interface FindByOptions {
+    cursor?: string;
+    // (undocumented)
+    limit?: number;
+    reverse?: boolean;
+}
+
 // @public (undocumented)
 export function getTimestamp(): number;
+
+// @internal
+export function _idClock(): (prefix: string) => string;
+
+// @internal
+export function _indexEntries<R extends {
+    id: string;
+}>(indexes: RecordIndexes<R>, record: R): Array<[string, IndexValue]>;
+
+// @public
+export type IndexValue = string | number | boolean;
 
 // @public
 export interface LinkOptions<R extends string = string> {
@@ -364,6 +390,31 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
 }
 
 // @public
+export type RecordIndexes<R extends {
+    id: string;
+} = StoredRecord> = Readonly<Record<string, (record: R) => unknown>>;
+
+// @public
+export interface RecordStore<R extends {
+    id: string;
+} = StoredRecord> {
+    // (undocumented)
+    close(): void;
+    copyTo(targetDir: string): Promise<void>;
+    delete(id: string): void;
+    findBy(index: string, value: IndexValue, options?: FindByOptions): R[];
+    get(id: string): R | undefined;
+    newId(prefix: string): string;
+    readonly path: string;
+    put(record: R): void;
+    // (undocumented)
+    readonly readOnly: boolean;
+    // (undocumented)
+    reopen(): void;
+    reset(): Promise<void>;
+}
+
+// @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
     // (undocumented)
     id: EARS.EntityId;
@@ -441,6 +492,11 @@ E
 
 // @public
 export type ShortCode<P extends string> = `${P}-${number}`;
+
+// @public
+export type StoredRecord = {
+    id: string;
+} & Record<string, unknown>;
 
 // @public
 export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
