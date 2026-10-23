@@ -67,6 +67,42 @@ own names (`READ_HELPER_NAMES`, `@apackdev/sdk/database-console`), so console co
 there is no second name for one operation to learn. `packages/apack-host/tests/query-vocabulary.spec.ts` holds
 the console's vocabulary to the same rule as the exports.
 
+## Vocabulary
+
+**Every member belongs to one family, and a family has one rule.** A new member either completes a family or
+starts one — never a second name for something a family already does. `tests/vocabulary.spec.ts` holds every member
+of the engine's faces to this table.
+
+| family | members | the rule |
+|---|---|---|
+| keyed read | `getRow`, `getAttr`, `getRoles` | by id, raw: through the trash, `undefined` for absence |
+| search | `findRelations` | by a match, possibly empty |
+| introspection | `getSchemaStats` | what the data holds, keyed by the names it holds |
+| entry | `query(type)`, `query.ids`, `query.all`, `.withTrashed`, `.trashed` | where a query starts; `withTrashed` and `trashed` have the same three entry points |
+| filter | `where`, `has`/`lacks`, `withRole`, `ofType`, `within`, `linkedTo`/`linkedFrom`, `unlinkedTo`/`unlinkedFrom`, `linkedWith` | keeps part of the set; a positive and its negation are a pair |
+| walk | `out`/`in`, `descendants`/`ancestors`, `outEdges`/`inEdges` | moves to an edge's far end, one deep or any number deep, or returns the edges; no direction flag |
+| shape | `orderBy`, `reverse`, `limit`, `distinct`, `groupBy` | reorders or trims the set |
+| projection | `pick`, `pickOne`, `pickAll` | rows; `pickOne` is the first row or `undefined` |
+| ids | `ids`, `first`, `last`, `count`, `exists` | the set as ids or a number |
+| iteration | `map`, `forEach`, `reduce` | over ids |
+| row write | `create`, `upsert`, `write` | `create` and `upsert` take the whole row, the id inside it |
+| field write | `set`, `setMany`, `merge`, `delete` | `delete(k)` is the one way to remove a field |
+| list write | `append`, `removeAt`, `removeValue` | the attribute's list |
+| link | `link`, `unlink`, `unlinkAll`, and `updateRelation` on the engine | a relation by its ends; `updateRelation` by its id |
+| role | `grant`, `revoke`, `grantExclusive` | |
+| lifecycle | `trash`, `restore`, `destroy`, `unload` | `destroy` deletes what is stored; `unload` only leaves memory |
+| builder end | `id`, `row` | a write builder's entity, and its row as `getRow` reads it |
+| check, unit, numbering | `isEntityType`/`isRelationKind`/`isRole`, `wouldCreateCycle`; `transact`; `nextLabel` | |
+| admin | `engine.admin`: `clear`, `bulkLoadAttr`, `addToIndex` (load); `putAttr`, `deleteAttr`, `addRelation`, `updateRelation` (unchecked write); `getAttr`, `getAllEntities`, `getEntitiesOfType` (raw read) | the creator's alone |
+
+The rules every family follows:
+
+- **One entity row**, `{ id, entityType, ...attributes }`, wherever a read returns one.
+- **One relation row**, `{ id, kind, source, target, info }`, wherever a read returns one; a match and a patch use
+  its field names.
+- **Absence is `undefined`.** `null` is only ever a stored value.
+- **The subject comes first**: the entity, type or relation an operation is about is its first argument.
+
 ## The engine
 
 - **An instance.** `createEarsEngine({ persistence, isEntityType, isRelationKind, isRole, rowRules })` returns a new, empty engine that owns its stores, indexes and caches. Each module is a factory closing over its state (`createAttributeStorage`, `createRelationIndex`, `createQuery`, `createWrites`, …), and `engine.ts` passes each its dependencies (the sink, the relation index, the entity-type checker). No module keeps anything at module scope, not even a reference to an engine. `persistence` defaults to `noopSink`. `isEntityType` says which names are entity types, `isRelationKind` which are relation kinds and `isRole` which are roles. `rowRules(type)` says what a type's created row is held to (`RowRules`) — nothing by default, since an engine given no shapes knows of no rule: its `required` fields, which `create` refuses a row without and `delete` one of (`REQUIRED_FIELD`), before anything is written, and its `shortCode` prefix, which `create` numbers a row's `shortCode` with, `<prefix>-<n>`, when the row brings none — once every check has passed, so a refused create takes no number; the admin face's loads take any row. Codegen reads both off a pack's shapes, a `shortCode` typed `ShortCode<prefix>` naming the prefix.
@@ -109,7 +145,8 @@ the console's vocabulary to the same rule as the exports.
 
 ## Tests (`tests/`)
 
-- `engine/`: black-box specs of the public API: `writes` (`create`, `upsert` and `write`, each entry point's refusals, the builder's attribute writes, the reserved names, the ids and fields returned), `relations` (link, unlink, `out`/`in`, `linkedTo`/`linkedFrom`/`linkedWith`, `linkSymmetric`, cycle detection, roles), `queries` (the entry points and their refusals, filters, terminals and ordering, blueprints and `spawn`), `transact` (every write undone by a unit that throws, the sink's bracket, nesting) and `persistence` (the exact order and payload of sink calls, hydration through bulk load). They reach the engine only through `engine-under-test.ts` (`freshEngine`); `helpers.ts` has `recordingSink()`. A few specs pin existing quirks; they say so.
+- `engine/`: black-box specs of the public API: `writes` (`create`, `upsert` and `write`, each entry point's refusals, the builder's attribute writes, the reserved names, the ids and fields returned), `relations` (link, unlink, `out`/`in`, `linkedTo`/`linkedFrom`/`linkedWith`, the hierarchy walks, cycle detection, roles), `queries` (the entry points and their refusals, filters, terminals and ordering), `transact` (every write undone by a unit that throws, the sink's bracket, nesting) and `persistence` (the exact order and payload of sink calls, hydration through bulk load). They reach the engine only through `engine-under-test.ts` (`freshEngine`); `helpers.ts` has `recordingSink()`. A few specs pin existing quirks; they say so.
+- `vocabulary.spec.ts`: every member of the engine, `admin`, `query`, a query builder and a write builder belongs to one family of the table below (Vocabulary), read off a real engine, so a member added without a family fails there.
 - `engines.spec.ts`: a typed facade acts on whichever engine its getter returns; two engines in one process share nothing. The bound engine's operations are the SDK's, and its spec is `apack-sdk/tests/ears/bound-ears.spec.ts`.
 - `lmdb/`: `persistence` (the LMDB adapter and its units, the sharded router, `LmdbReader`), `convert` (format 1 to 2 to 3) and `store` (`openLmdbStore`: writes reach LMDB through `store.sink`, and a store opened again hydrates them).
 - Test files run in parallel (`fileParallelism: true`): each creates its own engines.

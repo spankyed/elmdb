@@ -1,4 +1,4 @@
-// The engine's contract: query builder starts, filters, ordering and terminals; blueprints; the repository registry
+// The engine's contract: query builder starts, filters, ordering and terminals
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EARS } from '../../src/index.ts';
 import { engine, type Id } from './helpers.ts';
