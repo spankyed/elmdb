@@ -9,11 +9,15 @@ export const KINDS = new Set(['about', 'assigned', 'blocks', 'child', 'contains'
 
 export const isRelationKind = (name: string) => KINDS.has(name);
 
+export const ROLES = new Set(['current', 'focus', 'free', 'lead', 'member', 'owner', 'pinned']);
+
+export const isRole = (name: string) => ROLES.has(name);
+
 export type Id = EARS.EntityId;
 
-/** An engine with the contract specs' entity types and relation kinds, and no persistence unless given */
+/** An engine with the contract specs' entity types, relation kinds and roles, and no persistence unless given */
 export function engine(persistence?: PersistenceSink): EngineUnderTest {
-  return freshEngine({ isEntityType, isRelationKind, persistence });
+  return freshEngine({ isEntityType, isRelationKind, isRole, persistence });
 }
 
 export type SinkCall = [method: string, ...args: unknown[]];

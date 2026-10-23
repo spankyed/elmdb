@@ -178,7 +178,10 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
           return setIds(cur().filter(i => !hasAttr(i, kind)));
         },
 
-        withRole: (r: string) => setIds(holding(EARS.AttrKind.Role, r)),
+        withRole: (r: string) => {
+          names.role(r, 'withRole');
+          return setIds(holding(EARS.AttrKind.Role, r));
+        },
 
         linkedWith: (other: EARS.EntityId) => {
           const linked = new Set(findEntitiesInRelationTo(other));

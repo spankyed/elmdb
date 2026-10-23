@@ -15,7 +15,9 @@ export type EarsErrorCode =
   /** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
   | 'NOT_A_LIST'
   /** A link, or a read or walk over links, named a relation kind that is not registered */
-  | 'UNKNOWN_RELATION_KIND';
+  | 'UNKNOWN_RELATION_KIND'
+  /** A role write, or a query by role, named a role that is not registered */
+  | 'UNKNOWN_ROLE';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

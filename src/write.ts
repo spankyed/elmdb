@@ -164,14 +164,17 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
       },
 
       grant(role) {
+        names.role(role, 'grant');
         if (!getRoles(id).includes(role)) grantRole(id, role);
         return self;
       },
       revoke(role) {
+        names.role(role, 'revoke');
         if (getRoles(id).includes(role)) revokeRole(id, role);
         return self;
       },
       grantExclusive(role, among) {
+        names.role(role, 'grantExclusive');
         for (const other of among) {
           if (other !== id && getRoles(other).includes(role)) revokeRole(other, role);
         }

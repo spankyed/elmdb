@@ -446,6 +446,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   const getAllAttributeKinds = (): EARS.AttrKind[] => Array.from(store.keys());
   const getAllRelationKinds = (): string[] => Object.keys(relationIndex);
+  /** Every role an entity holds, once each */
+  const getAllRoles = (): string[] => [...new Set([...(store.get(EARS.AttrKind.Role)?.values() ?? [])].flat() as string[])];
   const getAllEntityTypes = (): EARS.Entity[] => Array.from(entityIndex.keys());
 
   /** How many entities hold the attribute, and how many values they hold (a list's elements each count) */
@@ -478,7 +480,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
     findEntitiesInRelationTo, findEntitiesByRelationTo,
-    destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
+    destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllRoles, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }
 

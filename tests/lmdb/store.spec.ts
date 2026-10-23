@@ -24,7 +24,7 @@ let engine: EarsEngine;
 /** A store and a new engine persisting to it, installed, as an app's composition opens them */
 function openStore(options: Pick<LmdbStoreOptions, 'readOnly' | 'log'> = {}): LmdbStore {
   const store = openLmdbStore({ paths, policy, engine: () => engine.admin, ...options });
-  engine = createEarsEngine({ persistence: store.sink, isEntityType: (name) => name === 'Note' || name === 'Trace', isRelationKind: () => true });
+  engine = createEarsEngine({ persistence: store.sink, isEntityType: (name) => name === 'Note' || name === 'Trace', isRelationKind: () => true, isRole: () => true });
   open.push(store);
   return store;
 }

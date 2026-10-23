@@ -187,6 +187,29 @@ describe('graph walks', () => {
   });
 });
 
+describe('declared roles', () => {
+  const unknown = { code: 'UNKNOWN_ROLE' };
+
+  it('refuses a role its creator did not register, in a role write and a query by role', () => {
+    const [a, b] = [task('A'), task('B')];
+    const uses: Array<[string, () => unknown]> = [
+      ['grant', () => e.write(a).grant('leed')],
+      ['revoke', () => e.write(a).revoke('leed')],
+      ['grantExclusive', () => e.write(a).grantExclusive('leed', [b])],
+      ['withRole', () => e.query.all().withRole('leed')],
+    ];
+    for (const [via, use] of uses) expect(use, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("leed")`) }));
+    expect(e.getRoles(a)).toEqual([]);
+  });
+
+  it("loads a stored role of any kind through the admin face, which is how data a pack's removal left is read", () => {
+    const a = task('A');
+    e.admin.putAttr(a, 'role', ['retired']);
+    expect(e.getRoles(a)).toEqual(['retired']);
+    expect(e.getAllRoles()).toEqual(['retired']);
+  });
+});
+
 describe('roles', () => {
   it('grant, revoke, grantExclusive and withRole', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
@@ -201,7 +224,7 @@ describe('roles', () => {
     e.write(a).grantExclusive('owner', [c]);
     expect(e.getRoles(a)).toEqual(['owner']);
     expect(e.getRoles(b)).toEqual(['owner']);
-    e.write(a).revoke('owner').revoke('never');
+    e.write(a).revoke('owner').revoke('member');
     expect(e.getRoles(a)).toEqual([]);
     // A role is held once: granting it again changes nothing, and revoking the last leaves no role attribute
     e.write(b).grant('free');

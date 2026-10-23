@@ -17,7 +17,7 @@ const sink: PersistenceSink = {
   onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttr() {},
   onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
-const engine = freshEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, persistence: sink });
+const engine = freshEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink });
 const { admin } = engine;
 
 const task = (i: number) => `Task-${i}` as Id;
