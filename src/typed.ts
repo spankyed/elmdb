@@ -11,8 +11,8 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateOptions, QueryBuilder, WhereValue, WriteBuilder, WriteOptions } from './runtime.ts';
-import { createEntity } from './attribute-storage.ts';
+import type { CreateFields, QueryBuilder, RequiredField, RowIdentity, WhereValue, WriteBuilder, WriteOptions } from './runtime.ts';
+import { newId } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './entity-helpers.ts';
 import type { Ears } from './engine.ts';
 
@@ -37,14 +37,20 @@ export interface TypedQuery<S extends EntityShapes, N extends string = string, R
   trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R, O>;
 }
 
-/** Creates an entity of a declared type; writes to its declared fields are checked */
+/** The argument after a type: required when the shape requires a field, so an incomplete row doesn't compile */
+type RowArg<S extends EntityShapes, E extends string, Row> = [RequiredField<S, E>] extends [never] ? [row?: Row] : [row: Row];
+
+/**
+ * Creates an entity of a declared type with its row: every field the shape requires and any it allows, beside the id
+ * and times it keeps when it brings them (`RowIdentity`) — one argument, so nothing lands in the wrong place
+ */
 export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
-  <E extends string>(type: Name<N, E>, options?: CreateOptions): WriteBuilder<E, S, R, O>;
+  <E extends string>(type: Name<N, E>, ...row: RowArg<S, E, CreateFields<S, E> & RowIdentity>): WriteBuilder<E, S, R, O>;
 }
 
-/** Writes to the entity with `id`, creating it as `type` when no entity has it */
+/** Writes the row's fields to the entity with `id`, creating it as `type` with them when no entity has it */
 export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
-  <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S, R, O>;
+  <E extends string>(type: Name<N, E>, id: EARS.EntityId, ...row: RowArg<S, E, CreateFields<S, E>>): WriteBuilder<E, S, R, O>;
 }
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
@@ -70,7 +76,7 @@ export interface TypedFindWhere<S extends EntityShapes, N extends string = strin
 }
 
 /** Brands the id with the entity type when `S` declares its shape; other types stay unbranded. */
-export type TypedCreateEntity<S extends EntityShapes, N extends string = string> =
+export type TypedNewId<S extends EntityShapes, N extends string = string> =
   <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
 
 /** A field's value on an entity whose id names its type; `unknown` when the id isn't branded. */
@@ -79,12 +85,16 @@ export interface TypedGetAttr<S extends EntityShapes> {
   (id: EARS.EntityId, field: string): unknown;
 }
 
-/** Creates an entity with a short code, label and timestamps filled in. */
+/** The row `createEntityWithDefaults` writes: `create`'s, with the short code and label it generates left optional */
+type DefaultedRow<S extends EntityShapes, E extends string> = [E] extends [keyof S]
+  ? Omit<CreateFields<S, E>, 'shortCode' | 'label'> & Partial<Pick<ShapeOf<S, E>, Extract<'shortCode' | 'label', keyof ShapeOf<S, E>>>>
+  : Record<string, unknown>;
+
+/** Creates an entity with a short code, label and timestamps filled in, and the id its row brings */
 export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends string = string> = <E extends string>(
   entityType: Name<N, E>,
-  data: Partial<ShapeOf<S, E>>,
+  data: DefaultedRow<S, E> & { id?: EARS.EntityId },
   prefix?: string,
-  providedId?: EARS.EntityId,
 ) => ShapeOf<S, E> & CreatedEntityFields;
 
 export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
@@ -96,7 +106,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
   findById: TypedFindById<S>;
   findAll: TypedFindAll<S, N>;
   findWhere: TypedFindWhere<S, N>;
-  createEntity: TypedCreateEntity<S, N>;
+  newId: TypedNewId<S, N>;
   createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
   getAttr: TypedGetAttr<S>;
 }
@@ -127,7 +137,7 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
     findById: on('findById'),
     findAll: on('findAll'),
     findWhere: on('findWhere'),
-    createEntity,
+    newId,
     createEntityWithDefaults: on('createEntityWithDefaults'),
     getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N, R, O>;

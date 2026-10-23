@@ -30,10 +30,17 @@ describe('create', () => {
     expect(e.getAllEntityTypes()).toEqual(['Task', 'Project']);
   });
 
-  it('uses an id and a creation time it is given', () => {
-    const id = e.create('Task', { id: 'Task-custom' as Id, createdAt: 42 }).set('title', 'Mine').id();
+  it('takes its row in one object: the fields, and the id and creation time it is given', () => {
+    const id = e.create('Task', { id: 'Task-custom' as Id, createdAt: 42, title: 'Mine', tags: ['a'] }).id();
     expect(id).toBe('Task-custom');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: 42, updatedAt: 42, title: 'Mine' });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: 42, updatedAt: 42, title: 'Mine', tags: ['a'] });
+  });
+
+  it("refuses a row naming the engine's other fields, before the entity exists", () => {
+    for (const field of ['entityType', 'role', 'trashedAt', 'relationDetails']) {
+      expect(() => e.create('Task', { title: 'x', [field]: 1 }), field).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+    }
+    expect(e.admin.getAllEntities()).toEqual([]);
   });
 
   it('refuses a name that is not a registered type, an id in use, and an id naming another type', () => {
@@ -52,7 +59,7 @@ describe('create', () => {
       shortCode: 'PRO-1', label: 'New Project 1', createdAt: NOW, updatedAt: NOW,
     });
     expect(e.findById(created.id)).toEqual({ ...created });
-    const second = e.createEntityWithDefaults('Project', { label: 'Named' }, 'PX', 'Project-given' as Id);
+    const second = e.createEntityWithDefaults('Project', { label: 'Named', id: 'Project-given' as Id }, 'PX');
     expect(second).toMatchObject({ id: 'Project-given', shortCode: 'PX-1', label: 'Named' });
     expect(e.generateShortCode('Project', 'P')).toBe('P-1');
     expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 1');
@@ -114,12 +121,14 @@ describe('write', () => {
 });
 
 describe('upsert', () => {
-  it('creates the entity with the id when none has it, and writes to it when one does', () => {
+  it('creates the entity with the id and its row when none has it, and writes the row to it when one does', () => {
     const id = 'Task-singleton' as Id;
-    e.upsert('Task', id).set('title', 'first');
+    e.upsert('Task', id, { title: 'first' });
     vi.setSystemTime(NOW + 5);
-    e.upsert('Task', id).set('title', 'second');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second' });
+    e.upsert('Task', id, { title: 'second' }).set('done', true);
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second', done: true });
+    // The id is upsert's argument, never a field of its row
+    expect(() => e.upsert('Task', id, { id })).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });
 
   it('refuses an unregistered type, and an entity of another type', () => {
@@ -241,7 +250,6 @@ describe('updatedAt', () => {
     later();
     e.write(id).link('blocks', other).grant('lead').trash().restore();
     e.write(id, { touch: false }).set('lastSeen', 1);
-    e.upsert('Task', id, { touch: false }).set('lastSeen', 2);
     expect(e.getAttr(id, 'updatedAt')).toBe(NOW);
   });
 

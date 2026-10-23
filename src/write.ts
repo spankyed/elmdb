@@ -2,13 +2,13 @@
 // type, `write` an entity that exists, and `upsert` a type and an id that is either free or that type's.
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { Journal } from './journal.ts';
-import { createEntity, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
+import { newId, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
-import type { CreateOptions, LinkOptions, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { LinkOptions, RowIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
 
 /** When the entity last changed: stamped by the engine, never written by a caller */
 const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
@@ -18,14 +18,14 @@ const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn', 'symmet
 /** A string that is not shaped like an id: where a type is meant, an id fails to compile */
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
 
-/** Creates an entity of a registered type, with a new id or the one given */
+/** Creates an entity of a registered type with its row: its fields, and its id and times when it brings them */
 export interface Create {
-  <E extends string>(type: TypeName<E>, options?: CreateOptions): WriteBuilder<E>;
+  <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
 }
 
-/** Writes to the entity with this id, creating it as `type` when no entity has it */
+/** Writes the row's fields to the entity with this id, creating it as `type` with them when no entity has it */
 export interface Upsert {
-  <E extends string>(type: TypeName<E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E>;
+  <E extends string>(type: TypeName<E>, id: EARS.EntityId, fields?: Record<string, unknown>): WriteBuilder<E>;
 }
 
 /** Writes to the entity with this id, which must exist */
@@ -199,8 +199,12 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
     return self;
   }
 
-  const create = ((type: string, { id: given, createdAt, updatedAt }: CreateOptions = {}) => {
+  const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => {
     requireType(type, 'create');
+    // The row's id and times are the engine's to write; its other reserved names are refused before the entity
+    // exists, so a create that fails leaves nothing behind
+    const { id: given, createdAt, updatedAt, ...fields } = row;
+    for (const field of Object.keys(fields)) refuseReserved(field, 'create');
     let id: EARS.EntityId;
     if (given !== undefined) {
       // An id is the record of its entity's type (`entityTypeOf`), so it must name the type it is created as
@@ -212,14 +216,14 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
       }
       id = given;
     } else {
-      id = createEntity(type);
+      id = newId(type);
     }
     entityCreated(id, type);
     const at = createdAt ?? Date.now();
     putAttr(id, attr('createdAt'), at);
     putAttr(id, UPDATED_AT, updatedAt ?? at);
-    // The creation is the entity's first change: what the builder writes now is part of it
-    return builder(id, false);
+    // The creation is the entity's first change: its fields, and what the builder writes now, are part of it
+    return builder(id, false).setMany(fields);
   }) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
@@ -229,13 +233,14 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
     return builder(id, touch);
   }) as Write;
 
-  const upsert = ((type: string, id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
+  const upsert = ((type: string, id: EARS.EntityId, fields: Record<string, unknown> = {}) => {
     requireType(type, 'upsert');
-    if (!hasEntity(id)) return create(type, { id });
+    for (const field of Object.keys(fields)) refuseReserved(field, 'upsert');
+    if (!hasEntity(id)) return create(type, { ...fields, id });
     if (entityTypeOf(id) !== type) {
       throw new EarsError('TYPE_MISMATCH', `upsert(${JSON.stringify(type)}, ${JSON.stringify(id)}): that entity is a ${entityTypeOf(id)}`);
     }
-    return builder(id, touch);
+    return builder(id, true).setMany(fields);
   }) as Upsert;
 
   /**

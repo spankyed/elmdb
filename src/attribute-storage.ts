@@ -11,7 +11,7 @@ import { EarsError } from './errors.ts';
  *
  * @internal
  */
-export const createEntity = <E extends EARS.Entity>(t: E): EARS.EntityId =>
+export const newId = <E extends EARS.Entity>(t: E): EARS.EntityId =>
   `${t}-${idSuffix()}` as EARS.EntityId;
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
@@ -23,7 +23,7 @@ export const TRASHED_AT = 'trashedAt' as EARS.AttrKind;
 const ABSENT = Symbol('absent');
 
 /**
- * An entity's type, from its id: the one record of it. `createEntity` builds `<Type>-<suffix>`, `create`
+ * An entity's type, from its id: the one record of it. `newId` builds `<Type>-<suffix>`, `create`
  * refuses an id naming another type, and the id is the wire's record too — a frontend opens an entity by
  * it, and reference nodes keep ids inside stored documents — so nothing else stores the type. `entityIndex`
  * is keyed by this, and the `entityType` field every row carries is read from it.
@@ -283,7 +283,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
         }
       }
     }
-    const relId = createEntity(EARS.Entity.Relation);
+    const relId = newId(EARS.Entity.Relation);
     put(relId, EARS.AttrKind.RelationDetails, {
       sourceEntity: src,
       targetEntity: tgt,

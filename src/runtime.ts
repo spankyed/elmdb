@@ -164,7 +164,11 @@ export interface LinkOptions<R extends string = string> {
 }
 
 /** What `create` is given besides the type */
-export interface CreateOptions {
+/**
+ * The engine's own fields a created row may carry beside its fields, none of which a field can be named: its id and
+ * its times, for an import keeping the ones it had
+ */
+export interface RowIdentity {
   /** The new entity's id, in place of a generated one; one already in use is refused */
   id?: EARS.EntityId;
   /** When it was created, in place of now: an import keeping an original time */
@@ -173,7 +177,7 @@ export interface CreateOptions {
   updatedAt?: number;
 }
 
-/** What `write` and `upsert` are given besides the entity */
+/** What `write` is given besides the entity */
 export interface WriteOptions {
   /**
    * Whether the builder's attribute writes stamp `updatedAt` (they do by default). `false` is for a write that is no
@@ -197,6 +201,20 @@ export type OptionalField<S extends EntityShapes, E extends string> =
   [E] extends [keyof S]
     ? Extract<{ [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never }[keyof ShapeOf<S, E>], WritableField<S, E>>
     : string;
+
+/** The fields a declared shape requires: its writable fields that aren't optional, which `create` takes up front */
+export type RequiredField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
+
+/**
+ * The row `create` writes: for a declared shape, every required field and any optional one, so a row read back has
+ * what its shape says it has; any fields otherwise (an undeclared type, or one known only at runtime)
+ */
+export type CreateFields<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? { [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K] }
+      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
+    : Record<string, unknown>;
 
 /** What `where(k, v)` and `findWhere` match field `K` against: a value, one element of a list field, or a predicate */
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> =

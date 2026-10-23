@@ -22,16 +22,15 @@ export function createEntityHelpers({ create, counters }: { create: Create; coun
    */
   function createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(
     entityType: EARS.Entity,
-    data: Partial<T>,
+    data: Partial<T> & { id?: EARS.EntityId },
     prefix?: string,
-    providedId?: EARS.EntityId,
   ): T & CreatedEntityFields {
     const ts = getTimestamp();
     const shortCode = data.shortCode || counters.generateShortCode(entityType, prefix || entityType.substring(0, 3).toUpperCase());
     const label = data.label || counters.generateLabelWithCount(`New ${entityType}`, entityType);
 
     const fields = { ...data, shortCode, label };
-    const id = create(entityType, { id: providedId, createdAt: ts }).setMany(fields).id();
+    const id = create(entityType, { ...fields, createdAt: ts }).id();
 
     return { ...fields, entityType, createdAt: ts, updatedAt: ts, id } as unknown as T & CreatedEntityFields;
   }

@@ -44,7 +44,7 @@ export interface Ears {
   findAll<T = unknown>(entityType: EARS.Entity): T[];
   findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
   createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(
-    entityType: EARS.Entity, data: Partial<T>, prefix?: string, providedId?: EARS.EntityId,
+    entityType: EARS.Entity, data: Partial<T> & { id?: EARS.EntityId }, prefix?: string,
   ): T & CreatedEntityFields;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;

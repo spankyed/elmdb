@@ -61,7 +61,7 @@ export const bp: (entity: EARS.Entity) => BlueprintBuilder;
 // @public
 export interface Create {
     // (undocumented)
-    <E extends string>(type: TypeName<E>, options?: CreateOptions): WriteBuilder<E>;
+    <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
 }
 
 // @public
@@ -84,11 +84,13 @@ export interface CreatedEntityFields {
 export function createEarsEngine(input: EARSRuntimeDeps): EarsEngine;
 
 // @public
-export interface CreateOptions {
-    createdAt?: number;
-    id?: EARS.EntityId;
-    updatedAt?: number;
-}
+export type CreateFields<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? {
+    [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K];
+} & {
+    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K];
+} : Record<string, unknown>;
 
 // @public
 export function defineEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string>(engine: () => Ears): TypedEars<S, N, R, O>;
@@ -177,7 +179,9 @@ export interface Ears {
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
     // (undocumented)
-    createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(entityType: EARS.Entity, data: Partial<T>, prefix?: string, providedId?: EARS.EntityId): T & CreatedEntityFields;
+    createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(entityType: EARS.Entity, data: Partial<T> & {
+        id?: EARS.EntityId;
+    }, prefix?: string): T & CreatedEntityFields;
     // (undocumented)
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
@@ -578,7 +582,19 @@ export const RepositoryErrorCode: {
 export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof RepositoryErrorCode];
 
 // @public
+export type RequiredField<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
+
+// @public
 export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "updatedAt", "role", "relationDetails", "trashedAt"];
+
+// @public
+export interface RowIdentity {
+    createdAt?: number;
+    id?: EARS.EntityId;
+    updatedAt?: number;
+}
 
 // @public
 export interface SchemaStats {
@@ -619,21 +635,18 @@ export interface ShardedPersistence extends PersistenceSink {
 // @public
 export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, options?: CreateOptions): WriteBuilder<E, S, R, O>;
+    <E extends string>(type: Name<N, E>, ...row: RowArg<S, E, CreateFields<S, E> & RowIdentity>): WriteBuilder<E, S, R, O>;
 }
 
 // @public
-export type TypedCreateEntity<S extends EntityShapes, N extends string = string> = <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
-
-// @public
-export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends string = string> = <E extends string>(entityType: Name<N, E>, data: Partial<ShapeOf<S, E>>, prefix?: string, providedId?: EARS.EntityId) => ShapeOf<S, E> & CreatedEntityFields;
+export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends string = string> = <E extends string>(entityType: Name<N, E>, data: DefaultedRow<S, E> & {
+    id?: EARS.EntityId;
+}, prefix?: string) => ShapeOf<S, E> & CreatedEntityFields;
 
 // @public (undocumented)
 export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
-    // (undocumented)
-    createEntity: TypedCreateEntity<S, N>;
     // (undocumented)
     createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
     // (undocumented)
@@ -644,6 +657,8 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     findWhere: TypedFindWhere<S, N>;
     // (undocumented)
     getAttr: TypedGetAttr<S>;
+    // (undocumented)
+    newId: TypedNewId<S, N>;
     // (undocumented)
     query: TypedQuery<S, N, R, O>;
     // (undocumented)
@@ -685,6 +700,9 @@ export interface TypedGetAttr<S extends EntityShapes> {
 }
 
 // @public
+export type TypedNewId<S extends EntityShapes, N extends string = string> = <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
+
+// @public
 export interface TypedQuery<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> extends TypedQueryEntries<S, N, R, O> {
     // (undocumented)
     trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R, O>;
@@ -695,7 +713,7 @@ export interface TypedQuery<S extends EntityShapes, N extends string = string, R
 // @public
 export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S, R, O>;
+    <E extends string>(type: Name<N, E>, id: EARS.EntityId, ...row: RowArg<S, E, CreateFields<S, E>>): WriteBuilder<E, S, R, O>;
 }
 
 // @public
@@ -710,7 +728,7 @@ export type TypeName<T extends string> = T extends `${string}-${string}` ? never
 // @public
 export interface Upsert {
     // (undocumented)
-    <E extends string>(type: TypeName<E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E>;
+    <E extends string>(type: TypeName<E>, id: EARS.EntityId, fields?: Record<string, unknown>): WriteBuilder<E>;
 }
 
 // @public

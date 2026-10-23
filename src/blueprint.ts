@@ -61,11 +61,10 @@ export function createSpawn({ create, query }: { create: Create; query: Query })
       if (cache?.has(node)) {
         return cache.get(node)!;
       }
-      const builder = create(node.entity);
+      const builder = create(node.entity, node.attrs);
       const id = builder.id();
       cache?.set(node, id);
 
-      builder.setMany(node.attrs ?? {});
       for (const r of node.roles ?? []) {
         builder.grant(r);
       }

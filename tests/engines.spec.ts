@@ -14,7 +14,7 @@ describe('defineEars', () => {
     let current = first;
     const typed = defineEars<{ Note: { title: string } }, 'Note'>(() => current);
 
-    const id = typed.create('Note').set('title', 'first').id();
+    const id = typed.create('Note', { title: 'first' }).id();
     expect(first.findById(id)).toMatchObject({ title: 'first' });
     current = second;
     expect(typed.query('Note').ids()).toEqual([]);
@@ -26,7 +26,7 @@ describe('defineEars', () => {
 
   it('builds without an engine, so a facade can be defined before one exists', () => {
     const typed = defineEars(() => { throw new Error('no engine yet'); });
-    expect(typed.createEntity('Note')).toMatch(/^Note-/);
+    expect(typed.newId('Note')).toMatch(/^Note-/);
     expect(() => typed.query('Note')).toThrow('no engine yet');
   });
 });
