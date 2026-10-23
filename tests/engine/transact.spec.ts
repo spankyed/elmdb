@@ -200,6 +200,34 @@ describe('a link\'s target', () => {
   });
 });
 
+describe('a moved relation\'s ends', () => {
+  it('must exist when it is moved outside a unit, and nothing is written when one does not', () => {
+    const before = state();
+    expect(() => e.updateRelation(rel, { targetEntity: 'Task-ghost' as Id })).toThrow(/no entity has the id "Task-ghost"/);
+    expect(state()).toEqual(before);
+    expect(calls).toEqual([]);
+  });
+
+  it('may be one created later in the same unit', () => {
+    let later!: Id;
+    e.transact(() => {
+      e.updateRelation(rel, { targetEntity: 'Task-later' as Id });
+      later = e.create('Task', { id: 'Task-later' as Id }).id();
+    });
+    expect(e.findRelations({ sourceEntity: project, relationType: 'contains' }).map((r) => r.targetEntity)).toEqual([later]);
+  });
+
+  it('missing when the unit commits rolls the unit back', () => {
+    const before = state();
+    expect(() => e.transact(() => {
+      e.write(task).set('title', 'changed');
+      e.updateRelation(rel, { targetEntity: 'Task-never' as Id });
+    })).toThrow(/no entity has the id "Task-never"/);
+    expect(state()).toEqual(before);
+    expect(calls).toEqual([]);
+  });
+});
+
 describe('what transact refuses', () => {
   it('an async function, undoing what it wrote before its first await', () => {
     const before = state();

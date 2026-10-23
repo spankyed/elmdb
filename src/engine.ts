@@ -142,7 +142,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const edgeStore = createEdgeStore({ relations, storage });
   const query = createQuery({ storage, relations, isEntityType });
   const graph = createGraph({ query, edgeStore });
-  const { create, upsert, write } = createWrites({ storage, edgeStore, graph, isEntityType, journal });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(query);
   const entityHelpers = createEntityHelpers({ create, write, counters });
@@ -175,7 +175,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     findEntitiesInRelationTo: storage.findEntitiesInRelationTo,
     destroyEntity: storage.destroyEntity,
     removeRelationById: storage.removeRelationById,
-    updateRelation: (relId, { sourceEntity, targetEntity, info }) => storage.updateRelation(relId, sourceEntity, targetEntity, info),
+    updateRelation,
     repository: repositories.repository,
     registerRepository: repositories.registerRepository,
     unregisterRepository: repositories.unregisterRepository,

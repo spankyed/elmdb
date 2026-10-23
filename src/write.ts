@@ -40,7 +40,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
   const {
     destroyEntity, entityCreated, hasEntity,
     putAttr, addAttr, mergeAttr, dropAttr, deleteAttr, dropIf,
-    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo,
+    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr,
   } = storage;
 
   /**
@@ -195,5 +195,25 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
     return builder(id);
   }) as Upsert;
 
-  return { create, upsert, write };
+  /**
+   * Moves a relation's ends or changes its info, held to the rule `link` is: an end it names must exist — at once
+   * outside a unit, before anything is written, and when the unit commits inside one, where it reads the relation's
+   * ends as they are then. `admin.updateRelation` stays unchecked, as `admin.addRelation` does: loading data is the
+   * creator's to vouch for.
+   */
+  function updateRelation(relId: EARS.EntityId, { sourceEntity, targetEntity, info }: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void {
+    const missing = (end: EARS.EntityId) => new EarsError('NO_SUCH_ENTITY', `updateRelation(${JSON.stringify(relId)}): no entity has the id ${JSON.stringify(end)}`);
+    if (!journal.open) {
+      for (const end of [sourceEntity, targetEntity]) if (end !== undefined && !hasEntity(end)) throw missing(end);
+    } else {
+      journal.atCommit(() => {
+        const details = getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | null;
+        if (!details) return;
+        for (const end of [details.sourceEntity, details.targetEntity]) if (!hasEntity(end)) throw missing(end);
+      });
+    }
+    storage.updateRelation(relId, sourceEntity, targetEntity, info);
+  }
+
+  return { create, upsert, write, updateRelation };
 }
