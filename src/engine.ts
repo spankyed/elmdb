@@ -11,7 +11,7 @@ import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createQueryHelpers } from './query-helpers.ts';
 import { createEntityCounters } from './entity-utils.ts';
-import { createTransactionHelpers, type CreatedEntityFields } from './transaction-helpers.ts';
+import { createEntityHelpers, type CreatedEntityFields } from './entity-helpers.ts';
 import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
 import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
@@ -145,14 +145,14 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const { create, upsert, write } = createWrites({ storage, edgeStore, graph, isEntityType, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(query);
-  const writers = createTransactionHelpers({ create, write, counters });
+  const entityHelpers = createEntityHelpers({ create, write, counters });
   const relationReads = createRelationReads({ edgeStore, relations, storage });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType,
     ...finders,
-    ...writers,
+    ...entityHelpers,
     ...counters,
     ...relationReads,
     ...graph,

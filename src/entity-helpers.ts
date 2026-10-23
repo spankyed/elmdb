@@ -29,7 +29,7 @@ export interface CreatedEntityFields {
 }
 
 /** An engine's entity and relation helpers, over its writes */
-export function createTransactionHelpers({ create, write, counters }: { create: Create; write: Write; counters: ReturnType<typeof createEntityCounters> }) {
+export function createEntityHelpers({ create, write, counters }: { create: Create; write: Write; counters: ReturnType<typeof createEntityCounters> }) {
   /**
    * T is the caller's own attribute shape — it need not declare the fields this
    * function fills in (entityType, shortCode, label, timestamps); those are added

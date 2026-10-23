@@ -59,7 +59,7 @@ export const noopSink: PersistenceSink = {
 export interface EARSRuntimeDeps {
   /** Receives every write; nothing by default */
   persistence?: PersistenceSink;
-  /** Whether a name is an entity type (`tx('Note')` creates one) rather than an id */
+  /** Whether a name is an entity type (`create('Note')` makes one) rather than an id */
   isEntityType: (v: string) => boolean;
 }
 

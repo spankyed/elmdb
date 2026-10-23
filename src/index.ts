@@ -13,12 +13,12 @@ export type {
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf } from './attribute-storage.ts';
-export { prepareEntity } from './transaction-helpers.ts';
+export { prepareEntity } from './entity-helpers.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
 export { getTimestamp, filterSystemFields } from './entity-utils.ts';
 export type { RelationMatch, RelationRow, RelationStats } from './relations.ts';
 // Types that appear in the signatures above, so pack authors can name them.
-export type { CreatedEntityFields } from './transaction-helpers.ts';
+export type { CreatedEntityFields } from './entity-helpers.ts';
 export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
 export { noopSink } from './runtime.ts';
 // The persistence port: partitions, their policy, and the sink routing writes to each partition's sink
