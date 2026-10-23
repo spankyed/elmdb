@@ -3,6 +3,7 @@ import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
 import type { QueryBuilder } from './runtime.ts';
 import { EarsError } from './errors.ts';
+import { SEQUENCE_TYPE } from './entity-utils.ts';
 import type { TypeName } from './write.ts';
 
 type MaybeArr<T> = T | readonly T[];
@@ -27,7 +28,7 @@ const liftOne = <F extends (...args: any[]) => any>(many: F) =>
 /**
  * The query entry points. `query(type)` starts from every entity of a registered type, and refuses a name that
  * isn't one rather than finding nothing; `query.ids` starts from the ids given that exist; `query.all` from every
- * entity but the relations, which `findRelations` serves.
+ * entity but the engine's own: the relations, which `findRelations` serves, and the numbering sequences.
  */
 export interface Query {
   <E extends string>(type: TypeName<E>): QueryBuilder<E>;
@@ -281,6 +282,7 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
   const entry = ((start: unknown) => qxImpl(ofTypes(start))) as unknown as Query;
   entry.ids = ((start: EARS.EntityId | readonly EARS.EntityId[]) =>
     qxImpl((Array.isArray(start) ? start : [start]).filter(hasEntity))) as Query['ids'];
-  entry.all = (() => qxImpl(getAllEntities().filter((id) => !hasPrefix(EARS.Entity.Relation)(id)))) as Query['all'];
+  const engineOwn = [hasPrefix(EARS.Entity.Relation), hasPrefix(SEQUENCE_TYPE)];
+  entry.all = (() => qxImpl(getAllEntities().filter((id) => !engineOwn.some((own) => own(id))))) as Query['all'];
   return entry;
 }

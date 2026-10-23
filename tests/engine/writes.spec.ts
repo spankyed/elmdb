@@ -52,9 +52,45 @@ describe('create', () => {
     });
     expect(e.findById(created.id)).toEqual({ ...created });
     const second = e.createEntityWithDefaults('Project', { label: 'Named' }, 'PX', 'Project-given' as Id);
-    expect(second).toMatchObject({ id: 'Project-given', shortCode: 'PX-2', label: 'Named' });
-    expect(e.generateShortCode('Project', 'P')).toBe('P-3');
-    expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 3');
+    expect(second).toMatchObject({ id: 'Project-given', shortCode: 'PX-1', label: 'Named' });
+    expect(e.generateShortCode('Project', 'P')).toBe('P-1');
+    expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 1');
+  });
+});
+
+describe('numbering', () => {
+  it('never hands a short code out twice, though the row holding the highest is destroyed', () => {
+    const first = e.createEntityWithDefaults('Project', {});
+    const second = e.createEntityWithDefaults('Project', {});
+    expect(second.shortCode).toBe('PRO-2');
+    e.write(second.id).destroy();
+    expect(e.createEntityWithDefaults('Project', {}).shortCode).toBe('PRO-3');
+    e.write(first.id).destroy();
+    expect(e.createEntityWithDefaults('Project', {}).shortCode).toBe('PRO-4');
+  });
+
+  it('starts after the highest number a type already holds, and skips one a row took for itself', () => {
+    e.create('Task').set('shortCode', 'TSK-7');
+    e.create('Task').set('shortCode', 'TSK-x');
+    e.create('Task').set('label', 'New Task 2');
+    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-8');
+    e.create('Task').set('shortCode', 'TSK-9');
+    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-10');
+    expect(e.generateLabelWithCount('New Task', 'Task')).toBe('New Task 3');
+  });
+
+  it('gives back the numbers a unit took when it throws', () => {
+    expect(() => e.transact(() => {
+      e.generateShortCode('Task', 'TSK');
+      e.generateShortCode('Task', 'TSK');
+      throw new Error('stop');
+    })).toThrow('stop');
+    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-1');
+  });
+
+  it('keeps its sequences out of query.all()', () => {
+    const id = e.createEntityWithDefaults('Task', {}).id;
+    expect(e.query.all().ids()).toEqual([id]);
   });
 });
 
