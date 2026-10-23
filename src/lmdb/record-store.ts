@@ -61,9 +61,14 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     return dbs;
   }
 
-  function writable(): Dbs {
+  /**
+   * The open environment to write to, or nothing while the store is closed — for a reset or an import, which
+   * replace it — when the write is dropped: a record store is a log, and what is written while its files are being
+   * replaced has nowhere to go, as the LMDB store drops writes made while it is closed
+   */
+  function writable(): Dbs | null {
     if (readOnly) throw new Error(`The record store at ${dir} is open read-only`);
-    return current();
+    return dbs;
   }
 
   const entries = (record: StoredRecord): IndexKey[] =>
@@ -80,9 +85,12 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
   return {
     path: dir,
     readOnly,
-    get: (id) => current().records.get(id) as R | undefined,
+    // While closed, a read finds nothing
+    get: (id) => dbs?.records.get(id) as R | undefined,
     put(record) {
-      const { root, records, index } = writable();
+      const open = writable();
+      if (!open) return;
+      const { root, records, index } = open;
       root.transactionSync(() => {
         const previous = records.get(record.id);
         if (previous) for (const key of entries(previous)) index.removeSync(key);
@@ -91,7 +99,9 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
       });
     },
     delete(id) {
-      const { root, records, index } = writable();
+      const open = writable();
+      if (!open) return;
+      const { root, records, index } = open;
       root.transactionSync(() => {
         const previous = records.get(id);
         if (!previous) return;
@@ -100,7 +110,8 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
       });
     },
     findBy(name, value, { reverse = false, limit, cursor } = {}) {
-      const { records, index } = current();
+      if (!dbs) return [];
+      const { records, index } = dbs;
       // A reverse range starts at its high bound; a cursor bounds the end the walk starts from
       const low: IndexKey = [name, value, !reverse && cursor !== undefined ? cursor : ''];
       const high: IndexKey = [name, value, reverse && cursor !== undefined ? cursor : ID_CEILING];

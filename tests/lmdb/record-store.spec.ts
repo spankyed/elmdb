@@ -93,6 +93,20 @@ describe.each(Object.keys(STORES))('a record store %s', (where) => {
 });
 
 describe('openRecordStore', () => {
+  // A reset or an import closes the store while its files are replaced, and the app goes on running meanwhile
+  it('drops writes and finds nothing while closed, and refuses to copy itself', async () => {
+    const s = store();
+    s.put({ id: 'R-1', parentId: 'P' });
+    s.close();
+    expect(s.get('R-1')).toBeUndefined();
+    expect(s.findBy('parentId', 'P')).toEqual([]);
+    s.put({ id: 'R-2', parentId: 'P' });
+    s.delete('R-1');
+    await expect(s.copyTo(path.join(path.dirname(dir), 'copy'))).rejects.toThrow('is closed');
+    s.reopen();
+    expect(ids(s.findBy('parentId', 'P'))).toEqual(['R-1']);
+  });
+
   it('keeps its records across a reopen', async () => {
     const s = store();
     s.put({ id: 'R-1', parentId: 'P' });

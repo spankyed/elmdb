@@ -42,6 +42,7 @@ export interface RecordStore<R extends { id: string } = StoredRecord> {
   findBy(index: string, value: IndexValue, options?: FindByOptions): R[];
   /** A new id, `<prefix>-<n>`, sorting after every id this store handed out before (a same-millisecond one too) */
   newId(prefix: string): string;
+  /** Closes the store. While it is closed — a reset or an import replacing its files — reads find nothing and writes are dropped */
   close(): void;
   reopen(): void;
   /** Removes every record */

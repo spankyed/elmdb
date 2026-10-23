@@ -398,7 +398,6 @@ export type RecordIndexes<R extends {
 export interface RecordStore<R extends {
     id: string;
 } = StoredRecord> {
-    // (undocumented)
     close(): void;
     copyTo(targetDir: string): Promise<void>;
     delete(id: string): void;
