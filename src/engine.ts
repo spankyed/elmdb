@@ -11,11 +11,10 @@ import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createEntityCounters } from './entity-utils.ts';
 import { createRelationReads, type RelationMatch, type RelationRow } from './relations.ts';
-import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
 import { createNameChecks } from './names.ts';
 
-/** An engine's operations — its queries, writes, transactions and repository registry: what a program is handed */
+/** An engine's operations — its queries, writes and transactions: what a program is handed */
 export interface Ears {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
   query: Query;
@@ -51,10 +50,6 @@ export interface Ears {
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
   nextLabel(type: EARS.Entity, base: string): string;
-  /** The registered repositories; reading an unregistered name throws */
-  repository: Record<string, unknown>;
-  registerRepository(name: string, value: unknown): void;
-  unregisterRepository(name: string): void;
 }
 
 /** An engine's data lifecycle and direct writes: for the code that created it (the app's composition root, tests, tooling) */
@@ -79,8 +74,6 @@ export interface EarsAdmin {
   updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   /** Indexes a stored relation, without telling persistence */
   addToIndex(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId): void;
-  /** A copy of the registered repositories, by name */
-  repositories(): Record<string, unknown>;
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -105,7 +98,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const counters = createEntityCounters(storage);
   const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal });
   const relationReads = createRelationReads({ edgeStore, storage, names });
-  const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
@@ -117,9 +109,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     getRoles: storage.getRoles,
     getSchemaStats: storage.getSchemaStats,
     updateRelation,
-    repository: repositories.repository,
-    registerRepository: repositories.registerRepository,
-    unregisterRepository: repositories.unregisterRepository,
   };
 
   const admin: EarsAdmin = {
@@ -133,7 +122,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     addRelation: storage.addRelation,
     updateRelation: (relId, { source, target, info }) => storage.updateRelation(relId, source, target, info),
     addToIndex: (relId, kind, source, target) => relations.addToIndex(kind, source, target, relId),
-    repositories: repositories.entries,
   };
 
   return { ...operations, admin };

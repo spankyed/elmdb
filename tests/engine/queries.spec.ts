@@ -160,36 +160,6 @@ describe('terminals', () => {
   });
 });
 
-describe('repository registry', () => {
-  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty'])('owns the repository named %s without inheriting or leaking its members', name => {
-    expect(() => e.repository[name]).toThrow('is not registered');
-    const value = { owner: 'candidate' };
-    e.registerRepository(name, value);
-    expect(e.repository[name]).toBe(value);
-    const snapshot = e.admin.repositories();
-    expect(Object.hasOwn(snapshot, name)).toBe(true);
-    expect(snapshot[name]).toBe(value);
-    expect(Object.getPrototypeOf(snapshot)).toBe(Object.prototype);
-    expect(() => e.repository.owner).toThrow('is not registered');
-    delete snapshot[name];
-    expect(e.repository[name]).toBe(value);
-    e.unregisterRepository(name);
-    expect(Object.hasOwn(e.admin.repositories(), name)).toBe(false);
-    expect(() => e.repository[name]).toThrow('is not registered');
-    expect(() => e.repository.owner).toThrow('is not registered');
-  });
-
-  it('returns what was registered and names what wasn\'t', () => {
-    const repo = { list: () => 1 };
-    e.registerRepository('contractRepo', repo);
-    expect(e.repository.contractRepo).toBe(repo);
-    e.registerRepository('contractRepo', { list: () => 2 });
-    expect((e.repository.contractRepo as typeof repo).list()).toBe(2);
-    expect(() => e.repository.contractMissing).toThrow('[repository] "contractMissing" is not registered: a pack declares its repositories in apack.json');
-    expect((e.repository as Record<symbol, unknown>)[Symbol.iterator]).toBeUndefined();
-  });
-});
-
 describe('the value index', () => {
   /** What `where(k, v)` must answer, read by walking every entity of the types */
   const walked = (types: string[], k: string, v: unknown) =>

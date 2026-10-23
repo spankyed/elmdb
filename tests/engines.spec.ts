@@ -41,7 +41,6 @@ describe('two engines in one process', () => {
     const x = one.create('Note').set('title', 'one').id();
     const y = one.create('Note').id();
     one.write(x).link('refs', y);
-    one.registerRepository('noteQueries', { name: 'one' });
     two.create('Note').set('title', 'two');
     two.admin.bulkLoadAttr('Note-loaded' as EARS.EntityId, 'title', 'loaded');
 
@@ -50,8 +49,6 @@ describe('two engines in one process', () => {
     expect(one.findRelations()).toHaveLength(1);
     expect(two.findRelations()).toEqual([]);
     expect(Object.keys(two.getSchemaStats().relations)).toEqual([]);
-    expect(one.repository.noteQueries).toEqual({ name: 'one' });
-    expect(() => two.repository.noteQueries).toThrow('"noteQueries" is not registered');
     expect(b.calls.every(([, , id]) => id !== x)).toBe(true);
     expect(a.calls.filter(([method]) => method === 'onAddRelation')).toHaveLength(1);
     expect(b.calls.filter(([method]) => method === 'onAddRelation')).toHaveLength(0);
@@ -59,8 +56,6 @@ describe('two engines in one process', () => {
     one.admin.clear();
     expect(one.admin.getAllEntities()).toEqual([]);
     expect(two.admin.getAllEntities()).toHaveLength(2);
-    expect(one.repository.noteQueries).toEqual({ name: 'one' });
-    expect(one.admin.repositories()).toEqual({ noteQueries: { name: 'one' } });
   });
 });
 
@@ -77,19 +72,5 @@ describe('the engine', () => {
     const handed: Ears = engine;
     // @ts-expect-error `Ears` has no `admin`
     void handed.admin;
-  });
-});
-
-describe('the repository registry', () => {
-  it('reads a registered repository until it is unregistered', () => {
-    const engine = newEngine();
-    const noteQueries = { name: 'notes' };
-    engine.registerRepository('noteQueries', noteQueries);
-    expect(engine.repository.noteQueries).toBe(noteQueries);
-
-    engine.unregisterRepository('noteQueries');
-
-    expect(() => engine.repository.noteQueries).toThrow('"noteQueries" is not registered');
-    expect(engine.admin.repositories()).toEqual({});
   });
 });

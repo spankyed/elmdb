@@ -124,12 +124,7 @@ export interface Ears {
     isRole(name: string): boolean;
     nextLabel(type: EARS.Entity, base: string): string;
     query: Query;
-    // (undocumented)
-    registerRepository(name: string, value: unknown): void;
-    repository: Record<string, unknown>;
     transact<T>(fn: () => T): T;
-    // (undocumented)
-    unregisterRepository(name: string): void;
     updateRelation(relId: EARS.EntityId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
@@ -151,7 +146,6 @@ export interface EarsAdmin {
     getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    repositories(): Record<string, unknown>;
     updateRelation(relId: EARS.EntityId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
