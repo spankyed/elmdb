@@ -17,8 +17,8 @@ const entTypeOf = (id: string): EARS.Entity => {
   return entityTypeOf(id as EARS.EntityId);
 };
 
-/** A relation's details as the engine holds them, or null (`admin`'s relation details reader) */
-export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | null;
+/** A relation's details as the engine holds them, or undefined (`admin`'s relation details reader) */
+export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | undefined;
 
 /**
  * Routes sink calls to `sinks` by the partition `policy` gives each entity and relation. A relation it
@@ -27,7 +27,7 @@ export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetai
 export function makeShardedPersistence(
   policy: PartitionPolicy,
   sinks: Record<Partition, PersistenceSink>,
-  relationDetails: RelationDetailsReader = () => null,
+  relationDetails: RelationDetailsReader = () => undefined,
 ): ShardedPersistence {
   // Each relation's kind and ends as last written, which decide its partition
   const relMeta = new Map<string, { kind: string; src: string; tgt: string }>();

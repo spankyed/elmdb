@@ -87,7 +87,7 @@ const NO_ERRORS: PersistenceErrorStats = { errorCount: 0, lastError: null };
  */
 export function openLmdbStore({ paths, policy, engine, readOnly = false, log = console.log, onWriteFailure }: LmdbStoreOptions): LmdbStore {
   const relationDetails = (relId: EARS.EntityId) =>
-    engine().getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | null;
+    engine().getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | undefined;
   let envs: Record<Partition, LmdbDbs> | null = null;
   let current: ShardedPersistence | null = null;
   /** Failed writes of the environments closed so far, which `close()` reports with its own */

@@ -1,90 +1,117 @@
-// Every member of the engine's faces belongs to one family, and a family has one rule (`CLAUDE.md`, Vocabulary). A
-// member added without a family fails here, which is the point at which to ask whether it completes a family or
-// starts a second name for one. The members are read off a real engine, so the table cannot describe a face that
-// isn't there.
-import { describe, expect, it } from 'vitest';
+// The engine's vocabulary is held by rules a member is classified by on its own — its type and its name — rather
+// than by a list of members (`CLAUDE.md`, Vocabulary). A member added with a conventional name is checked the moment
+// it compiles; one that breaks a convention fails here, and the only list is the exceptions, each with its reason.
+// The API reports (`etc/*.api.md`) are where a change to the surface itself is reviewed.
+import { describe, expect, expectTypeOf, it } from 'vitest';
+import type { Ears, EarsAdmin, QueryBuilder, WriteBuilder } from '../src/index.ts';
 import { freshEngine } from './engine/engine-under-test.ts';
 
-const FAMILIES = [
-  'entry', 'keyed read', 'search', 'introspection', 'check', 'unit', 'numbering', 'row write', 'admin',
-  'filter', 'walk', 'shape', 'projection', 'ids', 'iteration',
-  'field write', 'list write', 'link', 'role', 'lifecycle', 'builder end',
-  'load', 'unchecked write', 'raw read',
-] as const;
-type Family = (typeof FAMILIES)[number];
+type Signature = (...args: never[]) => unknown;
+type Ret<F> = F extends Signature ? ReturnType<F> : never;
+type Params<F> = F extends Signature ? Parameters<F> : never;
+type Member<T> = keyof T & string;
 
-/** Each face's members, by family */
-const FACES: Record<'engine' | 'admin' | 'query' | 'builder' | 'write', Record<string, Family>> = {
-  engine: {
-    query: 'entry',
-    getRow: 'keyed read', getAttr: 'keyed read', getRoles: 'keyed read',
-    findRelations: 'search',
-    getSchemaStats: 'introspection',
-    isEntityType: 'check', isRelationKind: 'check', isRole: 'check', wouldCreateCycle: 'check',
-    transact: 'unit',
-    nextLabel: 'numbering',
-    create: 'row write', upsert: 'row write', write: 'row write',
-    updateRelation: 'link',
-    admin: 'admin',
-  },
-  admin: {
-    clear: 'load', bulkLoadAttr: 'load', addToIndex: 'load',
-    putAttr: 'unchecked write', deleteAttr: 'unchecked write', addRelation: 'unchecked write', updateRelation: 'unchecked write',
-    getAttr: 'raw read', getAllEntities: 'raw read', getEntitiesOfType: 'raw read',
-  },
-  query: { ids: 'entry', all: 'entry', withTrashed: 'entry', trashed: 'entry' },
-  builder: {
-    where: 'filter', has: 'filter', lacks: 'filter', withRole: 'filter', ofType: 'filter', within: 'filter',
-    linkedTo: 'filter', linkedFrom: 'filter', unlinkedTo: 'filter', unlinkedFrom: 'filter', linkedWith: 'filter',
-    out: 'walk', in: 'walk', ancestors: 'walk', descendants: 'walk', outEdges: 'walk', inEdges: 'walk',
-    orderBy: 'shape', reverse: 'shape', limit: 'shape', distinct: 'shape', groupBy: 'shape',
-    pick: 'projection', pickOne: 'projection', pickAll: 'projection',
-    ids: 'ids', first: 'ids', last: 'ids', count: 'ids', exists: 'ids',
-    map: 'iteration', forEach: 'iteration', reduce: 'iteration',
-  },
-  write: {
-    set: 'field write', setMany: 'field write', merge: 'field write', delete: 'field write',
-    append: 'list write', removeAt: 'list write', removeValue: 'list write',
-    link: 'link', unlink: 'link', unlinkAll: 'link',
-    grant: 'role', revoke: 'role', grantExclusive: 'role',
-    trash: 'lifecycle', restore: 'lifecycle', destroy: 'lifecycle', unload: 'lifecycle',
-    id: 'builder end', row: 'builder end',
-  },
-};
+/** `is*` members that don't answer a boolean */
+type IsNotBoolean<T> = { [K in Member<T>]: K extends `is${string}` ? ([Ret<T[K]>] extends [boolean] ? never : K) : never }[Member<T>];
+/** `find*` members that don't answer a list (a search may find nothing, so it answers an empty one) */
+type FindNotList<T> = { [K in Member<T>]: K extends `find${string}` ? ([Ret<T[K]>] extends [readonly unknown[]] ? never : K) : never }[Member<T>];
+/** Whether an argument is a boolean (optional or not): `unknown` and `any` take one but aren't one */
+type IsFlag<P> = unknown extends P ? false : [Exclude<P, undefined>] extends [never] ? false : [Exclude<P, undefined>] extends [boolean] ? true : false;
+/** Members taking a boolean argument: a direction or mode flag, where a step names the direction instead */
+type TakesFlag<T> = { [K in Member<T>]: true extends { [I in keyof Params<T[K]>]: IsFlag<Params<T[K]>[I]> }[number] ? K : never }[Member<T>];
+/** Write builder members that don't return the builder, so a chain of writes ends there */
+type EndsChain<T> = { [K in Member<T>]: [Ret<T[K]>] extends [WriteBuilder] ? never : K }[Member<T>];
 
-/** What a face's members and its table disagree on: members with no family, and families' members that are gone */
-function disagreement(members: readonly string[], table: Record<string, Family>) {
-  return {
-    unplaced: members.filter((member) => !Object.hasOwn(table, member)).sort(),
-    gone: Object.keys(table).filter((member) => !members.includes(member)).sort(),
-  };
-}
+type QB = QueryBuilder<string>;
+type WB = WriteBuilder;
 
-function faces(): Record<keyof typeof FACES, string[]> {
+describe('rules read off the types', () => {
+  it('is* answers a boolean and find* a list, on every face', () => {
+    expectTypeOf<IsNotBoolean<Ears>>().toBeNever();
+    expectTypeOf<IsNotBoolean<QB>>().toBeNever();
+    expectTypeOf<FindNotList<Ears>>().toBeNever();
+    expectTypeOf<FindNotList<EarsAdmin>>().toBeNever();
+    // The rules have members to hold: an empty population passes everything
+    expectTypeOf<Extract<Member<Ears>, `is${string}`>>().not.toBeNever();
+    expectTypeOf<Extract<Member<Ears>, `find${string}`>>().not.toBeNever();
+  });
+
+  it('no step or write takes a direction or mode flag', () => {
+    expectTypeOf<TakesFlag<QB>>().toBeNever();
+    expectTypeOf<TakesFlag<WB>>().toBeNever();
+    expectTypeOf<TakesFlag<Ears>>().toBeNever();
+  });
+
+  it('writes chain; what ends a chain is the lifecycle end and the two reads of the builder', () => {
+    // destroy and unload leave nothing to write to; id and row read the builder rather than writing
+    expectTypeOf<EndsChain<WB>>().toEqualTypeOf<'destroy' | 'unload' | 'id' | 'row'>();
+  });
+
+  it('each rule names the member that breaks it', () => {
+    interface Broken {
+      isOpen(): string;
+      findAll(): number;
+      step(outward: boolean): void;
+      set(): number;
+    }
+    expectTypeOf<IsNotBoolean<Broken>>().toEqualTypeOf<'isOpen'>();
+    expectTypeOf<FindNotList<Broken>>().toEqualTypeOf<'findAll'>();
+    expectTypeOf<TakesFlag<Broken>>().toEqualTypeOf<'step'>();
+    expectTypeOf<EndsChain<Broken>>().toEqualTypeOf<Member<Broken>>();
+  });
+});
+
+/** Each face's members, read off a real engine */
+function faces(): Record<'engine' | 'admin' | 'query' | 'builder' | 'write', Record<string, unknown>> {
   const engine = freshEngine({ isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
   const id = engine.create('Note').id();
-  return {
-    engine: Object.keys(engine),
-    admin: Object.keys(engine.admin),
-    query: Object.keys(engine.query),
-    builder: Object.keys(engine.query.all()),
-    write: Object.keys(engine.write(id)),
-  };
+  const { admin, ...operations } = engine;
+  const face = (members: object) => members as Record<string, unknown>;
+  return { engine: face(operations), admin: face(admin), query: face(engine.query), builder: face(engine.query.all()), write: face(engine.write(id)) };
 }
 
-describe('the engine vocabulary', () => {
-  it.each(Object.keys(FACES) as (keyof typeof FACES)[])('places every %s member in one family', (face) => {
-    const members = faces()[face];
-    expect(members.length, `${face} has members to place`).toBeGreaterThan(0);
-    expect(disagreement(members, FACES[face])).toEqual({ unplaced: [], gone: [] });
+/** A negation without its positive, or a direction without its opposite */
+function unpaired(names: readonly string[]): string[] {
+  const has = (name: string) => names.includes(name);
+  const twins = (name: string): string[] => [
+    ...(/^un[a-z]/.test(name) ? [name.slice(2)] : []),
+    ...(name.endsWith('To') ? [`${name.slice(0, -2)}From`] : []),
+    ...(name.endsWith('From') ? [`${name.slice(0, -4)}To`] : []),
+    ...(/^out(?=[A-Z]|$)/.test(name) ? [name.replace(/^out/, 'in')] : []),
+    ...(/^in(?=[A-Z]|$)/.test(name) ? [name.replace(/^in/, 'out')] : []),
+    ...({ ancestors: ['descendants'], descendants: ['ancestors'] }[name] ?? []),
+  ];
+  return names.filter((name) => twins(name).some((other) => !has(other)));
+}
+
+/** `get*` members that answer `null` for an id no entity has: absence is `undefined`, and `null` a stored value */
+function absentAsNull(face: Record<string, unknown>): string[] {
+  return Object.keys(face).filter((name) => /^get[A-Z]/.test(name))
+    .filter((name) => (face[name] as (...args: unknown[]) => unknown)('Note-absent', 'title') === null);
+}
+
+/** The members that break a rule on purpose, each with why. One that no longer breaks it is reported as stale */
+const UNPAIRED_BY_DESIGN: Record<string, string> = {
+  unlinkAll: 'removes every edge of the entity; its positive is a link per edge, not one call',
+  unload: 'not the undoing of a load: it is destroy that leaves storage alone',
+};
+
+describe('rules read off the names', () => {
+  it('pairs every negation with its positive and every direction with its opposite', () => {
+    const all = Object.values(faces()).flatMap((face) => unpaired(Object.keys(face)));
+    expect(all.filter((name) => !Object.hasOwn(UNPAIRED_BY_DESIGN, name)), 'unpaired members').toEqual([]);
+    expect(Object.keys(UNPAIRED_BY_DESIGN).filter((name) => !all.includes(name)), 'exceptions that excuse nothing').toEqual([]);
   });
 
-  it('names only declared families', () => {
-    const used = new Set(Object.values(FACES).flatMap((table) => Object.values(table)));
-    expect(FAMILIES.filter((family) => !used.has(family)), 'families no member belongs to').toEqual([]);
+  it('answers undefined, never null, from every get* asked about an id no entity has', () => {
+    const { engine, admin } = faces();
+    expect(Object.keys({ ...engine, ...admin }).filter((name) => /^get[A-Z]/.test(name)).length, 'get* members').toBeGreaterThan(3);
+    expect(absentAsNull(engine)).toEqual([]);
+    expect(absentAsNull(admin)).toEqual([]);
   });
 
-  it('reports a member with no family and a family member that is gone', () => {
-    expect(disagreement(['where', 'whereNot'], { where: 'filter', has: 'filter' })).toEqual({ unplaced: ['whereNot'], gone: ['has'] });
+  it('each rule names the member that breaks it', () => {
+    expect(unpaired(['linkedTo', 'unlinkedTo', 'out', 'ancestors', 'outEdges', 'inEdges'])).toEqual(['linkedTo', 'unlinkedTo', 'out', 'ancestors']);
+    expect(absentAsNull({ getThing: () => null, getOther: () => undefined, other: () => null })).toEqual(['getThing']);
   });
 });

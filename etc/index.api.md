@@ -143,7 +143,7 @@ export interface EarsAdmin {
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
+    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | undefined;
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     updateRelation(relId: EARS.EntityId, patch: {
@@ -386,7 +386,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
 }
 
 // @public
-export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | null;
+export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | undefined;
 
 // @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
