@@ -24,11 +24,17 @@ type Name<N extends string, E extends string> = EntityNameArg<N, E>;
  * from ids (typed by the entity an id is tagged with), `query.all` from every entity. A name and an id are
  * different arguments to different functions, so an id passed where a type is meant fails to compile.
  */
-export interface TypedQuery<S extends EntityShapes, N extends string = string> {
+export interface TypedQueryEntries<S extends EntityShapes, N extends string = string> {
   <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
   <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
   ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
   all(): QueryBuilder<string, S, N>;
+}
+
+/** The typed queries, which reach no entity in the trash; `withTrashed` reaches those too, `trashed` only those */
+export interface TypedQuery<S extends EntityShapes, N extends string = string> extends TypedQueryEntries<S, N> {
+  withTrashed: TypedQueryEntries<S, N>;
+  trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
 }
 
 /** Creates an entity of a declared type; writes to its declared fields are checked */
@@ -111,7 +117,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
   write: TypedWrite<S>;
   transact: Ears['transact'];
   findById: TypedFindById<S>;
-  findByIdRaw: TypedFindById<S>;
   findAll: TypedFindAll<S, N>;
   findWhere: TypedFindWhere<S, N>;
   findFirst: TypedFindFirst<S, N>;
@@ -138,13 +143,17 @@ export function defineEars<S extends EntityShapes, N extends string = string>(en
     query: Object.assign(on('query'), {
       ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.ids(ids),
       all: () => engine().query.all(),
+      withTrashed: Object.assign((start: never) => engine().query.withTrashed(start), {
+        ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.withTrashed.ids(ids),
+        all: () => engine().query.withTrashed.all(),
+      }),
+      trashed: (type: never) => engine().query.trashed(type),
     }),
     create: on('create'),
     upsert: on('upsert'),
     write: on('write'),
     transact: on('transact'),
     findById: on('findById'),
-    findByIdRaw: on('findByIdRaw'),
     findAll: on('findAll'),
     findWhere: on('findWhere'),
     findFirst: on('findFirst'),

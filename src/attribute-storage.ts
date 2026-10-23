@@ -16,6 +16,9 @@ export const createEntity = <E extends EARS.Entity>(t: E): EARS.EntityId =>
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
 
+/** When an entity was put in the trash: an entity holding it is trashed, and reads by type, id or link skip it */
+export const TRASHED_AT = 'trashedAt' as EARS.AttrKind;
+
 /** No value: an attribute an entity doesn't hold, which `null`, a value, can't say */
 const ABSENT = Symbol('absent');
 
@@ -36,6 +39,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   // undo or a held sink call keeps is the value that was there
   const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue>>();
   const entityIndex = new Map<EARS.Entity, Set<EARS.EntityId>>();
+  // The entities holding `trashedAt`, kept by `place`, so what undo and hydration write keeps it too
+  const trashed = new Set<EARS.EntityId>();
   const relationIndex = relations.index;
   // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
   // what hydration rebuilds the attribute from; storing the attribute too would be a second record of it
@@ -48,6 +53,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     removals++;
     store.clear();
     entityIndex.clear();
+    trashed.clear();
     relations.clear();
   }
 
@@ -60,6 +66,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const place = (id: EARS.EntityId, kind: EARS.AttrKind, next: EARS.AttributeValue | typeof ABSENT) => {
     if (next === ABSENT) store.get(kind)?.delete(id);
     else bucket(kind).set(id, next);
+    if (kind !== TRASHED_AT) return;
+    if (next === ABSENT) trashed.delete(id);
+    else if (!trashed.has(id)) {
+      trashed.add(id);
+      // A query kept across a trash drops the row at its next step, as it does a destroyed one
+      removals++;
+    }
   };
 
   /** Records how to put back the entity's value of a kind */
@@ -299,6 +312,10 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Whether the entity is in the engine, from its type's index rather than a scan of every entity */
   const hasEntity = (id: EARS.EntityId) =>
     entityIndex.get(entityTypeOf(id))?.has(id) ?? false;
+  /** Whether the entity is in the trash */
+  const isTrashed = (id: EARS.EntityId) => trashed.has(id);
+  /** Whether the entity is in the engine and not in the trash: what a read by type, id or link reaches */
+  const isLive = (id: EARS.EntityId) => hasEntity(id) && !trashed.has(id);
 
   const findEntitiesByRole = (role: string) =>
     getAllEntities().filter(id => getRoles(id).includes(role));
@@ -402,7 +419,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
-    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, removals: () => removals,
+    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, removals: () => removals,
     findEntitiesByRole, findEntitiesByAttribute, findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };

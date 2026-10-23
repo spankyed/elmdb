@@ -105,6 +105,8 @@ export interface BaseEntity {
   entityType: EARS.Entity;
   createdAt: number;
   updatedAt?: number;
+  /** When the entity was put in the trash: only a read that reaches the trash (`query.withTrashed`, `query.trashed`) finds one */
+  trashedAt?: number;
 }
 
 /**

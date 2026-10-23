@@ -235,26 +235,70 @@ describe('destroy', () => {
   });
 });
 
+describe('trash', () => {
+  it('takes an entity out of every query, a link\'s far end included, and withTrashed and trashed reach it', () => {
+    const kept = e.create('Task').set('title', 'kept').id();
+    const binned = e.create('Task').set('title', 'binned').id();
+    const project = e.create('Project').id();
+    e.write(project).link('contains', kept).link('contains', binned);
+    e.write(binned).trash(5);
+
+    expect(e.query('Task').ids()).toEqual([kept]);
+    expect(e.query.ids([kept, binned]).ids()).toEqual([kept]);
+    expect(e.query.all().ofType('Task').ids()).toEqual([kept]);
+    expect(e.query.ids(project).linksTo('contains').ids()).toEqual([kept]);
+    expect(e.query.ids(project).links('contains').map(({ id }) => id)).toEqual([kept]);
+    expect(e.query.withTrashed('Task').ids()).toEqual([kept, binned]);
+    expect(e.query.withTrashed.ids(project).linksTo('contains').ids()).toEqual([kept, binned]);
+    expect(e.query.trashed('Task').pickAll()).toEqual([expect.objectContaining({ id: binned, title: 'binned', trashedAt: 5 })]);
+    // Its edges stay, and a write still reaches it
+    expect(e.findRelations({ targetEntity: binned })).toHaveLength(1);
+    e.write(binned).set('title', 'still writable');
+
+    e.write(binned).restore();
+    expect(e.query('Task').ids()).toEqual([kept, binned]);
+    expect(e.query.trashed('Task').ids()).toEqual([]);
+    expect(e.getAll(binned)).not.toHaveProperty('trashedAt');
+  });
+
+  it('keeps the first time when trashed again, and refuses trashedAt as an attribute write', () => {
+    const id = e.create('Task').trash(1).trash(2).id();
+    expect(e.getAttr(id, 'trashedAt')).toBe(1);
+    expect(() => e.write(id).set('trashedAt', 3)).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+  });
+
+  it('drops a trashed row from a query kept across the trash, and a unit that throws keeps it out of the trash', () => {
+    const id = e.create('Task').id();
+    const kept = e.query('Task');
+    e.write(id).trash();
+    expect(kept.limit(5).ids()).toEqual([]);
+    e.write(id).restore();
+    expect(() => e.transact(() => { e.write(id).trash(); throw new Error('stop'); })).toThrow('stop');
+    expect(e.query('Task').ids()).toEqual([id]);
+  });
+});
+
 describe('finders', () => {
-  it('skip soft-deleted rows, except the raw ones', () => {
+  it('skip rows in the trash', () => {
     const a = e.create('Task').setMany({ title: 'A', status: 'open' }).id();
-    const b = e.create('Task').setMany({ title: 'B', status: 'open', deleted: true }).id();
+    const b = e.create('Task').setMany({ title: 'B', status: 'open' }).trash().id();
     const c = e.create('Task').setMany({ title: 'C', status: 'done' }).id();
     e.write(c).grant('pinned');
     e.write(b).grant('pinned');
     expect(e.findById(b)).toBeUndefined();
-    expect(e.findByIdRaw(b)).toMatchObject({ id: b, deleted: true });
     expect(e.findAll<{ id: Id }>('Task').map((r) => r.id)).toEqual([a, c]);
     expect(e.findWhere<{ id: Id }>('Task', 'status', 'open').map((r) => r.id)).toEqual([a]);
     expect(e.findFirst<{ id: Id }>('Task', 'status', 'done')?.id).toBe(c);
-    expect(e.findWithFields('Task', ['title'])).toEqual([{ id: a, title: 'A' }, { id: b, title: 'B' }, { id: c, title: 'C' }]);
+    expect(e.findWithFields('Task', ['title'])).toEqual([{ id: a, title: 'A' }, { id: c, title: 'C' }]);
     expect(e.findByIdWithFields(a, ['title', 'missing'])).toEqual({ id: a, title: 'A', missing: null });
+    expect(e.findByIdWithFields(b, ['title'])).toBeUndefined();
     expect(e.findWithRole<{ id: Id }>('Task', 'pinned').map((r) => r.id)).toEqual([c]);
     expect(e.findFirstWithRole<{ id: Id }>('Task', 'pinned')?.id).toBe(c);
     expect(e.countEntities('Task')).toBe(2);
-    expect(e.exists(b)).toBe(true);
+    expect(e.exists(b)).toBe(false);
     expect(e.exists('Task-none' as Id)).toBe(false);
-    expect(e.hasIdCollision(a)).toBe(true);
+    // An id is taken whether its entity is in the trash or not
+    expect(e.hasIdCollision(b)).toBe(true);
     expect(e.hasIdCollision(undefined)).toBe(false);
   });
 

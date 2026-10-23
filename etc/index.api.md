@@ -18,6 +18,7 @@ export interface BaseEntity {
     entityType: EARS.Entity;
     // (undocumented)
     id: EARS.EntityId;
+    trashedAt?: number;
     // (undocumented)
     updatedAt?: number;
 }
@@ -190,8 +191,6 @@ export interface Ears {
     findAll<T = unknown>(entityType: EARS.Entity): T[];
     // (undocumented)
     findById<T = unknown>(id: EARS.EntityId): T | undefined;
-    // (undocumented)
-    findByIdRaw<T = unknown>(id: EARS.EntityId): T | undefined;
     // (undocumented)
     findByIdWithFields<T>(id: EARS.EntityId, fields: string[]): T | undefined;
     // (undocumented)
@@ -471,15 +470,11 @@ export function prepareEntity<T extends {
 }>(entityType: EARS.Entity, data: Partial<T>, defaults?: Partial<T>): Omit<T, 'id'>;
 
 // @public
-export interface Query {
+export interface Query extends QueryEntries {
     // (undocumented)
-    <E extends string>(type: TypeName<E>): QueryBuilder<E>;
+    trashed<E extends string>(type: TypeName<E>): QueryBuilder<E>;
     // (undocumented)
-    <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
-    // (undocumented)
-    all(): QueryBuilder<string>;
-    // (undocumented)
-    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
+    withTrashed: QueryEntries;
 }
 
 // @public
@@ -616,7 +611,7 @@ export const RepositoryErrorCode: {
 export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof RepositoryErrorCode];
 
 // @public
-export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "role", "relationDetails"];
+export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "role", "relationDetails", "trashedAt"];
 
 // @public
 export type ShapeOf<S extends EntityShapes, E extends string> = [
@@ -661,8 +656,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     findAll: TypedFindAll<S, N>;
     // (undocumented)
     findById: TypedFindById<S>;
-    // (undocumented)
-    findByIdRaw: TypedFindById<S>;
     // (undocumented)
     findByIdWithFields: TypedFindByIdWithFields<S>;
     // (undocumented)
@@ -742,15 +735,11 @@ export interface TypedGetAttr<S extends EntityShapes> {
 }
 
 // @public
-export interface TypedQuery<S extends EntityShapes, N extends string = string> {
+export interface TypedQuery<S extends EntityShapes, N extends string = string> extends TypedQueryEntries<S, N> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
+    trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
     // (undocumented)
-    <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
-    // (undocumented)
-    all(): QueryBuilder<string, S, N>;
-    // (undocumented)
-    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
+    withTrashed: TypedQueryEntries<S, N>;
 }
 
 // @public
@@ -804,10 +793,12 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     id(): EARS.EntityId<E>;
     link(kind: string, target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, S>;
     merge<K extends string>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S>;
+    restore(): WriteBuilder<E, S>;
     // (undocumented)
     revoke(role: string): WriteBuilder<E, S>;
     set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
     setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S>;
+    trash(at?: number): WriteBuilder<E, S>;
     unlink(kind: string, target?: EARS.EntityId): WriteBuilder<E, S>;
     unlinkAll(): WriteBuilder<E, S>;
 }

@@ -53,6 +53,7 @@ export type FindByAttrOpts = {
 export interface Format3Conversion {
     joinedLists: number;
     singleValues: number;
+    trashed: number;
 }
 
 // @public

@@ -102,6 +102,18 @@ describe('openLmdbStore', () => {
     expect(written).toMatchObject({ tags: ['only'], grown: ['a', 'b'], meta: { k: [1] }, nothing: null, role: ['current'] });
   });
 
+  it('keeps an entity in the trash across a close: hydrated, it is still out of every query', async () => {
+    const first = openStore();
+    const binned = engine.create('Note', { id: id('Note-binned') }).trash(9).id();
+    engine.create('Note', { id: id('Note-kept') });
+    await flushed();
+    first.close();
+
+    await openStore().hydrate();
+    expect(engine.query('Note').ids()).toEqual([id('Note-kept')]);
+    expect(engine.query.trashed('Note').pickAll()).toEqual([expect.objectContaining({ id: binned, trashedAt: 9 })]);
+  });
+
   it('keeps one sink across a reopen, and drops writes while closed', async () => {
     const store = openStore();
     const { sink } = store;

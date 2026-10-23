@@ -28,9 +28,9 @@ export class EarsError extends Error {
 
 /**
  * Attributes only the engine writes: its own kinds (a role is written by `grant`, a relation's details by
- * `link`) and an entity's identity, type and creation time.
+ * `link`, when an entity was trashed by `trash`) and an entity's identity, type and creation time.
  */
-export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'createdAt', 'role', 'relationDetails'] as const;
+export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'createdAt', 'role', 'relationDetails', 'trashedAt'] as const;
 
 /** Throws `RESERVED_ATTRIBUTE` for a name only the engine writes */
 export function refuseReserved(name: string, via: string): void {

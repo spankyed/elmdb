@@ -196,7 +196,7 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * The writes to one entity, from `create`, `upsert` or `write`. `E` and `S` type them: started from a
  * declared entity type or an id tagged with one, the values of declared fields are checked; from a plain
  * id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
- * `entityType`, `createdAt`, `role`, `relationDetails`) are refused by every attribute write.
+ * `entityType`, `createdAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write.
  */
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
   /** Replaces the attribute's value with `v` (a list is one array value) */
@@ -226,6 +226,14 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
   revoke(role: string): WriteBuilder<E, S>;
   /** Grants the role here and revokes it from every other entity in `among` */
   grantExclusive(role: string, among: readonly EARS.EntityId[]): WriteBuilder<E, S>;
+  /**
+   * Puts the entity in the trash at `at` (now by default), marking it `trashedAt`: it stays stored, with its
+   * edges, and queries reach it only through `query.withTrashed` and `query.trashed`. Trashing it again keeps
+   * the first time.
+   */
+  trash(at?: number): WriteBuilder<E, S>;
+  /** Takes the entity out of the trash */
+  restore(): WriteBuilder<E, S>;
   /**
    * Deletes the entity and every edge to or from it. `keepStored` takes it out of the engine and leaves what
    * persistence stored of it, as clearing run records from memory does.

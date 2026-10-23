@@ -71,17 +71,20 @@ export interface Format3Conversion {
   singleValues: number;
   /** Attributes stored as several rows (a role list, a list built by `add`), each joined into one array value */
   joinedLists: number;
+  /** Entities marked `deleted: true`, put in the trash: `trashedAt`, from their `deletedAt` */
+  trashed: number;
 }
 
 /**
  * Converts the format 2 environment at `basePath` to format 3, in one transaction, and records format 3: each
  * attribute's rows (`kind␟id␟index`) become one row (`kind␟id`). One row at index 0 is the value; several rows, or
- * a role, are one array by index, a hole read as null.
+ * a role, are one array by index, a hole read as null. The trash moves into the engine: an entity marked
+ * `deleted: true` gets `trashedAt` (its `deletedAt`, else its `updatedAt`, else 0), and both marks go.
  */
 export function convertToFormat3(basePath: string): Format3Conversion {
   return withEnv(basePath, 2, ({ root, meta }) => {
     const attrs = root.openDB({ name: 'attrs', encoding: 'json' }) as Database<AttrRecord>;
-    const result: Format3Conversion = { singleValues: 0, joinedLists: 0 };
+    const result: Format3Conversion = { singleValues: 0, joinedLists: 0, trashed: 0 };
     root.transactionSync(() => {
       const grouped = new Map<string, Array<[number, unknown]>>();
       // Materialised, since the body removes keys from the range it walks
@@ -93,8 +96,18 @@ export function convertToFormat3(basePath: string): Format3Conversion {
         rows.push([Number(key.slice(last + 1)), decodeAttr(value)]);
         attrs.remove(key);
       }
+      const valueOf = (kind: string, id: string) => grouped.get(`${kind}${SEP}${id}`)?.find(([index]) => index === 0)?.[1];
       for (const [attribute, rows] of grouped) {
         const kind = attribute.slice(0, attribute.indexOf(SEP));
+        if (kind === 'deleted' || kind === 'deletedAt') {
+          const id = attribute.slice(kind.length + 1);
+          if (kind === 'deleted' && valueOf('deleted', id) === true) {
+            const at = [valueOf('deletedAt', id), valueOf('updatedAt', id)].find((v) => typeof v === 'number') ?? 0;
+            attrs.put(`trashedAt${SEP}${id}`, encode(at));
+            result.trashed++;
+          }
+          continue;
+        }
         let value: unknown;
         if (rows.length === 1 && rows[0][0] === 0 && kind !== 'role') {
           value = rows[0][1];

@@ -91,7 +91,7 @@ function format2(rows: Record<string, unknown>): string {
   return dir;
 }
 
-it('joins each attribute\'s rows into one: a single row is its value, several rows or a role one list', () => {
+it('joins each attribute\'s rows into one, a single row its value and several rows or a role one list, and moves the trash into the engine', () => {
   const dir = format2({
     'title|Note-1|0': 'kept',
     'tags|Note-1|0': ['a', 'b'],
@@ -99,8 +99,11 @@ it('joins each attribute\'s rows into one: a single row is its value, several ro
     'role|Note-1|0': 'current',
     'gap|Note-1|1': 'after a hole',
     'meta|Note-1|0': { k: 1 },
+    'deleted|Note-2|0': true, 'deletedAt|Note-2|0': 7,
+    'deleted|Note-3|0': true, 'updatedAt|Note-3|0': 4,
+    'deleted|Note-4|0': false, 'deletedAt|Note-4|0': null,
   });
-  expect(convertToFormat3(dir)).toEqual({ singleValues: 3, joinedLists: 3 });
+  expect(convertToFormat3(dir)).toEqual({ singleValues: 4, joinedLists: 3, trashed: 2 });
   const { attrs, format } = read(dir);
   expect(format).toBe(3);
   expect(Object.fromEntries(Object.entries(attrs).map(([key, { v }]) => [key.replace(SEP, '|'), v]))).toEqual({
@@ -110,6 +113,9 @@ it('joins each attribute\'s rows into one: a single row is its value, several ro
     'role|Note-1': ['current'],
     'gap|Note-1': [null, 'after a hole'],
     'meta|Note-1': { k: 1 },
+    'trashedAt|Note-2': 7,
+    'trashedAt|Note-3': 4,
+    'updatedAt|Note-3': 4,
   });
 });
 

@@ -36,7 +36,6 @@ export interface Ears {
   /** Whether `name` is an entity type the engine's creator registered */
   isEntityType(name: string): boolean;
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
-  findByIdRaw<T = unknown>(id: EARS.EntityId): T | undefined;
   findAll<T = unknown>(entityType: EARS.Entity): T[];
   findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
   findFirst<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T | undefined;

@@ -2,7 +2,7 @@
 // type, `write` an entity that exists, and `upsert` a type and an id that is either free or that type's.
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { Journal } from './journal.ts';
-import { createEntity, entityTypeOf } from './attribute-storage.ts';
+import { createEntity, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
 import { EARS } from './entities.ts';
@@ -38,7 +38,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
   isEntityType: (name: string) => boolean;
 }) {
   const {
-    destroyEntity, entityCreated, hasEntity,
+    destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
     grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr,
   } = storage;
@@ -149,6 +149,15 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
           if (other !== id && getRoles(other).includes(role)) revokeRole(other, role);
         }
         return self.grant(role);
+      },
+
+      trash(at = Date.now()) {
+        if (!isTrashed(id)) putAttr(id, TRASHED_AT, at);
+        return self;
+      },
+      restore() {
+        deleteAttr(id, TRASHED_AT);
+        return self;
       },
 
       destroy({ keepStored = false } = {}) {
