@@ -192,7 +192,7 @@ describe('upsert', () => {
 describe('attribute writes', () => {
   it('set replaces, add appends to a list, setMany sets each; a read gives back exactly what was written', () => {
     const id = e.create('Task').set('tag', ['a']).id();
-    e.write(id).add('tag', 'b').add('tag', 'c');
+    e.write(id).append('tag', 'b').append('tag', 'c');
     expect(e.getRow(id)?.tag).toEqual(['a', 'b', 'c']);
     expect(e.query.ids(id).pickOne()).toMatchObject({ tag: ['a', 'b', 'c'] });
     e.write(id).set('tag', 'z');
@@ -202,14 +202,14 @@ describe('attribute writes', () => {
   });
 
   it('a one-element list reads as a list, whichever write made it', () => {
-    const id = e.create('Task').set('written', ['only']).add('added', 'only').id();
+    const id = e.create('Task').set('written', ['only']).append('added', 'only').id();
     expect(e.getRow(id)).toMatchObject({ written: ['only'], added: ['only'] });
     expect(e.query('Task').pickAll()[0]).toMatchObject({ written: ['only'], added: ['only'] });
   });
 
-  it('add, deleteAt and deleteValue refuse a value that is not a list', () => {
+  it('append, removeAt and removeValue refuse a value that is not a list', () => {
     const id = e.create('Task').set('title', 'one').id();
-    for (const attempt of [() => e.write(id).add('title', 'two'), () => e.write(id).deleteAt('title', 0), () => e.write(id).deleteValue('title', 'one')]) {
+    for (const attempt of [() => e.write(id).append('title', 'two'), () => e.write(id).removeAt('title', 0), () => e.write(id).removeValue('title', 'one')]) {
       expect(attempt).toThrow(expect.objectContaining({ code: 'NOT_A_LIST' }));
     }
     expect(e.getRow(id)?.title).toBe('one');
@@ -225,15 +225,15 @@ describe('attribute writes', () => {
     expect(e.getRow(id)?.fresh).toEqual({ v: 1 });
   });
 
-  it('deleteAt removes by index, deleteValue by value or by matching object fields, delete the attribute', () => {
+  it('removeAt removes by index, removeValue by value or by matching object fields, delete the field', () => {
     const id = e.create('Task').set('tag', ['a', 'b', { k: 1, x: 2 }, 'c']).id();
-    e.write(id).deleteAt('tag', 1);
+    e.write(id).removeAt('tag', 1);
     expect(e.getRow(id)?.tag).toEqual(['a', { k: 1, x: 2 }, 'c']);
-    e.write(id).deleteValue('tag', { k: 1 });
+    e.write(id).removeValue('tag', { k: 1 });
     expect(e.getRow(id)?.tag).toEqual(['a', 'c']);
-    e.write(id).deleteValue('tag', 'missing').deleteAt('tag', 5).delete('absent');
+    e.write(id).removeValue('tag', 'missing').removeAt('tag', 5).delete('absent');
     expect(e.getRow(id)?.tag).toEqual(['a', 'c']);
-    e.write(id).deleteValue('tag', 'a').deleteValue('tag', 'c');
+    e.write(id).removeValue('tag', 'a').removeValue('tag', 'c');
     expect(e.getRow(id)?.tag).toEqual([]);
     e.write(id).delete('tag');
     expect(e.getRow(id)?.tag).toBeUndefined();
@@ -243,7 +243,7 @@ describe('attribute writes', () => {
   it('never changes a list a read handed out', () => {
     const id = e.create('Task').set('tag', ['a']).id();
     const read = e.getRow(id)?.tag;
-    e.write(id).add('tag', 'b').deleteAt('tag', 0);
+    e.write(id).append('tag', 'b').removeAt('tag', 0);
     expect(read).toEqual(['a']);
   });
 
@@ -252,8 +252,8 @@ describe('attribute writes', () => {
     const before = e.getRow(id);
     const w = () => e.write(id);
     for (const attempt of [
-      () => w().set(name, 'x'), () => w().add(name, 'x'), () => w().merge(name, {}), () => w().delete(name),
-      () => w().deleteAt(name, 0), () => w().deleteValue(name, 'x'), () => w().setMany({ title: 'kept out', [name]: 'x' }),
+      () => w().set(name, 'x'), () => w().append(name, 'x'), () => w().merge(name, {}), () => w().delete(name),
+      () => w().removeAt(name, 0), () => w().removeValue(name, 'x'), () => w().setMany({ title: 'kept out', [name]: 'x' }),
     ]) {
       expect(attempt).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
     }
@@ -284,11 +284,11 @@ describe('updatedAt', () => {
   it.each([
     ['set', (w: WriteBuilder<'Task'>) => w.set('title', 'B')],
     ['setMany', (w: WriteBuilder<'Task'>) => w.setMany({ title: 'B' })],
-    ['add', (w: WriteBuilder<'Task'>) => w.add('tags', 'x')],
+    ['append', (w: WriteBuilder<'Task'>) => w.append('tags', 'x')],
     ['merge', (w: WriteBuilder<'Task'>) => w.merge('meta', { k: 1 })],
     ['delete', (w: WriteBuilder<'Task'>) => w.delete('title')],
-    ['deleteAt', (w: WriteBuilder<'Task'>) => w.deleteAt('tags', 0)],
-    ['deleteValue', (w: WriteBuilder<'Task'>) => w.deleteValue('tags', 'a')],
+    ['removeAt', (w: WriteBuilder<'Task'>) => w.removeAt('tags', 0)],
+    ['removeValue', (w: WriteBuilder<'Task'>) => w.removeValue('tags', 'a')],
   ])('is stamped by %s', (_name, change) => {
     const id = e.create('Task').setMany({ title: 'A', tags: ['a'] }).id();
     later();
@@ -309,7 +309,7 @@ describe('updatedAt', () => {
     const engineWithSink = engine(sink);
     const id = engineWithSink.create('Task').id();
     calls.length = 0;
-    engineWithSink.write(id).set('a', 1).set('b', 2).add('c', 3);
+    engineWithSink.write(id).set('a', 1).set('b', 2).append('c', 3);
     expect(calls.filter(([, kind]) => kind === 'updatedAt')).toHaveLength(1);
     expect(() => e.write(e.create('Task').id()).set('updatedAt', 1)).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });

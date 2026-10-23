@@ -91,7 +91,7 @@ describe('openLmdbStore', () => {
   it('reads back every value as it was written, a one-element list, a grown list and roles included', async () => {
     const first = openStore();
     const note = engine.create('Note', { id: id('Note-1') })
-      .set('tags', ['only']).add('grown', 'a').add('grown', 'b').set('meta', { k: [1] }).set('nothing', null)
+      .set('tags', ['only']).append('grown', 'a').append('grown', 'b').set('meta', { k: [1] }).set('nothing', null)
       .grant('current').id();
     await flushed();
     const written = engine.getRow(note);

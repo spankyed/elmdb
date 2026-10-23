@@ -29,7 +29,7 @@ let task: Id, other: Id, project: Id, rel: Id;
 beforeEach(() => {
   const recording = recordingSink();
   e = engine(recording.sink);
-  task = e.create('Task').set('title', 'a').add('tags', 'x').set('meta', { n: 1 }).grant('owner').id();
+  task = e.create('Task').set('title', 'a').append('tags', 'x').set('meta', { n: 1 }).grant('owner').id();
   other = e.create('Task').set('title', 'b').id();
   project = e.create('Project').set('name', 'p').id();
   e.write(project).link('contains', task, { info: { pos: 1 } });
@@ -46,11 +46,11 @@ const writes: Record<string, () => void> = {
   'set': () => e.write(task).set('title', 'changed'),
   'set on a new attribute': () => e.write(task).set('fresh', 1),
   'setMany': () => e.write(task).setMany({ title: 'changed', fresh: 1 }),
-  'add': () => e.write(task).add('tags', 'y'),
+  'append': () => e.write(task).append('tags', 'y'),
   'merge': () => e.write(task).merge('meta', { m: 2 }),
   'delete': () => e.write(task).delete('tags'),
-  'deleteAt': () => e.write(task).deleteAt('tags', 0),
-  'deleteValue': () => e.write(task).deleteValue('tags', 'x'),
+  'removeAt': () => e.write(task).removeAt('tags', 0),
+  'removeValue': () => e.write(task).removeValue('tags', 'x'),
   'grant': () => e.write(other).grant('owner'),
   'revoke': () => e.write(task).revoke('owner'),
   'grantExclusive': () => e.write(other).grantExclusive('owner', [task]),
@@ -144,8 +144,8 @@ describe('a unit inside another', () => {
 
   it('that throws after growing a list the outer wrote sends the outer\'s list, not the grown one', () => {
     e.transact(() => {
-      e.write(task).add('tags', 'a');
-      expect(() => e.transact(() => { e.write(task).add('tags', 'b'); throw new Error('stop'); })).toThrow();
+      e.write(task).append('tags', 'a');
+      expect(() => e.transact(() => { e.write(task).append('tags', 'b'); throw new Error('stop'); })).toThrow();
     });
     expect(e.getRow(task)?.tags).toEqual(['x', 'a']);
     const sent = calls.filter(([method, kind]) => method === 'onPutAttr' && kind === 'tags');

@@ -74,8 +74,8 @@ describe('filters', () => {
     expect(e.query('Task').where('rank', (rank) => (rank as number) < 3).ids()).toEqual([t.a, t.d]);
     expect(() => e.query('Task').where('rank', undefined as never)).toThrow(expect.objectContaining({ code: 'NO_VALUE' }));
     // A value among several of the attribute's, within what the query already holds
-    e.write(t.c).add('tag', 'x').add('tag', 'y');
-    e.write(t.d).add('tag', 'y');
+    e.write(t.c).append('tag', 'x').append('tag', 'y');
+    e.write(t.d).append('tag', 'y');
     e.write(t.a).set('tag', { k: 'y' });
     expect(e.query('Task').where('tag', 'y').ids()).toEqual([t.c, t.d]);
     expect(e.query.ids([t.d, t.c]).where('tag', 'y').ids()).toEqual([t.d, t.c]);
@@ -207,10 +207,10 @@ describe('the value index', () => {
     e.write(t.b).set('status', 'open');
     e.write(t.a).set('status', 'done');
     e.write(t.c).set('tags', ['x', 'y']).grant('focus');
-    e.write(t.d).add('tags', 'x').add('tags', 'x');
-    e.write(t.d).deleteValue('tags', 'x');
+    e.write(t.d).append('tags', 'x').append('tags', 'x');
+    e.write(t.d).removeValue('tags', 'x');
     expect(tags(t.d)).toEqual(['x']);
-    e.write(t.c).deleteAt('tags', 0);
+    e.write(t.c).removeAt('tags', 0);
     e.write(t.a).revoke('focus');
     const late = e.create('Task').setMany({ status: 'open', tags: ['x'] }).grant('focus').id();
     e.write(t.b).trash();

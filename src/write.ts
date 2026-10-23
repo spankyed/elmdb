@@ -110,8 +110,8 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
         if (defined.length > 0) changed();
         return self;
       },
-      add(k, v) {
-        refuseReserved(k, 'add');
+      append(k, v) {
+        refuseReserved(k, 'append');
         appendAttr(id, attr(k), v);
         changed();
         return self;
@@ -131,14 +131,14 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
         changed();
         return self;
       },
-      deleteAt(k, index) {
-        refuseReserved(k, 'deleteAt');
+      removeAt(k, index) {
+        refuseReserved(k, 'removeAt');
         removeAt(id, attr(k), index);
         changed();
         return self;
       },
-      deleteValue(k, v) {
-        refuseReserved(k, 'deleteValue');
+      removeValue(k, v) {
+        refuseReserved(k, 'removeValue');
         removeValue(id, attr(k), v);
         changed();
         return self;

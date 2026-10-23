@@ -285,15 +285,15 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
   /** `set` for each field, leaving one whose value is `undefined` as it is; refuses them all, writing none, when one is the engine's */
   setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S, R, O>;
   /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
-  add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+  append<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
   /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
   merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
-  /** Removes the attribute; a declared shape's required fields can't be removed, only replaced with `set` */
+  /** Removes the field; a declared shape's required fields can't be removed, only replaced with `set` */
   delete(k: OptionalField<S, E>): WriteBuilder<E, S, R, O>;
   /** Removes the list's element at `index`; refuses a value that isn't a list */
-  deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
+  removeAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
   /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
-  deleteValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+  removeValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
   /**
    * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
    * none is given) is the same edge, and linking it again changes nothing.

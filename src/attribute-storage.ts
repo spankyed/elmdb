@@ -215,7 +215,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   /** Appends `val` to the attribute's list, starting one when there is none */
   const append = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) =>
-    assign(id, kind, [...listOf(id, kind, 'add'), val] as unknown as EARS.AttributeValue);
+    assign(id, kind, [...listOf(id, kind, 'append'), val] as unknown as EARS.AttributeValue);
 
   /** Merges `val` into the attribute's object, or sets it when either isn't a plain object */
   const merge = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => {
@@ -226,14 +226,14 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   /** Removes the list's element at `idx` */
   const removeAt = (id: EARS.EntityId, kind: EARS.AttrKind, idx: number) => {
-    const list = listOf(id, kind, 'deleteAt');
+    const list = listOf(id, kind, 'removeAt');
     if (idx < 0 || idx >= list.length) return;
     assign(id, kind, list.filter((_, i) => i !== idx) as unknown as EARS.AttributeValue);
   };
 
   /** Removes the list's first element equal to `crit` (for an object, the first holding each of its fields) */
   const removeValue = (id: EARS.EntityId, kind: EARS.AttrKind, crit: unknown) => {
-    const list = listOf(id, kind, 'deleteValue');
+    const list = listOf(id, kind, 'removeValue');
     const i = list.findIndex(
       v =>
         v === crit ||

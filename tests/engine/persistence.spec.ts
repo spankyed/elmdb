@@ -13,9 +13,9 @@ describe('persistence sink', () => {
   it('receives each write, in order, with its payload: a created entity with its type, a relation a destroy removes with the destroyed end', () => {
     const { sink, calls } = recordingSink();
     const e = engine(sink);
-    const a = e.create('Task').set('title', 'A').add('tag', 'x').add('tag', 'y').id();
+    const a = e.create('Task').set('title', 'A').append('tag', 'x').append('tag', 'y').id();
     const b = e.create('Project').setMany({ title: 'P' }).id();
-    e.write(a).merge('meta', { k: 1 }).deleteAt('tag', 0).deleteValue('tag', 'y').grant('lead');
+    e.write(a).merge('meta', { k: 1 }).removeAt('tag', 0).removeValue('tag', 'y').grant('lead');
     e.write(b).link('contains', a, { info: { order: 1 } });
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { info: { order: 2 } });

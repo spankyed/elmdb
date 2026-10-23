@@ -199,7 +199,7 @@ export type EarsErrorCode =
 | 'RESERVED_ATTRIBUTE'
 /** A `where` was given no value to compare with, or `set` none to store */
 | 'NO_VALUE'
-/** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
+/** A list write (`append`, `removeAt`, `removeValue`) named an attribute whose value isn't a list */
 | 'NOT_A_LIST'
 /** A link, or a read or walk over links, named a relation kind that is not registered */
 | 'UNKNOWN_RELATION_KIND'
@@ -595,10 +595,8 @@ export interface Write {
 
 // @public
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
-    add<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+    append<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
     delete(k: OptionalField<S, E>): WriteBuilder<E, S, R, O>;
-    deleteAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
-    deleteValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
     destroy(options?: {
         keepStored?: boolean;
     }): void;
@@ -609,6 +607,8 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     id(): EARS.EntityId<E>;
     link(kind: R, target: EARS.EntityId, options?: LinkOptions<R>): WriteBuilder<E, S, R, O>;
     merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+    removeAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
+    removeValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
     restore(): WriteBuilder<E, S, R, O>;
     // (undocumented)
     revoke(role: O): WriteBuilder<E, S, R, O>;
