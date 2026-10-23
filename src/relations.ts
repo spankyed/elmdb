@@ -11,7 +11,7 @@ export interface RelationMatch {
   targetEntity?: EARS.EntityId;
 }
 
-/** A relation row: its id (what removeRelationById takes) and its details, including its info */
+/** A relation row: its id (`write(id).destroy()` removes that one relation) and its details, including its info */
 export interface RelationRow extends EARS.RelationDetail {
   id: EARS.EntityId;
 }

@@ -57,11 +57,11 @@ describe('links', () => {
     expect(() => e.write(a).link('blocks', a, { replace: true })).toThrow("can't be linked to itself");
   });
 
-  it('unlink, unlinkAll and removeRelationById remove relations and empty index entries', () => {
+  it('unlink, unlinkAll and destroying a relation by its id remove relations and empty index entries', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b).link('blocks', c).link('refs', b).link('refs', c);
     const blocksAB = e.findRelations({ sourceEntity: a, relationType: 'blocks', targetEntity: b })[0].id;
-    e.removeRelationById(blocksAB);
+    e.write(blocksAB).destroy();
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', b, undefined], [a, 'refs', c, undefined]]);
     e.write(a).unlink('refs', b);
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', c, undefined]]);
@@ -81,9 +81,19 @@ describe('links', () => {
     e.write(c).unlinkAll();
 
     e.write(b).link('refs', c);
-    e.removeRelationById(e.findRelations()[0].id);
+    e.write(e.findRelations()[0].id).destroy();
     expect(edges()).toEqual([]);
     expect(e.getAllRelationKinds()).toEqual([]);
+  });
+
+  it('destroying a relation removes that one edge, leaving the other edges between its ends and the ends themselves', () => {
+    const [a, b] = [task('A'), task('B')];
+    e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
+    const [first] = e.findRelations();
+    e.write(first.id).destroy();
+    expect(edges()).toEqual([[a, 'blocks', b, { handle: 2 }]]);
+    expect(e.query.ids([a, b]).ids()).toEqual([a, b]);
+    expect(e.getRow(first.id)).toBeUndefined();
   });
 
   it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id', () => {

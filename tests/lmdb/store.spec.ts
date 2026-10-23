@@ -180,7 +180,7 @@ describe('openLmdbStore', () => {
 
     engine.write(id('Note-1')).destroy();
     engine.write(id('Trace-2')).destroy();
-    engine.removeRelationById(unlinked);
+    engine.write(unlinked).destroy();
     await flushed();
 
     // The run's record still says which node it ran; the node and its own relations are gone
@@ -212,7 +212,7 @@ describe('openLmdbStore', () => {
     expect(store.envs.volatileBackup.relations.get(rel)).toMatchObject({ kind: 'mentions', src: 'Note-1', tgt: 'Trace-1' });
     // A reopened store's sink has no relation cache
     store.reopen();
-    engine.removeRelationById(rel);
+    engine.write(rel).destroy();
     await flushed();
     expect(store.envs.volatileBackup.relations.get(rel)).toBeUndefined();
   });
@@ -262,7 +262,7 @@ describe('openLmdbStore', () => {
     // In the same synchronous block as its writes, before they're flushed
     engine.write(id('Note-2')).set('title', 'ghost again');
     engine.write(id('Note-2')).destroy();
-    engine.removeRelationById(rel);
+    engine.write(rel).destroy();
     await flushed();
     expect(first.read('primary').getEntityMeta('Note-2')).toBeNull();
     expect(first.envs.primary.relations.get(rel)).toBeUndefined();

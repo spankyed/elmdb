@@ -56,7 +56,6 @@ export interface Ears {
   /** Every role an entity holds, once each */
   getAllRoles(): string[];
   getSchemaStats(): SchemaStats;
-  removeRelationById(relId: EARS.EntityId): void;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
   updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
@@ -142,7 +141,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     getAllRelationKinds: storage.getAllRelationKinds,
     getAllRoles: storage.getAllRoles,
     getSchemaStats: storage.getSchemaStats,
-    removeRelationById: storage.removeRelationById,
     updateRelation,
     repository: repositories.repository,
     registerRepository: repositories.registerRepository,

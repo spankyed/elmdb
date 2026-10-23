@@ -168,8 +168,6 @@ export interface Ears {
     query: Query;
     // (undocumented)
     registerRepository(name: string, value: unknown): void;
-    // (undocumented)
-    removeRelationById(relId: EARS.EntityId): void;
     repository: Record<string, unknown>;
     transact<T>(fn: () => T): T;
     // (undocumented)

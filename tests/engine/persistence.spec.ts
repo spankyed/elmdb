@@ -83,6 +83,16 @@ describe('persistence sink', () => {
   });
 });
 
+it('hears a destroyed relation as that relation removed, not as an entity destroyed', () => {
+  const { sink, calls } = recordingSink();
+  const e = engine(sink);
+  const [a, b] = ['Task', 'Task'].map((type) => e.create(type).id());
+  e.write(a).link('refs', b);
+  const before = calls.length;
+  e.write(e.findRelations()[0].id).destroy();
+  expect(calls.slice(before)).toEqual([['onRemoveRelation', '#3']]);
+});
+
 describe('hydration', () => {
   it('bulk loads attributes and relations without telling the sink, then answers queries', () => {
     const { sink, calls } = recordingSink();

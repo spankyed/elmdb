@@ -286,7 +286,8 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
   restore(): WriteBuilder<E, S, R, O>;
   /**
    * Deletes the entity and every edge to or from it. `keepStored` takes it out of the engine and leaves what
-   * persistence stored of it, as clearing run records from memory does.
+   * persistence stored of it, as clearing run records from memory does. A relation's id (from `findRelations`)
+   * removes that one relation, which is how one edge of several between the same ends goes.
    */
   destroy(options?: { keepStored?: boolean }): void;
   id(): EARS.EntityId<E>;

@@ -425,6 +425,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   };
 
   function destroyEntity(id: EARS.EntityId, skipPersistence = false) {
+    // A relation is its details, so destroying one is removing it, as an unlink of that one edge would
+    if (entityTypeOf(id) === EARS.Entity.Relation) return removeRelation(id);
     removals++;
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];

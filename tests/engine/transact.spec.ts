@@ -57,7 +57,7 @@ const writes: Record<string, () => void> = {
   'link': () => e.write(other).link('blocks', task),
   'link with replace': () => e.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
   'updateRelation': () => e.updateRelation(rel, { targetEntity: other, info: { pos: 9 } }),
-  'removeRelationById': () => e.removeRelationById(rel),
+  'destroy a relation': () => e.write(rel).destroy(),
   'unlink': () => e.write(project).unlink('contains'),
   'unlinkAll': () => e.write(project).unlinkAll(),
   'set null and delete': () => e.write(task).set('title', null).delete('meta'),
