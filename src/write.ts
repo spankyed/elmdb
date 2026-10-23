@@ -202,9 +202,6 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
       destroy() {
         destroyEntity(id);
       },
-      unload() {
-        destroyEntity(id, true);
-      },
 
       id: () => id,
 

@@ -10,7 +10,7 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers());
 
 describe('persistence sink', () => {
-  it('receives each write, in order, with its payload: a created entity with its type, a relation a destroy removes with the destroyed end', () => {
+  it('receives each write, in order, with its payload: a created entity with its type, and the relations a destroy removes before the entity', () => {
     const { sink, calls } = recordingSink();
     const e = engine(sink);
     const a = e.create('Task').set('title', 'A').append('tag', 'x').append('tag', 'y').id();
@@ -22,7 +22,6 @@ describe('persistence sink', () => {
     e.write(b).link('contains', a, { replace: true });
     e.write(a).set('title', 'B').delete('gone');
     e.write(a).destroy();
-    e.write(b).unload();
 
     expect(calls).toEqual([
       ['onCreateEntity', '#1', 'Task'],
@@ -47,7 +46,7 @@ describe('persistence sink', () => {
       ['onAddRelation', '#4', 'contains', '#2', '#1', undefined],
       ['onPutAttr', 'title', '#1', 'B'],
       ['onPutAttr', 'updatedAt', '#1', 1000],
-      ['onRemoveRelation', '#4', '#1'],
+      ['onRemoveRelation', '#4'],
       ['onDestroyEntity', '#1'],
     ]);
   });

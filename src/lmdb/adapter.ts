@@ -53,7 +53,7 @@ export interface WriteFailure {
   error: unknown;
 }
 
-export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFailure) => void): PersistenceSink {
+export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFailure) => void): Required<PersistenceSink> {
   const { entities, attrs, relations } = dbs;
 
   // Error tracking

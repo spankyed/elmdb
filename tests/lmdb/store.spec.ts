@@ -1,30 +1,29 @@
 // openLmdbStore: the engine's writes reach LMDB through store.sink, and a store opened again on the same
-// paths hydrates them back
+// path hydrates them back
 //
-// @slow: 24 cases, each opening a real LMDB environment in a temp dir of its own, at ~150ms apiece
+// @slow: 22 cases, each opening a real LMDB environment in a temp dir of its own, at ~150ms apiece
 // There is no outlier to extract — measured, the cases run 104-346ms and the median is the profile — so
 // what would shorten this is opening fewer environments, which is the subject. `beforeEach` mkdtemps a
 // directory per case because what is being checked is the state *on disk* across a close, a reopen and a
-// reset; several cases open the same paths twice to prove hydration, and sharing one environment between
+// reset; several cases open the same path twice to prove hydration, and sharing one environment between
 // them would delete the thing under test.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createEarsEngine, makePolicy, type EARS, type EarsEngine } from '../../src/index.ts';
+import { createEarsEngine, type EARS, type EarsEngine } from '../../src/index.ts';
 import { open as openEnv } from 'lmdb';
 import { LMDB_FORMAT_VERSION, convertToCurrentFormat, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
-const policy = makePolicy({ excludedEntityTypes: new Set(['Trace']) });
-let paths: { primary: string; volatileBackup: string };
+let dbPath: string;
 const open: LmdbStore[] = [];
 let engine: EarsEngine;
 
 /** A store and a new engine persisting to it, installed, as an app's composition opens them */
 function openStore(options: Pick<LmdbStoreOptions, 'readOnly' | 'log'> = {}): LmdbStore {
-  const store = openLmdbStore({ paths, policy, engine: () => engine.admin, ...options });
-  engine = createEarsEngine({ persistence: store.sink, isEntityType: (name) => name === 'Note' || name === 'Trace', isRelationKind: () => true, isRole: () => true });
+  const store = openLmdbStore({ path: dbPath, engine: () => engine.admin, ...options });
+  engine = createEarsEngine({ persistence: store.sink, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
   open.push(store);
   return store;
 }
@@ -36,7 +35,7 @@ const id = (name: string) => name as EARS.EntityId;
 
 beforeEach(() => {
   const dir = fs.mkdtempSync(path.join(root, 'case-'));
-  paths = { primary: path.join(dir, 'ears-db'), volatileBackup: path.join(dir, 'ears-trace') };
+  dbPath = path.join(dir, 'ears-db');
 });
 afterEach(() => {
   for (const store of open.splice(0)) store.close();
@@ -65,11 +64,10 @@ describe('openLmdbStore', () => {
     expect(getAttr(id('Note-3'), 'title')).toBe('committed');
   });
 
-  it('persists writes across a close and a new store on the same paths', async () => {
+  it('persists writes across a close and a new store on the same path', async () => {
     const first = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'kept');
     engine.create('Note', { id: id('Note-2') }).set('title', 'mentioned');
-    engine.create('Trace', { id: id('Trace-1') }).set('step', 'volatile');
     engine.write(id('Note-1')).link('mentions', id('Note-2'));
     await flushed();
     first.close();
@@ -80,12 +78,6 @@ describe('openLmdbStore', () => {
     await second.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
     expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
-    // Only the primary partition is hydrated; the volatile one is read directly
-    expect(getAttr(id('Trace-1'), 'step')).toBeUndefined();
-    expect(second.read('volatileBackup').getAttr('Trace-1', 'step')).toBe('volatile');
-
-    await second.hydrate({ includeVolatile: true });
-    expect(getAttr(id('Trace-1'), 'step')).toBe('volatile');
   });
 
   it('reads back every value as it was written, a one-element list, a grown list and roles included', async () => {
@@ -119,7 +111,7 @@ describe('openLmdbStore', () => {
     const { sink } = store;
     store.close();
     expect(store.isOpen()).toBe(false);
-    expect(() => store.envs).toThrow('The LMDB store is closed');
+    expect(() => store.env).toThrow('The LMDB store is closed');
     engine.create('Note', { id: id('Note-dropped') }).set('title', 'lost');
 
     store.reopen();
@@ -127,8 +119,8 @@ describe('openLmdbStore', () => {
     expect(store.sink).toBe(sink);
     engine.create('Note', { id: id('Note-after') }).set('title', 'saved');
     await flushed();
-    expect(store.read('primary').getAttr('Note-after', 'title')).toBe('saved');
-    expect(store.read('primary').getEntityMeta('Note-dropped')).toBeNull();
+    expect(store.read().getAttr('Note-after', 'title')).toBe('saved');
+    expect(store.read().getEntityMeta('Note-dropped')).toBeNull();
   });
 
   it('reset deletes the files and opens the store empty', async () => {
@@ -137,7 +129,7 @@ describe('openLmdbStore', () => {
     await flushed();
     await store.reset();
     expect(store.isOpen()).toBe(true);
-    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
+    expect(store.read().getEntityMeta('Note-1')).toBeNull();
     // The engine's memory is the caller's
     expect(getAttr(id('Note-1'), 'title')).toBe('gone');
   });
@@ -154,125 +146,30 @@ describe('openLmdbStore', () => {
     await resetting;
     await flushed();
 
-    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
-    expect(store.read('primary').getAttr('Note-2', 'title')).toBe('written during the reset');
+    expect(store.read().getEntityMeta('Note-1')).toBeNull();
+    expect(store.read().getAttr('Note-2', 'title')).toBe('written during the reset');
     // A store closed any other way still drops writes
     store.close();
     engine.create('Note', { id: id('Note-3') }).set('title', 'dropped');
     store.reopen();
     await flushed();
-    expect(store.read('primary').getEntityMeta('Note-3')).toBeNull();
+    expect(store.read().getEntityMeta('Note-3')).toBeNull();
   });
 
-  it("keeps a run's history link when the entity it ran is destroyed, and removes it with the run or an unlink", async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'ran');
-    engine.create('Note', { id: id('Note-2') }).set('title', 'ran too');
-    engine.create('Trace', { id: id('Trace-1') }).set('step', 'run');
-    engine.create('Trace', { id: id('Trace-2') }).set('step', 'run');
-    engine.create('Trace', { id: id('Trace-3') }).set('step', 'run');
-    const kept = engine.admin.addRelation(id('Trace-1'), 'instance_of', id('Note-1'));
-    const withRun = engine.admin.addRelation(id('Trace-2'), 'instance_of', id('Note-2'));
-    const unlinked = engine.admin.addRelation(id('Trace-3'), 'instance_of', id('Note-2'));
-    const between = engine.admin.addRelation(id('Note-1'), 'mentions', id('Note-2'));
-    await flushed();
-    const stored = (rel: EARS.EntityId) => store.envs.volatileBackup.relations.get(rel) ?? store.envs.primary.relations.get(rel);
-
-    engine.write(id('Note-1')).destroy();
-    engine.write(id('Trace-2')).destroy();
-    engine.write(unlinked).destroy();
-    await flushed();
-
-    // The run's record still says which node it ran; the node and its own relations are gone
-    expect(stored(kept)).toMatchObject({ kind: 'instance_of', src: 'Trace-1', tgt: 'Note-1' });
-    expect(stored(between)).toBeUndefined();
-    expect(store.read('primary').getEntityMeta('Note-1')).toBeNull();
-    expect(stored(withRun)).toBeUndefined();
-    expect(stored(unlinked)).toBeUndefined();
-    // Memory drops it with the node
-    expect(engine.findRelations({ source: id('Trace-1') })).toEqual([]);
-  });
-
-  it('keeps unloaded runs stored whole, their links between runs and to what they ran included', async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'ran');
-    engine.create('Trace', { id: id('Trace-1') }).set('step', 'flow');
-    engine.create('Trace', { id: id('Trace-2') }).set('step', 'step');
-    engine.write(id('Trace-1')).link('spawned', id('Trace-2'));
-    engine.write(id('Trace-2')).link('instance_of', id('Note-1'));
-    await flushed();
-
-    for (const run of engine.query('Trace').ids()) engine.write(run).unload();
-    await flushed();
-    expect(engine.query('Trace').ids()).toEqual([]);
-    expect(engine.findRelations()).toEqual([]);
-    store.close();
-
-    const reopened = openStore();
-    await reopened.hydrate({ includeVolatile: true });
-    expect(getAttr(id('Trace-2'), 'step')).toBe('step');
-    expect(engine.findRelations().map(({ kind, source, target }) => [source, kind, target])).toEqual(expect.arrayContaining([
-      ['Trace-1', 'spawned', 'Trace-2'],
-      ['Trace-2', 'instance_of', 'Note-1'],
-    ]));
-    expect(engine.findRelations()).toHaveLength(2);
-  });
-
-  it("keeps a history link it didn't see written when the other end is destroyed", async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'ran');
-    const rel = engine.admin.addRelation(id('Trace-1'), 'instance_of', id('Note-1'));
-    await flushed();
-    store.reopen();
-    engine.write(id('Note-1')).destroy();
-    await flushed();
-    expect(store.envs.volatileBackup.relations.get(rel)).toMatchObject({ src: 'Trace-1', tgt: 'Note-1' });
-  });
-
-  it("removes a relation it didn't see written, wherever it is", async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'a');
-    const rel = engine.admin.addRelation(id('Note-1'), 'mentions', id('Trace-1'));
-    await flushed();
-    expect(store.envs.volatileBackup.relations.get(rel)).toMatchObject({ kind: 'mentions', src: 'Note-1', tgt: 'Trace-1' });
-    // A reopened store's sink has no relation cache
-    store.reopen();
-    engine.write(rel).destroy();
-    await flushed();
-    expect(store.envs.volatileBackup.relations.get(rel)).toBeUndefined();
-  });
-
-  it("moves a relation it didn't see written to its new ends' partition, by the engine's details", async () => {
-    const store = openStore();
-    engine.create('Note', { id: id('Note-1') }).set('title', 'a');
-    engine.create('Note', { id: id('Note-2') }).set('title', 'b');
-    engine.create('Trace', { id: id('Trace-1') }).set('step', 's');
-    const rel = engine.admin.addRelation(id('Note-1'), 'mentions', id('Note-2'), { why: 'x' });
-    await flushed();
-    expect(store.envs.primary.relations.get(rel)).toMatchObject({ src: 'Note-1', tgt: 'Note-2' });
-
-    store.reopen();
-    engine.admin.updateRelation(rel, { target: id('Trace-1') });
-    await flushed();
-    expect(store.envs.primary.relations.get(rel)).toBeUndefined();
-    expect(store.envs.volatileBackup.relations.get(rel)).toMatchObject({ kind: 'mentions', src: 'Note-1', tgt: 'Trace-1', info: { why: 'x' } });
-  });
-
-  it("updates a relation it didn't see written in place when its partition doesn't change", async () => {
+  it("updates a relation it didn't see written in place, keeping when it was stored", async () => {
     const store = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'a');
     engine.create('Note', { id: id('Note-2') }).set('title', 'b');
     engine.create('Note', { id: id('Note-3') }).set('title', 'c');
     const rel = engine.admin.addRelation(id('Note-1'), 'mentions', id('Note-2'));
     await flushed();
-    const { createdAt } = store.envs.primary.relations.get(rel);
+    const { createdAt } = store.env.relations.get(rel);
 
     store.reopen();
     await new Promise((resolve) => setTimeout(resolve, 5));
     engine.admin.updateRelation(rel, { target: id('Note-3'), info: 'why' });
     await flushed();
-    expect(store.envs.primary.relations.get(rel)).toEqual({ kind: 'mentions', src: 'Note-1', tgt: 'Note-3', info: 'why', createdAt });
-    expect(store.envs.volatileBackup.relations.get(rel)).toBeUndefined();
+    expect(store.env.relations.get(rel)).toEqual({ kind: 'mentions', src: 'Note-1', tgt: 'Note-3', info: 'why', createdAt });
   });
 
   it('keeps an entity destroyed right after its writes, and a removed relation, out of the files', async () => {
@@ -282,15 +179,15 @@ describe('openLmdbStore', () => {
     const rel = engine.admin.addRelation(id('Note-1'), 'mentions', id('Note-1'));
     await flushed();
     // A relation is its row in the relations table, and no entity row
-    expect(first.envs.primary.relations.get(rel)).toBeTruthy();
-    expect(first.read('primary').getEntityMeta(rel)).toBeNull();
+    expect(first.env.relations.get(rel)).toBeTruthy();
+    expect(first.read().getEntityMeta(rel)).toBeNull();
     // In the same synchronous block as its writes, before they're flushed
     engine.write(id('Note-2')).set('title', 'ghost again');
     engine.write(id('Note-2')).destroy();
     engine.write(rel).destroy();
     await flushed();
-    expect(first.read('primary').getEntityMeta('Note-2')).toBeNull();
-    expect(first.envs.primary.relations.get(rel)).toBeUndefined();
+    expect(first.read().getEntityMeta('Note-2')).toBeNull();
+    expect(first.env.relations.get(rel)).toBeUndefined();
     first.close();
 
     const second = openStore();
@@ -311,18 +208,18 @@ describe('openLmdbStore', () => {
     const lines: string[] = [];
     const readOnly = openStore({ readOnly: true, log: (line) => lines.push(line) });
     expect(readOnly.readOnly).toBe(true);
-    expect(readOnly.paths).toEqual(paths);
+    expect(readOnly.path).toBe(dbPath);
     await readOnly.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
     expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
-    expect(lines).toContain('[LMDB] Hydrating partitions: primary');
+    expect(lines).toContainEqual(expect.stringMatching(/^\[LMDB\] Hydrated \d+ attributes, 1 relations$/));
     expect(() => engine.write(id('Note-1')).set('title', 'changed')).toThrow('is open read-only');
     await expect(readOnly.reset()).rejects.toThrow('is open read-only');
     expect(readOnly.close()).toEqual({ errorCount: 0, lastError: null });
     expect(lines).toContain('[LMDB] Environment closed successfully');
 
     const reopened = openStore();
-    expect(reopened.read('primary').getAttr('Note-1', 'title')).toBe('kept');
+    expect(reopened.read().getAttr('Note-1', 'title')).toBe('kept');
   });
 
   it('reports writes lost while it was closed for a reopen or a reset, not only this close\'s', async () => {
@@ -344,7 +241,7 @@ describe('openLmdbStore', () => {
 
   it('opens no database where none exists when read-only', () => {
     expect(() => openStore({ readOnly: true })).toThrow();
-    expect(fs.existsSync(paths.primary)).toBe(false);
+    expect(fs.existsSync(dbPath)).toBe(false);
   });
 
   it('reports a failed final flush from close, and nothing for a clean or repeated close', async () => {
@@ -399,12 +296,12 @@ describe('the storage format', () => {
     await flushed();
 
     // The files the reopen finds are in a format this version doesn't read
-    writeFormat(paths.volatileBackup, LMDB_FORMAT_VERSION + 1);
+    writeFormat(dbPath, LMDB_FORMAT_VERSION + 1);
     expect(() => store.reopen()).toThrow(String(LMDB_FORMAT_VERSION + 1));
 
     expect(() => engine.create('Note', { id: id('Note-2') }).set('title', 'lost')).toThrow(/opening it again failed/);
 
-    writeFormat(paths.volatileBackup, LMDB_FORMAT_VERSION);
+    writeFormat(dbPath, LMDB_FORMAT_VERSION);
     store.reopen();
     engine.create('Note', { id: id('Note-3') }).set('title', 'taken');
     await flushed();
@@ -421,15 +318,14 @@ describe('the storage format', () => {
     engine.create('Note', { id: id('Note-1') }).set('title', 'kept');
     await flushed();
     store.close();
-    expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
-    expect(storedFormat(paths.volatileBackup)).toBe(LMDB_FORMAT_VERSION);
+    expect(storedFormat(dbPath)).toBe(LMDB_FORMAT_VERSION);
   });
 
   it('refuses files that predate it, which are format 1, until they are converted', async () => {
     openStore().close();
     // Files from before the format was recorded, holding data: an attribute row per list index
-    writeFormat(paths.primary);
-    const root = openEnv({ path: paths.primary, maxDbs: 8, compression: true });
+    writeFormat(dbPath);
+    const root = openEnv({ path: dbPath, maxDbs: 8, compression: true });
     root.openDB({ name: 'entities', encoding: 'json' }).putSync('Note-1', { type: 'Note', createdAt: 1 });
     root.openDB({ name: 'attrs', encoding: 'json' }).putSync('title\x1FNote-1\x1F0', { t: 'string', v: 'kept' });
     root.close();
@@ -437,10 +333,10 @@ describe('the storage format', () => {
     const format1 = new RegExp(`storage format 1, but this version reads format ${LMDB_FORMAT_VERSION}: convert a copy of it with scripts/ears-convert\\.ts`);
     expect(() => openStore({ readOnly: true, log: () => {} })).toThrow(format1);
     expect(() => openStore()).toThrow(format1);
-    expect(storedFormat(paths.primary)).toBeUndefined();
+    expect(storedFormat(dbPath)).toBeUndefined();
 
-    convertToCurrentFormat(paths.primary);
-    expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
+    convertToCurrentFormat(dbPath);
+    expect(storedFormat(dbPath)).toBe(LMDB_FORMAT_VERSION);
     const converted = openStore({ log: () => {} });
     await converted.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
@@ -448,52 +344,36 @@ describe('the storage format', () => {
 
   it('records the format in new, empty files, which hold nothing to misread', () => {
     // A version that recorded no format, and wrote nothing
-    for (const dir of [paths.primary, paths.volatileBackup]) {
-      const root = openEnv({ path: dir, maxDbs: 8, compression: true });
-      for (const name of ['entities', 'attrs', 'relations']) root.openDB({ name, encoding: 'json' });
-      root.close();
-    }
+    const root = openEnv({ path: dbPath, maxDbs: 8, compression: true });
+    for (const name of ['entities', 'attrs', 'relations']) root.openDB({ name, encoding: 'json' });
+    root.close();
     openStore().close();
-    expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
-  });
-
-  it('refuses a run history in another format, saying it can be deleted, and leaves the files closed', () => {
-    openStore().close();
-    writeFormat(paths.volatileBackup, LMDB_FORMAT_VERSION + 1);
-
-    expect(() => openStore()).toThrow(
-      new RegExp(`storage format ${LMDB_FORMAT_VERSION + 1}[\\s\\S]*run history only: deleting ${paths.volatileBackup} loses that and nothing else`),
-    );
-
-    // Deleting it is enough: the data partition was never the problem
-    fs.rmSync(paths.volatileBackup, { recursive: true, force: true });
-    const store = openStore();
-    expect(store.isOpen()).toBe(true);
+    expect(storedFormat(dbPath)).toBe(LMDB_FORMAT_VERSION);
   });
 
   it('refuses a directory with no database in it when read-only', () => {
-    fs.mkdirSync(paths.primary, { recursive: true });
-    expect(() => openStore({ readOnly: true })).toThrow(`No LMDB database at ${paths.primary}`);
+    fs.mkdirSync(dbPath, { recursive: true });
+    expect(() => openStore({ readOnly: true })).toThrow(`No LMDB database at ${dbPath}`);
   });
 
   it('refuses another format, saying which, and leaves the files closed', async () => {
     openStore().close();
-    writeFormat(paths.primary, LMDB_FORMAT_VERSION + 1);
+    writeFormat(dbPath, LMDB_FORMAT_VERSION + 1);
 
     const newer = new RegExp(`storage format ${LMDB_FORMAT_VERSION + 1}, but this version reads format ${LMDB_FORMAT_VERSION}: it was written by a newer apack`);
     expect(() => openStore()).toThrow(newer);
     expect(() => openStore({ readOnly: true })).toThrow(newer);
 
-    writeFormat(paths.primary, 'nonsense');
+    writeFormat(dbPath, 'nonsense');
     expect(() => openStore()).toThrow(new RegExp(`storage format "nonsense", but this version reads format ${LMDB_FORMAT_VERSION}$`));
 
     // The environment it opened is closed, so the files can be replaced and opened again
-    fs.rmSync(paths.primary, { recursive: true, force: true });
+    fs.rmSync(dbPath, { recursive: true, force: true });
     const store = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'after');
     await flushed();
-    expect(store.read('primary').getAttr('Note-1', 'title')).toBe('after');
-    expect(storedFormat(paths.primary)).toBe(LMDB_FORMAT_VERSION);
+    expect(store.read().getAttr('Note-1', 'title')).toBe('after');
+    expect(storedFormat(dbPath)).toBe(LMDB_FORMAT_VERSION);
   });
 });
 
@@ -508,13 +388,13 @@ describe('snapshot', () => {
     }
   }
 
-  it('copies a partition into a directory of its own, readable on its own', async () => {
+  it('copies the database into a directory of its own, readable on its own', async () => {
     const store = openStore({ log: () => {} });
     engine.create('Note', { id: id('Note-1') }).set('title', 'kept');
     await flushed();
 
     const target = path.join(fs.mkdtempSync(path.join(root, 'snap-')), 'lmdb');
-    await store.copyTo('primary', target);
+    await store.copyTo(target);
 
     // The layout a backup folder holds: the directory is made, with data.mdb in it and no lock file
     expect(fs.readdirSync(target)).toEqual(['data.mdb']);
@@ -528,7 +408,7 @@ describe('snapshot', () => {
 
     // Writes carry on across the copy, as they would while the app runs
     const target = path.join(fs.mkdtempSync(path.join(root, 'snap-')), 'lmdb');
-    const copying = store.copyTo('primary', target);
+    const copying = store.copyTo(target);
     for (let n = 400; n < 800; n++) engine.create('Note', { id: id(`Note-${n}`) }).set('title', `during ${n}`);
     await copying;
     await flushed();
@@ -545,6 +425,6 @@ describe('snapshot', () => {
     const store = openStore({ log: () => {} });
     store.close();
     const target = path.join(fs.mkdtempSync(path.join(root, 'snap-')), 'lmdb');
-    await expect(store.copyTo('primary', target)).rejects.toThrow('The LMDB store is closed');
+    await expect(store.copyTo(target)).rejects.toThrow('The LMDB store is closed');
   });
 });

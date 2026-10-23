@@ -30,13 +30,8 @@ export interface PersistenceSink {
   onPutAttr(kind: string, entityId: string, value: unknown): void;
   onAddRelation(relId: string, kind: string, source: string, target: string, info: unknown): void;
   onUpdateRelation(relId: string, patch: { source?: string; target?: string; info?: unknown }): void;
-  /**
-   * A relation (a link between two entities) was removed.
-   * - `destroyed` is set when the link was removed only because one of its two entities is being deleted:
-   *   it's the id of that entity. The sink may then keep the stored link (see makeShardedPersistence).
-   * - `destroyed` is undefined when the link itself was removed (an unlink): the sink deletes it.
-   */
-  onRemoveRelation(relId: string, destroyed?: string): void;
+  /** A relation (a link between two entities) was removed: unlinked, destroyed, or with one of its entities */
+  onRemoveRelation(relId: string): void;
   /**
    * A committed unit (`transact`) begins: the calls up to `onUnitEnd` are its writes, and the sink stores them
    * together or not at all. Calls outside a unit are each their own.
@@ -313,7 +308,7 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * `entityType`, `createdAt`, `updatedAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write, and
  * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
  *
- * A relation's id (from `findRelations`, `outEdges` or `inEdges`) takes `destroy()` and `unload()` only: a
+ * A relation's id (from `findRelations`, `outEdges` or `inEdges`) takes `destroy()` only: a
  * relation is its kind, ends and info, which `updateRelation(id, { source?, target?, info? })` changes.
  */
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
@@ -360,11 +355,6 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
    * relation, which is how one edge of several between the same ends goes.
    */
   destroy(): void;
-  /**
-   * Takes the entity and every edge to or from it out of the engine, and tells persistence nothing: what is
-   * stored of them stays, as clearing run records from memory wants, and a store opened again hydrates them.
-   */
-  unload(): void;
   id(): EARS.EntityId<E>;
   /** The entity's whole row as the builder's writes left it (`getRow`'s): what a `create` reads back */
   row(): ShapeOf<S, E>;

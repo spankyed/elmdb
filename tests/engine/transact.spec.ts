@@ -63,7 +63,6 @@ const writes: Record<string, () => void> = {
   'set null and delete': () => e.write(task).set('title', null).delete('meta'),
   'trash': () => e.write(task).trash(),
   'destroy': () => e.write(task).destroy(),
-  unload: () => e.write(task).unload(),
   'destroy then create the same id': () => { e.write(task).destroy(); e.create('Task', { id: task }).set('title', 'again'); },
 };
 

@@ -2,7 +2,6 @@
 import { open, type Database, type RootDatabase } from 'lmdb';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Partition } from '../persistence/policy.ts';
 
 /** The databases of one LMDB environment: entity records, attribute rows and relations */
 export type LmdbDbs = {
@@ -111,28 +110,6 @@ export function openEnvAt(basePath: string, { readOnly = false }: { readOnly?: b
   };
 }
 
-/** Each partition's database directory */
-export type LmdbPaths = Record<Partition, string>;
-
-/** Opens each partition's environment; `readOnly` opens existing ones without writing */
-export function openShardedEnvs(paths: LmdbPaths, { readOnly = false }: { readOnly?: boolean } = {}): Record<Partition, LmdbDbs> {
-  const primary = openEnvAt(paths.primary, { readOnly });
-  try {
-    return { primary, volatileBackup: openEnvAt(paths.volatileBackup, { readOnly }) };
-  } catch (error) {
-    // Neither partition stays open when one of them can't be
-    closeEnv(primary, () => {});
-    // The volatile partition holds run history and nothing else, which is worth saying before someone despairs of a
-    // database that is otherwise fine
-    throw new Error(`${(error as Error).message}\n  It holds the run history only: deleting ${paths.volatileBackup} loses that and nothing else.`, { cause: error });
-  }
-}
-
-export function closeShardedEnvs(envs: Record<Partition, LmdbDbs>, log: (message: string) => void = console.log) {
-  closeEnv(envs.primary, log);
-  closeEnv(envs.volatileBackup, log);
-}
-
 export function closeEnv(dbs: LmdbDbs, log: (message: string) => void = console.log): void {
   try {
     // Close child databases first, then root
@@ -147,15 +124,6 @@ export function closeEnv(dbs: LmdbDbs, log: (message: string) => void = console.
     if (!error?.message?.includes('Dbi is not open') &&
         !error?.message?.includes('already been closed')) {
       console.error('[LMDB] Error closing environment:', error);
-    }
-  }
-}
-
-/** Delete all LMDB database directories. Must be called after connections are closed. */
-export function deleteLmdbDirectories(paths: LmdbPaths): void {
-  for (const dbPath of [paths.primary, paths.volatileBackup]) {
-    if (fs.existsSync(dbPath)) {
-      fs.rmSync(dbPath, { recursive: true, force: true });
     }
   }
 }

@@ -16,9 +16,6 @@ export type AttrRecord = {
 // @public (undocumented)
 export function closeEnv(dbs: LmdbDbs, log?: (message: string) => void): void;
 
-// @public (undocumented)
-export function closeShardedEnvs(envs: Record<Partition, LmdbDbs>, log?: (message: string) => void): void;
-
 // @public
 export function convertToCurrentFormat(basePath: string): FormatSteps;
 
@@ -30,9 +27,6 @@ export function convertToFormat3(basePath: string): Format3Conversion;
 
 // @public
 export function decodeAttr(rec?: AttrRecord | null): unknown;
-
-// @public
-export function deleteLmdbDirectories(paths: LmdbPaths): void;
 
 // @public (undocumented)
 export type EntityMeta = {
@@ -84,12 +78,9 @@ export type FormatSteps = Array<{
 }>;
 
 // @public
-export function hydrateSharded(params: {
+export function hydrate(params: {
     engine: EarsAdmin;
-    envs: Record<Partition, LmdbDbs>;
-    policy: PartitionPolicy;
-    includeVolatile?: boolean;
-    shardedPersistence?: ShardedPersistence;
+    env: LmdbDbs;
     log?: (message: string) => void;
 }): Promise<void>;
 
@@ -103,9 +94,6 @@ export type LmdbDbs = {
     relations: Database<any>;
     root: RootDatabase;
 };
-
-// @public
-export type LmdbPaths = Record<Partition, string>;
 
 // @public (undocumented)
 export class LmdbReader {
@@ -154,19 +142,16 @@ export class LmdbReader {
 // @public
 export interface LmdbStore {
     close(): PersistenceErrorStats;
-    copyTo(partition: Partition, targetDir: string): Promise<void>;
-    readonly envs: Readonly<Record<Partition, LmdbDbs>>;
-    hydrate(options?: {
-        includeVolatile?: boolean;
-    }): Promise<void>;
+    copyTo(targetDir: string): Promise<void>;
+    readonly env: LmdbDbs;
+    hydrate(): Promise<void>;
     isOpen(): boolean;
-    readonly paths: Readonly<LmdbPaths>;
-    readonly policy: PartitionPolicy;
-    read(partition: Partition): LmdbReader;
+    readonly path: string;
+    read(): LmdbReader;
     readonly readOnly: boolean;
     reopen(): void;
     reset(): Promise<void>;
-    readonly sink: ShardedPersistence;
+    readonly sink: Required<PersistenceSink>;
 }
 
 // @public
@@ -174,13 +159,12 @@ export interface LmdbStoreOptions {
     engine: () => EarsAdmin;
     log?: (message: string) => void;
     onWriteFailure?: (failure: WriteFailure) => void;
-    paths: LmdbPaths;
-    policy: PartitionPolicy;
+    path: string;
     readOnly?: boolean;
 }
 
 // @public (undocumented)
-export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFailure) => void): PersistenceSink;
+export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFailure) => void): Required<PersistenceSink>;
 
 // @public
 export function openEnvAt(basePath: string, input?: {
@@ -192,11 +176,6 @@ export function openLmdbStore(input: LmdbStoreOptions): LmdbStore;
 
 // @public
 export function openRecordStore<R extends StoredRecord = StoredRecord>(input: RecordStoreOptions): RecordStore<R>;
-
-// @public
-export function openShardedEnvs(paths: LmdbPaths, input?: {
-    readOnly?: boolean;
-}): Record<Partition, LmdbDbs>;
 
 // @public
 export const RECORD_STORE_FORMAT_VERSION = 1;

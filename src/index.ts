@@ -16,9 +16,6 @@ export type { RelationMatch, RelationRow } from './relations.ts';
 // Types that appear in the signatures above, so pack authors can name them.
 export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
 export { noopSink } from './runtime.ts';
-// The persistence port: partitions, their policy, and the sink routing writes to each partition's sink
-export { makePolicy, type Partition, type PartitionPolicy } from './persistence/policy.ts';
-export { makeShardedPersistence, type ShardedPersistence, type RelationDetailsReader } from './persistence/sharded-router.ts';
 export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {

@@ -241,15 +241,6 @@ export interface LinkOptions<R extends string = string> {
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
 // @public
-export function makePolicy(config: {
-    excludedEntityTypes: ReadonlySet<EARS.Entity>;
-    hydratePartitions?: ReadonlySet<Partition>;
-}): PartitionPolicy;
-
-// @public
-export function makeShardedPersistence(policy: PartitionPolicy, sinks: Record<Partition, PersistenceSink>, relationDetails?: RelationDetailsReader): ShardedPersistence;
-
-// @public
 export const noopSink: PersistenceSink;
 
 // @public
@@ -265,19 +256,6 @@ E
 ] extends [keyof S] ? Extract<{
     [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
 }[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
-
-// @public
-export type Partition = 'primary' | 'volatileBackup';
-
-// @public (undocumented)
-export interface PartitionPolicy {
-    readonly hydrate: ReadonlySet<Partition>;
-    routeEntity(entityType: EARS.Entity): Partition;
-    routeRelation(params: {
-        srcType: EARS.Entity;
-        tgtType: EARS.Entity;
-    }): Partition;
-}
 
 // @public
 export interface PersistenceErrorStats {
@@ -300,7 +278,7 @@ export interface PersistenceSink {
     onDestroyEntity(entityId: string): void;
     onDropAttr(kind: string, entityId: string): void;
     onPutAttr(kind: string, entityId: string, value: unknown): void;
-    onRemoveRelation(relId: string, destroyed?: string): void;
+    onRemoveRelation(relId: string): void;
     // (undocumented)
     onUnitEnd(): void;
     onUnitStart(): void;
@@ -386,9 +364,6 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
 }
 
 // @public
-export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | undefined;
-
-// @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
     // (undocumented)
     id: EARS.EntityId;
@@ -463,18 +438,6 @@ E
 ] extends [keyof S] ? S[E] & BaseEntity & {
     id: EARS.EntityId<E>;
 } : BaseEntity & Record<string, unknown>;
-
-// @public
-export interface ShardedPersistence extends PersistenceSink {
-    // (undocumented)
-    getRelMeta(): Map<string, {
-        kind: string;
-        src: string;
-        tgt: string;
-    }>;
-    // (undocumented)
-    hydrateRelationMetadata(relId: string, kind: string, src: string, tgt: string): void;
-}
 
 // @public
 export type ShortCode<P extends string> = `${P}-${number}`;
@@ -584,7 +547,6 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     trash(at?: number): WriteBuilder<E, S, R, O>;
     unlink(kind: R, target?: EARS.EntityId): WriteBuilder<E, S, R, O>;
     unlinkAll(): WriteBuilder<E, S, R, O>;
-    unload(): void;
 }
 
 // @public

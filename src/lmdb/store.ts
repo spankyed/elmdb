@@ -1,47 +1,42 @@
 import * as fs from 'node:fs';
 import type { PersistenceSink, PersistenceErrorStats } from '../runtime.ts';
-import { EARS } from '../entities.ts';
 import type { EarsAdmin } from '../engine.ts';
-import type { Partition, PartitionPolicy } from '../persistence/policy.ts';
-import { makeShardedPersistence, type ShardedPersistence } from '../persistence/sharded-router.ts';
-import { openShardedEnvs, closeShardedEnvs, deleteLmdbDirectories, type LmdbDbs, type LmdbPaths } from './envs.ts';
+import { openEnvAt, closeEnv, type LmdbDbs } from './envs.ts';
 import { makeLmdbAdapter, type WriteFailure } from './adapter.ts';
-import { hydrateSharded } from './hydrate.ts';
+import { hydrate } from './hydrate.ts';
 import { LmdbReader } from './reader.ts';
 
-/** An app's LMDB store: one environment per partition, and the sink that writes the engine's changes to them */
+/** An app's LMDB store: one environment, and the sink that writes the engine's changes to it */
 export interface LmdbStore {
   /**
    * The engine's persistence: create the engine with it (`createEarsEngine({ persistence: store.sink })`).
    * It stays the same object when the store reopens, and drops writes while the store is closed.
    */
-  readonly sink: ShardedPersistence;
-  /** The partition policy the store was opened with */
-  readonly policy: PartitionPolicy;
-  /** Each partition's database directory */
-  readonly paths: Readonly<LmdbPaths>;
+  readonly sink: Required<PersistenceSink>;
+  /** The database directory */
+  readonly path: string;
   /** Whether the store was opened read-only: its sink then throws on every write */
   readonly readOnly: boolean;
-  /** Each partition's open environment. Throws while the store is closed */
-  readonly envs: Readonly<Record<Partition, LmdbDbs>>;
-  /** Whether the environments are open */
+  /** The open environment. Throws while the store is closed */
+  readonly env: LmdbDbs;
+  /** Whether the environment is open */
   isOpen(): boolean;
-  /** Loads the partitions the policy hydrates (and the volatile one with `includeVolatile`) into the store's engine */
-  hydrate(options?: { includeVolatile?: boolean }): Promise<void>;
-  /** Direct reads of a partition's environment, without hydrating it */
-  read(partition: Partition): LmdbReader;
+  /** Loads the database into the store's engine */
+  hydrate(): Promise<void>;
+  /** Direct reads of the environment, without hydrating it */
+  read(): LmdbReader;
   /**
-   * Writes a consistent copy of `partition` into `targetDir` (as `data.mdb`, which the directory is created for).
+   * Writes a consistent copy of the database into `targetDir` (as `data.mdb`, which the directory is created for).
    * LMDB copies one read transaction's worth of data, so the copy is the database as of a single moment even
    * while the app goes on writing — unlike copying the files, which can catch a commit half-made.
    */
-  copyTo(partition: Partition, targetDir: string): Promise<void>;
+  copyTo(targetDir: string): Promise<void>;
   /**
-   * Flushes pending writes and closes the environments. Returns the failed writes of the environments it closed,
+   * Flushes pending writes and closes the environment. Returns the failed writes of the environments it closed,
    * the final flush's included (none when the store was already closed)
    */
   close(): PersistenceErrorStats;
-  /** Opens the environments again (after their files were replaced, say), closing them first if open */
+  /** Opens the environment again (after its files were replaced, say), closing it first if open */
   reopen(): void;
   /**
    * Closes the store, deletes its files and opens it empty. Doesn't touch the engine's memory. Writes made
@@ -56,13 +51,11 @@ const ignoresClosed = (error: unknown) =>
 
 /** What an LMDB store is opened with */
 export interface LmdbStoreOptions {
-  /** Each partition's database directory */
-  paths: LmdbPaths;
-  /** Which partition each entity and relation lives in */
-  policy: PartitionPolicy;
+  /** The database directory */
+  path: string;
   /**
-   * The engine the store persists: hydration loads into it, and the sink reads a relation's details from it.
-   * A function, because the engine is created with the store's sink.
+   * The engine the store persists, which hydration loads into. A function, because the engine is created with the
+   * store's sink.
    */
   engine: () => EarsAdmin;
   /** Opens existing environments without writing to them (tools reading a copy, or a running app's files) */
@@ -82,18 +75,16 @@ export interface LmdbStoreOptions {
 const NO_ERRORS: PersistenceErrorStats = { errorCount: 0, lastError: null };
 
 /**
- * Opens the LMDB environments at `paths` and returns the store. Nothing reaches the engine until the
- * caller creates it with `store.sink` and hydrates.
+ * Opens the LMDB environment at `path` and returns the store. Nothing reaches the engine until the caller creates
+ * it with `store.sink` and hydrates.
  */
-export function openLmdbStore({ paths, policy, engine, readOnly = false, log = console.log, onWriteFailure }: LmdbStoreOptions): LmdbStore {
-  const relationDetails = (relId: EARS.EntityId) =>
-    engine().getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | undefined;
-  let envs: Record<Partition, LmdbDbs> | null = null;
-  let current: ShardedPersistence | null = null;
+export function openLmdbStore({ path, engine, readOnly = false, log = console.log, onWriteFailure }: LmdbStoreOptions): LmdbStore {
+  let env: LmdbDbs | null = null;
+  let current: Required<PersistenceSink> | null = null;
   /** Failed writes of the environments closed so far, which `close()` reports with its own */
   let carried: PersistenceErrorStats = { errorCount: 0, lastError: null };
   /** Writes made while a reset has the store closed, written when it opens again */
-  let heldForReset: Array<(sink: ShardedPersistence) => void> | null = null;
+  let heldForReset: Array<(sink: Required<PersistenceSink>) => void> | null = null;
   /**
    * Why opening the environments again failed, while it has: the store keeps no files to write to, so a write
    * can't be kept and throws instead of being dropped
@@ -101,20 +92,17 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
   let openFailure: Error | null = null;
 
   function open() {
-    envs = openShardedEnvs(paths, { readOnly });
+    env = openEnvAt(path, { readOnly });
     openFailure = null;
-    current = makeShardedPersistence(policy, {
-      primary: makeLmdbAdapter(envs.primary, onWriteFailure),
-      volatileBackup: makeLmdbAdapter(envs.volatileBackup, onWriteFailure),
-    }, relationDetails);
+    current = makeLmdbAdapter(env, onWriteFailure);
   }
 
-  /** Closes the open environments and returns their failed writes, the final flush's included */
+  /** Closes the open environment and returns its failed writes, the final flush's included */
   function closeEnvs(): PersistenceErrorStats {
-    const [closingEnvs, closingSink] = [envs, current];
-    envs = null;
+    const [closingEnv, closingSink] = [env, current];
+    env = null;
     current = null;
-    if (!closingEnvs) return NO_ERRORS;
+    if (!closingEnv) return NO_ERRORS;
     const warn = (error: unknown) => {
       if (!ignoresClosed(error)) console.warn('[Persistence] Non-critical close error:', (error as Error).message);
     };
@@ -125,7 +113,7 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
       warn(error);
     } finally {
       try {
-        closeShardedEnvs(closingEnvs, log);
+        closeEnv(closingEnv, log);
       } catch (error) {
         warn(error);
       }
@@ -162,30 +150,30 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
     carried = { errorCount: carried.errorCount + stats.errorCount, lastError: stats.lastError ?? carried.lastError };
   }
 
-  function openEnvs(): Record<Partition, LmdbDbs> {
-    if (!envs) throw new Error('The LMDB store is closed');
-    return envs;
+  function openEnv(): LmdbDbs {
+    if (!env) throw new Error('The LMDB store is closed');
+    return env;
   }
 
   // Forwards to the current environments' sinks, so the engine keeps one sink across reopens. A closed store
   // drops writes, except during a reset, which holds them for the new files, and one whose files failed to open
   // again, where a write throws (`write`) rather than vanishing.
-  const forward = (fn: (sink: ShardedPersistence) => void) => {
+  const forward = (fn: (sink: Required<PersistenceSink>) => void) => {
     if (current) fn(current);
     else heldForReset?.push(fn);
   };
-  const write = (fn: (sink: ShardedPersistence) => void) => {
-    if (readOnly) throw new Error(`The LMDB store at ${paths.primary} is open read-only`);
+  const write = (fn: (sink: Required<PersistenceSink>) => void) => {
+    if (readOnly) throw new Error(`The LMDB store at ${path} is open read-only`);
     if (openFailure) {
       throw new Error(
-        `The LMDB store at ${paths.primary} is closed: opening it again failed (${openFailure.message}). `
+        `The LMDB store at ${path} is closed: opening it again failed (${openFailure.message}). `
         + 'Nothing can be saved until the app is started again.',
         { cause: openFailure },
       );
     }
     forward(fn);
   };
-  const sink: ShardedPersistence = {
+  const sink: Required<PersistenceSink> = {
     onCreateEntity: (...args) => write((s) => s.onCreateEntity(...args)),
     onDestroyEntity: (...args) => write((s) => s.onDestroyEntity(...args)),
     onDropAttr: (...args) => write((s) => s.onDropAttr(...args)),
@@ -195,29 +183,24 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
     onRemoveRelation: (...args) => write((s) => s.onRemoveRelation(...args)),
     onUnitStart: () => write((s) => s.onUnitStart()),
     onUnitEnd: () => write((s) => s.onUnitEnd()),
-    // Hydration filling the sink's relation cache, not a write
-    hydrateRelationMetadata: (...args) => forward((s) => s.hydrateRelationMetadata(...args)),
-    getRelMeta: () => current?.getRelMeta() ?? new Map(),
-    getErrorStats: () => current?.getErrorStats?.() ?? { errorCount: 0, lastError: null },
+    getErrorStats: () => current?.getErrorStats() ?? { errorCount: 0, lastError: null },
     close,
-  } satisfies Required<PersistenceSink> & ShardedPersistence;
+  };
 
   open();
 
   return {
     sink,
-    policy,
-    paths,
+    path,
     readOnly,
-    get envs() { return openEnvs(); },
-    isOpen: () => envs !== null,
-    hydrate: ({ includeVolatile = false } = {}) =>
-      hydrateSharded({ engine: engine(), envs: openEnvs(), policy, includeVolatile, shardedPersistence: sink, log }),
-    read: (partition) => new LmdbReader(openEnvs()[partition]),
-    async copyTo(partition, targetDir) {
+    get env() { return openEnv(); },
+    isOpen: () => env !== null,
+    hydrate: () => hydrate({ engine: engine(), env: openEnv(), log }),
+    read: () => new LmdbReader(openEnv()),
+    async copyTo(targetDir) {
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });
-      await openEnvs()[partition].root.backup(targetDir, false);
+      await openEnv().root.backup(targetDir, false);
     },
     close,
     reopen() {
@@ -225,13 +208,13 @@ export function openLmdbStore({ paths, policy, engine, readOnly = false, log = c
       openAgain();
     },
     async reset() {
-      if (readOnly) throw new Error(`The LMDB store at ${paths.primary} is open read-only`);
+      if (readOnly) throw new Error(`The LMDB store at ${path} is open read-only`);
       heldForReset = [];
       try {
         carry(closeEnvs());
         // Let LMDB release the files before deleting them
         await new Promise((resolve) => setTimeout(resolve, 100));
-        deleteLmdbDirectories(paths);
+        fs.rmSync(path, { recursive: true, force: true });
         openAgain();
       } finally {
         const held = heldForReset;

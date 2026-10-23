@@ -43,8 +43,8 @@ describe('rules read off the types', () => {
   });
 
   it('writes chain; what ends a chain is the lifecycle end and the two reads of the builder', () => {
-    // destroy and unload leave nothing to write to; id and row read the builder rather than writing
-    expectTypeOf<EndsChain<WB>>().toEqualTypeOf<'destroy' | 'unload' | 'id' | 'row'>();
+    // destroy leaves nothing to write to; id and row read the builder rather than writing
+    expectTypeOf<EndsChain<WB>>().toEqualTypeOf<'destroy' | 'id' | 'row'>();
   });
 
   it('each rule names the member that breaks it', () => {
@@ -93,7 +93,6 @@ function absentAsNull(face: Record<string, unknown>): string[] {
 /** The members that break a rule on purpose, each with why. One that no longer breaks it is reported as stale */
 const UNPAIRED_BY_DESIGN: Record<string, string> = {
   unlinkAll: 'removes every edge of the entity; its positive is a link per edge, not one call',
-  unload: 'not the undoing of a load: it is destroy that leaves storage alone',
 };
 
 describe('rules read off the names', () => {

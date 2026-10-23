@@ -1,6 +1,4 @@
 import { EARS } from '../entities.ts';
-import type { PartitionPolicy, Partition } from '../persistence/policy.ts';
-import type { ShardedPersistence } from '../persistence/sharded-router.ts';
 import type { LmdbDbs } from './envs.ts';
 import type { EarsAdmin } from '../engine.ts';
 
@@ -12,80 +10,56 @@ function dec(e: { t: string; v: unknown }): unknown {
   return e.v;
 }
 
-/**
- * Loads the partitions `policy` hydrates (and `volatileBackup` with `includeVolatile`) into `engine`,
- * filling `shardedPersistence`'s relation metadata.
- */
-export async function hydrateSharded(params: {
+/** Loads the environment's attributes and relations into `engine` */
+export async function hydrate(params: {
   engine: EarsAdmin;
-  envs: Record<Partition, LmdbDbs>;
-  policy: PartitionPolicy;
-  includeVolatile?: boolean;
-  shardedPersistence?: ShardedPersistence;
-  /** Where the partition counts go; `console.log` by default */
+  env: LmdbDbs;
+  /** Where the counts go; `console.log` by default */
   log?: (message: string) => void;
 }) {
-  const { engine, envs, policy, includeVolatile = false, shardedPersistence, log = console.log } = params;
+  const { engine, env, log = console.log } = params;
 
-  const partitionsToHydrate: Partition[] = [];
-  if (policy.hydrate.has('primary')) {
-    partitionsToHydrate.push('primary');
+  // Hydrate attributes
+  let attrCount = 0;
+  for (const { key, value } of env.attrs.getRange()) {
+    // kind␟entityId: one row per attribute
+    const keyStr = String(key);
+    const sep = keyStr.indexOf(SEP);
+    engine.bulkLoadAttr(keyStr.substring(sep + 1) as EARS.EntityId, keyStr.substring(0, sep) as EARS.AttrKind, dec(value));
+    attrCount++;
   }
-  if (includeVolatile || policy.hydrate.has('volatileBackup')) {
-    partitionsToHydrate.push('volatileBackup');
-  }
 
-  log(`[LMDB] Hydrating partitions: ${partitionsToHydrate.join(', ')}`);
+  // Hydrate relations
+  let relCount = 0;
+  for (const { key: relId, value: r } of env.relations.getRange()) {
+    const relIdStr = String(relId);
 
-  for (const partition of partitionsToHydrate) {
-    const env = envs[partition];
-
-    // Hydrate attributes
-    let attrCount = 0;
-    for (const { key, value } of env.attrs.getRange()) {
-      // kind␟entityId: one row per attribute
-      const keyStr = String(key);
-      const sep = keyStr.indexOf(SEP);
-      engine.bulkLoadAttr(keyStr.substring(sep + 1) as EARS.EntityId, keyStr.substring(0, sep) as EARS.AttrKind, dec(value));
-      attrCount++;
+    if (!r.src || typeof r.src !== 'string' || r.src.length === 0) {
+      console.warn(`[Hydrate] Skipping relation with invalid src: relId=${relIdStr}, src=${r.src}`);
+      continue;
+    }
+    if (!r.tgt || typeof r.tgt !== 'string' || r.tgt.length === 0) {
+      console.warn(`[Hydrate] Skipping relation with invalid tgt: relId=${relIdStr}, tgt=${r.tgt}`);
+      continue;
+    }
+    if (!r.kind || typeof r.kind !== 'string') {
+      console.warn(`[Hydrate] Skipping relation with invalid kind: relId=${relIdStr}, kind=${r.kind}`);
+      continue;
     }
 
-    // Hydrate relations
-    let relCount = 0;
-    for (const { key: relId, value: r } of env.relations.getRange()) {
-      const relIdStr = String(relId);
-
-      if (!r.src || typeof r.src !== 'string' || r.src.length === 0) {
-        console.warn(`[Hydrate] Skipping relation with invalid src: relId=${relIdStr}, src=${r.src}`);
-        continue;
-      }
-      if (!r.tgt || typeof r.tgt !== 'string' || r.tgt.length === 0) {
-        console.warn(`[Hydrate] Skipping relation with invalid tgt: relId=${relIdStr}, tgt=${r.tgt}`);
-        continue;
-      }
-      if (!r.kind || typeof r.kind !== 'string') {
-        console.warn(`[Hydrate] Skipping relation with invalid kind: relId=${relIdStr}, kind=${r.kind}`);
-        continue;
-      }
-
-      if (shardedPersistence) {
-        shardedPersistence.hydrateRelationMetadata(relIdStr, r.kind, r.src, r.tgt);
-      }
-
-      engine.bulkLoadAttr(
-        relIdStr as EARS.EntityId,
-        EARS.AttrKind.RelationDetails,
-        {
-          source: r.src,
-          target: r.tgt,
-          kind: r.kind,
-          info: r.info ?? undefined,
-        } satisfies EARS.RelationDetail
-      );
-      engine.addToIndex(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt);
-      relCount++;
-    }
-
-    log(`[LMDB] Hydrated ${partition}: ${attrCount} attributes, ${relCount} relations`);
+    engine.bulkLoadAttr(
+      relIdStr as EARS.EntityId,
+      EARS.AttrKind.RelationDetails,
+      {
+        source: r.src,
+        target: r.tgt,
+        kind: r.kind,
+        info: r.info ?? undefined,
+      } satisfies EARS.RelationDetail
+    );
+    engine.addToIndex(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt);
+    relCount++;
   }
+
+  log(`[LMDB] Hydrated ${attrCount} attributes, ${relCount} relations`);
 }

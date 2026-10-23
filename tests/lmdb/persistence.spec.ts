@@ -3,14 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import type { EARS } from '../../src/entities.ts';
 import { openEnvAt, makeLmdbAdapter, LmdbReader, decodeAttr, type LmdbDbs } from '../../src/lmdb/index.ts';
-import { makePolicy, makeShardedPersistence, type Partition, type PersistenceSink } from '../../src/index.ts';
-
-const Entity = {
-  Document: 'Document' as EARS.Entity,
-  TNode: 'TNode' as EARS.Entity,
-};
 
 function tmpDir(label: string) {
   return path.join(os.tmpdir(), `vitest-persistence-${label}-${crypto.randomBytes(4).toString('hex')}`);
@@ -222,7 +215,7 @@ describe('LMDB Adapter, a unit', () => {
 });
 
 // ---------------------------------------------------------------------------
-// B. Sharded Router
+// B. LMDB Adapter error stats
 // ---------------------------------------------------------------------------
 describe('LMDB Adapter error stats', () => {
   /** An environment whose writes all fail, as a full disk would */
@@ -286,217 +279,8 @@ describe('LMDB Adapter error stats', () => {
   });
 });
 
-describe('Sharded Router', () => {
-  let dirs: { primary: string; volatileBackup: string };
-  let envs: Record<Partition, LmdbDbs>;
-  let sinks: Record<Partition, PersistenceSink>;
-  let policy: ReturnType<typeof makePolicy>;
-  let sharded: ReturnType<typeof makeShardedPersistence>;
-
-  beforeAll(() => {
-    dirs = {
-      primary: tmpDir('shard-primary'),
-      volatileBackup: tmpDir('shard-volatile'),
-    };
-    envs = {
-      primary: openEnvAt(dirs.primary),
-      volatileBackup: openEnvAt(dirs.volatileBackup),
-    };
-    policy = makePolicy({
-      excludedEntityTypes: new Set([Entity.TNode]),
-    });
-    sinks = {
-      primary: makeLmdbAdapter(envs.primary),
-      volatileBackup: makeLmdbAdapter(envs.volatileBackup),
-    };
-    sharded = makeShardedPersistence(policy, sinks);
-  });
-
-  afterAll(() => {
-    sharded.close?.();
-    for (const db of Object.values(envs)) {
-      try { db.entities.close(); db.attrs.close(); db.relations.close(); db.root.close(); } catch {}
-    }
-    for (const d of Object.values(dirs)) {
-      fs.rmSync(d, { recursive: true, force: true });
-    }
-  });
-
-  it('onUpdateRelation throws on null/empty src or tgt in patch', () => {
-    sharded.onCreateEntity('Document-a', 'Document');
-    sharded.onCreateEntity('Document-b', 'Document');
-    sharded.onAddRelation('Relation-1', 'TEST', 'Document-a', 'Document-b', null);
-
-    expect(() => sharded.onUpdateRelation('Relation-1', { source: null as any }))
-      .toThrow('patch.source is empty');
-    expect(() => sharded.onUpdateRelation('Relation-1', { target: '' }))
-      .toThrow('patch.target is empty');
-  });
-
-  it.each([
-    { src: '', tgt: 'Document-1', label: 'empty src' },
-    { src: null as any, tgt: 'Document-1', label: 'null src' },
-    { src: 'Document-1', tgt: '', label: 'empty tgt' },
-    { src: 'Document-1', tgt: undefined as any, label: 'undefined tgt' },
-    { src: 123 as any, tgt: 'Document-1', label: 'non-string src' },
-  ])('hydrateRelationMetadata warns on invalid input: $label', ({ src, tgt }) => {
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    sharded.hydrateRelationMetadata('Relation-1', 'TEST', src, tgt);
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('[Sharded] Invalid'));
-    spy.mockRestore();
-  });
-
-  it('getRelMeta() returns independent Map copies', () => {
-    const m1 = sharded.getRelMeta();
-    const m2 = sharded.getRelMeta();
-    expect(m1).not.toBe(m2);
-    m1.set('fake', { kind: 'x', src: 'x', tgt: 'x' });
-    expect(sharded.getRelMeta().has('fake')).toBe(false);
-  });
-
-  it('getErrorStats() aggregates from all sinks', () => {
-    const stats = sharded.getErrorStats?.();
-    expect(stats).toBeDefined();
-    expect(stats).toHaveProperty('errorCount');
-    expect(typeof stats!.errorCount).toBe('number');
-  });
-
-  it('best-effort update broadcasts to all sinks for unknown relId', () => {
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Should not throw
-    expect(() =>
-      sharded.onUpdateRelation('Relation-unknown', { info: { x: 1 } })
-    ).not.toThrow();
-    expect(spy).toHaveBeenCalledWith(
-      expect.stringContaining('unknown relId'),
-      expect.anything()
-    );
-    spy.mockRestore();
-  });
-
-  it('best-effort removal broadcasts to all sinks for unknown relId', () => {
-    // Should not throw even for completely unknown relation
-    expect(() => sharded.onRemoveRelation('Relation-mystery')).not.toThrow();
-  });
-
-  it("drops a relation's cache entry when the engine removes it, before destroying its ends", () => {
-    sharded.onCreateEntity('Document-d1', 'Document');
-    sharded.onCreateEntity('Document-d2', 'Document');
-    sharded.onAddRelation('Relation-cd1', 'REF', 'Document-d1', 'Document-d2', null);
-    expect(sharded.getRelMeta().has('Relation-cd1')).toBe(true);
-
-    // The engine's order (engine/persistence.spec.ts)
-    sharded.onRemoveRelation('Relation-cd1');
-    sharded.onDestroyEntity('Document-d1');
-
-    expect(sharded.getRelMeta().has('Relation-cd1')).toBe(false);
-  });
-
-  it('system continues working after encountering invalid data', () => {
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Feed bad data
-    sharded.hydrateRelationMetadata('Relation-bad1', 'TEST', '', 'Document-1');
-    spy.mockRestore();
-
-    // Valid operations should still work
-    sharded.onCreateEntity('Document-ok', 'Document');
-    sharded.onCreateEntity('Document-ok2', 'Document');
-    expect(() =>
-      sharded.onAddRelation('Relation-ok', 'TEST', 'Document-ok', 'Document-ok2', null)
-    ).not.toThrow();
-  });
-});
-
 // ---------------------------------------------------------------------------
-// C. Relation Updates
-// ---------------------------------------------------------------------------
-describe('Relation Updates', () => {
-  let dirs: { primary: string; volatileBackup: string };
-  let envs: Record<Partition, LmdbDbs>;
-  let sinks: Record<Partition, PersistenceSink>;
-  let policy: ReturnType<typeof makePolicy>;
-  let sharded: ReturnType<typeof makeShardedPersistence>;
-
-  beforeAll(() => {
-    dirs = {
-      primary: tmpDir('relupd-primary'),
-      volatileBackup: tmpDir('relupd-volatile'),
-    };
-    envs = {
-      primary: openEnvAt(dirs.primary),
-      volatileBackup: openEnvAt(dirs.volatileBackup),
-    };
-    policy = makePolicy({
-      excludedEntityTypes: new Set([Entity.TNode]),
-    });
-    sinks = {
-      primary: makeLmdbAdapter(envs.primary),
-      volatileBackup: makeLmdbAdapter(envs.volatileBackup),
-    };
-    sharded = makeShardedPersistence(policy, sinks);
-
-    // Set up entities
-    sharded.onCreateEntity('Document-r1', 'Document');
-    sharded.onCreateEntity('Document-r2', 'Document');
-    sharded.onCreateEntity('TNode-t1', 'TNode');
-  });
-
-  afterAll(() => {
-    sharded.close?.();
-    for (const db of Object.values(envs)) {
-      try { db.entities.close(); db.attrs.close(); db.relations.close(); db.root.close(); } catch {}
-    }
-    for (const d of Object.values(dirs)) {
-      fs.rmSync(d, { recursive: true, force: true });
-    }
-  });
-
-  it('partial update (info only) preserves src/tgt metadata', () => {
-    sharded.onAddRelation('Relation-pu1', 'LINKS', 'Document-r1', 'Document-r2', { weight: 0.5 });
-    const before = sharded.getRelMeta().get('Relation-pu1');
-
-    sharded.onUpdateRelation('Relation-pu1', { info: { weight: 0.8 } });
-
-    const after = sharded.getRelMeta().get('Relation-pu1');
-    expect(after?.src).toBe(before?.src);
-    expect(after?.tgt).toBe(before?.tgt);
-  });
-
-  it('cross-partition endpoint change moves relation between sinks', () => {
-    // Doc -> TNode goes to volatileBackup
-    sharded.onAddRelation('Relation-cp1', 'LINKS', 'Document-r1', 'TNode-t1', { w: 1 });
-    const partBefore = policy.routeRelation({
-      srcType: Entity.Document,
-      tgtType: Entity.TNode,
-    });
-    expect(partBefore).toBe('volatileBackup');
-
-    // Change tgt to Document -> moves to primary
-    sharded.onUpdateRelation('Relation-cp1', { target: 'Document-r2' });
-    const partAfter = policy.routeRelation({
-      srcType: Entity.Document,
-      tgtType: Entity.Document,
-    });
-    expect(partAfter).toBe('primary');
-
-    const meta = sharded.getRelMeta().get('Relation-cp1');
-    expect(meta?.tgt).toBe('Document-r2');
-  });
-
-  it('info preserved during cross-partition move', () => {
-    sharded.onAddRelation('Relation-cp2', 'LINKS', 'Document-r1', 'TNode-t1', { important: true });
-    // Move to primary by changing tgt
-    sharded.onUpdateRelation('Relation-cp2', { target: 'Document-r2' });
-    // Metadata should still be valid
-    const meta = sharded.getRelMeta().get('Relation-cp2');
-    expect(meta).toBeDefined();
-    expect(meta?.src).toBe('Document-r1');
-    expect(meta?.tgt).toBe('Document-r2');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// D. Query Layer
+// C. Query Layer
 // ---------------------------------------------------------------------------
 describe('Query Layer', () => {
   let dbs: LmdbDbs;
@@ -594,39 +378,5 @@ describe('Query Layer', () => {
     const decoded = decodeAttr(dateRec);
     expect(decoded).toBeInstanceOf(Date);
     expect((decoded as Date).toISOString()).toBe('2025-01-01T00:00:00.000Z');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// E. Partition Routing (pure unit tests on policy)
-// ---------------------------------------------------------------------------
-describe('Partition Routing', () => {
-  const policy = makePolicy({
-    excludedEntityTypes: new Set([Entity.TNode]),
-  });
-
-  it('routes Document -> primary and TNode -> volatileBackup', () => {
-    expect(policy.routeEntity('Document')).toBe('primary');
-    expect(policy.routeEntity('TNode')).toBe('volatileBackup');
-  });
-
-  it('routes relations based on endpoint types', () => {
-    // Both primary -> primary
-    expect(policy.routeRelation({
-      srcType: Entity.Document,
-      tgtType: Entity.Document,
-    })).toBe('primary');
-
-    // Either excluded -> volatile
-    expect(policy.routeRelation({
-      srcType: Entity.Document,
-      tgtType: Entity.TNode,
-    })).toBe('volatileBackup');
-
-    expect(policy.routeRelation({
-      srcType: Entity.TNode,
-      tgtType: Entity.Document,
-    })).toBe('volatileBackup');
-
   });
 });
