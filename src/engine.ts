@@ -9,7 +9,6 @@ import { createEdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
-import { createQueryHelpers } from './query-helpers.ts';
 import { createEntityCounters } from './entity-utils.ts';
 import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
 import { createRepositoryRegistry } from './repository.ts';
@@ -38,6 +37,7 @@ export interface Ears {
   isRelationKind(name: string): boolean;
   /** Whether `name` is a role the engine's creator registered */
   isRole(name: string): boolean;
+  /** The live row with an id — none for one in the trash, which `getRow` reads — or undefined */
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
@@ -115,13 +115,12 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const graph = createGraph({ query, names });
   const counters = createEntityCounters(storage);
   const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal });
-  const finders = createQueryHelpers(query);
   const relationReads = createRelationReads({ edgeStore, relations, storage, names });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
-    ...finders,
+    findById: <T>(id: EARS.EntityId) => query.ids(id).pickAll()[0] as T | undefined,
     generateLabelWithCount: counters.generateLabelWithCount,
     ...relationReads,
     ...graph,

@@ -115,7 +115,6 @@ export interface Ears {
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-    // (undocumented)
     findById<T = unknown>(id: EARS.EntityId): T | undefined;
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
