@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// Direct reads of an LMDB environment, without hydrating it (the volatile trace store, db scripts)
+// Direct reads of an LMDB environment, without hydrating it (backups, db scripts)
 import type { LmdbDbs } from './envs.ts';
 import { isDeepStrictEqual } from 'node:util';
 
