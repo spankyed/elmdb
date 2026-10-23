@@ -304,8 +304,11 @@ describe('finders', () => {
     expect(e.getAttributeStats('tag')).toEqual({ entityCount: 1, totalValues: 2 });
     expect(e.getSchemaStats()).toEqual({
       entities: { Task: 1, Project: 1, Relation: 1 },
-      attributes: { createdAt: 2, title: 1, tag: 2, relationDetails: 1 },
-      relations: { contains: 1 },
+      attributes: {
+        createdAt: { entityCount: 2, totalValues: 2 }, title: { entityCount: 1, totalValues: 1 },
+        tag: { entityCount: 1, totalValues: 2 }, relationDetails: { entityCount: 1, totalValues: 1 },
+      },
+      relations: { contains: { totalRelations: 1, uniqueSources: 1, uniqueTargets: 1 } },
     });
   });
 

@@ -12,7 +12,7 @@ export type {
   EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues, ListElement,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
-export { entityTypeOf } from './attribute-storage.ts';
+export { entityTypeOf, type SchemaStats } from './attribute-storage.ts';
 export { prepareEntity } from './entity-helpers.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
 export { getTimestamp } from './entity-utils.ts';

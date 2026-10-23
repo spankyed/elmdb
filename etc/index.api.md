@@ -209,13 +209,7 @@ export interface Ears {
     // (undocumented)
     getRoles(id: EARS.EntityId): string[];
     // (undocumented)
-    getSchemaStats(): {
-        entities: Record<string, number>;
-        attributes: Record<string, number>;
-        relations: Record<string, number>;
-    };
-    // (undocumented)
-    grantRole(id: EARS.EntityId, role: string): void;
+    getSchemaStats(): SchemaStats;
     isEntityType(name: string): boolean;
     // (undocumented)
     leaves(kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
@@ -229,8 +223,6 @@ export interface Ears {
     // (undocumented)
     removeRelationById(relId: EARS.EntityId): void;
     repository: Record<string, unknown>;
-    // (undocumented)
-    revokeRole(id: EARS.EntityId, role: string): void;
     // (undocumented)
     rootParent(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId;
     // (undocumented)
@@ -577,6 +569,23 @@ export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof Reposi
 
 // @public
 export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "role", "relationDetails", "trashedAt"];
+
+// @public
+export interface SchemaStats {
+    // (undocumented)
+    attributes: Record<string, {
+        entityCount: number;
+        totalValues: number;
+    }>;
+    // (undocumented)
+    entities: Record<string, number>;
+    // (undocumented)
+    relations: Record<string, {
+        totalRelations: number;
+        uniqueSources: number;
+        uniqueTargets: number;
+    }>;
+}
 
 // @public
 export type ShapeOf<S extends EntityShapes, E extends string> = [

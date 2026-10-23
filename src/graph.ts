@@ -185,7 +185,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     kind: EARS.RelKind,
     filterType?: EARS.Entity,
   ): EARS.EntityId[] {
-    const all = new Set<EARS.EntityId>((filterType ? query(filterType as never) : query.all()).ids());
+    const all = new Set<EARS.EntityId>((filterType ? query(filterType) : query.all()).ids());
     const hasOut = new Set<EARS.EntityId>();
 
     for (const id of all) {

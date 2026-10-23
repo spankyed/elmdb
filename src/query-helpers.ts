@@ -9,7 +9,7 @@ import type { EARS } from './entities.ts';
  */
 export function createQueryHelpers(query: Query) {
   // A type known only at runtime: the finders are untyped, and so is the builder they start
-  const ofType = (entityType: EARS.Entity) => query(entityType as never) as unknown as QueryBuilder;
+  const ofType = (entityType: EARS.Entity) => query(entityType) as unknown as QueryBuilder;
   function findById<T = unknown>(id: EARS.EntityId): T | undefined {
     return query.ids(id).pickAll()[0] as T | undefined;
   }

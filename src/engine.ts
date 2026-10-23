@@ -4,7 +4,7 @@
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
-import { createAttributeStorage } from './attribute-storage.ts';
+import { createAttributeStorage, type SchemaStats } from './attribute-storage.ts';
 import { createEdgeStore, type EdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
@@ -47,13 +47,11 @@ export interface Ears {
   /** Every attribute the entity holds, each exactly as written, with its `entityType` */
   getAll(id: EARS.EntityId): Record<string, unknown>;
   getRoles(id: EARS.EntityId): string[];
-  grantRole(id: EARS.EntityId, role: string): void;
-  revokeRole(id: EARS.EntityId, role: string): void;
   getAllEntityTypes(): EARS.Entity[];
   getAllAttributeKinds(): EARS.AttrKind[];
   getAllRelationKinds(): string[];
   getAttributeStats(kind: EARS.AttrKind): { entityCount: number; totalValues: number };
-  getSchemaStats(): { entities: Record<string, number>; attributes: Record<string, number>; relations: Record<string, number> };
+  getSchemaStats(): SchemaStats;
   removeRelationById(relId: EARS.EntityId): void;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
   updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
@@ -143,8 +141,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     getAttr: storage.getAttr,
     getAll: storage.getAll,
     getRoles: storage.getRoles,
-    grantRole: storage.grantRole,
-    revokeRole: storage.revokeRole,
     getAllEntityTypes: storage.getAllEntityTypes,
     getAllAttributeKinds: storage.getAllAttributeKinds,
     getAllRelationKinds: storage.getAllRelationKinds,

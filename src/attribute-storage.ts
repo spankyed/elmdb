@@ -458,18 +458,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Tells the sink an entity was created */
   const entityCreated = (id: EARS.EntityId, entityType: EARS.Entity) => persistence.onCreateEntity(id, entityType);
 
-  function getSchemaStats() {
+  /** The engine's data counted: entities per type, each attribute kind's use and each relation kind's */
+  function getSchemaStats(): SchemaStats {
     return {
-      entities: getAllEntityTypes().reduce((acc: Record<string, number>, type: string) => {
-        acc[type] = getEntitiesOfType(type as EARS.Entity).length;
-        return acc;
-      }, {}),
-      attributes: getAllAttributeKinds().reduce((acc: Record<string, number>, kind: EARS.AttrKind) => {
-        acc[kind as string] = getAttributeStats(kind).totalValues;
-        return acc;
-      }, {}),
-      relations: Object.fromEntries(Object.entries(relationIndex).map(([kind, { bySource }]) =>
-        [kind, Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0)])),
+      entities: Object.fromEntries(getAllEntityTypes().map((type) => [type, entityIndex.get(type)?.size ?? 0])),
+      attributes: Object.fromEntries(getAllAttributeKinds().map((kind) => [kind, getAttributeStats(kind)])),
+      relations: Object.fromEntries(Object.entries(relationIndex).map(([kind, { bySource, byTarget }]) => [kind, {
+        totalRelations: Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0),
+        uniqueSources: Object.keys(bySource).length,
+        uniqueTargets: Object.keys(byTarget).length,
+      }])),
     };
   }
 
@@ -484,6 +482,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 }
 
 export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
+
+/** Entities per type, and each attribute kind's and relation kind's use, over a whole engine */
+export interface SchemaStats {
+  entities: Record<string, number>;
+  attributes: Record<string, { entityCount: number; totalValues: number }>;
+  relations: Record<string, { totalRelations: number; uniqueSources: number; uniqueTargets: number }>;
+}
 
 /** Whether a stored value is `v`, or a list containing it: what `where(k, v)` matches */
 export const holds = (value: unknown, v: unknown) =>

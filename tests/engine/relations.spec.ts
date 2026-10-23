@@ -167,11 +167,11 @@ describe('roles', () => {
     e.write(a).revoke('owner').revoke('never');
     expect(e.getRoles(a)).toEqual([]);
     // A role is held once: granting it again changes nothing, and revoking the last leaves no role attribute
-    e.grantRole(b, 'free');
-    e.grantRole(b, 'free');
+    e.write(b).grant('free');
+    e.write(b).grant('free');
     expect(e.getRoles(b)).toEqual(['owner', 'free']);
-    e.revokeRole(b, 'free');
-    e.revokeRole(b, 'owner');
+    e.write(b).revoke('free');
+    e.write(b).revoke('owner');
     expect(e.getRoles(b)).toEqual([]);
     expect(e.getAll(b)).not.toHaveProperty('role');
   });
