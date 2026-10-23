@@ -27,7 +27,7 @@ describe('links', () => {
     expect(e.query('Task').linkedTo('blocks', b).ids()).toEqual([a]);
     expect(e.query('Task').linkedWith(a).ids()).toEqual([b]);
     expect(e.getRelationStats('blocks')).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
-    expect(e.getRelationStats('none')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
+    expect(e.getRelationStats('refs')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
     expect(e.admin.relationIndex).toEqual({ blocks: { bySource: { [a]: [rel.id] }, byTarget: { [b]: [rel.id] } } });
   });
 
@@ -120,6 +120,44 @@ describe('links', () => {
     expect(edges().filter(([, kind]) => kind === 'peer')).toEqual([[a, 'peer', c, 'p'], [c, 'peer', a, 'p']]);
     e.linkSymmetric(b, c, 'peer');
     expect(e.query.ids(c).out('peer').ids()).toEqual([a, b]);
+  });
+});
+
+describe('relation kinds', () => {
+  const unknown = { code: 'UNKNOWN_RELATION_KIND' };
+
+  it('refuses a kind its creator did not register, before writing anything', () => {
+    const [a, b] = [task('A'), task('B')];
+    expect(() => e.write(a).link('blokcs', b)).toThrow(expect.objectContaining(unknown));
+    expect(() => e.write(a).link('blocks', b, { acyclicIn: ['blokcs'] })).toThrow(expect.objectContaining(unknown));
+    expect(() => e.write(a).unlink('blokcs')).toThrow(expect.objectContaining(unknown));
+    expect(() => e.linkSymmetric(a, b, 'blokcs')).toThrow(expect.objectContaining(unknown));
+    expect(e.findRelations()).toEqual([]);
+  });
+
+  // A read naming a kind nothing registered would answer as if no entity had such a link, which reads as data
+  it('refuses one in every read and walk that names a kind, rather than answering with nothing', () => {
+    const [a, b] = [task('A'), task('B')];
+    e.write(a).link('blocks', b);
+    const reads: Array<[string, () => unknown]> = [
+      ['out', () => e.query.ids(a).out('blokcs')],
+      ['in', () => e.query.ids(b).in(['blocks', 'blokcs'])],
+      ['outEdges', () => e.query.ids(a).outEdges('blokcs')],
+      ['inEdges', () => e.query.ids(b).inEdges('blokcs')],
+      ['linkedTo', () => e.query('Task').linkedTo('blokcs', b)],
+      ['linkedFrom', () => e.query('Task').linkedFrom('blokcs', a)],
+      ['findRelations', () => e.findRelations({ relationType: 'blokcs' })],
+      ['getRelationStats', () => e.getRelationStats('blokcs')],
+      ['descendants', () => e.descendants(a, 'blokcs')],
+      ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
+    ];
+    for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
+  });
+
+  it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
+    const [a, b] = [task('A'), task('B')];
+    e.admin.addRelation(a, 'retired', b);
+    expect(e.findRelations().map((r) => r.relationType)).toEqual(['retired']);
   });
 });
 

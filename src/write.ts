@@ -7,6 +7,7 @@ import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
+import type { NameChecks } from './names.ts';
 import type { CreateOptions, LinkOptions, WriteBuilder, WriteOptions } from './runtime.ts';
 
 /** When the entity last changed: stamped by the engine, never written by a caller */
@@ -33,12 +34,13 @@ export interface Write {
 }
 
 /** An engine's writes, over its storage, edge store and graph walks */
-export function createWrites({ storage, edgeStore, graph, isEntityType, journal }: {
+export function createWrites({ storage, edgeStore, graph, isEntityType, names, journal }: {
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
   graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle' | 'linkSymmetric'>;
   isEntityType: (name: string) => boolean;
+  names: NameChecks;
 }) {
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
@@ -134,6 +136,8 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
 
       link(kind, target, options: LinkOptions = {}) {
         const { info, replace, acyclicIn, symmetric } = options;
+        names.relationKinds(kind, 'link');
+        if (acyclicIn) names.relationKinds(acyclicIn, 'link');
         // An edge's info is `{ info }`: an object with other keys is info passed where the options go
         const stray = Object.keys(options).filter((k) => !LINK_OPTIONS.includes(k));
         if (stray.length) throw new Error(`link(${kind}): unknown option ${stray.join(', ')}; an edge's info goes in { info }`);
@@ -150,6 +154,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
         return self;
       },
       unlink(kind, target) {
+        names.relationKinds(kind, 'unlink');
         edgeStore.unlink({ sourceEntity: id, relationType: kind, targetEntity: target });
         return self;
       },

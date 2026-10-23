@@ -5,7 +5,7 @@ import { createEarsEngine, defineEars, type EARS, type Ears, type PersistenceSin
 import { recordingSink } from './engine/helpers.ts';
 
 const types = new Set(['Note']);
-const newEngine = (persistence?: PersistenceSink) => createEarsEngine({ isEntityType: (name) => types.has(name), persistence });
+const newEngine = (persistence?: PersistenceSink) => createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, persistence });
 
 describe('defineEars', () => {
   it('acts on the engine its getter returns at each call', () => {

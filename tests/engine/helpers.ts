@@ -5,11 +5,15 @@ export const TYPES = new Set(['Task', 'Project', 'Person', 'Relation']);
 
 export const isEntityType = (name: string) => TYPES.has(name);
 
+export const KINDS = new Set(['about', 'assigned', 'blocks', 'child', 'contains', 'instance_of', 'lead', 'mentions', 'owner', 'owns', 'parent', 'peer', 'refers', 'refs', 'x']);
+
+export const isRelationKind = (name: string) => KINDS.has(name);
+
 export type Id = EARS.EntityId;
 
-/** An engine with the contract specs' entity types, and no persistence unless given */
+/** An engine with the contract specs' entity types and relation kinds, and no persistence unless given */
 export function engine(persistence?: PersistenceSink): EngineUnderTest {
-  return freshEngine({ isEntityType, persistence });
+  return freshEngine({ isEntityType, isRelationKind, persistence });
 }
 
 export type SinkCall = [method: string, ...args: unknown[]];

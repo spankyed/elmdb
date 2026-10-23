@@ -4,6 +4,7 @@ import { createEarsEngine, type EarsEngine, type PersistenceSink } from '../../s
 
 export interface EngineUnderTestOptions {
   isEntityType: (name: string) => boolean;
+  isRelationKind: (name: string) => boolean;
   persistence?: PersistenceSink;
 }
 

@@ -12,6 +12,7 @@ interface TypeStart {
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
 import type { TypeName } from './write.ts';
+import type { NameChecks } from './names.ts';
 
 type MaybeArr<T> = T | readonly T[];
 function asArr<T>(v: MaybeArr<T>): readonly T[] {
@@ -55,7 +56,7 @@ export interface Query extends QueryEntries {
 }
 
 /** An engine's untyped query entry points, over its storage (which reads the relation index for them) */
-export function createQuery({ storage, isEntityType }: { storage: AttributeStorage; isEntityType: (name: string) => boolean }): Query {
+export function createQuery({ storage, isEntityType, names }: { storage: AttributeStorage; isEntityType: (name: string) => boolean; names: NameChecks }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, removals, getAttr, hasAttr,
     findEntitiesInRelationTo, findEntitiesByRelationTo, getRow,
@@ -125,6 +126,7 @@ export function createQuery({ storage, isEntityType }: { storage: AttributeStora
 
       /** The entities at the far end of the set's edges of the kinds, out or in; never an entity of the set itself */
       const walk = (kinds: MaybeArr<string>, type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
+        names.relationKinds(kinds, outward ? 'out' : 'in');
         const matches = ofTypes(type);
         const reached = new Set<EARS.EntityId>();
         for (const from of cur()) for (const k of asArr(kinds)) {
@@ -136,6 +138,7 @@ export function createQuery({ storage, isEntityType }: { storage: AttributeStora
 
       /** Each edge of the kinds, out or in: its kind and the entity at its far end */
       const edges = <K extends string>(kinds: K | readonly K[], type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
+        names.relationKinds(kinds, outward ? 'outEdges' : 'inEdges');
         const matches = ofTypes(type);
         const rows: Array<{ kind: K; id: EARS.EntityId }> = [];
         for (const from of cur()) for (const k of asArr(kinds)) {
@@ -183,11 +186,13 @@ export function createQuery({ storage, isEntityType }: { storage: AttributeStora
         },
 
         linkedTo: (kind: string, other: EARS.EntityId) => {
+          names.relationKinds(kind, 'linkedTo');
           const linked = new Set(findEntitiesByRelationTo(kind, other));
           return setIds(cur().filter(i => linked.has(i)));
         },
 
         linkedFrom: (kind: string, other: EARS.EntityId) => {
+          names.relationKinds(kind, 'linkedFrom');
           const linked = new Set(findEntitiesByRelationTo(kind, other, true));
           return setIds(cur().filter(i => linked.has(i)));
         },

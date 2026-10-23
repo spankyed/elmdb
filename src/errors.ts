@@ -13,7 +13,9 @@ export type EarsErrorCode =
   /** A `where` was given no value to compare with, or `set` none to store */
   | 'NO_VALUE'
   /** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
-  | 'NOT_A_LIST';
+  | 'NOT_A_LIST'
+  /** A link, or a read or walk over links, named a relation kind that is not registered */
+  | 'UNKNOWN_RELATION_KIND';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

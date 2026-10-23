@@ -24,32 +24,32 @@ type Name<N extends string, E extends string> = EntityNameArg<N, E>;
  * from ids (typed by the entity an id is tagged with), `query.all` from every entity. A name and an id are
  * different arguments to different functions, so an id passed where a type is meant fails to compile.
  */
-export interface TypedQueryEntries<S extends EntityShapes, N extends string = string> {
-  <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
-  <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N>;
-  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N>;
-  all(): QueryBuilder<string, S, N>;
+export interface TypedQueryEntries<S extends EntityShapes, N extends string = string, R extends string = string> {
+  <E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R>;
+  <E extends string>(types: readonly Name<N, E>[]): QueryBuilder<string, S, N, R>;
+  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, S, N, R>;
+  all(): QueryBuilder<string, S, N, R>;
 }
 
 /** The typed queries, which reach no entity in the trash; `withTrashed` reaches those too, `trashed` only those */
-export interface TypedQuery<S extends EntityShapes, N extends string = string> extends TypedQueryEntries<S, N> {
-  withTrashed: TypedQueryEntries<S, N>;
-  trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N>;
+export interface TypedQuery<S extends EntityShapes, N extends string = string, R extends string = string> extends TypedQueryEntries<S, N, R> {
+  withTrashed: TypedQueryEntries<S, N, R>;
+  trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R>;
 }
 
 /** Creates an entity of a declared type; writes to its declared fields are checked */
-export interface TypedCreate<S extends EntityShapes, N extends string = string> {
-  <E extends string>(type: Name<N, E>, options?: CreateOptions): WriteBuilder<E, S>;
+export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string> {
+  <E extends string>(type: Name<N, E>, options?: CreateOptions): WriteBuilder<E, S, R>;
 }
 
 /** Writes to the entity with `id`, creating it as `type` when no entity has it */
-export interface TypedUpsert<S extends EntityShapes, N extends string = string> {
-  <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S>;
+export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string> {
+  <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S, R>;
 }
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
-export interface TypedWrite<S extends EntityShapes> {
-  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S>;
+export interface TypedWrite<S extends EntityShapes, R extends string = string> {
+  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S, R>;
 }
 
 export interface TypedFindById<S extends EntityShapes> {
@@ -87,11 +87,11 @@ export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends stri
   providedId?: EARS.EntityId,
 ) => ShapeOf<S, E> & CreatedEntityFields;
 
-export interface TypedEars<S extends EntityShapes, N extends string = string> {
-  query: TypedQuery<S, N>;
-  create: TypedCreate<S, N>;
-  upsert: TypedUpsert<S, N>;
-  write: TypedWrite<S>;
+export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string> {
+  query: TypedQuery<S, N, R>;
+  create: TypedCreate<S, N, R>;
+  upsert: TypedUpsert<S, N, R>;
+  write: TypedWrite<S, R>;
   transact: Ears['transact'];
   findById: TypedFindById<S>;
   findAll: TypedFindAll<S, N>;
@@ -102,12 +102,12 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
 }
 
 /**
- * The EARS query helpers typed against `S`, taking the entity names `N` (any string when omitted), each acting on
- * the engine `engine` returns when it is called. A getter rather than an engine, so a facade can be defined
- * before its engine exists, which is the case for every pack: its `#generated/ears` passes the SDK's
- * `boundEars`.
+ * The EARS query helpers typed against `S`, taking the entity names `N` and the relation kinds `R` (any string when
+ * omitted), each acting on the engine `engine` returns when it is called. A getter rather than an engine, so a
+ * facade can be defined before its engine exists, which is the case for every pack: its `#generated/ears` passes
+ * the SDK's `boundEars`.
  */
-export function defineEars<S extends EntityShapes, N extends string = string>(engine: () => Ears): TypedEars<S, N> {
+export function defineEars<S extends EntityShapes, N extends string = string, R extends string = string>(engine: () => Ears): TypedEars<S, N, R> {
   const on = <K extends keyof Ears>(name: K) =>
     ((...args: unknown[]) => (engine()[name] as (...a: unknown[]) => unknown)(...args));
   return {
@@ -130,5 +130,5 @@ export function defineEars<S extends EntityShapes, N extends string = string>(en
     createEntity,
     createEntityWithDefaults: on('createEntityWithDefaults'),
     getAttr: on('getAttr'),
-  } as unknown as TypedEars<S, N>;
+  } as unknown as TypedEars<S, N, R>;
 }

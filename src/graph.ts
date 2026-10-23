@@ -1,9 +1,10 @@
 import type { Query } from './query.ts';
 import type { EdgeStore } from './edge-store.ts';
 import { EARS } from './entities.ts';
+import type { NameChecks } from './names.ts';
 
 /** An engine's graph walks, over its queries and edge store */
-export function createGraph({ query, edgeStore }: { query: Query; edgeStore: EdgeStore }) {
+export function createGraph({ query, edgeStore, names }: { query: Query; edgeStore: EdgeStore; names: NameChecks }) {
   const neighbours = (
     id: EARS.EntityId,
     kinds: readonly EARS.RelKind[],
@@ -17,6 +18,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     start: EARS.EntityId,
     relKind: EARS.RelKind,
   ): EARS.EntityId[] {
+    names.relationKinds(relKind, 'descendants');
     const seen = new Set<EARS.EntityId>();
     const stack = [start];
 
@@ -37,6 +39,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     start: EARS.EntityId,
     relKind: EARS.RelKind,
   ): EARS.EntityId[] {
+    names.relationKinds(relKind, 'ancestors');
     const seen = new Set<EARS.EntityId>();
     const stack = [start];
 
@@ -59,6 +62,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     start: EARS.EntityId,
     relKind: EARS.RelKind,
   ): EARS.EntityId {
+    names.relationKinds(relKind, 'rootParent');
     let cur = start;
     while (true) {
       const parent = query.ids(cur)
@@ -75,6 +79,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     tgt: EARS.EntityId,
     kinds: readonly EARS.RelKind[],
   ): boolean {
+    names.relationKinds(kinds, 'wouldCreateCycle');
     const seen = new Set<EARS.EntityId>();
     const stack = [tgt];
     while (stack.length) {
@@ -96,6 +101,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     kind: EARS.RelKind,
     info?: unknown,
   ) {
+    names.relationKinds(kind, 'linkSymmetric');
     if (a === b) throw new Error("Self-link refused");
     edgeStore.linkOne(a, kind, b, info);
     edgeStore.linkOne(b, kind, a, info);
@@ -106,6 +112,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     kind: EARS.RelKind,
     filterType?: EARS.Entity,
   ): EARS.EntityId[] {
+    names.relationKinds(kind, 'topoSort');
     const outgoing = new Map<EARS.EntityId, Set<EARS.EntityId>>();
     const incoming = new Map<EARS.EntityId, number>();
 
@@ -138,6 +145,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
   }
 
   function shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null {
+    names.relationKinds(kinds, 'shortestPath');
     if (src === tgt) return [src];
 
     const front = new Map<EARS.EntityId, EARS.EntityId>(); front.set(src, src);
@@ -185,6 +193,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     kind: EARS.RelKind,
     filterType?: EARS.Entity,
   ): EARS.EntityId[] {
+    names.relationKinds(kind, 'leaves');
     const all = new Set<EARS.EntityId>((filterType ? query(filterType) : query.all()).ids());
     const hasOut = new Set<EARS.EntityId>();
 
@@ -201,6 +210,7 @@ export function createGraph({ query, edgeStore }: { query: Query; edgeStore: Edg
     b: EARS.EntityId,
     treeKind: EARS.RelKind,
   ): EARS.EntityId | null {
+    names.relationKinds(treeKind, 'lowestCommonAncestor');
     const pathToRoot = (id: EARS.EntityId) => {
       const path: EARS.EntityId[] = [];
       let cur: EARS.EntityId | null = id;

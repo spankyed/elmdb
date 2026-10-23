@@ -16,6 +16,7 @@ import { createRelationReads, type RelationMatch, type RelationRow, type Relatio
 import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
+import { createNameChecks } from './names.ts';
 
 /** An engine's operations — its queries, writes, transactions and repository registry: what a program is handed */
 export interface Ears {
@@ -35,6 +36,8 @@ export interface Ears {
   transact<T>(fn: () => T): T;
   /** Whether `name` is an entity type the engine's creator registered */
   isEntityType(name: string): boolean;
+  /** Whether `name` is a relation kind the engine's creator registered */
+  isRelationKind(name: string): boolean;
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
   findAll<T = unknown>(entityType: EARS.Entity): T[];
   findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
@@ -101,6 +104,8 @@ export interface EarsAdmin {
   updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
   /** The engine's entity-type checker */
   isEntityType(name: string): boolean;
+  /** The engine's relation-kind checker */
+  isRelationKind(name: string): boolean;
   /** A copy of the registered repositories, by name */
   repositories(): Record<string, unknown>;
 }
@@ -111,26 +116,27 @@ export interface EarsEngine extends Ears {
 }
 
 /**
- * A new, empty engine. `isEntityType` says which names are entity types `create` and `query` accept;
- * `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
+ * A new, empty engine. `isEntityType` says which names are entity types `create` and `query` accept, and
+ * `isRelationKind` which are relation kinds a link, and a read or walk over links, may name; `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSRuntimeDeps): EarsEngine {
+export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind }: EARSRuntimeDeps): EarsEngine {
+  const names = createNameChecks({ isRelationKind });
   const { journal, unitSink, transact } = createJournal(persistence);
   const relations = createRelationIndex(journal);
   const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
   const edgeStore = createEdgeStore({ relations, storage });
-  const query = createQuery({ storage, isEntityType });
-  const graph = createGraph({ query, edgeStore });
-  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, journal });
+  const query = createQuery({ storage, isEntityType, names });
+  const graph = createGraph({ query, edgeStore, names });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, names, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(storage);
   const entityHelpers = createEntityHelpers({ create, counters });
-  const relationReads = createRelationReads({ edgeStore, relations, storage });
+  const relationReads = createRelationReads({ edgeStore, relations, storage, names });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
-    query, create, upsert, write, transact, isEntityType,
+    query, create, upsert, write, transact, isEntityType, isRelationKind,
     ...finders,
     ...entityHelpers,
     ...counters,
@@ -168,6 +174,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     removeFromIndex: relations.removeFromIndex,
     updateIndex: relations.updateIndex,
     isEntityType,
+    isRelationKind,
     repositories: repositories.entries,
   };
 
