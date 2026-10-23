@@ -39,8 +39,6 @@ export interface Ears {
   /** Whether `name` is a role the engine's creator registered */
   isRole(name: string): boolean;
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
-  findAll<T = unknown>(entityType: EARS.Entity): T[];
-  findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */

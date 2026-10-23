@@ -116,13 +116,9 @@ export interface Ears {
     create: Create;
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
-    findAll<T = unknown>(entityType: EARS.Entity): T[];
-    // (undocumented)
     findById<T = unknown>(id: EARS.EntityId): T | undefined;
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
-    // (undocumented)
-    findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
@@ -530,11 +526,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
     // (undocumented)
-    findAll: TypedFindAll<S, N>;
-    // (undocumented)
     findById: TypedFindById<S>;
-    // (undocumented)
-    findWhere: TypedFindWhere<S, N>;
     // (undocumented)
     getAttr: TypedGetAttr<S>;
     // (undocumented)
@@ -550,25 +542,11 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
 }
 
 // @public (undocumented)
-export interface TypedFindAll<S extends EntityShapes, N extends string = string> {
-    // (undocumented)
-    <E extends string>(entityType: Name<N, E>): ShapeOf<S, E>[];
-    // (undocumented)
-    <T, E extends string = string>(entityType: Name<N, E>): T[];
-}
-
-// @public (undocumented)
 export interface TypedFindById<S extends EntityShapes> {
     // (undocumented)
     <E extends string>(id: EARS.EntityId<E>): ShapeOf<S, E> | undefined;
     // (undocumented)
     <T>(id: EARS.EntityId): T | undefined;
-}
-
-// @public (undocumented)
-export interface TypedFindWhere<S extends EntityShapes, N extends string = string> {
-    // (undocumented)
-    <E extends string, K extends keyof ShapeOf<S, E> & string>(entityType: Name<N, E>, field: K, value: WhereValue<S, E, K>): ShapeOf<S, E>[];
 }
 
 // @public

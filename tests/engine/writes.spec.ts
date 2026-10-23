@@ -394,16 +394,16 @@ describe('rows', () => {
   });
 });
 
-describe('finders', () => {
-  it('skip rows in the trash', () => {
+describe('findById', () => {
+  it('skips a row in the trash, which getRow reads', () => {
     const a = e.create('Task').setMany({ title: 'A', status: 'open' }).id();
     const b = e.create('Task').setMany({ title: 'B', status: 'open' }).trash().id();
     const c = e.create('Task').setMany({ title: 'C', status: 'done' }).id();
     e.write(c).grant('pinned');
     e.write(b).grant('pinned');
     expect(e.findById(b)).toBeUndefined();
-    expect(e.findAll<{ id: Id }>('Task').map((r) => r.id)).toEqual([a, c]);
-    expect(e.findWhere<{ id: Id }>('Task', 'status', 'open').map((r) => r.id)).toEqual([a]);
+    expect(e.findById(a)).toMatchObject({ id: a, title: 'A' });
+    expect(e.getRow(b)).toMatchObject({ id: b, title: 'B' });
   });
 
   it('read every field of a row, attribute kinds and stats', () => {

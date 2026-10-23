@@ -134,10 +134,10 @@ export type ShapeOf<S extends EntityShapes, E extends string> =
  * inside the helper only the fields every entity has are known:
  *
  * ```ts
- * import { findAll, type EntityName } from '#generated/ears';
+ * import { query, type EntityName } from '#generated/ears';
  *
  * function newestOf<E extends EntityName>(entityType: E) {
- *   return findAll(entityType).sort((a, b) => b.createdAt - a.createdAt);
+ *   return query(entityType).pickAll().sort((a, b) => b.createdAt - a.createdAt);
  * }
  * newestOf('Note')[0].title; // typed with the Note shape
  * ```

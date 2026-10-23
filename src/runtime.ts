@@ -245,7 +245,7 @@ export type CreateFields<S extends EntityShapes, E extends string> =
       & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> | NumberedField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
     : Record<string, unknown>;
 
-/** What `where(k, v)` and `findWhere` match field `K` against: a value, one element of a list field, or a predicate */
+/** What `where(k, v)` matches field `K` against: a value, one element of a list field, or a predicate */
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> =
   | ShapeOf<S, E>[K]
   | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never)

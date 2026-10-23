@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateFields, QueryBuilder, RequiredField, RowIdentity, WhereValue, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { CreateFields, QueryBuilder, RequiredField, RowIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
 import { newId } from './attribute-storage.ts';
 import type { Ears } from './engine.ts';
 
@@ -62,18 +62,6 @@ export interface TypedFindById<S extends EntityShapes> {
   <T>(id: EARS.EntityId): T | undefined;
 }
 
-// The `<T>` overloads read rows as an explicit shape. A call without a type argument that fails the
-// first overload infers `E` here too, so an undeclared literal is still rejected; passing `T` leaves
-// `E` at its default (`string`), which lets a name known only at runtime through.
-export interface TypedFindAll<S extends EntityShapes, N extends string = string> {
-  <E extends string>(entityType: Name<N, E>): ShapeOf<S, E>[];
-  <T, E extends string = string>(entityType: Name<N, E>): T[];
-}
-
-export interface TypedFindWhere<S extends EntityShapes, N extends string = string> {
-  <E extends string, K extends keyof ShapeOf<S, E> & string>(entityType: Name<N, E>, field: K, value: WhereValue<S, E, K>): ShapeOf<S, E>[];
-}
-
 /** Brands the id with the entity type when `S` declares its shape; other types stay unbranded. */
 export type TypedNewId<S extends EntityShapes, N extends string = string> =
   <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
@@ -91,8 +79,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
   write: TypedWrite<S, R, O>;
   transact: Ears['transact'];
   findById: TypedFindById<S>;
-  findAll: TypedFindAll<S, N>;
-  findWhere: TypedFindWhere<S, N>;
   newId: TypedNewId<S, N>;
   getAttr: TypedGetAttr<S>;
 }
@@ -121,8 +107,6 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
     write: on('write'),
     transact: on('transact'),
     findById: on('findById'),
-    findAll: on('findAll'),
-    findWhere: on('findWhere'),
     newId,
     getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N, R, O>;

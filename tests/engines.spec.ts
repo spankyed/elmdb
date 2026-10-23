@@ -20,7 +20,7 @@ describe('defineEars', () => {
     expect(typed.query('Note').ids()).toEqual([]);
     expect(typed.query.all().ids()).toEqual([]);
     current = first;
-    expect(typed.findAll('Note').map((row) => row.title)).toEqual(['first']);
+    expect(typed.query('Note').pickAll().map((row) => row.title)).toEqual(['first']);
     expect(typed.query.ids(id).count()).toBe(1);
   });
 
