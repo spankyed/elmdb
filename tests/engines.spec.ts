@@ -15,7 +15,7 @@ describe('defineEars', () => {
     const typed = defineEars<{ Note: { title: string } }, 'Note'>(() => current);
 
     const id = typed.create('Note', { title: 'first' }).id();
-    expect(first.findById(id)).toMatchObject({ title: 'first' });
+    expect(first.query.ids(id).pickOne()).toMatchObject({ title: 'first' });
     current = second;
     expect(typed.query('Note').ids()).toEqual([]);
     expect(typed.query.all().ids()).toEqual([]);
@@ -68,7 +68,7 @@ describe('the engine', () => {
   it('is its operations, with the creator\'s privileges beside them in admin', () => {
     const engine = newEngine();
     const id = engine.create('Note').set('title', 'held').id();
-    expect(engine.findById(id)).toMatchObject({ title: 'held' });
+    expect(engine.query.ids(id).pickOne()).toMatchObject({ title: 'held' });
     engine.admin.clear();
     expect(engine.admin.getAllEntities()).toEqual([]);
 

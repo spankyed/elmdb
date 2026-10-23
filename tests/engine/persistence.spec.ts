@@ -110,7 +110,7 @@ describe('hydration', () => {
 
     expect(calls).toEqual([]);
     expect(e.admin.getAllEntities()).toEqual([a, b, p, rel]);
-    expect(e.findById(a)).toEqual({ id: a, entityType: 'Task', title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
+    expect(e.query.ids(a).pickOne()).toEqual({ id: a, entityType: 'Task', title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
     expect(e.query('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
     expect(e.query.all().withRole('current').ids()).toEqual([p]);
     expect(e.query.ids(p).out('contains').ids()).toEqual([a]);

@@ -37,8 +37,6 @@ export interface Ears {
   isRelationKind(name: string): boolean;
   /** Whether `name` is a role the engine's creator registered */
   isRole(name: string): boolean;
-  /** The live row with an id — none for one in the trash, which `getRow` reads — or undefined */
-  findById<T = unknown>(id: EARS.EntityId): T | undefined;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
@@ -120,7 +118,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
-    findById: <T>(id: EARS.EntityId) => query.ids(id).pickAll()[0] as T | undefined,
     generateLabelWithCount: counters.generateLabelWithCount,
     ...relationReads,
     ...graph,

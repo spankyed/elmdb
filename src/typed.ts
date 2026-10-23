@@ -57,11 +57,6 @@ export interface TypedWrite<S extends EntityShapes, R extends string = string, O
   <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S, R, O>;
 }
 
-export interface TypedFindById<S extends EntityShapes> {
-  <E extends string>(id: EARS.EntityId<E>): ShapeOf<S, E> | undefined;
-  <T>(id: EARS.EntityId): T | undefined;
-}
-
 /** Brands the id with the entity type when `S` declares its shape; other types stay unbranded. */
 export type TypedNewId<S extends EntityShapes, N extends string = string> =
   <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
@@ -78,7 +73,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
   upsert: TypedUpsert<S, N, R, O>;
   write: TypedWrite<S, R, O>;
   transact: Ears['transact'];
-  findById: TypedFindById<S>;
   newId: TypedNewId<S, N>;
   getAttr: TypedGetAttr<S>;
 }
@@ -106,7 +100,6 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
     upsert: on('upsert'),
     write: on('write'),
     transact: on('transact'),
-    findById: on('findById'),
     newId,
     getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N, R, O>;

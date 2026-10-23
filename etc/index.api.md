@@ -115,7 +115,6 @@ export interface Ears {
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-    findById<T = unknown>(id: EARS.EntityId): T | undefined;
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
@@ -391,10 +390,10 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     } & Pick<ShapeOf<S, E>, A[number]>)[];
     // (undocumented)
     pickAll(): ShapeOf<S, E>[];
-    // (undocumented)
     pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(f: A): ({
         id: EARS.EntityId<E>;
     } & Pick<ShapeOf<S, E>, A[number]>) | null;
+    pickOne(): ShapeOf<S, E> | null;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -525,8 +524,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
     // (undocumented)
-    findById: TypedFindById<S>;
-    // (undocumented)
     getAttr: TypedGetAttr<S>;
     // (undocumented)
     newId: TypedNewId<S, N>;
@@ -538,14 +535,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     upsert: TypedUpsert<S, N, R, O>;
     // (undocumented)
     write: TypedWrite<S, R, O>;
-}
-
-// @public (undocumented)
-export interface TypedFindById<S extends EntityShapes> {
-    // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>): ShapeOf<S, E> | undefined;
-    // (undocumented)
-    <T>(id: EARS.EntityId): T | undefined;
 }
 
 // @public
@@ -621,6 +610,7 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     restore(): WriteBuilder<E, S, R, O>;
     // (undocumented)
     revoke(role: O): WriteBuilder<E, S, R, O>;
+    row(): ShapeOf<S, E>;
     set<K extends WritableField<S, E>>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S, R, O>;
     setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S, R, O>;
     trash(at?: number): WriteBuilder<E, S, R, O>;

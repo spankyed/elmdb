@@ -152,9 +152,12 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>)[];
+  /** The first entity's fields picked, or null when the query reaches none */
   pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
     f: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>) | null;
+  /** The first entity's whole row (`pickAll`'s, `getRow`'s), or null when the query reaches none: `query.ids(id).pickOne()` is the live row with an id */
+  pickOne(): ShapeOf<S, E> | null;
   pickAll(): ShapeOf<S, E>[];
   orderBy(field: keyof ShapeOf<S, E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, S, N, R, O>;
   reverse(): QueryBuilder<E, S, N, R, O>;
@@ -317,4 +320,6 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
    */
   destroy(options?: { keepStored?: boolean }): void;
   id(): EARS.EntityId<E>;
+  /** The entity's whole row as the builder's writes left it (`getRow`'s): what a `create` reads back */
+  row(): ShapeOf<S, E>;
 }

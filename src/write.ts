@@ -49,7 +49,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
-    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr,
+    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr, getRow,
   } = storage;
 
   /**
@@ -201,6 +201,9 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
       },
 
       id: () => id,
+
+      // The builder's entity exists — write refuses an id no entity has, and destroy ends the chain
+      row: () => getRow(id) as ReturnType<WriteBuilder['row']>,
     };
     return self;
   }

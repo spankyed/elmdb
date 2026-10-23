@@ -30,9 +30,6 @@ export const b64Decode = (s: string) => {
   }
 };
 
-const liftOne = <F extends (...args: any[]) => any>(many: F) =>
-  (...a: Parameters<F>) => (many as any)(...a)[0] ?? null;
-
 /**
  * The query entry points over the entities they reach. `(type)` starts from every entity of a registered type, and
  * refuses a name that isn't one rather than finding nothing; `ids` starts from the ids given that exist; `all` from
@@ -215,9 +212,12 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
             });
             return o as { id: EARS.EntityId } & { [K in A[number]]: unknown };
           }),
-        pickOne: liftOne(function <A extends readonly string[]>(f: A) {
-          return self.pick(f);
-        }),
+        // The first row: the fields picked, or with none the whole row, as pickAll reads it
+        pickOne: (f?: readonly string[]) => {
+          if (f) return self.pick(f)[0] ?? null;
+          const [first] = cur();
+          return first === undefined ? null : getRow(first)!;
+        },
 
         // A step's ids are in the engine, so each has a row
         pickAll: () => cur().map((i) => getRow(i)!),

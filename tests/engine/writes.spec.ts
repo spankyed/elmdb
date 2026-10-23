@@ -18,7 +18,7 @@ describe('create', () => {
   it('creates an entity of a type with a new id and createdAt', () => {
     const id = e.create('Task').set('title', 'Write specs').id();
     expect(id).toMatch(/^Task-[a-z0-9]+$/);
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'Write specs' });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'Write specs' });
     expect(e.admin.getEntitiesOfType('Task')).toEqual([id]);
     expect(e.admin.getAllEntities()).toEqual([id]);
   });
@@ -33,7 +33,7 @@ describe('create', () => {
   it('takes its row in one object: the fields, and the id and creation time it is given', () => {
     const id = e.create('Task', { id: 'Task-custom' as Id, createdAt: 42, title: 'Mine', tags: ['a'] }).id();
     expect(id).toBe('Task-custom');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: 42, updatedAt: 42, title: 'Mine', tags: ['a'] });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: 42, updatedAt: 42, title: 'Mine', tags: ['a'] });
   });
 
   it("refuses a row naming the engine's other fields, before the entity exists", () => {
@@ -55,7 +55,7 @@ describe('create', () => {
   it('numbers a row of a type with a short code prefix that brings none, and keeps one it brings', () => {
     const e = numbered();
     const id = e.create('Project', { color: 'red' }).id();
-    expect(e.findById(id)).toEqual({ id, entityType: 'Project', color: 'red', shortCode: 'PRO-1', createdAt: NOW, updatedAt: NOW });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Project', color: 'red', shortCode: 'PRO-1', createdAt: NOW, updatedAt: NOW });
     expect(e.getAttr(e.create('Project', { shortCode: 'PRO-40' }).id(), 'shortCode')).toBe('PRO-40');
     // A type with no prefix is not numbered
     expect(e.getRow(e.create('Task', { shortCode: undefined, title: 'x' }).id())).not.toHaveProperty('shortCode');
@@ -126,7 +126,7 @@ describe('write', () => {
     const id = e.create('Task').id();
     vi.setSystemTime(NOW + 5);
     e.write(id).set('title', 'Later');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'Later' });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'Later' });
   });
 
   /** An id no entity has used to be written to anyway, leaving attributes with no entity of a type behind them */
@@ -174,7 +174,7 @@ describe('upsert', () => {
     e.upsert('Task', id, { title: 'first' });
     vi.setSystemTime(NOW + 5);
     e.upsert('Task', id, { title: 'second' }).set('done', true);
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second', done: true });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second', done: true });
     // The id is upsert's argument, never a field of its row
     expect(() => e.upsert('Task', id, { id })).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });
@@ -191,11 +191,11 @@ describe('attribute writes', () => {
     const id = e.create('Task').set('tag', ['a']).id();
     e.write(id).add('tag', 'b').add('tag', 'c');
     expect(e.getAttr(id, 'tag')).toEqual(['a', 'b', 'c']);
-    expect(e.findById(id)).toMatchObject({ tag: ['a', 'b', 'c'] });
+    expect(e.query.ids(id).pickOne()).toMatchObject({ tag: ['a', 'b', 'c'] });
     e.write(id).set('tag', 'z');
     expect(e.getAttr(id, 'tag')).toBe('z');
     e.write(id).setMany({ tag: 'x', other: 1 });
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, tag: 'x', other: 1 });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, tag: 'x', other: 1 });
   });
 
   it('a one-element list reads as a list, whichever write made it', () => {
@@ -234,7 +234,7 @@ describe('attribute writes', () => {
     expect(e.getAttr(id, 'tag')).toEqual([]);
     e.write(id).delete('tag');
     expect(e.getAttr(id, 'tag')).toBeNull();
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW });
+    expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW });
   });
 
   it('never changes a list a read handed out', () => {
@@ -321,7 +321,7 @@ describe('destroy', () => {
     e.write(c).link('contains', a);
     e.write(c).link('contains', b);
     expect(e.write(a).destroy()).toBeUndefined();
-    expect(e.findById(a)).toBeUndefined();
+    expect(e.query.ids(a).pickOne()).toBeNull();
     expect(e.getAttr(a, 'title')).toBeNull();
     expect(e.admin.getEntitiesOfType('Task')).toEqual([b]);
     expect(e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity])).toEqual([[c, 'contains', b]]);
@@ -386,24 +386,33 @@ describe('rows', () => {
     const row = { id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'A', role: ['lead'] };
     expect(e.getRow(id)).toEqual(row);
     expect(e.query.ids(id).pickAll()).toEqual([row]);
-    expect(e.findById(id)).toEqual(row);
+    expect(e.query.ids(id).pickOne()).toEqual(row);
     expect(e.getRow('Task-none' as Id)).toBeUndefined();
     e.write(id).trash(7);
     expect(e.getRow(id)).toEqual({ ...row, trashedAt: 7 });
-    expect(e.findById(id)).toBeUndefined();
+    expect(e.query.ids(id).pickOne()).toBeNull();
   });
 });
 
-describe('findById', () => {
-  it('skips a row in the trash, which getRow reads', () => {
+describe('rows', () => {
+  it("pickOne() is a query's first whole row, which skips the trash where getRow reads it", () => {
     const a = e.create('Task').setMany({ title: 'A', status: 'open' }).id();
     const b = e.create('Task').setMany({ title: 'B', status: 'open' }).trash().id();
-    const c = e.create('Task').setMany({ title: 'C', status: 'done' }).id();
-    e.write(c).grant('pinned');
-    e.write(b).grant('pinned');
-    expect(e.findById(b)).toBeUndefined();
-    expect(e.findById(a)).toMatchObject({ id: a, title: 'A' });
+    expect(e.query.ids(a).pickOne()).toEqual(e.getRow(a));
+    expect(e.query.ids(b).pickOne()).toBeNull();
     expect(e.getRow(b)).toMatchObject({ id: b, title: 'B' });
+    expect(e.query('Task').pickOne()).toEqual(e.getRow(a));
+    expect(e.query('Project').pickOne()).toBeNull();
+    // With fields, the fields picked
+    expect(e.query.ids(a).pickOne(['title'])).toEqual({ id: a, title: 'A' });
+  });
+
+  it("row() is a write's entity as its writes left it, a create's included", () => {
+    const id = e.create('Task', { title: 'A' }).set('status', 'open').id();
+    expect(e.create('Task', { title: 'B' }).row()).toMatchObject({ entityType: 'Task', title: 'B', createdAt: NOW, updatedAt: NOW });
+    expect(e.write(id).set('title', 'A2').row()).toEqual({ id, entityType: 'Task', title: 'A2', status: 'open', createdAt: NOW, updatedAt: NOW });
+    // A trashed entity's row is read as written, trashedAt included
+    expect(e.write(id).trash(9).row()).toMatchObject({ id, trashedAt: 9 });
   });
 
   it('read every field of a row, attribute kinds and stats', () => {

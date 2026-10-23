@@ -101,10 +101,10 @@ describe('a unit that returns', () => {
   it('returns what fn returned, and reads inside it see its own writes', () => {
     const made = e.transact(() => {
       const id = e.create('Task').set('title', 'inside').id();
-      expect(e.findById(id)).toMatchObject({ title: 'inside' });
+      expect(e.query.ids(id).pickOne()).toMatchObject({ title: 'inside' });
       return id;
     });
-    expect(e.findById(made)).toMatchObject({ title: 'inside' });
+    expect(e.query.ids(made).pickOne()).toMatchObject({ title: 'inside' });
   });
 
   it('sends the sink its writes after it returns, between onUnitStart and onUnitEnd', () => {
@@ -117,7 +117,7 @@ describe('a unit that returns', () => {
   });
 
   it('sends nothing, not even the bracket, when it wrote nothing', () => {
-    e.transact(() => e.findById(task));
+    e.transact(() => e.query.ids(task).pickOne());
     expect(calls).toEqual([]);
   });
 });
@@ -135,11 +135,11 @@ describe('a unit inside another', () => {
     e.transact(() => {
       e.write(task).set('title', 'outer');
       expect(() => e.transact(() => { e.write(task).set('title', 'inner'); e.write(other).destroy(); throw new Error('stop'); })).toThrow();
-      expect(e.findById(task)).toMatchObject({ title: 'outer' });
-      expect(e.findById(other)).toMatchObject({ title: 'b' });
+      expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
+      expect(e.query.ids(other).pickOne()).toMatchObject({ title: 'b' });
     });
     expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
-    expect(e.findById(task)).toMatchObject({ title: 'outer' });
+    expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
   });
 
   it('that throws after growing a list the outer wrote sends the outer\'s list, not the grown one', () => {
@@ -199,7 +199,7 @@ describe('a link\'s target', () => {
       e.write(task).unlink('refers', 'Task-ghost' as Id);
       e.write(task).set('title', 'committed');
     });
-    expect(e.findById(task)).toMatchObject({ title: 'committed' });
+    expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'committed' });
   });
 
   it('destroyed later in the unit takes the link with it, which is no error', () => {
@@ -263,6 +263,6 @@ describe('what transact refuses', () => {
 
   it('emptying the engine inside it', () => {
     expect(() => e.transact(() => e.admin.clear())).toThrow(/clear\(\) inside transact/);
-    expect(e.findById(task)).toBeDefined();
+    expect(e.query.ids(task).pickOne()).toBeDefined();
   });
 });
