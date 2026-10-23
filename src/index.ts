@@ -6,8 +6,6 @@ export {
 } from './engine.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
-export type { EdgeStore, EdgeMatch } from './edge-store.ts';
-export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
   EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, RowIdentity, WriteOptions, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue,
 } from './runtime.ts';
@@ -30,4 +28,3 @@ export {
   type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedNewId,
   type TypedGetAttr, type TypedCreateEntityWithDefaults,
 } from './typed.ts';
-export { bp, type Blueprint, type BlueprintBuilder } from './blueprint.ts';

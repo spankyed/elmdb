@@ -1,6 +1,6 @@
 // The engine's contract: query builder starts, filters, ordering and terminals; blueprints; the repository registry
 import { beforeEach, describe, expect, it } from 'vitest';
-import { bp, EARS } from '../../src/index.ts';
+import { EARS } from '../../src/index.ts';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
@@ -100,7 +100,8 @@ describe('filters', () => {
     expect(e.query.ids(p).outEdges('contains', 'Project')).toEqual([]);
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
     // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
-    e.admin.addRelation(p, 'refers', 'Task-ghost' as Id);
+    e.admin.bulkLoadAttr('Relation-ghost' as Id, EARS.AttrKind.RelationDetails, { sourceEntity: p, targetEntity: 'Task-ghost', relationType: 'refers' });
+    e.admin.addToIndex('refers', p, 'Task-ghost' as Id, 'Relation-ghost' as Id);
     e.write(p).link('refers', t.d);
     expect(e.query.ids(p).outEdges('refers')).toEqual([{ kind: 'refers', id: t.d }]);
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);
@@ -154,35 +155,6 @@ describe('terminals', () => {
     expect(e.query('Task').pickOne(['title'])).toEqual({ id: t.a, title: 'banana' });
     expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeNull();
     expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), updatedAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
-  });
-});
-
-describe('blueprints', () => {
-  it('spawn creates a blueprint graph, reusing shared nodes unless told not to', () => {
-    const shared = bp('Person').attr('name', 'Sam').grant('member').build();
-    const plan = bp('Project')
-      .attr('title', 'Plan')
-      .ensure('current')
-      .link('owner', shared)
-      .link('lead', shared, { since: 1 })
-      .link('about', t.a)
-      .build();
-    expect(plan).toEqual({
-      entity: 'Project', attrs: { title: 'Plan' }, uniqueRoles: ['current'],
-      rels: [{ kind: 'owner', target: shared, info: undefined }, { kind: 'lead', target: shared, info: { since: 1 } }, { kind: 'about', target: t.a, info: undefined }],
-    });
-    const id = e.spawn(plan);
-    expect(e.findById(id)).toMatchObject({ title: 'Plan', role: ['current'] });
-    const [owner] = e.query.ids(id).out('owner').ids();
-    expect(e.query.ids(id).out('lead').ids()).toEqual([owner]);
-    expect(e.findById(owner)).toMatchObject({ name: 'Sam', role: ['member'] });
-    expect(e.findRelations({ sourceEntity: id, relationType: 'lead' })[0].info).toEqual({ since: 1 });
-    expect(e.query.ids(id).out('about').ids()).toEqual([t.a]);
-
-    const again = e.spawn(plan, { dedupe: false });
-    expect(e.query.all().withRole('current').ids()).toEqual([again]);
-    expect(e.query.ids(again).out(['owner', 'lead']).count()).toBe(2);
-    expect(e.admin.getEntitiesOfType('Person')).toHaveLength(3);
   });
 });
 

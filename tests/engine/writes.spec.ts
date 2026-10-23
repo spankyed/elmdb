@@ -398,7 +398,6 @@ describe('finders', () => {
     expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getAttr('Task-gone' as Id, 'entityType')).toBeNull();
     expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'updatedAt', 'title', 'tag', 'relationDetails']);
-    expect(e.getAttributeStats('tag')).toEqual({ entityCount: 1, totalValues: 2 });
     expect(e.getSchemaStats()).toEqual({
       entities: { Task: 1, Project: 1, Relation: 1 },
       attributes: {

@@ -13,7 +13,7 @@ import type { LinkOptions, RowIdentity, WriteBuilder, WriteOptions } from './run
 /** When the entity last changed: stamped by the engine, never written by a caller */
 const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
 
-const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn', 'symmetric'] satisfies Array<keyof LinkOptions>;
+const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn'] satisfies Array<keyof LinkOptions>;
 
 /** A string that is not shaped like an id: where a type is meant, an id fails to compile */
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
@@ -38,7 +38,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
-  graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle' | 'linkSymmetric'>;
+  graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle'>;
   isEntityType: (name: string) => boolean;
   requiredFields: (type: string) => readonly string[];
   names: NameChecks;
@@ -66,7 +66,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
       if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).includes(source)) throw missing();
     });
   }
-  const { wouldCreateCycle, linkSymmetric } = graph;
+  const { wouldCreateCycle } = graph;
   const attr = (k: string) => EARS.AttrKind.Custom(k);
 
   function requireType(type: string, via: string): void {
@@ -139,7 +139,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
       },
 
       link(kind, target, options: LinkOptions = {}) {
-        const { info, replace, acyclicIn, symmetric } = options;
+        const { info, replace, acyclicIn } = options;
         names.relationKinds(kind, 'link');
         if (acyclicIn) names.relationKinds(acyclicIn, 'link');
         // An edge's info is `{ info }`: an object with other keys is info passed where the options go
@@ -152,8 +152,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
             : `Cannot create a ${kind} relation that would form a cycle within [${acyclicIn.join(', ')}]`);
         }
         requireTarget(id, kind, target);
-        if (symmetric) linkSymmetric(id, target, kind, info);
-        else if (replace) edgeStore.linkOne(id, kind, target, info);
+        if (replace) edgeStore.linkOne(id, kind, target, info);
         else addRelation(id, kind, target, info);
         return self;
       },

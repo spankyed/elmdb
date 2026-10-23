@@ -23,41 +23,6 @@ export interface BaseEntity {
     updatedAt?: number;
 }
 
-// @public (undocumented)
-export interface Blueprint {
-    // (undocumented)
-    attrs?: Record<string, unknown>;
-    // (undocumented)
-    entity: EARS.Entity;
-    // (undocumented)
-    rels?: Array<{
-        kind: EARS.RelKind;
-        target: Blueprint | EARS.EntityId;
-        info?: unknown;
-    }>;
-    // (undocumented)
-    roles?: EARS.RoleKind[];
-    // (undocumented)
-    uniqueRoles?: EARS.RoleKind[];
-}
-
-// @public
-export interface BlueprintBuilder {
-    // (undocumented)
-    attr(k: string, v: unknown): BlueprintBuilder;
-    // (undocumented)
-    build(): Blueprint;
-    // (undocumented)
-    ensure(r: EARS.RoleKind): BlueprintBuilder;
-    // (undocumented)
-    grant(r: EARS.RoleKind): BlueprintBuilder;
-    // (undocumented)
-    link(kind: EARS.RelKind, target: Blueprint | EARS.EntityId, info?: unknown): BlueprintBuilder;
-}
-
-// @public (undocumented)
-export const bp: (entity: EARS.Entity) => BlueprintBuilder;
-
 // @public
 export interface Create {
     // (undocumented)
@@ -140,18 +105,6 @@ export namespace EARS {
     // (undocumented)
     export type AttrKind = typeof AttrKindValues[keyof typeof AttrKindValues] | (string & {});
     // (undocumented)
-    export type Blueprint = {
-        entity: EARS.Entity;
-        attrs?: Record<string, unknown>;
-        roles?: EARS.RoleKind[];
-        uniqueRoles?: EARS.RoleKind[];
-        rels?: {
-            kind: EARS.RelKind;
-            target: Blueprint | EARS.EntityId;
-            info?: unknown;
-        }[];
-    };
-    // (undocumented)
     export type Entity = typeof Entity[keyof typeof Entity] | (string & {});
     export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
         readonly __entity?: E;
@@ -175,14 +128,12 @@ export namespace EARS {
 
 // @public
 export interface Ears {
-    // (undocumented)
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
     // (undocumented)
     createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(entityType: EARS.Entity, data: Partial<T> & {
         id?: EARS.EntityId;
     }, prefix?: string): T & CreatedEntityFields;
-    // (undocumented)
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
     findAll<T = unknown>(entityType: EARS.Entity): T[];
@@ -205,11 +156,6 @@ export interface Ears {
     getAllRoles(): string[];
     getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     // (undocumented)
-    getAttributeStats(kind: EARS.AttrKind): {
-        entityCount: number;
-        totalValues: number;
-    };
-    // (undocumented)
     getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
     getRoles(id: EARS.EntityId): string[];
@@ -219,28 +165,12 @@ export interface Ears {
     isEntityType(name: string): boolean;
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
-    // (undocumented)
-    leaves(kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
-    // (undocumented)
-    linkSymmetric(a: EARS.EntityId, b: EARS.EntityId, kind: EARS.RelKind, info?: unknown): void;
-    // (undocumented)
-    lowestCommonAncestor(a: EARS.EntityId, b: EARS.EntityId, treeKind: EARS.RelKind): EARS.EntityId | null;
     query: Query;
     // (undocumented)
     registerRepository(name: string, value: unknown): void;
     // (undocumented)
     removeRelationById(relId: EARS.EntityId): void;
     repository: Record<string, unknown>;
-    // (undocumented)
-    rootParent(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId;
-    // (undocumented)
-    shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null;
-    // (undocumented)
-    spawn(root: Blueprint, options?: {
-        dedupe?: boolean;
-    }): EARS.EntityId;
-    // (undocumented)
-    topoSort(roots: EARS.EntityId[], kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
     transact<T>(fn: () => T): T;
     // (undocumented)
     unregisterRepository(name: string): void;
@@ -250,36 +180,27 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
-    // (undocumented)
     wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
 
 // @public
 export interface EarsAdmin {
-    // (undocumented)
     addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
     addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-    // (undocumented)
-    edgeStore: EdgeStore;
     getAllEntities(): EARS.EntityId[];
     getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
-    isEntityType(name: string): boolean;
-    isRelationKind(name: string): boolean;
-    isRole(name: string): boolean;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    readonly relationIndex: Readonly<RelationIndex>;
-    // (undocumented)
-    removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
     repositories(): Record<string, unknown>;
-    // (undocumented)
-    updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
-    // (undocumented)
-    updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
+    updateRelation(relId: EARS.EntityId, patch: {
+        sourceEntity?: EARS.EntityId;
+        targetEntity?: EARS.EntityId;
+        info?: unknown;
+    }): void;
 }
 
 // @public
@@ -328,22 +249,6 @@ export interface EARSRuntimeDeps {
 }
 
 // @public
-export type EdgeMatch = Partial<Pick<EARS.RelationDetail, 'sourceEntity' | 'relationType' | 'targetEntity'>>;
-
-// @public
-export interface EdgeStore {
-    find(w: Partial<EARS.RelationDetail>): EARS.RelationDetail[];
-    linkOne(src: EARS.EntityId, kind: EARS.RelKind, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
-    patchOne(w: Partial<EARS.RelationDetail>, u: {
-        newSource?: EARS.EntityId;
-        newTarget?: EARS.EntityId;
-        newInfo?: unknown;
-    }): boolean;
-    relIds(w: EdgeMatch): EARS.EntityId[];
-    unlink(w: Partial<EARS.RelationDetail>): void;
-}
-
-// @public
 export type EntityNameArg<N extends string, E extends string> = string extends E ? E : [E] extends [N] ? E : N;
 
 // @public
@@ -380,7 +285,6 @@ export interface LinkOptions<R extends string = string> {
     acyclicIn?: readonly R[];
     info?: unknown;
     replace?: boolean;
-    symmetric?: boolean;
 }
 
 // @public
@@ -526,17 +430,6 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
 
 // @public
 export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | null;
-
-// @public
-export type RelationIndex = Record<string, RelationIndexEntry>;
-
-// @public
-export interface RelationIndexEntry {
-    // (undocumented)
-    bySource: DirectionLists;
-    // (undocumented)
-    byTarget: DirectionLists;
-}
 
 // @public
 export interface RelationMatch {

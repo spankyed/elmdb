@@ -1,19 +1,13 @@
 import type { Query } from './query.ts';
-import type { EdgeStore } from './edge-store.ts';
 import { EARS } from './entities.ts';
 import type { NameChecks } from './names.ts';
 
-/** An engine's graph walks, over its queries and edge store */
-export function createGraph({ query, edgeStore, names }: { query: Query; edgeStore: EdgeStore; names: NameChecks }) {
-  const neighbours = (
-    id: EARS.EntityId,
-    kinds: readonly EARS.RelKind[],
-    asSource = true,
-  ): EARS.EntityId[] =>
-    kinds.flatMap(k =>
-      (asSource ? query.ids(id).out(k) : query.ids(id).in(k)).ids(),
-    );
+/** An engine's walks over a hierarchy — a tree or any graph of one relation kind — over its queries */
+export function createGraph({ query, names }: { query: Query; names: NameChecks }) {
+  const children = (id: EARS.EntityId, kinds: readonly EARS.RelKind[]): EARS.EntityId[] =>
+    kinds.flatMap(k => query.ids(id).out(k).ids());
 
+  /** Every entity `start` reaches through `relKind`, each once, `start` excluded: a subtree, or a cycle's other members */
   function descendants(
     start: EARS.EntityId,
     relKind: EARS.RelKind,
@@ -35,6 +29,7 @@ export function createGraph({ query, edgeStore, names }: { query: Query; edgeSto
     return [...seen];
   }
 
+  /** Every entity that reaches `start` through `relKind`, each once, `start` excluded: in a tree, its parent first and its root last */
   function ancestors(
     start: EARS.EntityId,
     relKind: EARS.RelKind,
@@ -58,22 +53,7 @@ export function createGraph({ query, edgeStore, names }: { query: Query; edgeSto
     return [...seen];
   }
 
-  function rootParent(
-    start: EARS.EntityId,
-    relKind: EARS.RelKind,
-  ): EARS.EntityId {
-    names.relationKinds(relKind, 'rootParent');
-    let cur = start;
-    while (true) {
-      const parent = query.ids(cur)
-        .in(relKind)
-        .first();
-      if (!parent) break;
-      cur = parent;
-    }
-    return cur;
-  }
-
+  /** Whether linking `src` to `tgt` would close a cycle through `kinds`: `tgt` already reaches `src`, or is `src` */
   function wouldCreateCycle(
     src: EARS.EntityId,
     tgt: EARS.EntityId,
@@ -85,7 +65,7 @@ export function createGraph({ query, edgeStore, names }: { query: Query; edgeSto
     while (stack.length) {
       const node = stack.pop()!;
       if (node === src) return true;
-      for (const n of neighbours(node, kinds)) {
+      for (const n of children(node, kinds)) {
         if (!seen.has(n)) {
           seen.add(n);
           stack.push(n);
@@ -95,141 +75,5 @@ export function createGraph({ query, edgeStore, names }: { query: Query; edgeSto
     return false;
   }
 
-  function linkSymmetric(
-    a: EARS.EntityId,
-    b: EARS.EntityId,
-    kind: EARS.RelKind,
-    info?: unknown,
-  ) {
-    names.relationKinds(kind, 'linkSymmetric');
-    if (a === b) throw new Error("Self-link refused");
-    edgeStore.linkOne(a, kind, b, info);
-    edgeStore.linkOne(b, kind, a, info);
-  }
-
-  function topoSort(
-    roots: EARS.EntityId[],
-    kind: EARS.RelKind,
-    filterType?: EARS.Entity,
-  ): EARS.EntityId[] {
-    names.relationKinds(kind, 'topoSort');
-    const outgoing = new Map<EARS.EntityId, Set<EARS.EntityId>>();
-    const incoming = new Map<EARS.EntityId, number>();
-
-    const all = new Set<EARS.EntityId>(roots);
-    const collect = (id: EARS.EntityId) => {
-      const kids = new Set<EARS.EntityId>(query.ids(id).out(kind, filterType).ids());
-      outgoing.set(id, kids);
-      kids.forEach(k => {
-        incoming.set(k, (incoming.get(k) ?? 0) + 1);
-        if (!outgoing.has(k)) collect(k);
-        all.add(k);
-      });
-    };
-    roots.forEach(collect);
-
-    const queue = [...all].filter(id => !incoming.has(id));
-    const ordered: EARS.EntityId[] = [];
-
-    while (queue.length) {
-      const n = queue.shift()!;
-      ordered.push(n);
-      for (const m of outgoing.get(n) ?? []) {
-        incoming.set(m, (incoming.get(m) ?? 0) - 1);
-        if (incoming.get(m) === 0) queue.push(m);
-      }
-    }
-    if (ordered.length !== all.size)
-      throw new Error("Cycle detected – topological order impossible");
-    return ordered;
-  }
-
-  function shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null {
-    names.relationKinds(kinds, 'shortestPath');
-    if (src === tgt) return [src];
-
-    const front = new Map<EARS.EntityId, EARS.EntityId>(); front.set(src, src);
-    const back = new Map<EARS.EntityId, EARS.EntityId>(); back.set(tgt, tgt);
-
-    const fwdNbrs = (id: EARS.EntityId) => neighbours(id, kinds, true);
-    const bckNbrs = (id: EARS.EntityId) => neighbours(id, kinds, false);
-
-    let layer = [src], revLayer = [tgt];
-
-    while (layer.length && revLayer.length) {
-      if (layer.length <= revLayer.length) {
-        const next: EARS.EntityId[] = [];
-        for (const v of layer)
-          for (const n of fwdNbrs(v))
-            if (!front.has(n)) {
-              front.set(n, v);
-              if (back.has(n)) return join(n);
-              next.push(n);
-            }
-        layer = next;
-      } else {
-        const next: EARS.EntityId[] = [];
-        for (const v of revLayer)
-          for (const n of bckNbrs(v))
-            if (!back.has(n)) {
-              back.set(n, v);
-              if (front.has(n)) return join(n);
-              next.push(n);
-            }
-        revLayer = next;
-      }
-    }
-    return null;
-
-    function join(meet: EARS.EntityId): EARS.EntityId[] {
-      const path = [meet];
-      for (let v = meet; v !== src; v = front.get(v)!) path.unshift(front.get(v)!);
-      for (let v = meet; v !== tgt; v = back.get(v)!)  path.push(back.get(v)!);
-      return path;
-    }
-  }
-
-  function leaves(
-    kind: EARS.RelKind,
-    filterType?: EARS.Entity,
-  ): EARS.EntityId[] {
-    names.relationKinds(kind, 'leaves');
-    const all = new Set<EARS.EntityId>((filterType ? query(filterType) : query.all()).ids());
-    const hasOut = new Set<EARS.EntityId>();
-
-    for (const id of all) {
-      if (query.ids(id).out(kind, filterType).exists()) {
-        hasOut.add(id);
-      }
-    }
-    return [...all].filter(id => !hasOut.has(id));
-  }
-
-  function lowestCommonAncestor(
-    a: EARS.EntityId,
-    b: EARS.EntityId,
-    treeKind: EARS.RelKind,
-  ): EARS.EntityId | null {
-    names.relationKinds(treeKind, 'lowestCommonAncestor');
-    const pathToRoot = (id: EARS.EntityId) => {
-      const path: EARS.EntityId[] = [];
-      let cur: EARS.EntityId | null = id;
-      while (cur) {
-        path.push(cur);
-        cur = query.ids(cur)
-          .in(treeKind)
-          .first();
-      }
-      return path;
-    };
-
-    const A = pathToRoot(a);
-    const B = new Set(pathToRoot(b));
-    return A.find(node => B.has(node)) ?? null;
-  }
-
-  return {
-    descendants, ancestors, rootParent, wouldCreateCycle, linkSymmetric,
-    topoSort, shortestPath, leaves, lowestCommonAncestor,
-  };
+  return { descendants, ancestors, wouldCreateCycle };
 }

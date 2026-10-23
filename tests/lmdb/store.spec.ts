@@ -227,7 +227,7 @@ describe('openLmdbStore', () => {
     expect(store.envs.primary.relations.get(rel)).toMatchObject({ src: 'Note-1', tgt: 'Note-2' });
 
     store.reopen();
-    engine.admin.updateRelation(rel, undefined, id('Trace-1'));
+    engine.admin.updateRelation(rel, { targetEntity: id('Trace-1') });
     await flushed();
     expect(store.envs.primary.relations.get(rel)).toBeUndefined();
     expect(store.envs.volatileBackup.relations.get(rel)).toMatchObject({ kind: 'mentions', src: 'Note-1', tgt: 'Trace-1', info: { why: 'x' } });
@@ -244,7 +244,7 @@ describe('openLmdbStore', () => {
 
     store.reopen();
     await new Promise((resolve) => setTimeout(resolve, 5));
-    engine.admin.updateRelation(rel, undefined, id('Note-3'), 'why');
+    engine.admin.updateRelation(rel, { targetEntity: id('Note-3'), info: 'why' });
     await flushed();
     expect(store.envs.primary.relations.get(rel)).toEqual({ kind: 'mentions', src: 'Note-1', tgt: 'Note-3', info: 'why', createdAt });
     expect(store.envs.volatileBackup.relations.get(rel)).toBeUndefined();

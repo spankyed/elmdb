@@ -8,19 +8,19 @@ let e: EngineUnderTest;
 let calls: SinkCall[];
 
 /**
- * Everything a write can change: each entity's attributes, the type index and the relation index. A copy,
- * since a row read from the engine holds the live relation details that `relPatch` changes in place.
+ * Everything a write can change: each entity's attributes, the type index, and the relation index as every read
+ * of it sees it — the relations, the kinds, and each entity's edges out and in. A copy, since a row read from the
+ * engine holds the live relation details that `relPatch` changes in place.
  */
 function state() {
   const ids = [...e.admin.getAllEntities()].sort();
   return structuredClone({
     rows: ids.map((id) => [id, e.getRow(id)]),
     types: Object.fromEntries(e.getAllEntityTypes().map((t) => [t, [...e.admin.getEntitiesOfType(t)].sort()])),
-    relations: Object.keys(e.admin.relationIndex).sort().map((kind) => {
-      const entry = e.admin.relationIndex[kind];
-      const lists = (side: Record<string, Id[]>) => Object.keys(side).sort().map((id) => [id, [...side[id]]]);
-      return [kind, lists(entry.bySource), lists(entry.byTarget)];
-    }),
+    relations: e.findRelations().sort((x, y) => x.id.localeCompare(y.id)),
+    edges: [...e.getAllRelationKinds()].sort().map((kind) => [kind, ids.map((id) => [
+      id, e.query.withTrashed.ids(id).outEdges(kind), e.query.withTrashed.ids(id).inEdges(kind),
+    ])]),
   });
 }
 
@@ -56,7 +56,6 @@ const writes: Record<string, () => void> = {
   'grantExclusive': () => e.write(other).grantExclusive('owner', [task]),
   'link': () => e.write(other).link('blocks', task),
   'link with replace': () => e.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
-  'link symmetric': () => e.write(other).link('peer', task, { symmetric: true }),
   'updateRelation': () => e.updateRelation(rel, { targetEntity: other, info: { pos: 9 } }),
   'removeRelationById': () => e.removeRelationById(rel),
   'unlink': () => e.write(project).unlink('contains'),

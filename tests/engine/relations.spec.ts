@@ -1,5 +1,6 @@
 // The engine's contract: relations (links, their index and graph walks) and roles
 import { beforeEach, describe, expect, it } from 'vitest';
+import { EARS } from '../../src/index.ts';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
@@ -28,7 +29,6 @@ describe('links', () => {
     expect(e.query('Task').linkedWith(a).ids()).toEqual([b]);
     expect(e.getRelationStats('blocks')).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
     expect(e.getRelationStats('refs')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
-    expect(e.admin.relationIndex).toEqual({ blocks: { bySource: { [a]: [rel.id] }, byTarget: { [b]: [rel.id] } } });
   });
 
   it('linking the same edge again changes nothing, keeping its id and its place; another info is another edge', () => {
@@ -55,7 +55,6 @@ describe('links', () => {
     const a = task('A');
     expect(() => e.write(a).link('blocks', a)).toThrow("an entity can't be linked to itself");
     expect(() => e.write(a).link('blocks', a, { replace: true })).toThrow("can't be linked to itself");
-    expect(() => e.linkSymmetric(a, a, 'peer')).toThrow('Self-link refused');
   });
 
   it('unlink, unlinkAll and removeRelationById remove relations and empty index entries', () => {
@@ -84,7 +83,7 @@ describe('links', () => {
     e.write(b).link('refs', c);
     e.removeRelationById(e.findRelations()[0].id);
     expect(edges()).toEqual([]);
-    expect(e.admin.relationIndex).toEqual({});
+    expect(e.getAllRelationKinds()).toEqual([]);
   });
 
   it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id', () => {
@@ -105,7 +104,7 @@ describe('links', () => {
     e.updateRelation('Relation-missing' as Id, { info: 6 });
   });
 
-  it('link refuses a cycle within acyclicIn, and links both ways when symmetric', () => {
+  it('link refuses a cycle within acyclicIn', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('parent', b, { acyclicIn: ['parent'] });
     e.write(b).link('parent', c, { acyclicIn: ['parent'] });
@@ -115,11 +114,7 @@ describe('links', () => {
       .toThrow('Cannot create a child relation that would form a cycle within [parent, child]');
     expect(e.wouldCreateCycle(c, a, ['parent'])).toBe(true);
     expect(e.wouldCreateCycle(a, c, ['parent'])).toBe(false);
-    e.write(c).link('parent', a);
-    e.write(a).link('peer', c, { symmetric: true, info: 'p' });
-    expect(edges().filter(([, kind]) => kind === 'peer')).toEqual([[a, 'peer', c, 'p'], [c, 'peer', a, 'p']]);
-    e.linkSymmetric(b, c, 'peer');
-    expect(e.query.ids(c).out('peer').ids()).toEqual([a, b]);
+    expect(e.wouldCreateCycle(a, a, ['parent'])).toBe(true);
   });
 });
 
@@ -131,7 +126,6 @@ describe('relation kinds', () => {
     expect(() => e.write(a).link('blokcs', b)).toThrow(expect.objectContaining(unknown));
     expect(() => e.write(a).link('blocks', b, { acyclicIn: ['blokcs'] })).toThrow(expect.objectContaining(unknown));
     expect(() => e.write(a).unlink('blokcs')).toThrow(expect.objectContaining(unknown));
-    expect(() => e.linkSymmetric(a, b, 'blokcs')).toThrow(expect.objectContaining(unknown));
     expect(e.findRelations()).toEqual([]);
   });
 
@@ -149,6 +143,7 @@ describe('relation kinds', () => {
       ['findRelations', () => e.findRelations({ relationType: 'blokcs' })],
       ['getRelationStats', () => e.getRelationStats('blokcs')],
       ['descendants', () => e.descendants(a, 'blokcs')],
+      ['ancestors', () => e.ancestors(b, 'blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -156,34 +151,31 @@ describe('relation kinds', () => {
 
   it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
     const [a, b] = [task('A'), task('B')];
-    e.admin.addRelation(a, 'retired', b);
+    e.admin.bulkLoadAttr('Relation-r1' as Id, EARS.AttrKind.RelationDetails, { sourceEntity: a, targetEntity: b, relationType: 'retired' });
+    e.admin.addToIndex('retired', a, b, 'Relation-r1' as Id);
     expect(e.findRelations().map((r) => r.relationType)).toEqual(['retired']);
   });
 });
 
-describe('graph walks', () => {
-  it('descendants, ancestors, roots, leaves, order, paths and common ancestors', () => {
+describe('hierarchy walks', () => {
+  it('descendants and ancestors reach every entity through a kind once each; ancestors in a tree run parent to root', () => {
     const [root, left, right, leaf] = [task('root'), task('left'), task('right'), task('leaf')];
     e.write(root).link('child', left).link('child', right);
     e.write(left).link('child', leaf);
     e.write(right).link('child', leaf);
-    const other = e.create('Project').id();
     expect(e.descendants(root, 'child').sort()).toEqual([left, right, leaf].sort());
     expect(e.ancestors(leaf, 'child').sort()).toEqual([root, left, right].sort());
-    expect(e.rootParent(leaf, 'child')).toBe(root);
-    expect(e.leaves('child', 'Task')).toEqual([leaf]);
-    // Without a type, every entity but the relations
-    expect(e.leaves('child')).toEqual([leaf, other]);
-    expect(e.topoSort([root], 'child')).toEqual([root, left, right, leaf]);
-    expect(e.shortestPath(root, leaf, ['child'])).toEqual([root, left, leaf]);
-    expect(e.shortestPath(leaf, root, ['child'])).toBeNull();
-    expect(e.shortestPath(root, root, ['child'])).toEqual([root]);
-    // Each path follows the first parent: leaf, left, root
-    expect(e.lowestCommonAncestor(leaf, right, 'child')).toBe(root);
-    expect(e.lowestCommonAncestor(leaf, left, 'child')).toBe(left);
-    expect(e.lowestCommonAncestor(other, leaf, 'child')).toBeNull();
-    e.write(leaf).link('child', root);
-    expect(() => e.topoSort([root], 'child')).toThrow('Cycle detected');
+    expect(e.descendants(leaf, 'child')).toEqual([]);
+    expect(e.ancestors(left, 'child')).toEqual([root]);
+
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('child', b);
+    e.write(b).link('child', c);
+    expect(e.ancestors(c, 'child')).toEqual([b, a]);
+    // A cycle in the data ends the walk rather than the stack
+    e.write(c).link('child', a);
+    expect(e.descendants(a, 'child')).toEqual([b, c]);
+    expect(e.ancestors(a, 'child')).toEqual([c, b]);
   });
 });
 

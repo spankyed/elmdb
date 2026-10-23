@@ -164,8 +164,6 @@ export interface LinkOptions<R extends string = string> {
   replace?: boolean;
   /** Refuses the edge when it would close a cycle through these kinds */
   acyclicIn?: readonly R[];
-  /** Links both ways */
-  symmetric?: boolean;
 }
 
 /** What `create` is given besides the type */

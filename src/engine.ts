@@ -3,9 +3,9 @@
 // the faces define the contract, not a security boundary (packs run in-process).
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
-import { createRelationIndex, type RelationIndex } from './relation-index.ts';
+import { createRelationIndex } from './relation-index.ts';
 import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
-import { createEdgeStore, type EdgeStore } from './edge-store.ts';
+import { createEdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
@@ -13,7 +13,6 @@ import { createQueryHelpers } from './query-helpers.ts';
 import { createEntityCounters } from './entity-utils.ts';
 import { createEntityHelpers, type CreatedEntityFields } from './entity-helpers.ts';
 import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
-import { createSpawn, type Blueprint } from './blueprint.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
 import { createNameChecks } from './names.ts';
@@ -56,23 +55,18 @@ export interface Ears {
   getAllRelationKinds(): string[];
   /** Every role an entity holds, once each */
   getAllRoles(): string[];
-  getAttributeStats(kind: EARS.AttrKind): { entityCount: number; totalValues: number };
   getSchemaStats(): SchemaStats;
   removeRelationById(relId: EARS.EntityId): void;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
   updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
   getRelationStats(kind: EARS.RelKind): RelationStats;
+  /** Every entity `start` reaches through `relKind`, each once, `start` excluded */
   descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
+  /** Every entity that reaches `start` through `relKind`, each once, `start` excluded: in a tree, its parent first and its root last */
   ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-  rootParent(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId;
+  /** Whether linking `src` to `tgt` would close a cycle through `kinds` */
   wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
-  linkSymmetric(a: EARS.EntityId, b: EARS.EntityId, kind: EARS.RelKind, info?: unknown): void;
-  topoSort(roots: EARS.EntityId[], kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
-  shortestPath(src: EARS.EntityId, tgt: EARS.EntityId, kinds: EARS.RelKind[]): EARS.EntityId[] | null;
-  leaves(kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
-  lowestCommonAncestor(a: EARS.EntityId, b: EARS.EntityId, treeKind: EARS.RelKind): EARS.EntityId | null;
-  spawn(root: Blueprint, options?: { dedupe?: boolean }): EARS.EntityId;
   generateShortCode(entityType: EARS.Entity, prefix: string): string;
   generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
   /** The registered repositories; reading an unregistered name throws */
@@ -97,21 +91,12 @@ export interface EarsAdmin {
   putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   /** Removes an attribute */
   deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
+  /** Links any kind between any ids, either end missing included: unchecked, as loaded data is */
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
-  updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
-  edgeStore: EdgeStore;
-  /** The relation index, by kind (read it; write through the index functions) */
-  readonly relationIndex: Readonly<RelationIndex>;
+  /** `updateRelation` without its checks: any relation, to any ends */
+  updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
   /** Indexes a stored relation, without telling persistence */
   addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
-  removeFromIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
-  updateIndex(kind: string, relId: EARS.EntityId, oldSource: EARS.EntityId, oldTarget: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId): void;
-  /** The engine's entity-type checker */
-  isEntityType(name: string): boolean;
-  /** The engine's relation-kind checker */
-  isRelationKind(name: string): boolean;
-  /** The engine's role checker */
-  isRole(name: string): boolean;
   /** A copy of the registered repositories, by name */
   repositories(): Record<string, unknown>;
 }
@@ -134,7 +119,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
   const edgeStore = createEdgeStore({ relations, storage });
   const query = createQuery({ storage, isEntityType, names });
-  const graph = createGraph({ query, edgeStore, names });
+  const graph = createGraph({ query, names });
   const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, requiredFields, names, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(storage);
@@ -149,7 +134,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     ...counters,
     ...relationReads,
     ...graph,
-    spawn: createSpawn({ create, query }),
     getAttr: storage.getAttr,
     getRow: storage.getRow,
     getRoles: storage.getRoles,
@@ -157,7 +141,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     getAllAttributeKinds: storage.getAllAttributeKinds,
     getAllRelationKinds: storage.getAllRelationKinds,
     getAllRoles: storage.getAllRoles,
-    getAttributeStats: storage.getAttributeStats,
     getSchemaStats: storage.getSchemaStats,
     removeRelationById: storage.removeRelationById,
     updateRelation,
@@ -175,15 +158,8 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     putAttr: storage.putAttr,
     deleteAttr: storage.deleteAttr,
     addRelation: storage.addRelation,
-    updateRelation: storage.updateRelation,
-    edgeStore,
-    relationIndex: relations.index,
+    updateRelation: (relId, { sourceEntity, targetEntity, info }) => storage.updateRelation(relId, sourceEntity, targetEntity, info),
     addToIndex: relations.addToIndex,
-    removeFromIndex: relations.removeFromIndex,
-    updateIndex: relations.updateIndex,
-    isEntityType,
-    isRelationKind,
-    isRole,
     repositories: repositories.entries,
   };
 
