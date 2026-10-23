@@ -1,5 +1,5 @@
 import { EARS } from './entities.ts';
-import type { AttributeStorage } from './attribute-storage.ts';
+import { entityTypeOf, type AttributeStorage } from './attribute-storage.ts';
 
 export function getTimestamp(): number {
   return Date.now();
@@ -20,32 +20,35 @@ const NEXT = EARS.AttrKind.Custom('next');
  * sequence is written like any attribute, so it persists and a unit that throws returns its numbers.
  */
 export function createEntityCounters(storage: AttributeStorage) {
-  const { hasEntity, getAttr, putAttr, entityCreated, getEntitiesOfType } = storage;
+  const { hasEntity, getAttr, putAttr, entityCreated, getEntitiesOfType, holders } = storage;
 
   /** The numbers `field` holds across the type's rows, read as `<head><n>` */
   const numbersIn = (entityType: EARS.Entity, field: string, head: string) => {
     const kind = EARS.AttrKind.Custom(field);
-    const taken = new Set<number>();
+    const numbers: number[] = [];
     for (const id of getEntitiesOfType(entityType)) {
       const value = getAttr(id, kind);
       if (typeof value !== 'string' || !value.startsWith(head)) continue;
       const rest = value.slice(head.length);
-      if (/^\d+$/.test(rest)) taken.add(Number(rest));
+      if (/^\d+$/.test(rest)) numbers.push(Number(rest));
     }
-    return taken;
+    return numbers;
   };
 
   function take(key: string, entityType: EARS.Entity, field: string, head: string): string {
     const id = `${SEQUENCE_TYPE}-${key}` as EARS.EntityId;
-    const taken = numbersIn(entityType, field, head);
+    const kind = EARS.AttrKind.Custom(field);
     let next: number;
     if (hasEntity(id)) {
       next = getAttr(id, NEXT) as number;
     } else {
-      next = Math.max(0, ...taken) + 1;
+      // The one walk of the type: a sequence starts after the highest number its rows already hold
+      next = numbersIn(entityType, field, head).reduce((max, n) => Math.max(max, n), 0) + 1;
       entityCreated(id, SEQUENCE_TYPE);
     }
-    while (taken.has(next)) next++;
+    // A number a row took for itself is skipped, which the value index answers without a walk
+    const taken = (n: number) => [...holders(kind, `${head}${n}`)].some((holder) => entityTypeOf(holder) === entityType);
+    while (taken(next)) next++;
     putAttr(id, NEXT, next + 1);
     return `${head}${next}`;
   }

@@ -1,6 +1,6 @@
 // The engine's contract: query builder starts, filters, ordering and terminals; blueprints; the repository registry
 import { beforeEach, describe, expect, it } from 'vitest';
-import { bp } from '../../src/index.ts';
+import { bp, EARS } from '../../src/index.ts';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
@@ -210,5 +210,77 @@ describe('repository registry', () => {
     expect((e.repository.contractRepo as typeof repo).list()).toBe(2);
     expect(() => e.repository.contractMissing).toThrow('[repository] "contractMissing" is not registered: a pack declares its repositories in apack.json');
     expect((e.repository as Record<symbol, unknown>)[Symbol.iterator]).toBeUndefined();
+  });
+});
+
+describe('the value index', () => {
+  /** What `where(k, v)` must answer, read by walking every entity of the types */
+  const walked = (types: string[], k: string, v: unknown) =>
+    e.query.withTrashed(types as never).ids().filter((id) => {
+      if (e.query.trashed(e.getAttr(id, 'entityType') as never).ids().includes(id)) return false;
+      const value = e.getAttr(id, k);
+      return value === v || (Array.isArray(value) && value.includes(v));
+    });
+
+  it('answers where and withRole as a walk would, through every kind of write once it is built', () => {
+    const tags = (id: Id) => e.getAttr(id, 'tags') as string[] | null;
+    // Built by the first read, before any of the writes below
+    expect(e.query('Task').where('status', 'open').ids()).toEqual([t.a, t.c, t.d]);
+    expect(e.query('Task').where('tags', 'x').ids()).toEqual([]);
+
+    e.write(t.b).set('status', 'open');
+    e.write(t.a).set('status', 'done');
+    e.write(t.c).set('tags', ['x', 'y']).grant('focus');
+    e.write(t.d).add('tags', 'x').add('tags', 'x');
+    e.write(t.d).deleteValue('tags', 'x');
+    expect(tags(t.d)).toEqual(['x']);
+    e.write(t.c).deleteAt('tags', 0);
+    e.write(t.a).revoke('focus');
+    const late = e.create('Task').setMany({ status: 'open', tags: ['x'] }).grant('focus').id();
+    e.write(t.b).trash();
+    expect(() => e.transact(() => {
+      e.write(late).set('status', 'done').delete('tags').revoke('focus');
+      e.write(t.d).destroy();
+      throw new Error('stop');
+    })).toThrow('stop');
+    e.write(t.c).delete('status');
+
+    for (const [k, v] of [['status', 'open'], ['status', 'done'], ['tags', 'x'], ['tags', 'y']] as const) {
+      expect(e.query('Task').where(k, v).ids(), `${k} = ${v}`).toEqual(walked(['Task'], k, v));
+    }
+    // t.d came back from an undone destroy, so it is last in its type's order now
+    expect(e.query('Task').where('status', 'open').ids()).toEqual([late, t.d]);
+    expect(e.query('Task').withRole('focus').ids()).toEqual([t.c, late]);
+    // A step after the start reads the index too, and keeps what the step before it narrowed to
+    expect(e.query('Task').where('tags', 'x').withRole('focus').ids()).toEqual([late]);
+    expect(e.query.ids([late, t.d]).where('tags', 'x').ids()).toEqual([late, t.d]);
+  });
+
+  it('gives its matches in the order the types and their entities were given, and reads trashed ones only with withTrashed', () => {
+    const plan = e.create('Project').set('status', 'open').id();
+    expect(e.query(['Project', 'Task']).where('status', 'open').ids()).toEqual([plan, t.a, t.c, t.d]);
+    expect(e.query(['Task', 'Project']).where('status', 'open').ids()).toEqual([t.a, t.c, t.d, plan]);
+    e.write(t.c).trash();
+    expect(e.query('Task').where('status', 'open').ids()).toEqual([t.a, t.d]);
+    expect(e.query.withTrashed('Task').where('status', 'open').ids()).toEqual([t.a, t.c, t.d]);
+    expect(e.query.trashed('Task').where('status', 'open').ids()).toEqual([t.c]);
+  });
+
+  it('is rebuilt from what a clear and a bulk load leave', () => {
+    expect(e.query('Task').where('status', 'open').ids()).toHaveLength(3);
+    e.admin.clear();
+    expect(e.query('Task').where('status', 'open').ids()).toEqual([]);
+    e.admin.bulkLoadAttr('Task-loaded' as Id, 'status', 'open');
+    e.admin.bulkLoadAttr('Task-loaded' as Id, EARS.AttrKind.Role, ['focus']);
+    expect(e.query('Task').where('status', 'open').ids()).toEqual(['Task-loaded']);
+    expect(e.query('Task').withRole('focus').ids()).toEqual(['Task-loaded']);
+  });
+
+  it('leaves to a walk what it cannot answer: a predicate, an object, NaN and the entity type', () => {
+    e.write(t.a).set('meta', { k: 1 }).set('score', Number.NaN);
+    expect(e.query('Task').where('rank', (r: unknown) => typeof r === 'number' && r > 1).ids()).toEqual([t.a, t.b]);
+    expect(e.query('Task').where('meta', { k: 1 }).ids()).toEqual([]);
+    expect(e.query('Task').where('score', Number.NaN).ids()).toEqual([]);
+    expect(e.query.all().where('entityType', 'Project').ids()).toEqual([p]);
   });
 });

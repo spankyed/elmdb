@@ -1,5 +1,6 @@
 // The engine's benchmark: hydrating an app-sized graph, then queries, relation walks and write batches on it.
-// Run with `npm run bench -w @apackdev/ears`; the baseline and tolerance are in docs/goals/goal-package-boundaries.md (Phase 6).
+// Run with `npm run bench -w @apackdev/ears`; the baseline and tolerance are in docs/archive/goals/goal-package-boundaries.md
+// (Phase 6, "Value index").
 import { bench, describe } from 'vitest';
 import { EARS, type PersistenceSink } from '../src/index.ts';
 import { freshEngine } from '../tests/engine/engine-under-test.ts';
@@ -36,6 +37,9 @@ function hydrate(): void {
     admin.bulkLoadAttr(id, 'status', STATUSES[i % 3]);
     admin.bulkLoadAttr(id, 'rank', i % 100);
     admin.bulkLoadAttr(id, 'createdAt', 1_700_000_000_000 + i);
+    // One entity in a hundred holds a role, and one in a thousand a short code: what an app's rows hold
+    if (i % 100 === 0) admin.bulkLoadAttr(id, EARS.AttrKind.Role, ['pinned']);
+    if (i % 1000 === 0) admin.bulkLoadAttr(id, 'shortCode', `T-${i}`);
   });
   let rel = 0;
   const relate = (src: Id, kind: string, tgt: Id) => {
@@ -60,6 +64,15 @@ describe('queries', () => {
     engine.query('Task').where('status', 'blocked').pickAll();
   }, { iterations: 20, time: 0 });
 
+  // A lookup by a value one entity holds, as a note's links and a document's short code are resolved
+  bench('1,000 where lookups by a unique value', () => {
+    for (let i = 0; i < 1000; i++) engine.query('Task').where('title', `Row ${i * 37}`).first();
+  }, { iterations: 10, time: 0 });
+
+  bench('100 withRole lookups', () => {
+    for (let i = 0; i < 100; i++) engine.query('Task').withRole('pinned').count();
+  }, { iterations: 10, time: 0 });
+
   bench('1,000 query.ids(id) lookups', () => {
     for (let i = 0; i < 1000; i++) engine.query.ids(task(i)).count();
   }, { iterations: 20, time: 0 });
@@ -77,6 +90,10 @@ describe('writes', () => {
   bench('1,000 creates', () => {
     for (let i = 0; i < 1000; i++) engine.create('Note').set('title', `Note ${i}`).set('status', 'open');
   }, { iterations: 50, time: 0 });
+
+  bench('1,000 short codes', () => {
+    for (let i = 0; i < 1000; i++) engine.generateShortCode('Task', 'T');
+  }, { iterations: 20, time: 0 });
 
   // The same writes as one unit: what the journal costs
   bench('transact: 1,000 creates as one unit', () => {

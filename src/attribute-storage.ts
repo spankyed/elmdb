@@ -38,9 +38,22 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   // One value per attribute: a list is an array value. A stored value is never changed in place, so the value an
   // undo or a held sink call keeps is the value that was there
   const store       = new Map<EARS.AttrKind, Map<EARS.EntityId, EARS.AttributeValue>>();
-  const entityIndex = new Map<EARS.Entity, Set<EARS.EntityId>>();
+  // Each type's entities, in the order they entered, with their place in that order: a read from the value index sorts
+  // its matches by it, so they come in the order a walk of the type gives
+  const entityIndex = new Map<EARS.Entity, Map<EARS.EntityId, number>>();
+  let nextOrder = 0;
   // The entities holding `trashedAt`, kept by `place`, so what undo and hydration write keeps it too
   const trashed = new Set<EARS.EntityId>();
+  /**
+   * The value index, per attribute kind: a value → the entities holding it, or holding a list with it as an element
+   * (multikey). Built for a kind on its first read (`holders`), then kept by `place`, the one write every change —
+   * a unit's undo, hydration, a destroy — goes through. An object value isn't indexed.
+   */
+  // A value one entity holds keeps that id rather than a set of one: most values of a unique field (a title, a short
+  // code) are held once, and a set per value is what a write would otherwise allocate
+  const valueIndex = new Map<EARS.AttrKind, Map<unknown, EARS.EntityId | Set<EARS.EntityId>>>();
+  // What `holders` answers for a value nobody holds; never written to, since only `indexValue` adds and it adds to its own
+  const none: ReadonlySet<EARS.EntityId> = new Set();
   const relationIndex = relations.index;
   // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
   // what hydration rebuilds the attribute from; storing the attribute too would be a second record of it
@@ -54,6 +67,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     store.clear();
     entityIndex.clear();
     trashed.clear();
+    valueIndex.clear();
     relations.clear();
   }
 
@@ -62,10 +76,56 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return store.get(k)!;
   };
 
+  const indexKey = (index: Map<unknown, EARS.EntityId | Set<EARS.EntityId>>, id: EARS.EntityId, key: unknown, add: boolean) => {
+    // An object is never a key, whether the value or a list's element
+    if (key !== null && typeof key === 'object') return;
+    const held = index.get(key);
+    if (add) {
+      if (held === undefined) index.set(key, id);
+      else if (typeof held === 'string') { if (held !== id) index.set(key, new Set([held, id])); }
+      else held.add(id);
+    } else if (held === id) {
+      index.delete(key);
+    } else if (typeof held !== 'string' && held?.delete(id) && held.size === 1) {
+      index.set(key, held.values().next().value!);
+    }
+  };
+
+  /** Indexes a value under itself, or a list under each of its elements */
+  const indexValue = (index: Map<unknown, EARS.EntityId | Set<EARS.EntityId>>, id: EARS.EntityId, value: unknown, add: boolean) => {
+    if (Array.isArray(value)) for (const element of value) indexKey(index, id, element, add);
+    else indexKey(index, id, value, add);
+  };
+
+  /** The entities holding `value` under `kind`, or a list with it (a primitive: an object is never indexed) */
+  const holders = (kind: EARS.AttrKind, value: unknown): ReadonlySet<EARS.EntityId> => {
+    let index = valueIndex.get(kind);
+    if (!index) {
+      valueIndex.set(kind, index = new Map());
+      for (const [id, v] of store.get(kind) ?? []) indexValue(index, id, v, true);
+    }
+    const held = index.get(value);
+    return held === undefined ? none : typeof held === 'string' ? new Set([held]) : held;
+  };
+
+  /** Where the entity sits in its type's order */
+  const orderOf = (id: EARS.EntityId) => entityIndex.get(entityTypeOf(id))?.get(id) ?? Infinity;
+
   /** Memory's one write of an attribute: `next`, or nothing when it is `ABSENT`. Undo goes through it too */
   const place = (id: EARS.EntityId, kind: EARS.AttrKind, next: EARS.AttributeValue | typeof ABSENT) => {
-    if (next === ABSENT) store.get(kind)?.delete(id);
-    else bucket(kind).set(id, next);
+    let b = store.get(kind);
+    if (valueIndex.size > 0) {
+      const index = valueIndex.get(kind);
+      if (index) {
+        if (b?.has(id)) indexValue(index, id, b.get(id), false);
+        if (next !== ABSENT) indexValue(index, id, next, true);
+      }
+    }
+    if (next === ABSENT) b?.delete(id);
+    else {
+      if (!b) store.set(kind, b = new Map());
+      b.set(id, next);
+    }
     if (kind !== TRASHED_AT) return;
     if (next === ABSENT) trashed.delete(id);
     else if (!trashed.has(id)) {
@@ -89,34 +149,41 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       const type = entityTypeOf(id);
       const was = entityIndex.get(type)?.has(id) ?? false;
       return () => {
-        const ids = entityIndex.get(type);
-        if (was) {
-          if (ids) ids.add(id);
-          else entityIndex.set(type, new Set([id]));
-        } else if (ids?.delete(id)) {
-          removals++;
-          if (ids.size === 0) entityIndex.delete(type);
-        }
+        if (was) enter(id);
+        else if (leave(id)) removals++;
       };
     });
 
-  /** Takes the entity out of the type index, and its type with it once it holds no other */
-  const unindexEntity = (id: EARS.EntityId) => {
+  /** Puts the entity in its type's index, last */
+  const enter = (id: EARS.EntityId, type = entityTypeOf(id)) => {
+    const ids = entityIndex.get(type);
+    if (ids) {
+      if (!ids.has(id)) ids.set(id, nextOrder++);
+    } else {
+      entityIndex.set(type, new Map([[id, nextOrder++]]));
+    }
+  };
+
+  /** Takes the entity out of its type's index, and its type with it once it holds no other; whether it was there */
+  const leave = (id: EARS.EntityId) => {
     const type = entityTypeOf(id);
     const ids = entityIndex.get(type);
-    if (!ids?.has(id)) return;
-    touchIndexed(id);
-    ids.delete(id);
+    if (!ids?.delete(id)) return false;
     if (ids.size === 0) entityIndex.delete(type);
+    return true;
+  };
+
+  const unindexEntity = (id: EARS.EntityId) => {
+    if (!entityIndex.get(entityTypeOf(id))?.has(id)) return;
+    touchIndexed(id);
+    leave(id);
   };
 
   const indexEntity = (id: EARS.EntityId) => {
     const type = entityTypeOf(id);
-    const ids = entityIndex.get(type);
-    if (ids?.has(id)) return;
+    if (entityIndex.get(type)?.has(id)) return;
     touchIndexed(id);
-    if (ids) ids.add(id);
-    else entityIndex.set(type, new Set([id]));
+    enter(id, type);
   };
 
   /** Every write of an attribute: journaled, in memory, and told to persistence */
@@ -298,16 +365,14 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   const getAllEntities = () => {
     const all: EARS.EntityId[] = [];
-    for (const set of entityIndex.values()) {
-      for (const id of set) {
-        all.push(id);
-      }
+    for (const ids of entityIndex.values()) {
+      for (const id of ids.keys()) all.push(id);
     }
     return all;
   };
 
   const getEntitiesOfType = (t: EARS.Entity) =>
-    [...(entityIndex.get(t) ?? [])];
+    [...(entityIndex.get(t)?.keys() ?? [])];
 
   /** Whether the entity is in the engine, from its type's index rather than a scan of every entity */
   const hasEntity = (id: EARS.EntityId) =>
@@ -419,7 +484,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
-    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, removals: () => removals,
+    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
     findEntitiesByRole, findEntitiesByAttribute, findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
