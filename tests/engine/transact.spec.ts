@@ -42,7 +42,7 @@ beforeEach(() => {
 const writes: Record<string, () => void> = {
   'create': () => e.create('Task').set('title', 'new'),
   'create with an id': () => e.create('Task', { id: 'Task-given' as Id }).set('title', 'new'),
-  'upsert creating': () => e.upsert('Task', 'Task-upserted' as Id).set('title', 'new'),
+  'upsert creating': () => e.upsert('Task', { id: 'Task-upserted' as Id }).set('title', 'new'),
   'set': () => e.write(task).set('title', 'changed'),
   'set on a new attribute': () => e.write(task).set('fresh', 1),
   'setMany': () => e.write(task).setMany({ title: 'changed', fresh: 1 }),

@@ -47,9 +47,12 @@ export interface TypedCreate<S extends EntityShapes, N extends string = string, 
   <E extends string>(type: Name<N, E>, ...row: RowArg<S, E, CreateFields<S, E> & RowIdentity>): WriteBuilder<E, S, R, O>;
 }
 
-/** Writes the row's fields to the entity with `id`, creating it as `type` with them when no entity has it */
+/**
+ * Writes the row to the entity with its `id`, creating it as `type` with the row when no entity has it: `create`'s row,
+ * with the id always given — one argument, as `create` takes
+ */
 export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
-  <E extends string>(type: Name<N, E>, id: EARS.EntityId, ...row: RowArg<S, E, CreateFields<S, E>>): WriteBuilder<E, S, R, O>;
+  <E extends string>(type: Name<N, E>, row: CreateFields<S, E> & RowIdentity & { id: EARS.EntityId }): WriteBuilder<E, S, R, O>;
 }
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */

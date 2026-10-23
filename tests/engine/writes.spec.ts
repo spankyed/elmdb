@@ -171,18 +171,21 @@ describe('required fields', () => {
 describe('upsert', () => {
   it('creates the entity with the id and its row when none has it, and writes the row to it when one does', () => {
     const id = 'Task-singleton' as Id;
-    e.upsert('Task', id, { title: 'first' });
+    e.upsert('Task', { id, title: 'first' });
     vi.setSystemTime(NOW + 5);
-    e.upsert('Task', id, { title: 'second' }).set('done', true);
+    e.upsert('Task', { id, title: 'second' }).set('done', true);
     expect(e.query.ids(id).pickOne()).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second', done: true });
-    // The id is upsert's argument, never a field of its row
-    expect(() => e.upsert('Task', id, { id })).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+    // A created row keeps the times it brings, as create's does; an entity that exists keeps its own
+    const imported = 'Task-imported' as Id;
+    e.upsert('Task', { id: imported, createdAt: 7, updatedAt: 8 });
+    expect(e.query.ids(imported).pickOne()).toMatchObject({ createdAt: 7, updatedAt: 8 });
+    expect(() => e.upsert('Task', { id, createdAt: 7 })).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });
 
   it('refuses an unregistered type, and an entity of another type', () => {
-    expect(() => e.upsert('Memo' as never, 'Memo-1' as Id)).toThrow(expect.objectContaining({ code: 'UNKNOWN_ENTITY_TYPE' }));
+    expect(() => e.upsert('Memo' as never, { id: 'Memo-1' as Id })).toThrow(expect.objectContaining({ code: 'UNKNOWN_ENTITY_TYPE' }));
     const id = e.create('Task').id();
-    expect(() => e.upsert('Project', id)).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
+    expect(() => e.upsert('Project', { id })).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
   });
 });
 

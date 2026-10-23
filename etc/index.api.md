@@ -557,7 +557,9 @@ export interface TypedQuery<S extends EntityShapes, N extends string = string, R
 // @public
 export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, id: EARS.EntityId, ...row: RowArg<S, E, CreateFields<S, E>>): WriteBuilder<E, S, R, O>;
+    <E extends string>(type: Name<N, E>, row: CreateFields<S, E> & RowIdentity & {
+        id: EARS.EntityId;
+    }): WriteBuilder<E, S, R, O>;
 }
 
 // @public
@@ -572,7 +574,9 @@ export type TypeName<T extends string> = T extends `${string}-${string}` ? never
 // @public
 export interface Upsert {
     // (undocumented)
-    <E extends string>(type: TypeName<E>, id: EARS.EntityId, fields?: Record<string, unknown>): WriteBuilder<E>;
+    <E extends string>(type: TypeName<E>, row: Record<string, unknown> & RowIdentity & {
+        id: EARS.EntityId;
+    }): WriteBuilder<E>;
 }
 
 // @public

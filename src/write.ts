@@ -24,9 +24,12 @@ export interface Create {
   <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
 }
 
-/** Writes the row's fields to the entity with this id, creating it as `type` with them when no entity has it */
+/**
+ * Writes the row to the entity with its `id`, creating it as `type` with the row when no entity has it: the same row
+ * `create` takes, with the id it is written under always given
+ */
 export interface Upsert {
-  <E extends string>(type: TypeName<E>, id: EARS.EntityId, fields?: Record<string, unknown>): WriteBuilder<E>;
+  <E extends string>(type: TypeName<E>, row: Record<string, unknown> & RowIdentity & { id: EARS.EntityId }): WriteBuilder<E>;
 }
 
 /** Writes to the entity with this id, which must exist */
@@ -249,12 +252,12 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
     return builder(id, touch);
   }) as Write;
 
-  const upsert = ((type: string, id: EARS.EntityId, fields: Record<string, unknown> = {}) => {
+  // An entity that exists keeps its times: setMany refuses a createdAt or updatedAt in the row, as any write of them
+  const upsert = ((type: string, { id, ...fields }: Record<string, unknown> & { id: EARS.EntityId }) => {
     requireType(type, 'upsert');
-    for (const field of Object.keys(fields)) refuseReserved(field, 'upsert');
     if (!hasEntity(id)) return create(type, { ...fields, id });
     if (entityTypeOf(id) !== type) {
-      throw new EarsError('TYPE_MISMATCH', `upsert(${JSON.stringify(type)}, ${JSON.stringify(id)}): that entity is a ${entityTypeOf(id)}`);
+      throw new EarsError('TYPE_MISMATCH', `upsert(${JSON.stringify(type)}, { id: ${JSON.stringify(id)} }): that entity is a ${entityTypeOf(id)}`);
     }
     return builder(id, true).setMany(fields);
   }) as Upsert;
