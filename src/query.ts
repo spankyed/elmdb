@@ -44,12 +44,12 @@ export interface QueryEntries {
 
 /**
  * The engine's queries. They reach no entity in the trash — not as a start, not at a link's far end — and
- * `withTrashed` is the same entry points reaching those too; `trashed(type)` starts from only the trashed
- * entities of a type.
+ * `withTrashed` is the same entry points reaching those too; `trashed` the same entry points starting from only the
+ * trashed entities.
  */
 export interface Query extends QueryEntries {
   withTrashed: QueryEntries;
-  trashed<E extends string>(type: TypeName<E>): QueryBuilder<E>;
+  trashed: QueryEntries;
 }
 
 /** An engine's untyped query entry points, over its storage (which reads the relation index for them) */
@@ -297,19 +297,22 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
 
   const engineOwn = [hasPrefix(EARS.Entity.Relation), hasPrefix(SEQUENCE_TYPE)];
   /** The entry points over the entities `alive` admits */
-  const entriesOver = (alive: (id: EARS.EntityId) => boolean): QueryEntries => {
+  const entriesOver = (alive: (id: EARS.EntityId) => boolean, start: (id: EARS.EntityId) => boolean = alive): QueryEntries => {
     const qx = builderOver(alive);
-    const entries = ((start: unknown) => qx({ types: ofTypes(start) })) as unknown as QueryEntries;
-    entries.ids = ((start: EARS.EntityId | readonly EARS.EntityId[]) =>
-      qx((Array.isArray(start) ? start : [start]).filter(alive))) as Query['ids'];
-    entries.all = (() => qx(getAllEntities().filter((id) => alive(id) && !engineOwn.some((own) => own(id))))) as Query['all'];
+    const entries = ((types: unknown) => start === alive
+      ? qx({ types: ofTypes(types) })
+      : qx(ofTypes(types).flatMap((t) => getEntitiesOfType(t)).filter(start))) as unknown as QueryEntries;
+    entries.ids = ((ids: EARS.EntityId | readonly EARS.EntityId[]) =>
+      qx((Array.isArray(ids) ? ids : [ids]).filter(start))) as Query['ids'];
+    entries.all = (() => qx(getAllEntities().filter((id) => start(id) && !engineOwn.some((own) => own(id))))) as Query['all'];
     return entries;
   };
 
   const entry = entriesOver(isLive) as Query;
   const withTrashed = entriesOver(hasEntity);
   entry.withTrashed = withTrashed;
-  const inTrash = builderOver(hasEntity);
-  entry.trashed = ((type: unknown) => inTrash(ofTypes(type).flatMap((t) => getEntitiesOfType(t)).filter(isTrashed))) as Query['trashed'];
+  // The trash: entities that exist and are trashed, and the steps from them reach the trash too
+  const trashed = entriesOver(hasEntity, isTrashed);
+  entry.trashed = trashed;
   return entry;
 }

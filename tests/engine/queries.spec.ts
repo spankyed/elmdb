@@ -193,7 +193,7 @@ describe('the value index', () => {
   /** What `where(k, v)` must answer, read by walking every entity of the types */
   const walked = (types: string[], k: string, v: unknown) =>
     e.query.withTrashed(types).ids().filter((id) => {
-      if (e.query.trashed(e.getRow(id)?.entityType as never).ids().includes(id)) return false;
+      if (e.query.trashed.ids(id).exists()) return false;
       const value = e.getRow(id)?.[k];
       return value === v || (Array.isArray(value) && value.includes(v));
     });

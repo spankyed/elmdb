@@ -334,7 +334,7 @@ export interface PersistenceSink {
 // @public
 export interface Query extends QueryEntries {
     // (undocumented)
-    trashed<E extends string>(type: TypeName<E>): QueryBuilder<E>;
+    trashed: QueryEntries;
     // (undocumented)
     withTrashed: QueryEntries;
 }
@@ -549,7 +549,7 @@ export type TypedNewId<S extends EntityShapes, N extends string = string> = <E e
 // @public
 export interface TypedQuery<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> extends TypedQueryEntries<S, N, R, O> {
     // (undocumented)
-    trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R, O>;
+    trashed: TypedQueryEntries<S, N, R, O>;
     // (undocumented)
     withTrashed: TypedQueryEntries<S, N, R, O>;
 }

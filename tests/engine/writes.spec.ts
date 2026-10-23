@@ -353,6 +353,10 @@ describe('trash', () => {
     expect(e.query.withTrashed('Task').ids()).toEqual([kept, binned]);
     expect(e.query.withTrashed.ids(project).out('contains').ids()).toEqual([kept, binned]);
     expect(e.query.trashed('Task').pickAll()).toEqual([expect.objectContaining({ id: binned, title: 'binned', trashedAt: 5 })]);
+    // The trash's entry points are the query's: by type, by ids (only those in the trash) and every trashed entity
+    expect(e.query.trashed.ids([kept, binned]).ids()).toEqual([binned]);
+    expect(e.query.trashed.ids(kept).exists()).toBe(false);
+    expect(e.query.trashed.all().ids()).toEqual([binned]);
     // Its edges stay, and a write still reaches it
     expect(e.findRelations({ targetEntity: binned })).toHaveLength(1);
     e.write(binned).set('title', 'still writable');
@@ -360,6 +364,8 @@ describe('trash', () => {
     e.write(binned).restore();
     expect(e.query('Task').ids()).toEqual([kept, binned]);
     expect(e.query.trashed('Task').ids()).toEqual([]);
+    expect(e.query.trashed.ids(binned).exists()).toBe(false);
+    expect(e.query.trashed.all().ids()).toEqual([]);
     expect(e.getRow(binned)).not.toHaveProperty('trashedAt');
   });
 

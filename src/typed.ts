@@ -33,7 +33,7 @@ export interface TypedQueryEntries<S extends EntityShapes, N extends string = st
 /** The typed queries, which reach no entity in the trash; `withTrashed` reaches those too, `trashed` only those */
 export interface TypedQuery<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> extends TypedQueryEntries<S, N, R, O> {
   withTrashed: TypedQueryEntries<S, N, R, O>;
-  trashed<E extends string>(type: Name<N, E>): QueryBuilder<E, S, N, R, O>;
+  trashed: TypedQueryEntries<S, N, R, O>;
 }
 
 /** The argument after a type: required when the shape requires a field, so an incomplete row doesn't compile */
@@ -97,7 +97,10 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
         ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.withTrashed.ids(ids),
         all: () => engine().query.withTrashed.all(),
       }),
-      trashed: (type: never) => engine().query.trashed(type),
+      trashed: Object.assign((start: never) => engine().query.trashed(start), {
+        ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.trashed.ids(ids),
+        all: () => engine().query.trashed.all(),
+      }),
     }),
     create: on('create'),
     upsert: on('upsert'),
