@@ -82,7 +82,7 @@ export async function hydrateSharded(params: {
           info: r.info ?? undefined,
         } satisfies EARS.RelationDetail
       );
-      engine.addToIndex(r.kind, r.src, r.tgt, relIdStr as EARS.EntityId);
+      engine.addToIndex(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt);
       relCount++;
     }
 

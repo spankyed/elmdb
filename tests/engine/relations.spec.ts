@@ -180,7 +180,7 @@ describe('relation kinds', () => {
   it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
     const [a, b] = [task('A'), task('B')];
     e.admin.bulkLoadAttr('Relation-r1' as Id, EARS.AttrKind.RelationDetails, { source: a, target: b, kind: 'retired' });
-    e.admin.addToIndex('retired', a, b, 'Relation-r1' as Id);
+    e.admin.addToIndex('Relation-r1' as Id, 'retired', a, b);
     expect(e.findRelations().map((r) => r.kind)).toEqual(['retired']);
   });
 });

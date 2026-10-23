@@ -57,9 +57,9 @@ export function createEntityCounters(storage: AttributeStorage) {
   const generateShortCode = (entityType: EARS.Entity, prefix: string): string =>
     take(`${entityType}:${prefix}`, entityType, 'shortCode', `${prefix}-`);
 
-  /** `<baseLabel> <n>`, numbered per type and base */
-  const generateLabelWithCount = (baseLabel: string, entityType: EARS.Entity): string =>
-    take(`label:${entityType}:${baseLabel}`, entityType, 'label', `${baseLabel} `);
+  /** `<base> <n>`, numbered per type and base */
+  const nextLabel = (entityType: EARS.Entity, base: string): string =>
+    take(`label:${entityType}:${base}`, entityType, 'label', `${base} `);
 
-  return { generateShortCode, generateLabelWithCount };
+  return { generateShortCode, nextLabel };
 }

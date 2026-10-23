@@ -114,7 +114,6 @@ export interface Ears {
     create: Create;
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
-    generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
     // (undocumented)
@@ -133,6 +132,7 @@ export interface Ears {
     isEntityType(name: string): boolean;
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
+    nextLabel(type: EARS.Entity, base: string): string;
     query: Query;
     // (undocumented)
     registerRepository(name: string, value: unknown): void;
@@ -146,14 +146,14 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
-    wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
+    wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
 
 // @public
 export interface EarsAdmin {
-    addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
-    addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
+    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId;
+    addToIndex(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId): void;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;

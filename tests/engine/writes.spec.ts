@@ -100,8 +100,8 @@ describe('numbering', () => {
 
   it('numbers a default label per type and base the same way', () => {
     e.create('Task').set('label', 'New Task 2');
-    expect(e.generateLabelWithCount('New Task', 'Task')).toBe('New Task 3');
-    expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 1');
+    expect(e.nextLabel('Task', 'New Task')).toBe('New Task 3');
+    expect(e.nextLabel('Project', 'Board')).toBe('Board 1');
   });
 
   it('gives back the numbers a unit took when it throws', () => {

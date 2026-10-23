@@ -105,8 +105,8 @@ describe('hydration', () => {
     e.admin.bulkLoadAttr(p, 'title', 'P');
     e.admin.bulkLoadAttr(p, EARS.AttrKind.Role, ['current']);
     e.admin.bulkLoadAttr(rel, EARS.AttrKind.RelationDetails, { source: p, target: a, kind: 'contains', info: { order: 1 } });
-    e.admin.addToIndex('contains', p, a, rel);
-    e.admin.addToIndex('contains', p, a, rel);
+    e.admin.addToIndex(rel, 'contains', p, a);
+    e.admin.addToIndex(rel, 'contains', p, a);
 
     expect(calls).toEqual([]);
     expect(e.admin.getAllEntities()).toEqual([a, b, p, rel]);

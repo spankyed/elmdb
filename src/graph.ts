@@ -7,18 +7,18 @@ export function createGraph({ query, names }: { query: Query; names: NameChecks 
   const children = (id: EARS.EntityId, kinds: readonly EARS.RelKind[]): EARS.EntityId[] =>
     kinds.flatMap(k => query.ids(id).out(k).ids());
 
-  /** Whether linking `src` to `tgt` would close a cycle through `kinds`: `tgt` already reaches `src`, or is `src` */
+  /** Whether linking `source` to `target` would close a cycle through `kinds`: `target` already reaches `source`, or is `source` */
   function wouldCreateCycle(
-    src: EARS.EntityId,
-    tgt: EARS.EntityId,
+    source: EARS.EntityId,
+    target: EARS.EntityId,
     kinds: readonly EARS.RelKind[],
   ): boolean {
     names.relationKinds(kinds, 'wouldCreateCycle');
     const seen = new Set<EARS.EntityId>();
-    const stack = [tgt];
+    const stack = [target];
     while (stack.length) {
       const node = stack.pop()!;
-      if (node === src) return true;
+      if (node === source) return true;
       for (const n of children(node, kinds)) {
         if (!seen.has(n)) {
           seen.add(n);

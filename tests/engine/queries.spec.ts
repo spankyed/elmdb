@@ -102,7 +102,7 @@ describe('filters', () => {
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
     // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
     e.admin.bulkLoadAttr('Relation-ghost' as Id, EARS.AttrKind.RelationDetails, { source: p, target: 'Task-ghost', kind: 'refers' });
-    e.admin.addToIndex('refers', p, 'Task-ghost' as Id, 'Relation-ghost' as Id);
+    e.admin.addToIndex('Relation-ghost' as Id, 'refers', p, 'Task-ghost' as Id);
     e.write(p).link('refers', t.d);
     expect(e.query.ids(p).outEdges('refers')).toEqual([edge('refers', p, t.d)]);
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);

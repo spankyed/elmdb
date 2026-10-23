@@ -46,7 +46,7 @@ function hydrate(): void {
   const relate = (src: Id, kind: string, tgt: Id) => {
     const relId = `Relation-${rel++}` as Id;
     admin.bulkLoadAttr(relId, EARS.AttrKind.RelationDetails, { source: src, target: tgt, kind, info: undefined });
-    admin.addToIndex(kind, src, tgt, relId);
+    admin.addToIndex(relId, kind, src, tgt);
   };
   for (let i = 0; i < TASKS; i++) relate(project(i % PROJECTS), 'contains', task(i));
   for (let i = 0; i < TASKS; i++) relate(task(i), 'assigned', person(i % PEOPLE));
