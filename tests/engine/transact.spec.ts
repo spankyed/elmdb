@@ -190,6 +190,17 @@ describe('a link\'s target', () => {
     expect(calls).toEqual([]);
   });
 
+  it('missing at commit is checked on this link\'s own edge, not on another entity\'s', () => {
+    // A relation to nothing that came with loaded data, from an entity this unit doesn't touch
+    e.admin.addRelation(other, 'refers', 'Task-ghost' as Id);
+    e.transact(() => {
+      e.write(task).link('refers', 'Task-ghost' as Id);
+      e.write(task).unlink('refers', 'Task-ghost' as Id);
+      e.write(task).set('title', 'committed');
+    });
+    expect(e.findById(task)).toMatchObject({ title: 'committed' });
+  });
+
   it('destroyed later in the unit takes the link with it, which is no error', () => {
     e.transact(() => {
       const gone = e.create('Task').set('title', 'gone').id();

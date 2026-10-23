@@ -49,14 +49,15 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
    * is gone with it, since destroying an entity removes its relations. Outside a unit a write is committed as it
    * is made, so the target must already be there.
    */
-  function requireTarget(kind: string, target: EARS.EntityId): void {
+  function requireTarget(source: EARS.EntityId, kind: string, target: EARS.EntityId): void {
     const missing = () => new EarsError('NO_SUCH_ENTITY', `link(${kind}, ${JSON.stringify(target)}): no entity has this id`);
     if (!journal.open) {
       if (!hasEntity(target)) throw missing();
       return;
     }
     journal.atCommit(() => {
-      if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).length > 0) throw missing();
+      // This link's own edge: another entity's relation to the same missing id, loaded from files, is not this unit's
+      if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).includes(source)) throw missing();
     });
   }
   const { wouldCreateCycle, linkSymmetric } = graph;
@@ -120,7 +121,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
             ? `Cannot create a ${kind} relation that would form a cycle`
             : `Cannot create a ${kind} relation that would form a cycle within [${acyclicIn.join(', ')}]`);
         }
-        requireTarget(kind, target);
+        requireTarget(id, kind, target);
         if (symmetric) linkSymmetric(id, target, kind, info);
         else if (replace) edgeStore.linkOne(id, kind, target, info);
         else addRelation(id, kind, target, info);
