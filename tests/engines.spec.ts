@@ -57,8 +57,8 @@ describe('two engines in one process', () => {
     expect(b.calls.filter(([method]) => method === 'onAddRelation')).toHaveLength(0);
 
     one.admin.clear();
-    expect(one.getAllEntities()).toEqual([]);
-    expect(two.getAllEntities()).toHaveLength(2);
+    expect(one.admin.getAllEntities()).toEqual([]);
+    expect(two.admin.getAllEntities()).toHaveLength(2);
     expect(one.repository.noteQueries).toEqual({ name: 'one' });
     expect(one.admin.repositories()).toEqual({ noteQueries: { name: 'one' } });
   });
@@ -70,7 +70,7 @@ describe('the engine', () => {
     const id = engine.create('Note').set('title', 'held').id();
     expect(engine.findById(id)).toMatchObject({ title: 'held' });
     engine.admin.clear();
-    expect(engine.getAllEntities()).toEqual([]);
+    expect(engine.admin.getAllEntities()).toEqual([]);
 
     // A program is handed the engine as `Ears`, which has no `admin`. This line stops compiling the moment `Ears`
     // gains an `admin` member, which would hand every program the creator's privileges.

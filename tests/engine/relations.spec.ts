@@ -18,15 +18,15 @@ describe('links', () => {
     const [rel] = e.findRelations();
     expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
     expect(e.getAttr(rel.id, 'relationDetails')).toEqual({ sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
-    expect(e.getEntitiesOfType('Relation')).toEqual([rel.id]);
+    expect(e.admin.getEntitiesOfType('Relation')).toEqual([rel.id]);
     expect(e.query.ids(a).linksTo('blocks').ids()).toEqual([b]);
     expect(e.query.ids(b).linksTo('blocks', undefined, false).ids()).toEqual([a]);
     expect(e.query.ids(a).edgeIds()).toEqual([rel.id]);
     expect(e.query.ids(b).edgeIds('blocks', false)).toEqual([rel.id]);
     expect(e.query.ids(a).edgeIds('missing')).toEqual([]);
-    expect(e.findEntitiesByRelationTo('blocks', a, true)).toEqual([b]);
-    expect(e.findEntitiesByRelationTo('blocks', b)).toEqual([a]);
-    expect(e.findEntitiesInRelationTo(a)).toEqual([b]);
+    expect(e.query('Task').related('blocks', a, true).ids()).toEqual([b]);
+    expect(e.query('Task').related('blocks', b).ids()).toEqual([a]);
+    expect(e.query('Task').relatedTo(a).ids()).toEqual([b]);
     expect(e.getRelationStats('blocks')).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
     expect(e.getRelationStats('none')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
     expect(e.admin.relationIndex).toEqual({ blocks: { bySource: { [a]: [rel.id] }, byTarget: { [b]: [rel.id] } } });
@@ -71,7 +71,7 @@ describe('links', () => {
     expect(edges()).toEqual([]);
     expect(e.getAllRelationKinds()).toEqual([]);
     // A relation is its details: a removed one leaves no entity behind
-    expect(e.getEntitiesOfType('Relation')).toEqual([]);
+    expect(e.admin.getEntitiesOfType('Relation')).toEqual([]);
 
     e.write(a).link('blocks', b).link('blocks', c).link('refs', c);
     e.write(a).unlink('blocks');
@@ -86,16 +86,6 @@ describe('links', () => {
     e.removeRelationById(e.findRelations()[0].id);
     expect(edges()).toEqual([]);
     expect(e.admin.relationIndex).toEqual({});
-  });
-
-  it('createRelation and removeRelation link and unlink by ends', () => {
-    const [a, b, c] = [task('A'), task('B'), task('C')];
-    e.createRelation(a, 'refs', b);
-    e.createRelation(a, 'refs', c);
-    e.removeRelation(a, 'refs', b);
-    expect(edges()).toEqual([[a, 'refs', c, undefined]]);
-    e.removeRelation(a, 'refs');
-    expect(edges()).toEqual([]);
   });
 
   it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id', () => {
@@ -167,7 +157,6 @@ describe('roles', () => {
     expect(e.getRoles(a)).toEqual(['lead', 'owner']);
     e.write(b).grant('lead');
     expect(e.query.all().withRole('lead').ids()).toEqual([a, b]);
-    expect(e.admin.findEntitiesByRole('lead')).toEqual([a, b]);
     e.write(c).grantExclusive('lead', e.query('Task').ids());
     expect(e.query.all().withRole('lead').ids()).toEqual([c]);
     // Revokes only among the entities given, and grants once

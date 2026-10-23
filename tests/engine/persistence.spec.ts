@@ -93,7 +93,7 @@ describe('hydration', () => {
     e.admin.addToIndex('contains', p, a, rel);
 
     expect(calls).toEqual([]);
-    expect(e.getAllEntities()).toEqual([a, b, p, rel]);
+    expect(e.admin.getAllEntities()).toEqual([a, b, p, rel]);
     expect(e.findById(a)).toEqual({ id: a, entityType: 'Task', title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
     expect(e.query('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
     expect(e.query.all().withRole('current').ids()).toEqual([p]);
@@ -111,7 +111,7 @@ describe('hydration', () => {
     expect(e.query.ids(b).linksTo('contains').ids()).toEqual([a]);
 
     e.admin.clear();
-    expect(e.getAllEntities()).toEqual([]);
+    expect(e.admin.getAllEntities()).toEqual([]);
     expect(e.getAllAttributeKinds()).toEqual([]);
     expect(e.admin.relationIndex).toEqual({});
     expect(calls).toHaveLength(1);

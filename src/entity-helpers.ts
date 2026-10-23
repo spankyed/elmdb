@@ -28,7 +28,7 @@ export interface CreatedEntityFields {
   updatedAt: number;
 }
 
-/** An engine's entity and relation helpers, over its writes */
+/** An engine's entity helpers, over its writes */
 export function createEntityHelpers({ create, write, counters }: { create: Create; write: Write; counters: ReturnType<typeof createEntityCounters> }) {
   /**
    * T is the caller's own attribute shape — it need not declare the fields this
@@ -69,21 +69,5 @@ export function createEntityHelpers({ create, write, counters }: { create: Creat
     });
   }
 
-  function createRelation(
-    sourceId: EARS.EntityId,
-    relationType: EARS.RelKind,
-    targetId: EARS.EntityId
-  ): void {
-    write(sourceId).link(relationType, targetId);
-  }
-
-  function removeRelation(
-    sourceId: EARS.EntityId,
-    relationType: EARS.RelKind,
-    targetId?: EARS.EntityId
-  ): void {
-    write(sourceId).unlink(relationType, targetId);
-  }
-
-  return { createEntityWithDefaults, updateEntity, createRelation, removeRelation };
+  return { createEntityWithDefaults, updateEntity };
 }

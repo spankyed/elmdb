@@ -63,17 +63,3 @@ export function createEntityCounters(storage: AttributeStorage) {
 
   return { generateShortCode, generateLabelWithCount };
 }
-
-export function filterSystemFields<T extends object>(
-  updates: T,
-  additionalExcludes: string[] = []
-): Partial<T> {
-  const systemFields = ['id', 'entityType', 'createdAt', ...additionalExcludes];
-  const filtered: Partial<T> = {};
-  Object.entries(updates).forEach(([key, value]) => {
-    if (!systemFields.includes(key) && value !== undefined) {
-      filtered[key as keyof T] = value as T[keyof T];
-    }
-  });
-  return filtered;
-}

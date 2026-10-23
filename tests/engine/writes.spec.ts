@@ -18,14 +18,14 @@ describe('create', () => {
     const id = e.create('Task').set('title', 'Write specs').id();
     expect(id).toMatch(/^Task-[a-z0-9]+$/);
     expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, title: 'Write specs' });
-    expect(e.getEntitiesOfType('Task')).toEqual([id]);
-    expect(e.getAllEntities()).toEqual([id]);
+    expect(e.admin.getEntitiesOfType('Task')).toEqual([id]);
+    expect(e.admin.getAllEntities()).toEqual([id]);
   });
 
   it('gives each entity its own id', () => {
     const ids = [e.create('Task').id(), e.create('Task').id(), e.create('Project').id()];
     expect(new Set(ids).size).toBe(3);
-    expect(e.getEntitiesOfType('Task')).toEqual(ids.slice(0, 2));
+    expect(e.admin.getEntitiesOfType('Task')).toEqual(ids.slice(0, 2));
     expect(e.getAllEntityTypes()).toEqual(['Task', 'Project']);
   });
 
@@ -41,7 +41,7 @@ describe('create', () => {
     const id = e.create('Task').id();
     expect(() => e.create('Task', { id })).toThrow(expect.objectContaining({ code: 'ID_IN_USE' }));
     expect(() => e.create('Task', { id: 'Project-1' as Id })).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
-    expect(e.getAllEntities()).toEqual([id]);
+    expect(e.admin.getAllEntities()).toEqual([id]);
   });
 
   it('createEntityWithDefaults fills in a short code, a label and timestamps', () => {
@@ -108,7 +108,7 @@ describe('write', () => {
     const gone = e.create('Task').id();
     e.write(gone).destroy();
     expect(() => e.write(gone).set('title', 'back')).toThrow(/no entity has this id/);
-    expect(e.getAllEntities()).toEqual([]);
+    expect(e.admin.getAllEntities()).toEqual([]);
   });
 });
 
@@ -221,17 +221,17 @@ describe('destroy', () => {
     expect(e.write(a).destroy()).toBeUndefined();
     expect(e.findById(a)).toBeUndefined();
     expect(e.getAttr(a, 'title')).toBeNull();
-    expect(e.getEntitiesOfType('Task')).toEqual([b]);
+    expect(e.admin.getEntitiesOfType('Task')).toEqual([b]);
     expect(e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity])).toEqual([[c, 'contains', b]]);
     expect(e.getAllRelationKinds()).toEqual(['contains']);
     expect(e.query.ids(c).linksTo('contains').ids()).toEqual([b]);
   });
 
-  it('destroyEntity forgets an emptied type', () => {
+  it('destroy forgets an emptied type', () => {
     const a = e.create('Person').id();
-    e.destroyEntity(a);
+    e.write(a).destroy();
     expect(e.getAllEntityTypes()).toEqual([]);
-    expect(e.getAllEntities()).toEqual([]);
+    expect(e.admin.getAllEntities()).toEqual([]);
   });
 });
 
@@ -288,18 +288,6 @@ describe('finders', () => {
     expect(e.findById(b)).toBeUndefined();
     expect(e.findAll<{ id: Id }>('Task').map((r) => r.id)).toEqual([a, c]);
     expect(e.findWhere<{ id: Id }>('Task', 'status', 'open').map((r) => r.id)).toEqual([a]);
-    expect(e.findFirst<{ id: Id }>('Task', 'status', 'done')?.id).toBe(c);
-    expect(e.findWithFields('Task', ['title'])).toEqual([{ id: a, title: 'A' }, { id: c, title: 'C' }]);
-    expect(e.findByIdWithFields(a, ['title', 'missing'])).toEqual({ id: a, title: 'A', missing: null });
-    expect(e.findByIdWithFields(b, ['title'])).toBeUndefined();
-    expect(e.findWithRole<{ id: Id }>('Task', 'pinned').map((r) => r.id)).toEqual([c]);
-    expect(e.findFirstWithRole<{ id: Id }>('Task', 'pinned')?.id).toBe(c);
-    expect(e.countEntities('Task')).toBe(2);
-    expect(e.exists(b)).toBe(false);
-    expect(e.exists('Task-none' as Id)).toBe(false);
-    // An id is taken whether its entity is in the trash or not
-    expect(e.hasIdCollision(b)).toBe(true);
-    expect(e.hasIdCollision(undefined)).toBe(false);
   });
 
   it('read every field of a row, attribute kinds and stats', () => {
@@ -319,9 +307,6 @@ describe('finders', () => {
       attributes: { createdAt: 2, title: 1, tag: 2, relationDetails: 1 },
       relations: { contains: 1 },
     });
-    expect(e.findEntitiesByAttribute('tag')).toEqual([a]);
-    expect(e.findEntitiesByAttribute('title', 'A')).toEqual([a]);
-    expect(e.findEntitiesByAttribute('title', 'Z')).toEqual([]);
   });
 
   it('isEntityType answers from the engine\'s checker', () => {

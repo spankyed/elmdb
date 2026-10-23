@@ -174,43 +174,19 @@ export namespace EARS {
 export interface Ears {
     // (undocumented)
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-    // (undocumented)
-    countEntities(entityType: EARS.Entity): number;
     create: Create;
     // (undocumented)
     createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(entityType: EARS.Entity, data: Partial<T>, prefix?: string, providedId?: EARS.EntityId): T & CreatedEntityFields;
     // (undocumented)
-    createRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId: EARS.EntityId): void;
-    // (undocumented)
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-    // (undocumented)
-    destroyEntity(id: EARS.EntityId, skipPersistence?: boolean): void;
-    // (undocumented)
-    exists(id: EARS.EntityId): boolean;
     // (undocumented)
     findAll<T = unknown>(entityType: EARS.Entity): T[];
     // (undocumented)
     findById<T = unknown>(id: EARS.EntityId): T | undefined;
     // (undocumented)
-    findByIdWithFields<T>(id: EARS.EntityId, fields: string[]): T | undefined;
-    // (undocumented)
-    findEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
-    // (undocumented)
-    findEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
-    // (undocumented)
-    findEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
-    // (undocumented)
-    findFirst<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T | undefined;
-    // (undocumented)
-    findFirstWithRole<T>(entityType: EARS.Entity, role: string): T | undefined;
-    // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
     // (undocumented)
     findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
-    // (undocumented)
-    findWithFields<T>(entityType: EARS.Entity, fields: string[]): T[];
-    // (undocumented)
-    findWithRole<T>(entityType: EARS.Entity, role: string): T[];
     // (undocumented)
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
     // (undocumented)
@@ -218,8 +194,6 @@ export interface Ears {
     getAll(id: EARS.EntityId): Record<string, unknown>;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
-    // (undocumented)
-    getAllEntities(): EARS.EntityId[];
     // (undocumented)
     getAllEntityTypes(): EARS.Entity[];
     // (undocumented)
@@ -230,8 +204,6 @@ export interface Ears {
         entityCount: number;
         totalValues: number;
     };
-    // (undocumented)
-    getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     // (undocumented)
     getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
@@ -244,8 +216,6 @@ export interface Ears {
     };
     // (undocumented)
     grantRole(id: EARS.EntityId, role: string): void;
-    // (undocumented)
-    hasIdCollision(providedId: string | undefined): boolean;
     isEntityType(name: string): boolean;
     // (undocumented)
     leaves(kind: EARS.RelKind, filterType?: EARS.Entity): EARS.EntityId[];
@@ -256,8 +226,6 @@ export interface Ears {
     query: Query;
     // (undocumented)
     registerRepository(name: string, value: unknown): void;
-    // (undocumented)
-    removeRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId?: EARS.EntityId): void;
     // (undocumented)
     removeRelationById(relId: EARS.EntityId): void;
     repository: Record<string, unknown>;
@@ -299,9 +267,9 @@ export interface EarsAdmin {
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     // (undocumented)
     edgeStore: EdgeStore;
-    // (undocumented)
-    findEntitiesByRole(role: string): EARS.EntityId[];
+    getAllEntities(): EARS.EntityId[];
     getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
+    getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     isEntityType(name: string): boolean;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     readonly relationIndex: Readonly<RelationIndex>;
@@ -388,9 +356,6 @@ E
 ] extends [keyof S] ? {
     [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K];
 } & Record<string, unknown> : Record<string, unknown>;
-
-// @public (undocumented)
-export function filterSystemFields<T extends object>(updates: T, additionalExcludes?: string[]): Partial<T>;
 
 // @public (undocumented)
 export function getTimestamp(): number;
@@ -657,17 +622,7 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     findById: TypedFindById<S>;
     // (undocumented)
-    findByIdWithFields: TypedFindByIdWithFields<S>;
-    // (undocumented)
-    findFirst: TypedFindFirst<S, N>;
-    // (undocumented)
-    findFirstWithRole: TypedFindFirstWithRole<S, N>;
-    // (undocumented)
     findWhere: TypedFindWhere<S, N>;
-    // (undocumented)
-    findWithFields: TypedFindWithFields<S, N>;
-    // (undocumented)
-    findWithRole: TypedFindWithRole<S, N>;
     // (undocumented)
     getAttr: TypedGetAttr<S>;
     // (undocumented)
@@ -699,32 +654,12 @@ export interface TypedFindById<S extends EntityShapes> {
 }
 
 // @public (undocumented)
-export type TypedFindByIdWithFields<S extends EntityShapes> = <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, fields: readonly K[]) => Pick<ShapeOf<S, E>, K> | undefined;
-
-// @public (undocumented)
-export interface TypedFindFirst<S extends EntityShapes, N extends string = string> {
-    // (undocumented)
-    <E extends string>(entityType: Name<N, E>, field: string, value: unknown): ShapeOf<S, E> | undefined;
-    // (undocumented)
-    <T, E extends string = string>(entityType: Name<N, E>, field: string, value: unknown): T | undefined;
-}
-
-// @public (undocumented)
-export type TypedFindFirstWithRole<S extends EntityShapes, N extends string = string> = <E extends string>(entityType: Name<N, E>, role: string) => ShapeOf<S, E> | undefined;
-
-// @public (undocumented)
 export interface TypedFindWhere<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     <E extends string>(entityType: Name<N, E>, field: string, value: unknown): ShapeOf<S, E>[];
     // (undocumented)
     <T, E extends string = string>(entityType: Name<N, E>, field: string, value: unknown): T[];
 }
-
-// @public (undocumented)
-export type TypedFindWithFields<S extends EntityShapes, N extends string = string> = <E extends string, K extends keyof ShapeOf<S, E> & string>(entityType: Name<N, E>, fields: readonly K[]) => Pick<ShapeOf<S, E>, K>[];
-
-// @public (undocumented)
-export type TypedFindWithRole<S extends EntityShapes, N extends string = string> = <E extends string>(entityType: Name<N, E>, role: string) => ShapeOf<S, E>[];
 
 // @public
 export interface TypedGetAttr<S extends EntityShapes> {

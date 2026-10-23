@@ -12,10 +12,10 @@ let calls: SinkCall[];
  * since a row read from the engine holds the live relation details that `relPatch` changes in place.
  */
 function state() {
-  const ids = [...e.getAllEntities()].sort();
+  const ids = [...e.admin.getAllEntities()].sort();
   return structuredClone({
     rows: ids.map((id) => [id, e.getAll(id)]),
-    types: Object.fromEntries(e.getAllEntityTypes().map((t) => [t, [...e.getEntitiesOfType(t)].sort()])),
+    types: Object.fromEntries(e.getAllEntityTypes().map((t) => [t, [...e.admin.getEntitiesOfType(t)].sort()])),
     relations: Object.keys(e.admin.relationIndex).sort().map((kind) => {
       const entry = e.admin.relationIndex[kind];
       const lists = (side: Record<string, Id[]>) => Object.keys(side).sort().map((id) => [id, [...side[id]]]);

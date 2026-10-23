@@ -38,20 +38,10 @@ export interface Ears {
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
   findAll<T = unknown>(entityType: EARS.Entity): T[];
   findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
-  findFirst<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T | undefined;
-  findWithFields<T>(entityType: EARS.Entity, fields: string[]): T[];
-  findByIdWithFields<T>(id: EARS.EntityId, fields: string[]): T | undefined;
-  findWithRole<T>(entityType: EARS.Entity, role: string): T[];
-  findFirstWithRole<T>(entityType: EARS.Entity, role: string): T | undefined;
-  countEntities(entityType: EARS.Entity): number;
-  exists(id: EARS.EntityId): boolean;
-  hasIdCollision(providedId: string | undefined): boolean;
   createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(
     entityType: EARS.Entity, data: Partial<T>, prefix?: string, providedId?: EARS.EntityId,
   ): T & CreatedEntityFields;
   updateEntity(id: EARS.EntityId, updates: Record<string, unknown>, skipTimestamp?: boolean): void;
-  createRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId: EARS.EntityId): void;
-  removeRelation(sourceId: EARS.EntityId, relationType: EARS.RelKind, targetId?: EARS.EntityId): void;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** Every attribute the entity holds, each exactly as written, with its `entityType` */
@@ -59,17 +49,11 @@ export interface Ears {
   getRoles(id: EARS.EntityId): string[];
   grantRole(id: EARS.EntityId, role: string): void;
   revokeRole(id: EARS.EntityId, role: string): void;
-  getAllEntities(): EARS.EntityId[];
-  getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
   getAllEntityTypes(): EARS.Entity[];
   getAllAttributeKinds(): EARS.AttrKind[];
   getAllRelationKinds(): string[];
   getAttributeStats(kind: EARS.AttrKind): { entityCount: number; totalValues: number };
   getSchemaStats(): { entities: Record<string, number>; attributes: Record<string, number>; relations: Record<string, number> };
-  findEntitiesByAttribute(kind: EARS.AttrKind, value?: unknown): EARS.EntityId[];
-  findEntitiesByRelationTo(relKind: string, id: EARS.EntityId, asSource?: boolean): EARS.EntityId[];
-  findEntitiesInRelationTo(target: EARS.EntityId): EARS.EntityId[];
-  destroyEntity(id: EARS.EntityId, skipPersistence?: boolean): void;
   removeRelationById(relId: EARS.EntityId): void;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
   updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
@@ -99,6 +83,10 @@ export interface EarsAdmin {
   clear(): void;
   /** An attribute's value, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
+  /** Every entity's id, the engine's own (relations, sequences) and those in the trash included: a raw listing */
+  getAllEntities(): EARS.EntityId[];
+  /** Every id of a type, the engine's own types and those in the trash included: a raw listing */
+  getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
   /** Loads a stored attribute value, without telling persistence */
   bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   /** Writes an attribute's value, any kind the engine owns included */
@@ -107,7 +95,6 @@ export interface EarsAdmin {
   deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
   updateRelation(relId: EARS.EntityId, newSource?: EARS.EntityId, newTarget?: EARS.EntityId, info?: unknown): void;
-  findEntitiesByRole(role: string): EARS.EntityId[];
   edgeStore: EdgeStore;
   /** The relation index, by kind (read it; write through the index functions) */
   readonly relationIndex: Readonly<RelationIndex>;
@@ -158,17 +145,11 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     getRoles: storage.getRoles,
     grantRole: storage.grantRole,
     revokeRole: storage.revokeRole,
-    getAllEntities: storage.getAllEntities,
-    getEntitiesOfType: storage.getEntitiesOfType,
     getAllEntityTypes: storage.getAllEntityTypes,
     getAllAttributeKinds: storage.getAllAttributeKinds,
     getAllRelationKinds: storage.getAllRelationKinds,
     getAttributeStats: storage.getAttributeStats,
     getSchemaStats: storage.getSchemaStats,
-    findEntitiesByAttribute: storage.findEntitiesByAttribute,
-    findEntitiesByRelationTo: storage.findEntitiesByRelationTo,
-    findEntitiesInRelationTo: storage.findEntitiesInRelationTo,
-    destroyEntity: storage.destroyEntity,
     removeRelationById: storage.removeRelationById,
     updateRelation,
     repository: repositories.repository,
@@ -179,12 +160,13 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const admin: EarsAdmin = {
     clear: storage.clear,
     getAttr: storage.getAttr,
+    getAllEntities: storage.getAllEntities,
+    getEntitiesOfType: storage.getEntitiesOfType,
     bulkLoadAttr: storage.bulkLoadAttr,
     putAttr: storage.putAttr,
     deleteAttr: storage.deleteAttr,
     addRelation: storage.addRelation,
     updateRelation: storage.updateRelation,
-    findEntitiesByRole: storage.findEntitiesByRole,
     edgeStore,
     relationIndex: relations.index,
     addToIndex: relations.addToIndex,

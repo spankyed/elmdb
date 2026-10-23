@@ -382,13 +382,6 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Whether the entity is in the engine and not in the trash: what a read by type, id or link reaches */
   const isLive = (id: EARS.EntityId) => hasEntity(id) && !trashed.has(id);
 
-  const findEntitiesByRole = (role: string) =>
-    getAllEntities().filter(id => getRoles(id).includes(role));
-
-  /** Entities holding the attribute, or, given a value, holding it or a list containing it */
-  const findEntitiesByAttribute = (k: EARS.AttrKind, v?: unknown) =>
-    getAllEntities().filter(id => v === undefined ? hasAttr(id, k) : holds(getAttr(id, k), v));
-
   const findEntitiesInRelationTo = (target: EARS.EntityId) => {
     const out = new Set<EARS.EntityId>();
     for (const k of Object.keys(relationIndex)) {
@@ -485,7 +478,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
-    findEntitiesByRole, findEntitiesByAttribute, findEntitiesInRelationTo, findEntitiesByRelationTo,
+    findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }

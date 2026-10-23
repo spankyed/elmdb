@@ -76,10 +76,10 @@ describe('openLmdbStore', () => {
 
     // A new engine: nothing in memory
     const second = openStore();
-    expect(engine.getEntitiesOfType('Relation')).toEqual([]);
+    expect(engine.admin.getEntitiesOfType('Relation')).toEqual([]);
     await second.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
-    expect(engine.getEntitiesOfType('Relation')).toHaveLength(1);
+    expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
     // Only the primary partition is hydrated; the volatile one is read directly
     expect(getAttr(id('Trace-1'), 'step')).toBeNull();
     expect(second.read('volatileBackup').getAttr('step', 'Trace-1')).toBe('volatile');
@@ -272,8 +272,8 @@ describe('openLmdbStore', () => {
     await second.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
     expect(engine.getAll(id('Note-2'))).toEqual({});
-    expect(engine.getEntitiesOfType('Note')).toEqual(['Note-1']);
-    expect(engine.getEntitiesOfType('Relation')).toEqual([]);
+    expect(engine.admin.getEntitiesOfType('Note')).toEqual(['Note-1']);
+    expect(engine.admin.getEntitiesOfType('Relation')).toEqual([]);
   });
 
   it('opens existing files read-only: it hydrates them, and refuses writes and a reset', async () => {
@@ -289,7 +289,7 @@ describe('openLmdbStore', () => {
     expect(readOnly.paths).toEqual(paths);
     await readOnly.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
-    expect(engine.getEntitiesOfType('Relation')).toHaveLength(1);
+    expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
     expect(lines).toContain('[LMDB] Hydrating partitions: primary');
     expect(() => engine.write(id('Note-1')).set('title', 'changed')).toThrow('is open read-only');
     await expect(readOnly.reset()).rejects.toThrow('is open read-only');

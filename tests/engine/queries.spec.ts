@@ -30,7 +30,7 @@ describe('starts', () => {
     expect(e.query.ids([t.c, 'Task-none' as Id, t.a]).ids()).toEqual([t.c, t.a]);
     expect(e.query.ids('Task-none' as Id).ids()).toEqual([]);
     expect(e.query.all().ids()).toEqual([t.a, t.b, t.c, t.d, p]);
-    expect(e.getEntitiesOfType('Relation')).toHaveLength(3);
+    expect(e.admin.getEntitiesOfType('Relation')).toHaveLength(3);
   });
 
   /**
@@ -179,7 +179,7 @@ describe('blueprints', () => {
     const again = e.spawn(plan, { dedupe: false });
     expect(e.query.all().withRole('current').ids()).toEqual([again]);
     expect(e.query.ids(again).linksTo(['owner', 'lead']).count()).toBe(2);
-    expect(e.getEntitiesOfType('Person')).toHaveLength(3);
+    expect(e.admin.getEntitiesOfType('Person')).toHaveLength(3);
   });
 });
 
@@ -216,7 +216,7 @@ describe('repository registry', () => {
 describe('the value index', () => {
   /** What `where(k, v)` must answer, read by walking every entity of the types */
   const walked = (types: string[], k: string, v: unknown) =>
-    e.query.withTrashed(types as never).ids().filter((id) => {
+    e.query.withTrashed(types).ids().filter((id) => {
       if (e.query.trashed(e.getAttr(id, 'entityType') as never).ids().includes(id)) return false;
       const value = e.getAttr(id, k);
       return value === v || (Array.isArray(value) && value.includes(v));
