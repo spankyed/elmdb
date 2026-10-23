@@ -366,8 +366,8 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     last(): EARS.EntityId<E> | undefined;
     // (undocumented)
     limit(n: number): QueryBuilder<E, S, N, R, O>;
-    linkedFrom(kind: R, other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-    linkedTo(kind: R, other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+    linkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+    linkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
     linkedWith(other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
     // (undocumented)
     map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
@@ -396,6 +396,8 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
     reverse(): QueryBuilder<E, S, N, R, O>;
+    unlinkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+    unlinkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
     where<K extends keyof ShapeOf<S, E> & string>(k: K, v: WhereValue<S, E, K>): QueryBuilder<E, S, N, R, O>;
     within(ids: readonly EARS.EntityId[]): QueryBuilder<E, S, N, R, O>;
     // (undocumented)

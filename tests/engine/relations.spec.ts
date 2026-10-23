@@ -31,6 +31,24 @@ describe('links', () => {
     expect(e.getRelationStats('refs')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
   });
 
+  it('linkedTo and linkedFrom without an end, and unlinkedTo and unlinkedFrom, filter by having an edge of the kind at all', () => {
+    const [root, child, grandchild, loose] = [task('root'), task('child'), task('grandchild'), task('loose')];
+    e.write(root).link('child', child);
+    e.write(child).link('child', grandchild);
+    const tasks = () => e.query('Task');
+    expect(tasks().linkedTo('child').ids()).toEqual([root, child]);
+    expect(tasks().linkedFrom('child').ids()).toEqual([child, grandchild]);
+    expect(tasks().unlinkedTo('child').ids()).toEqual([grandchild, loose]);
+    // A tree's roots: what nothing links to
+    expect(tasks().unlinkedFrom('child').ids()).toEqual([root, loose]);
+    expect(tasks().unlinkedFrom('child', root).ids()).toEqual([root, grandchild, loose]);
+    expect(tasks().unlinkedTo('child', grandchild).ids()).toEqual([root, grandchild, loose]);
+    // An edge whose far end is in the trash is one this query can't reach, as out and in step around it
+    e.write(root).trash();
+    expect(tasks().unlinkedFrom('child').ids()).toEqual([child, loose]);
+    expect(e.query.withTrashed('Task').unlinkedFrom('child').ids()).toEqual([root, loose]);
+  });
+
   it('linking the same edge again changes nothing, keeping its id and its place; another info is another edge', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b, { info: { x: 1 } }).link('blocks', c);

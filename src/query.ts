@@ -133,6 +133,18 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
         return qxImpl([...reached].filter(alive));
       };
 
+      /**
+       * The entities that have — or, with `keep` false, don't have — an edge of the kind going out (or coming in) whose
+       * far end is `other`, or with none named, any entity this query could reach: the far end of a relation can be
+       * missing or in the trash, as out and in step around
+       */
+      const filterByLink = (via: string, kind: string, other: EARS.EntityId | undefined, outward: boolean, keep: boolean) => {
+        names.relationKinds(kind, via);
+        const linked = (i: EARS.EntityId) => findEntitiesByRelationTo(kind, i, outward)
+          .some((end) => (other === undefined ? end !== i && alive(end) : end === other));
+        return setIds(cur().filter((i) => linked(i) === keep));
+      };
+
       /** Each edge of the kinds, out or in: its kind and the entity at its far end */
       const edges = <K extends string>(kinds: K | readonly K[], type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
         names.relationKinds(kinds, outward ? 'outEdges' : 'inEdges');
@@ -185,17 +197,10 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
           return setIds(cur().filter(i => linked.has(i)));
         },
 
-        linkedTo: (kind: string, other: EARS.EntityId) => {
-          names.relationKinds(kind, 'linkedTo');
-          const linked = new Set(findEntitiesByRelationTo(kind, other));
-          return setIds(cur().filter(i => linked.has(i)));
-        },
-
-        linkedFrom: (kind: string, other: EARS.EntityId) => {
-          names.relationKinds(kind, 'linkedFrom');
-          const linked = new Set(findEntitiesByRelationTo(kind, other, true));
-          return setIds(cur().filter(i => linked.has(i)));
-        },
+        linkedTo: (kind: string, other?: EARS.EntityId) => filterByLink('linkedTo', kind, other, true, true),
+        linkedFrom: (kind: string, other?: EARS.EntityId) => filterByLink('linkedFrom', kind, other, false, true),
+        unlinkedTo: (kind: string, other?: EARS.EntityId) => filterByLink('unlinkedTo', kind, other, true, false),
+        unlinkedFrom: (kind: string, other?: EARS.EntityId) => filterByLink('unlinkedFrom', kind, other, false, false),
 
         out: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, true),
         in: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, false),

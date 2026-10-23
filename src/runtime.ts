@@ -122,10 +122,17 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   /** The entities with no value of `k` */
   lacks<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
   withRole(r: O): QueryBuilder<E, S, N, R, O>;
-  /** The entities with a `kind` edge to `other` (a filter: the set stays these entities) */
-  linkedTo(kind: R, other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-  /** The entities `other` has a `kind` edge to (a filter) */
-  linkedFrom(kind: R, other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  /**
+   * The entities with a `kind` edge to `other` — or, without it, to any entity this query could reach (a filter: the
+   * set stays these entities)
+   */
+  linkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  /** The entities `other` has a `kind` edge to — or, without it, that any entity this query could reach has one to */
+  linkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  /** The entities `linkedTo(kind, other?)` leaves out */
+  unlinkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  /** The entities `linkedFrom(kind, other?)` leaves out: a tree's roots are `unlinkedFrom(parentKind)` */
+  unlinkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
   /** The entities with an edge of any kind, either way, to `other` (a filter) */
   linkedWith(other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
   /**
