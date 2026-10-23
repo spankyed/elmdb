@@ -127,7 +127,7 @@ export interface EarsEngine extends Ears {
  * a role write or a query by role may name; `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole }: EARSRuntimeDeps): EarsEngine {
+export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, requiredFields = () => [] }: EARSRuntimeDeps): EarsEngine {
   const names = createNameChecks({ isRelationKind, isRole });
   const { journal, unitSink, transact } = createJournal(persistence);
   const relations = createRelationIndex(journal);
@@ -135,7 +135,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const edgeStore = createEdgeStore({ relations, storage });
   const query = createQuery({ storage, isEntityType, names });
   const graph = createGraph({ query, edgeStore, names });
-  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, names, journal });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, requiredFields, names, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(storage);
   const entityHelpers = createEntityHelpers({ create, counters });

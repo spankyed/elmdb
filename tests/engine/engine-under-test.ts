@@ -6,6 +6,7 @@ export interface EngineUnderTestOptions {
   isEntityType: (name: string) => boolean;
   isRelationKind: (name: string) => boolean;
   isRole: (name: string) => boolean;
+  requiredFields?: (type: string) => readonly string[];
   persistence?: PersistenceSink;
 }
 

@@ -34,12 +34,13 @@ export interface Write {
 }
 
 /** An engine's writes, over its storage, edge store and graph walks */
-export function createWrites({ storage, edgeStore, graph, isEntityType, names, journal }: {
+export function createWrites({ storage, edgeStore, graph, isEntityType, requiredFields, names, journal }: {
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
   graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle' | 'linkSymmetric'>;
   isEntityType: (name: string) => boolean;
+  requiredFields: (type: string) => readonly string[];
   names: NameChecks;
 }) {
   const {
@@ -117,6 +118,9 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
       },
       delete(k) {
         refuseReserved(k, 'delete');
+        if (requiredFields(entityTypeOf(id)).includes(k)) {
+          throw new EarsError('REQUIRED_FIELD', `delete(${JSON.stringify(k)}): every ${entityTypeOf(id)} holds it; set(${JSON.stringify(k)}, value) replaces it`);
+        }
         deleteAttr(id, attr(k));
         changed();
         return self;
@@ -205,6 +209,10 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, names, j
     // exists, so a create that fails leaves nothing behind
     const { id: given, createdAt, updatedAt, ...fields } = row;
     for (const field of Object.keys(fields)) refuseReserved(field, 'create');
+    const missing = requiredFields(type).filter((field) => fields[field] === undefined);
+    if (missing.length > 0) {
+      throw new EarsError('REQUIRED_FIELD', `create(${JSON.stringify(type)}): the row lacks ${missing.map((field) => `"${field}"`).join(', ')}, which every ${type} holds`);
+    }
     let id: EARS.EntityId;
     if (given !== undefined) {
       // An id is the record of its entity's type (`entityTypeOf`), so it must name the type it is created as

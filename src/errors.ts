@@ -17,7 +17,9 @@ export type EarsErrorCode =
   /** A link, or a read or walk over links, named a relation kind that is not registered */
   | 'UNKNOWN_RELATION_KIND'
   /** A role write, or a query by role, named a role that is not registered */
-  | 'UNKNOWN_ROLE';
+  | 'UNKNOWN_ROLE'
+  /** A created row lacked a field its type requires, or a delete named one */
+  | 'REQUIRED_FIELD';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

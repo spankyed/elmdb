@@ -1,8 +1,8 @@
 // The engine's contract: create, upsert and write create, change and delete entities, each held to the claim it
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engine, recordingSink, type Id } from './helpers.ts';
-import type { EngineUnderTest } from './engine-under-test.ts';
+import { engine, isEntityType, isRelationKind, isRole, recordingSink, type Id } from './helpers.ts';
+import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 import type { WriteBuilder } from '../../src/index.ts';
 
 const NOW = 1_700_000_000_000;
@@ -117,6 +117,35 @@ describe('write', () => {
     e.write(gone).destroy();
     expect(() => e.write(gone).set('title', 'back')).toThrow(/no entity has this id/);
     expect(e.admin.getAllEntities()).toEqual([]);
+  });
+});
+
+describe('required fields', () => {
+  const strict = () => freshEngine({ isEntityType, isRelationKind, isRole, requiredFields: (type) => (type === 'Task' ? ['title', 'done'] : []) });
+
+  it('refuses a created row without a field its type requires, before the entity exists', () => {
+    const e = strict();
+    expect(() => e.create('Task', { title: 'x' })).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD', message: expect.stringContaining('"done"') }));
+    expect(() => e.create('Task', { title: 'x', done: undefined })).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD' }));
+    expect(e.admin.getAllEntities()).toEqual([]);
+    // null is a value, so a field holding it is held
+    const id = e.create('Task', { title: 'x', done: null }).id();
+    expect(e.getRow(id)).toMatchObject({ title: 'x', done: null });
+    expect(e.create('Project').id()).toMatch(/^Project-/);
+  });
+
+  it('refuses deleting a required field, which set replaces instead', () => {
+    const e = strict();
+    const id = e.create('Task', { title: 'x', done: false, note: 'n' }).id();
+    expect(() => e.write(id).delete('title')).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD' }));
+    e.write(id).delete('note').set('title', 'y');
+    expect(e.getRow(id)).toMatchObject({ title: 'y', done: false });
+  });
+
+  it("loads a row through the admin face whatever it holds, which is how data a shape's change left is read", () => {
+    const e = strict();
+    e.admin.putAttr('Task-old' as Id, 'title', 'kept');
+    expect(e.getAttr('Task-old' as Id, 'title')).toBe('kept');
   });
 });
 

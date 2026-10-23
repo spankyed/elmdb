@@ -67,6 +67,11 @@ export interface EARSRuntimeDeps {
   isRelationKind: (v: string) => boolean;
   /** Whether a name is a role: `grant`, `revoke`, `grantExclusive` and `withRole` refuse one that isn't */
   isRole: (v: string) => boolean;
+  /**
+   * The fields an entity type's row must hold: `create` refuses a row without one, and `delete` one of them. None by
+   * default — an engine given no shapes knows of no required field
+   */
+  requiredFields?: (type: string) => readonly string[];
 }
 
 
