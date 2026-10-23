@@ -294,6 +294,9 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * their declared types; from a plain id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
  * `entityType`, `createdAt`, `updatedAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write, and
  * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
+ *
+ * A relation's id (from `findRelations`, `outEdges` or `inEdges`) takes `destroy()` and `unload()` only: a
+ * relation is its kind, ends and info, which `updateRelation(id, { source?, target?, info? })` changes.
  */
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
   /**
