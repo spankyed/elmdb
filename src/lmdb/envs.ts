@@ -37,6 +37,9 @@ function checkFormat(root: RootDatabase, basePath: string, readOnly: boolean): v
   // A read-only environment has no database the writer never created, and one written before formats were recorded
   // has none either
   const meta = root.openDB({ name: META_DB, encoding: 'json' }) as Database<unknown> | undefined;
+  // A record store stamps its own kind beside its format (`openRecordStore`)
+  const kind = meta?.get('kind');
+  if (kind !== undefined) throw new Error(`The files at ${basePath} are a ${JSON.stringify(kind)} store, not an EARS database`);
   let format = meta?.get(FORMAT_KEY);
   if (format === undefined) {
     if (holdsData(root)) {
