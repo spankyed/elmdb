@@ -4,8 +4,8 @@ import type { AttributeStorage } from './attribute-storage.ts';
 import type { Journal } from './journal.ts';
 import { newId, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
 import type { EdgeStore } from './edge-store.ts';
-import type { createGraph } from './graph.ts';
-import type { createEntityCounters } from './entity-utils.ts';
+import type { createHierarchy } from './hierarchy.ts';
+import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
@@ -37,12 +37,12 @@ export interface Write {
   <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
-/** An engine's writes, over its storage, edge store and graph walks */
-export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal }: {
+/** An engine's writes, over its storage, edge store and cycle check */
+export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowRules, counters, names, journal }: {
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
-  graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle'>;
+  hierarchy: Pick<ReturnType<typeof createHierarchy>, 'wouldCreateCycle'>;
   isEntityType: (name: string) => boolean;
   rowRules: (type: string) => RowRules | undefined;
   counters: Pick<ReturnType<typeof createEntityCounters>, 'generateShortCode'>;
@@ -72,7 +72,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
       if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).includes(source)) throw missing();
     });
   }
-  const { wouldCreateCycle } = graph;
+  const { wouldCreateCycle } = hierarchy;
   const attr = (k: string) => EARS.AttrKind.Custom(k);
 
   function requireType(type: string, via: string): void {

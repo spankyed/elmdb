@@ -3,7 +3,7 @@ import { EARS } from './entities.ts';
 import type { NameChecks } from './names.ts';
 
 /** An engine's cycle check over a hierarchy — a tree or any graph of its relation kinds — over its queries */
-export function createGraph({ query, names }: { query: Query; names: NameChecks }) {
+export function createHierarchy({ query, names }: { query: Query; names: NameChecks }) {
   const children = (id: EARS.EntityId, kinds: readonly EARS.RelKind[]): EARS.EntityId[] =>
     kinds.flatMap(k => query.ids(id).out(k).ids());
 

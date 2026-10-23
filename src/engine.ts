@@ -7,9 +7,9 @@ import { createRelationIndex } from './relation-index.ts';
 import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
 import { createEdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
-import { createGraph } from './graph.ts';
+import { createHierarchy } from './hierarchy.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
-import { createEntityCounters } from './entity-utils.ts';
+import { createEntityCounters } from './numbering.ts';
 import { createRelationReads, type RelationMatch, type RelationRow } from './relations.ts';
 import { createJournal } from './journal.ts';
 import { createNameChecks } from './names.ts';
@@ -94,16 +94,16 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
   const edgeStore = createEdgeStore({ relations, storage });
   const query = createQuery({ storage, isEntityType, names });
-  const graph = createGraph({ query, names });
+  const hierarchy = createHierarchy({ query, names });
   const counters = createEntityCounters(storage);
-  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, hierarchy, isEntityType, rowRules, counters, names, journal });
   const relationReads = createRelationReads({ edgeStore, storage, names });
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
     nextLabel: counters.nextLabel,
     ...relationReads,
-    ...graph,
+    ...hierarchy,
     getRow: storage.getRow,
     getAttr: (id, field) => (storage.hasAttr(id, field) ? storage.getAttr(id, field) : undefined),
     getRoles: storage.getRoles,

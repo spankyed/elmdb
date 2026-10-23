@@ -2,7 +2,7 @@ import type { AttributeStorage } from './attribute-storage.ts';
 import { EARS } from './entities.ts';
 import type { QueryBuilder, RelationEdge } from './runtime.ts';
 import { EarsError } from './errors.ts';
-import { SEQUENCE_TYPE } from './entity-utils.ts';
+import { SEQUENCE_TYPE } from './numbering.ts';
 import { entityTypeOf, holds } from './attribute-storage.ts';
 
 /** A query started from types and not yet walked */
