@@ -545,7 +545,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     relatedTo(target: EARS.EntityId): QueryBuilder<E, S, N>;
     // (undocumented)
     reverse(): QueryBuilder<E, S, N>;
-    where<K extends keyof ShapeOf<S, E> & string>(k: K, v: ShapeOf<S, E>[K] | ((value: ShapeOf<S, E>[K]) => boolean)): QueryBuilder<E, S, N>;
+    where<K extends keyof ShapeOf<S, E> & string>(k: K, v: ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean)): QueryBuilder<E, S, N>;
     // (undocumented)
     withRole(r: string): QueryBuilder<E, S, N>;
 }

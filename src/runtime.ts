@@ -85,10 +85,13 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   ofType<T extends string>(t: EntityNameArg<N, T>): QueryBuilder<T, S, N>;
   inIds(sub: readonly EARS.EntityId[]): QueryBuilder<E, S, N>;
   /**
-   * The entities with a value of `k` equal (`===`) to `v`, or for which `v`, a function, answers true; an
-   * attribute's values are tested one by one. `v` is required: `has` and `lacks` ask about presence.
+   * The entities whose `k` is `v` (`===`) or a list holding it, or for which `v`, a function, answers true given the
+   * whole value. A primitive `v` is answered by the value index. `v` is required: `has` and `lacks` ask about presence.
    */
-  where<K extends keyof ShapeOf<S, E> & string>(k: K, v: ShapeOf<S, E>[K] | ((value: ShapeOf<S, E>[K]) => boolean)): QueryBuilder<E, S, N>;
+  where<K extends keyof ShapeOf<S, E> & string>(
+    k: K,
+    v: ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean),
+  ): QueryBuilder<E, S, N>;
   /** The entities with a value of `k` */
   has<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N>;
   /** The entities with no value of `k` */
