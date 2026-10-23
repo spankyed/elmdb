@@ -141,13 +141,13 @@ describe('LMDB Adapter', () => {
   });
 
   it.each([
-    { patch: { src: 'undefined' }, label: 'src="undefined"' },
-    { patch: { tgt: 'undefined' }, label: 'tgt="undefined"' },
-    { patch: { src: 'null' }, label: 'src="null"' },
-    { patch: { tgt: 'null' }, label: 'tgt="null"' },
-    { patch: { src: 'nohyphen' }, label: 'src without hyphen' },
-    { patch: { tgt: 'nohyphen' }, label: 'tgt without hyphen' },
-  ])('onUpdateRelation refuses invalid src/tgt values, and counts the write it drops: $label', ({ patch }) => {
+    { patch: { source: 'undefined' }, label: 'source="undefined"' },
+    { patch: { target: 'undefined' }, label: 'target="undefined"' },
+    { patch: { source: 'null' }, label: 'source="null"' },
+    { patch: { target: 'null' }, label: 'target="null"' },
+    { patch: { source: 'nohyphen' }, label: 'source without hyphen' },
+    { patch: { target: 'nohyphen' }, label: 'target without hyphen' },
+  ])('onUpdateRelation refuses invalid source/target values, and counts the write it drops: $label', ({ patch }) => {
     const adapter = makeLmdbAdapter(dbs);
     // First create a valid relation so onUpdateRelation finds it
     adapter.onAddRelation('Relation-valid', 'TEST', 'Doc-1', 'Doc-2', null);
@@ -327,10 +327,10 @@ describe('Sharded Router', () => {
     sharded.onCreateEntity('Document-b', 'Document');
     sharded.onAddRelation('Relation-1', 'TEST', 'Document-a', 'Document-b', null);
 
-    expect(() => sharded.onUpdateRelation('Relation-1', { src: null as any }))
-      .toThrow('patch.src is empty');
-    expect(() => sharded.onUpdateRelation('Relation-1', { tgt: '' }))
-      .toThrow('patch.tgt is empty');
+    expect(() => sharded.onUpdateRelation('Relation-1', { source: null as any }))
+      .toThrow('patch.source is empty');
+    expect(() => sharded.onUpdateRelation('Relation-1', { target: '' }))
+      .toThrow('patch.target is empty');
   });
 
   it.each([
@@ -472,7 +472,7 @@ describe('Relation Updates', () => {
     expect(partBefore).toBe('volatileBackup');
 
     // Change tgt to Document -> moves to primary
-    sharded.onUpdateRelation('Relation-cp1', { tgt: 'Document-r2' });
+    sharded.onUpdateRelation('Relation-cp1', { target: 'Document-r2' });
     const partAfter = policy.routeRelation({
       srcType: Entity.Document,
       tgtType: Entity.Document,
@@ -486,7 +486,7 @@ describe('Relation Updates', () => {
   it('info preserved during cross-partition move', () => {
     sharded.onAddRelation('Relation-cp2', 'LINKS', 'Document-r1', 'TNode-t1', { important: true });
     // Move to primary by changing tgt
-    sharded.onUpdateRelation('Relation-cp2', { tgt: 'Document-r2' });
+    sharded.onUpdateRelation('Relation-cp2', { target: 'Document-r2' });
     // Metadata should still be valid
     const meta = sharded.getRelMeta().get('Relation-cp2');
     expect(meta).toBeDefined();

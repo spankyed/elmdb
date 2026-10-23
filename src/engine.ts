@@ -49,7 +49,7 @@ export interface Ears {
   getAllRoles(): string[];
   getSchemaStats(): SchemaStats;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
-  updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
+  updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
   getRelationStats(kind: EARS.RelKind): RelationStats;
   /** Every entity `start` reaches through `relKind`, each once, `start` excluded */
@@ -85,7 +85,7 @@ export interface EarsAdmin {
   /** Links any kind between any ids, either end missing included: unchecked, as loaded data is */
   addRelation(src: EARS.EntityId, kind: string, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
   /** `updateRelation` without its checks: any relation, to any ends */
-  updateRelation(relId: EARS.EntityId, patch: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void;
+  updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   /** Indexes a stored relation, without telling persistence */
   addToIndex(kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId): void;
   /** A copy of the registered repositories, by name */
@@ -144,7 +144,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     putAttr: storage.putAttr,
     deleteAttr: storage.deleteAttr,
     addRelation: storage.addRelation,
-    updateRelation: (relId, { sourceEntity, targetEntity, info }) => storage.updateRelation(relId, sourceEntity, targetEntity, info),
+    updateRelation: (relId, { source, target, info }) => storage.updateRelation(relId, source, target, info),
     addToIndex: relations.addToIndex,
     repositories: repositories.entries,
   };

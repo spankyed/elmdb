@@ -6,7 +6,7 @@ import type { EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
 const task = (title: string) => e.create('Task').set('title', title).id();
-const edges = () => e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity, r.info]);
+const edges = () => e.findRelations().map((r) => [r.source, r.kind, r.target, r.info]);
 
 beforeEach(() => {
   e = engine();
@@ -17,13 +17,13 @@ describe('links', () => {
     const [a, b] = [task('A'), task('B')];
     e.write(a).link('blocks', b, { info: { weight: 2 } });
     const [rel] = e.findRelations();
-    expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
-    expect(e.getRow(rel.id)?.relationDetails).toEqual({ sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
+    expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), source: a, target: b, kind: 'blocks', info: { weight: 2 } });
+    expect(e.getRow(rel.id)?.relationDetails).toEqual({ source: a, target: b, kind: 'blocks', info: { weight: 2 } });
     expect(e.admin.getEntitiesOfType('Relation')).toEqual([rel.id]);
     expect(e.query.ids(a).out('blocks').ids()).toEqual([b]);
     expect(e.query.ids(b).in('blocks').ids()).toEqual([a]);
-    expect(e.findRelations({ sourceEntity: a }).map((r) => r.id)).toEqual([rel.id]);
-    expect(e.findRelations({ targetEntity: b, relationType: 'blocks' }).map((r) => r.id)).toEqual([rel.id]);
+    expect(e.findRelations({ source: a }).map((r) => r.id)).toEqual([rel.id]);
+    expect(e.findRelations({ target: b, kind: 'blocks' }).map((r) => r.id)).toEqual([rel.id]);
     expect(e.query('Task').linkedFrom('blocks', a).ids()).toEqual([b]);
     expect(e.query('Task').linkedTo('blocks', b).ids()).toEqual([a]);
     expect(e.query('Task').linkedWith(a).ids()).toEqual([b]);
@@ -52,14 +52,14 @@ describe('links', () => {
   it('linking the same edge again changes nothing, keeping its id and its place; another info is another edge', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b, { info: { x: 1 } }).link('blocks', c);
-    const first = e.findRelations({ sourceEntity: a, targetEntity: b })[0].id;
+    const first = e.findRelations({ source: a, target: b })[0].id;
     e.write(a).link('blocks', b, { info: { x: 1 } });
     // No info given matches any edge between the ends
     e.write(a).link('blocks', b);
     expect(e.findRelations().map((r) => r.id)).toEqual([first, expect.any(String)]);
     expect(e.query.ids(a).out('blocks').ids()).toEqual([b, c]);
     e.write(a).link('blocks', b, { info: { x: 2 } });
-    expect(e.findRelations({ sourceEntity: a, targetEntity: b })).toHaveLength(2);
+    expect(e.findRelations({ source: a, target: b })).toHaveLength(2);
   });
 
   it('refuses options it does not know, which is info passed where the options go', () => {
@@ -78,7 +78,7 @@ describe('links', () => {
   it('unlink, unlinkAll and destroying a relation by its id remove relations and empty index entries', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b).link('blocks', c).link('refs', b).link('refs', c);
-    const blocksAB = e.findRelations({ sourceEntity: a, relationType: 'blocks', targetEntity: b })[0].id;
+    const blocksAB = e.findRelations({ source: a, kind: 'blocks', target: b })[0].id;
     e.write(blocksAB).destroy();
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', b, undefined], [a, 'refs', c, undefined]]);
     e.write(a).unlink('refs', b);
@@ -120,11 +120,11 @@ describe('links', () => {
     e.write(a).link('refs', b, { info: 3, replace: true });
     expect(edges()).toEqual([[a, 'refs', b, 3]]);
     const rel = e.findRelations()[0].id;
-    e.updateRelation(rel, { targetEntity: c, info: 4 });
+    e.updateRelation(rel, { target: c, info: 4 });
     expect(edges()).toEqual([[a, 'refs', c, 4]]);
     expect(e.query.ids(b).in('refs').ids()).toEqual([]);
     expect(e.query.ids(c).in('refs').ids()).toEqual([a]);
-    e.updateRelation(rel, { sourceEntity: b, info: 5 });
+    e.updateRelation(rel, { source: b, info: 5 });
     expect(edges()).toEqual([[b, 'refs', c, 5]]);
     expect(e.findRelations()[0].id).toBe(rel);
     expect(e.query.ids(a).out('refs').ids()).toEqual([]);
@@ -168,7 +168,7 @@ describe('relation kinds', () => {
       ['inEdges', () => e.query.ids(b).inEdges('blokcs')],
       ['linkedTo', () => e.query('Task').linkedTo('blokcs', b)],
       ['linkedFrom', () => e.query('Task').linkedFrom('blokcs', a)],
-      ['findRelations', () => e.findRelations({ relationType: 'blokcs' })],
+      ['findRelations', () => e.findRelations({ kind: 'blokcs' })],
       ['getRelationStats', () => e.getRelationStats('blokcs')],
       ['descendants', () => e.descendants(a, 'blokcs')],
       ['ancestors', () => e.ancestors(b, 'blokcs')],
@@ -179,9 +179,9 @@ describe('relation kinds', () => {
 
   it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
     const [a, b] = [task('A'), task('B')];
-    e.admin.bulkLoadAttr('Relation-r1' as Id, EARS.AttrKind.RelationDetails, { sourceEntity: a, targetEntity: b, relationType: 'retired' });
+    e.admin.bulkLoadAttr('Relation-r1' as Id, EARS.AttrKind.RelationDetails, { source: a, target: b, kind: 'retired' });
     e.admin.addToIndex('retired', a, b, 'Relation-r1' as Id);
-    expect(e.findRelations().map((r) => r.relationType)).toEqual(['retired']);
+    expect(e.findRelations().map((r) => r.kind)).toEqual(['retired']);
   });
 });
 

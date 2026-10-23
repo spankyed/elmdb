@@ -76,9 +76,9 @@ export async function hydrateSharded(params: {
         relIdStr as EARS.EntityId,
         EARS.AttrKind.RelationDetails,
         {
-          sourceEntity: r.src,
-          targetEntity: r.tgt,
-          relationType: r.kind,
+          source: r.src,
+          target: r.tgt,
+          kind: r.kind,
           info: r.info ?? undefined,
         } satisfies EARS.RelationDetail
       );

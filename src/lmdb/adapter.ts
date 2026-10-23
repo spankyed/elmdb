@@ -277,7 +277,7 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
       scheduleFlush();
     },
 
-    onUpdateRelation(relId: string, patch: { src?: string; tgt?: string; info?: unknown }) {
+    onUpdateRelation(relId: string, patch: { source?: string; target?: string; info?: unknown }) {
       if (closed) return;
       const r = relations.get(relId) || relUpserts.get(relId);
       if (!r) {
@@ -286,29 +286,29 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
       }
       
       const updated = { ...r };
-      if (patch.src) {
+      if (patch.source) {
         // Validate src is a valid entity ID
-        if (patch.src === 'undefined' || patch.src === 'null' || typeof patch.src !== 'string') {
-          dropRelation(relId, `Invalid src in onUpdateRelation: relId=${relId}, src="${patch.src}"`);
+        if (patch.source === 'undefined' || patch.source === 'null' || typeof patch.source !== 'string') {
+          dropRelation(relId, `Invalid source in onUpdateRelation: relId=${relId}, src="${patch.source}"`);
           return;
         }
-        if (!patch.src.includes('-')) {
-          dropRelation(relId, `Invalid src format in onUpdateRelation: relId=${relId}, src="${patch.src}" (missing hyphen)`);
+        if (!patch.source.includes('-')) {
+          dropRelation(relId, `Invalid source format in onUpdateRelation: relId=${relId}, src="${patch.source}" (missing hyphen)`);
           return;
         }
-        updated.src = patch.src;
+        updated.src = patch.source;
       }
-      if (patch.tgt) {
+      if (patch.target) {
         // Validate tgt is a valid entity ID
-        if (patch.tgt === 'undefined' || patch.tgt === 'null' || typeof patch.tgt !== 'string') {
-          dropRelation(relId, `Invalid tgt in onUpdateRelation: relId=${relId}, tgt="${patch.tgt}"`);
+        if (patch.target === 'undefined' || patch.target === 'null' || typeof patch.target !== 'string') {
+          dropRelation(relId, `Invalid target in onUpdateRelation: relId=${relId}, tgt="${patch.target}"`);
           return;
         }
-        if (!patch.tgt.includes('-')) {
-          dropRelation(relId, `Invalid tgt format in onUpdateRelation: relId=${relId}, tgt="${patch.tgt}" (missing hyphen)`);
+        if (!patch.target.includes('-')) {
+          dropRelation(relId, `Invalid target format in onUpdateRelation: relId=${relId}, tgt="${patch.target}" (missing hyphen)`);
           return;
         }
-        updated.tgt = patch.tgt;
+        updated.tgt = patch.target;
       }
       if ('info' in patch) {
         updated.info = patch.info ?? null;

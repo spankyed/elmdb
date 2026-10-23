@@ -1,6 +1,6 @@
 import type { AttributeStorage } from './attribute-storage.ts';
 import { EARS } from './entities.ts';
-import type { QueryBuilder } from './runtime.ts';
+import type { QueryBuilder, RelationEdge } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import { SEQUENCE_TYPE } from './entity-utils.ts';
 import { entityTypeOf, holds } from './attribute-storage.ts';
@@ -56,7 +56,7 @@ export interface Query extends QueryEntries {
 export function createQuery({ storage, isEntityType, names }: { storage: AttributeStorage; isEntityType: (name: string) => boolean; names: NameChecks }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, removals, getAttr, hasAttr,
-    findEntitiesInRelationTo, findEntitiesByRelationTo, getRow,
+    findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf, getRow,
   } = storage;
 
   const prefixCache = new Map<EARS.Entity, (id: EARS.EntityId) => boolean>();
@@ -145,13 +145,16 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
         return setIds(cur().filter((i) => linked(i) === keep));
       };
 
-      /** Each edge of the kinds, out or in: its kind and the entity at its far end */
+      /** Each edge of the kinds, out or in, whose far end this query could reach: its relation row */
       const edges = <K extends string>(kinds: K | readonly K[], type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
         names.relationKinds(kinds, outward ? 'outEdges' : 'inEdges');
         const matches = ofTypes(type);
-        const rows: Array<{ kind: K; id: EARS.EntityId }> = [];
+        const rows: RelationEdge[] = [];
         for (const from of cur()) for (const k of asArr(kinds)) {
-          for (const id of findEntitiesByRelationTo(k, from, outward)) if (matches(id) && alive(id)) rows.push({ kind: k, id });
+          for (const row of relationsOf(k, from, outward)) {
+            const far = outward ? row.target : row.source;
+            if (matches(far) && alive(far)) rows.push(row);
+          }
         }
         return rows;
       };

@@ -327,7 +327,7 @@ describe('destroy', () => {
     expect(e.query.ids(a).pickOne()).toBeUndefined();
     expect(e.getRow(a)?.title).toBeUndefined();
     expect(e.admin.getEntitiesOfType('Task')).toEqual([b]);
-    expect(e.findRelations().map((r) => [r.sourceEntity, r.relationType, r.targetEntity])).toEqual([[c, 'contains', b]]);
+    expect(e.findRelations().map((r) => [r.source, r.kind, r.target])).toEqual([[c, 'contains', b]]);
     expect(e.getAllRelationKinds()).toEqual(['contains']);
     expect(e.query.ids(c).out('contains').ids()).toEqual([b]);
   });
@@ -352,7 +352,7 @@ describe('trash', () => {
     expect(e.query.ids([kept, binned]).ids()).toEqual([kept]);
     expect(e.query.all().ofType('Task').ids()).toEqual([kept]);
     expect(e.query.ids(project).out('contains').ids()).toEqual([kept]);
-    expect(e.query.ids(project).outEdges('contains').map(({ id }) => id)).toEqual([kept]);
+    expect(e.query.ids(project).outEdges('contains').map(({ target }) => target)).toEqual([kept]);
     expect(e.query.withTrashed('Task').ids()).toEqual([kept, binned]);
     expect(e.query.withTrashed.ids(project).out('contains').ids()).toEqual([kept, binned]);
     expect(e.query.trashed('Task').pickAll()).toEqual([expect.objectContaining({ id: binned, title: 'binned', trashedAt: 5 })]);
@@ -361,7 +361,7 @@ describe('trash', () => {
     expect(e.query.trashed.ids(kept).exists()).toBe(false);
     expect(e.query.trashed.all().ids()).toEqual([binned]);
     // Its edges stay, and a write still reaches it
-    expect(e.findRelations({ targetEntity: binned })).toHaveLength(1);
+    expect(e.findRelations({ target: binned })).toHaveLength(1);
     e.write(binned).set('title', 'still writable');
 
     e.write(binned).restore();

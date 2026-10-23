@@ -7,7 +7,7 @@ export {
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
 export type {
-  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, RowIdentity, WriteOptions, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, NumberedField, CreateFields, WhereValue, RowRules, ShortCode,
+  EARSRuntimeDeps, QueryBuilder, WriteBuilder, RelationEdge, LinkOptions, RowIdentity, WriteOptions, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, NumberedField, CreateFields, WhereValue, RowRules, ShortCode,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, type EntityRow, type SchemaStats } from './attribute-storage.ts';

@@ -36,9 +36,9 @@ export function makeShardedPersistence(
   function getRelationMeta(relId: string) {
     const d = relationDetails(relId as EARS.EntityId);
     return d ? {
-      kind: d.relationType,
-      src: d.sourceEntity as string,
-      tgt: d.targetEntity as string
+      kind: d.kind,
+      src: d.source as string,
+      tgt: d.target as string
     } : null;
   }
 
@@ -95,7 +95,7 @@ export function makeShardedPersistence(
       sinks[p].onAddRelation(relId, kind, src, tgt, info);
     },
 
-    onUpdateRelation(relId: string, patch: { src?: string; tgt?: string; info?: unknown }) {
+    onUpdateRelation(relId: string, patch: { source?: string; target?: string; info?: unknown }) {
       const prev = relMeta.get(relId);
 
       if (!prev) {
@@ -127,13 +127,13 @@ export function makeShardedPersistence(
 
       // Build next metadata - use presence checks with validation
       const next = { ...prev };
-      if ('src' in patch) {
-        if (patch.src == null || patch.src === '') throw new Error('[Sharded] patch.src is empty');
-        next.src = patch.src as string;
+      if ('source' in patch) {
+        if (patch.source == null || patch.source === '') throw new Error('[Sharded] patch.source is empty');
+        next.src = patch.source as string;
       }
-      if ('tgt' in patch) {
-        if (patch.tgt == null || patch.tgt === '') throw new Error('[Sharded] patch.tgt is empty');
-        next.tgt = patch.tgt as string;
+      if ('target' in patch) {
+        if (patch.target == null || patch.target === '') throw new Error('[Sharded] patch.target is empty');
+        next.tgt = patch.target as string;
       }
 
       // Compute current and new partitions

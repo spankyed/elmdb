@@ -33,7 +33,7 @@ beforeEach(() => {
   other = e.create('Task').set('title', 'b').id();
   project = e.create('Project').set('name', 'p').id();
   e.write(project).link('contains', task, { info: { pos: 1 } });
-  rel = e.findRelations({ sourceEntity: project, relationType: 'contains' })[0].id;
+  rel = e.findRelations({ source: project, kind: 'contains' })[0].id;
   calls = recording.calls;
   calls.length = 0;
 });
@@ -56,7 +56,7 @@ const writes: Record<string, () => void> = {
   'grantExclusive': () => e.write(other).grantExclusive('owner', [task]),
   'link': () => e.write(other).link('blocks', task),
   'link with replace': () => e.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
-  'updateRelation': () => e.updateRelation(rel, { targetEntity: other, info: { pos: 9 } }),
+  'updateRelation': () => e.updateRelation(rel, { target: other, info: { pos: 9 } }),
   'destroy a relation': () => e.write(rel).destroy(),
   'unlink': () => e.write(project).unlink('contains'),
   'unlinkAll': () => e.write(project).unlinkAll(),
@@ -178,7 +178,7 @@ describe('a link\'s target', () => {
       e.write(task).link('refers', 'Task-later' as Id);
       later = e.create('Task', { id: 'Task-later' as Id }).set('title', 'later').id();
     });
-    expect(e.findRelations({ sourceEntity: task, relationType: 'refers' }).map((r) => r.targetEntity)).toEqual([later]);
+    expect(e.findRelations({ source: task, kind: 'refers' }).map((r) => r.target)).toEqual([later]);
   });
 
   it('missing when the unit commits rolls the whole unit back, a nested unit\'s links included', () => {
@@ -208,14 +208,14 @@ describe('a link\'s target', () => {
       e.write(task).link('refers', gone);
       e.write(gone).destroy();
     });
-    expect(e.findRelations({ sourceEntity: task, relationType: 'refers' })).toEqual([]);
+    expect(e.findRelations({ source: task, kind: 'refers' })).toEqual([]);
   });
 });
 
 describe('a moved relation\'s ends', () => {
   it('must exist when it is moved outside a unit, and nothing is written when one does not', () => {
     const before = state();
-    expect(() => e.updateRelation(rel, { targetEntity: 'Task-ghost' as Id })).toThrow(/no entity has the id "Task-ghost"/);
+    expect(() => e.updateRelation(rel, { target: 'Task-ghost' as Id })).toThrow(/no entity has the id "Task-ghost"/);
     expect(state()).toEqual(before);
     expect(calls).toEqual([]);
   });
@@ -223,17 +223,17 @@ describe('a moved relation\'s ends', () => {
   it('may be one created later in the same unit', () => {
     let later!: Id;
     e.transact(() => {
-      e.updateRelation(rel, { targetEntity: 'Task-later' as Id });
+      e.updateRelation(rel, { target: 'Task-later' as Id });
       later = e.create('Task', { id: 'Task-later' as Id }).id();
     });
-    expect(e.findRelations({ sourceEntity: project, relationType: 'contains' }).map((r) => r.targetEntity)).toEqual([later]);
+    expect(e.findRelations({ source: project, kind: 'contains' }).map((r) => r.target)).toEqual([later]);
   });
 
   it('missing when the unit commits rolls the unit back', () => {
     const before = state();
     expect(() => e.transact(() => {
       e.write(task).set('title', 'changed');
-      e.updateRelation(rel, { targetEntity: 'Task-never' as Id });
+      e.updateRelation(rel, { target: 'Task-never' as Id });
     })).toThrow(/no entity has the id "Task-never"/);
     expect(state()).toEqual(before);
     expect(calls).toEqual([]);

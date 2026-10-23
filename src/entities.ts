@@ -44,11 +44,12 @@ export namespace EARS {
   export type RelKind = string & {};
 
   // ─── Relations ─────────────────────────────────────────────────────────
+  /** A relation's details: its kind, the entity it goes from and the one it goes to, and its info */
   export interface RelationDetail {
-    sourceEntity : EntityId;
-    targetEntity : EntityId;
-    relationType : RelKind;
-    info?        : AttributeValue;
+    kind   : RelKind;
+    source : EntityId;
+    target : EntityId;
+    info?  : AttributeValue;
   }
 
   // ─── RoleKind ──────────────────────────────────────────────────────────

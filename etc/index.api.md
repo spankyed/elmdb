@@ -93,16 +93,15 @@ export namespace EARS {
     export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
         readonly __entity?: E;
     };
-    // (undocumented)
     export interface RelationDetail {
         // (undocumented)
         info?: AttributeValue;
         // (undocumented)
-        relationType: RelKind;
+        kind: RelKind;
         // (undocumented)
-        sourceEntity: EntityId;
+        source: EntityId;
         // (undocumented)
-        targetEntity: EntityId;
+        target: EntityId;
     }
     // (undocumented)
     export type RelKind = string & {};
@@ -144,8 +143,8 @@ export interface Ears {
     // (undocumented)
     unregisterRepository(name: string): void;
     updateRelation(relId: EARS.EntityId, patch: {
-        sourceEntity?: EARS.EntityId;
-        targetEntity?: EARS.EntityId;
+        source?: EARS.EntityId;
+        target?: EARS.EntityId;
         info?: unknown;
     }): void;
     upsert: Upsert;
@@ -166,8 +165,8 @@ export interface EarsAdmin {
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     repositories(): Record<string, unknown>;
     updateRelation(relId: EARS.EntityId, patch: {
-        sourceEntity?: EARS.EntityId;
-        targetEntity?: EARS.EntityId;
+        source?: EARS.EntityId;
+        target?: EARS.EntityId;
         info?: unknown;
     }): void;
 }
@@ -313,7 +312,7 @@ export interface PersistenceSink {
     // (undocumented)
     getErrorStats?(): PersistenceErrorStats;
     // (undocumented)
-    onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown): void;
+    onAddRelation(relId: string, kind: string, source: string, target: string, info: unknown): void;
     onCreateEntity(entityId: string, entityType: string): void;
     // (undocumented)
     onDestroyEntity(entityId: string): void;
@@ -325,8 +324,8 @@ export interface PersistenceSink {
     onUnitStart(): void;
     // (undocumented)
     onUpdateRelation(relId: string, patch: {
-        src?: string;
-        tgt?: string;
+        source?: string;
+        target?: string;
         info?: unknown;
     }): void;
 }
@@ -358,10 +357,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     in<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
     // (undocumented)
     in(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
-    inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<{
-        kind: K;
-        id: EARS.EntityId<NoInferType<T>>;
-    }>;
+    inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
     lacks<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
     last(): EARS.EntityId<E> | undefined;
     // (undocumented)
@@ -378,10 +374,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     out<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
     // (undocumented)
     out(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
-    outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<{
-        kind: K;
-        id: EARS.EntityId<NoInferType<T>>;
-    }>;
+    outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
     // (undocumented)
     pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(fields: A): ({
         id: EARS.EntityId<E>;
@@ -408,13 +401,27 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
 export type RelationDetailsReader = (relId: EARS.EntityId) => EARS.RelationDetail | null;
 
 // @public
+export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
+    // (undocumented)
+    id: EARS.EntityId;
+    // (undocumented)
+    info?: EARS.AttributeValue;
+    // (undocumented)
+    kind: K;
+    // (undocumented)
+    source: EARS.EntityId<Source>;
+    // (undocumented)
+    target: EARS.EntityId<Target>;
+}
+
+// @public
 export interface RelationMatch {
     // (undocumented)
-    relationType?: EARS.RelKind;
+    kind?: EARS.RelKind;
     // (undocumented)
-    sourceEntity?: EARS.EntityId;
+    source?: EARS.EntityId;
     // (undocumented)
-    targetEntity?: EARS.EntityId;
+    target?: EARS.EntityId;
 }
 
 // @public

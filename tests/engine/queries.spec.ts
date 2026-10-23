@@ -89,21 +89,22 @@ describe('filters', () => {
     expect(e.query('Task').linkedWith(p).ids()).toEqual([t.a, t.b, t.c]);
   });
 
-  it('out and in walk edges, by kinds and target types, and outEdges and inEdges return them', () => {
+  it('out and in walk edges, by kinds and target types, and outEdges and inEdges return their relation rows', () => {
     expect(e.query.ids(p).out(['contains', 'owns']).ids()).toEqual([t.a, t.b, t.c]);
     expect(e.query.ids(p).out('contains', 'Project').ids()).toEqual([]);
     expect(e.query.ids(p).out('contains', ['Task']).ids()).toEqual([t.a, t.b]);
     expect(e.query.ids([t.a, t.b]).in('contains').ids()).toEqual([p]);
-    expect(e.query.ids(p).outEdges(['owns', 'contains'])).toEqual([
-      { kind: 'owns', id: t.c }, { kind: 'contains', id: t.a }, { kind: 'contains', id: t.b },
-    ]);
+    const edge = (kind: string, source: Id, target: Id) => ({ id: expect.stringMatching(/^Relation-/), kind, source, target });
+    expect(e.query.ids(p).outEdges(['owns', 'contains'])).toEqual([edge('owns', p, t.c), edge('contains', p, t.a), edge('contains', p, t.b)]);
+    // An edge is findRelations' row
+    expect(e.query.ids(p).outEdges('owns')).toEqual(e.findRelations({ source: p, kind: 'owns' }));
     expect(e.query.ids(p).outEdges('contains', 'Project')).toEqual([]);
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
     // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
-    e.admin.bulkLoadAttr('Relation-ghost' as Id, EARS.AttrKind.RelationDetails, { sourceEntity: p, targetEntity: 'Task-ghost', relationType: 'refers' });
+    e.admin.bulkLoadAttr('Relation-ghost' as Id, EARS.AttrKind.RelationDetails, { source: p, target: 'Task-ghost', kind: 'refers' });
     e.admin.addToIndex('refers', p, 'Task-ghost' as Id, 'Relation-ghost' as Id);
     e.write(p).link('refers', t.d);
-    expect(e.query.ids(p).outEdges('refers')).toEqual([{ kind: 'refers', id: t.d }]);
+    expect(e.query.ids(p).outEdges('refers')).toEqual([edge('refers', p, t.d)]);
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);
     expect(e.query.ids(p).out('contains').pick(['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
     expect(e.query.ids(p).out(['contains', 'owns'], 'Task').pick(['rank'])).toEqual([
@@ -112,7 +113,7 @@ describe('filters', () => {
     ]);
     // Walking in is the same walk the other way
     expect(e.query.ids(t.a).in('contains').ids()).toEqual([p]);
-    expect(e.query.ids(t.a).inEdges('contains')).toEqual([{ kind: 'contains', id: p }]);
+    expect(e.query.ids(t.a).inEdges('contains')).toEqual([edge('contains', p, t.a)]);
   });
 });
 

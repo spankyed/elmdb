@@ -9,6 +9,15 @@
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
 
+/** A relation row — its id, kind, ends and info, as `findRelations` returns one — with its ends typed */
+export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
+  id: EARS.EntityId;
+  kind: K;
+  source: EARS.EntityId<Source>;
+  target: EARS.EntityId<Target>;
+  info?: EARS.AttributeValue;
+}
+
 // ─── PersistenceSink interface ─────────────────────────────────────────
 
 export interface PersistenceSink {
@@ -19,8 +28,8 @@ export interface PersistenceSink {
   onDropAttr(kind: string, entityId: string): void;
   /** An attribute's value after a write, whole (a list is one array value): the sink stores it in place of what it had */
   onPutAttr(kind: string, entityId: string, value: unknown): void;
-  onAddRelation(relId: string, kind: string, src: string, tgt: string, info: unknown): void;
-  onUpdateRelation(relId: string, patch: { src?: string; tgt?: string; info?: unknown }): void;
+  onAddRelation(relId: string, kind: string, source: string, target: string, info: unknown): void;
+  onUpdateRelation(relId: string, patch: { source?: string; target?: string; info?: unknown }): void;
   /**
    * A relation (a link between two entities) was removed.
    * - `destroyed` is set when the link was removed only because one of its two entities is being deleted:
@@ -152,10 +161,13 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
   ): QueryBuilder<T, S, N, R, O>;
   in(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
-  /** Each outgoing edge of the kinds: its kind and the entity at its other end, one row per edge */
-  outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<{ kind: K; id: EARS.EntityId<NoInferType<T>> }>;
-  /** Each incoming edge of the kinds: its kind and the entity at its other end */
-  inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<{ kind: K; id: EARS.EntityId<NoInferType<T>> }>;
+  /**
+   * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
+   * `findRelations`' shape, one per edge
+   */
+  outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+  /** Each incoming edge of the kinds whose source this query could reach: its relation row */
+  inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
   pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>)[];

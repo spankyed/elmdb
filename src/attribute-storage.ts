@@ -285,9 +285,9 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     }
     const relId = newId(EARS.Entity.Relation);
     put(relId, EARS.AttrKind.RelationDetails, {
-      sourceEntity: src,
-      targetEntity: tgt,
-      relationType: kind,
+      source: src,
+      target: tgt,
+      kind,
       info,
     } as EARS.RelationDetail);
     relations.addToIndex(kind, src, tgt, relId);
@@ -306,19 +306,19 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       EARS.AttrKind.RelationDetails,
     ) as EARS.RelationDetail | null;
     if (!d) return;
-    const { sourceEntity: oS, targetEntity: oT, relationType: k } = d;
+    const { source: oS, target: oT, kind: k } = d;
     const next: EARS.RelationDetail = {
       ...d,
-      ...(newS && { sourceEntity: newS }),
-      ...(newT && { targetEntity: newT }),
+      ...(newS && { source: newS }),
+      ...(newT && { target: newT }),
       ...(info !== undefined && { info }),
     };
     put(relId, EARS.AttrKind.RelationDetails, next);
     if (newS || newT)
-      relations.updateIndex(k, relId, oS, oT, next.sourceEntity, next.targetEntity);
+      relations.updateIndex(k, relId, oS, oT, next.source, next.target);
     const patch: any = {};
-    if (newS) patch.src = newS;
-    if (newT) patch.tgt = newT;
+    if (newS) patch.source = newS;
+    if (newT) patch.target = newT;
     if (info !== undefined) patch.info = info;
     persistence.onUpdateRelation(relId, patch);
   }
@@ -333,7 +333,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       EARS.AttrKind.RelationDetails,
     ) as EARS.RelationDetail | null;
     if (d)
-      relations.removeFromIndex(d.relationType, d.sourceEntity, d.targetEntity, relId);
+      relations.removeFromIndex(d.kind, d.source, d.target, relId);
     deleteAttr(relId, EARS.AttrKind.RelationDetails);
     // A relation is its details: with them gone, so is the relation's entity
     unindexEntity(relId);
@@ -383,23 +383,24 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Whether the entity is in the engine and not in the trash: what a read by type, id or link reaches */
   const isLive = (id: EARS.EntityId) => hasEntity(id) && !trashed.has(id);
 
-  const findEntitiesInRelationTo = (target: EARS.EntityId) => {
+  /** Every entity `id` has a relation to or from, of any kind */
+  const findEntitiesInRelationTo = (id: EARS.EntityId) => {
     const out = new Set<EARS.EntityId>();
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
-      bySource[target]?.forEach(relId => {
-        const { targetEntity } = getAttr(
+      bySource[id]?.forEach(relId => {
+        const { target } = getAttr(
           relId,
           EARS.AttrKind.RelationDetails,
         ) as EARS.RelationDetail;
-        out.add(targetEntity);
+        out.add(target);
       });
-      byTarget[target]?.forEach(relId => {
-        const { sourceEntity } = getAttr(
+      byTarget[id]?.forEach(relId => {
+        const { source } = getAttr(
           relId,
           EARS.AttrKind.RelationDetails,
         ) as EARS.RelationDetail;
-        out.add(sourceEntity);
+        out.add(source);
       });
     }
     return [...out];
@@ -419,9 +420,17 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
           rel,
           EARS.AttrKind.RelationDetails,
         ) as EARS.RelationDetail;
-        return asSource ? d.targetEntity : d.sourceEntity;
+        return asSource ? d.target : d.source;
       })
       .filter(Boolean);
+  };
+
+  /** The relations of a kind going out of `id` (or, with `outward` false, coming in), each a relation row */
+  const relationsOf = (relKind: string, id: EARS.EntityId, outward: boolean) => {
+    const dir = relationIndex[relKind];
+    if (!dir) return [];
+    return (outward ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [])
+      .map((rel) => ({ ...(getAttr(rel, EARS.AttrKind.RelationDetails) as EARS.RelationDetail), id: rel }));
   };
 
   function destroyEntity(id: EARS.EntityId, skipPersistence = false) {
@@ -481,7 +490,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
-    findEntitiesInRelationTo, findEntitiesByRelationTo,
+    findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllRoles, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }

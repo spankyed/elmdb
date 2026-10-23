@@ -4,11 +4,11 @@ import type { RelationIndexStore } from './relation-index.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { NameChecks } from './names.ts';
 
-/** Which relations to match: any combination of source, relation kind and target */
+/** Which relations to match: any combination of kind, source and target */
 export interface RelationMatch {
-  sourceEntity?: EARS.EntityId;
-  relationType?: EARS.RelKind;
-  targetEntity?: EARS.EntityId;
+  kind?: EARS.RelKind;
+  source?: EARS.EntityId;
+  target?: EARS.EntityId;
 }
 
 /** A relation row: its id (`write(id).destroy()` removes that one relation) and its details, including its info */
@@ -28,7 +28,7 @@ export interface RelationStats {
 
 export function createRelationReads({ edgeStore, relations, storage, names }: { edgeStore: EdgeStore; relations: RelationIndexStore; storage: AttributeStorage; names: NameChecks }) {
   function findRelations(match: RelationMatch = {}): RelationRow[] {
-    if (match.relationType !== undefined) names.relationKinds(match.relationType, 'findRelations');
+    if (match.kind !== undefined) names.relationKinds(match.kind, 'findRelations');
     return edgeStore.relIds(match).flatMap((id) => {
       const detail = storage.getAttr(id, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | undefined;
       return detail ? [{ ...detail, id }] : [];

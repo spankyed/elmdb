@@ -57,8 +57,8 @@ describe('persistence sink', () => {
     const e = engine(sink);
     const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.create(type).id());
     const rel = e.admin.addRelation(a, 'refs', b);
-    e.admin.updateRelation(rel, { targetEntity: c, info: 'why' });
-    e.admin.updateRelation('Relation-none' as Id, { sourceEntity: a });
+    e.admin.updateRelation(rel, { target: c, info: 'why' });
+    e.admin.updateRelation('Relation-none' as Id, { source: a });
     e.admin.putAttr(a, 'x', 1);
     e.admin.putAttr(a, 'x', [1, 2]);
     e.admin.deleteAttr(a, 'x');
@@ -73,7 +73,7 @@ describe('persistence sink', () => {
     // admin's direct writes stamp nothing
     expect(calls.slice(9)).toEqual([
       ['onAddRelation', '#4', 'refs', '#1', '#2', undefined],
-      ['onUpdateRelation', '#4', { tgt: '#3', info: 'why' }],
+      ['onUpdateRelation', '#4', { target: '#3', info: 'why' }],
       ['onPutAttr', 'x', '#1', 1],
       ['onPutAttr', 'x', '#1', [1, 2]],
       // Removing what isn't there tells the sink nothing
@@ -104,7 +104,7 @@ describe('hydration', () => {
     e.admin.bulkLoadAttr(b, 'title', 'B');
     e.admin.bulkLoadAttr(p, 'title', 'P');
     e.admin.bulkLoadAttr(p, EARS.AttrKind.Role, ['current']);
-    e.admin.bulkLoadAttr(rel, EARS.AttrKind.RelationDetails, { sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } });
+    e.admin.bulkLoadAttr(rel, EARS.AttrKind.RelationDetails, { source: p, target: a, kind: 'contains', info: { order: 1 } });
     e.admin.addToIndex('contains', p, a, rel);
     e.admin.addToIndex('contains', p, a, rel);
 
@@ -114,7 +114,7 @@ describe('hydration', () => {
     expect(e.query('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
     expect(e.query.all().withRole('current').ids()).toEqual([p]);
     expect(e.query.ids(p).out('contains').ids()).toEqual([a]);
-    expect(e.findRelations({ targetEntity: a })).toEqual([{ id: rel, sourceEntity: p, targetEntity: a, relationType: 'contains', info: { order: 1 } }]);
+    expect(e.findRelations({ target: a })).toEqual([{ id: rel, source: p, target: a, kind: 'contains', info: { order: 1 } }]);
 
     // Writes after hydration reach the sink
     e.write(b).link('contains', a);

@@ -164,11 +164,11 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
       },
       unlink(kind, target) {
         names.relationKinds(kind, 'unlink');
-        edgeStore.unlink({ sourceEntity: id, relationType: kind, targetEntity: target });
+        edgeStore.unlink({ source: id, kind, target });
         return self;
       },
       unlinkAll() {
-        edgeStore.unlink({ sourceEntity: id });
+        edgeStore.unlink({ source: id });
         return self;
       },
 
@@ -268,18 +268,18 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
    * ends as they are then. `admin.updateRelation` stays unchecked, as `admin.addRelation` does: loading data is the
    * creator's to vouch for.
    */
-  function updateRelation(relId: EARS.EntityId, { sourceEntity, targetEntity, info }: { sourceEntity?: EARS.EntityId; targetEntity?: EARS.EntityId; info?: unknown }): void {
+  function updateRelation(relId: EARS.EntityId, { source, target, info }: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void {
     const missing = (end: EARS.EntityId) => new EarsError('NO_SUCH_ENTITY', `updateRelation(${JSON.stringify(relId)}): no entity has the id ${JSON.stringify(end)}`);
     if (!journal.open) {
-      for (const end of [sourceEntity, targetEntity]) if (end !== undefined && !hasEntity(end)) throw missing(end);
+      for (const end of [source, target]) if (end !== undefined && !hasEntity(end)) throw missing(end);
     } else {
       journal.atCommit(() => {
         const details = getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | null;
         if (!details) return;
-        for (const end of [details.sourceEntity, details.targetEntity]) if (!hasEntity(end)) throw missing(end);
+        for (const end of [details.source, details.target]) if (!hasEntity(end)) throw missing(end);
       });
     }
-    storage.updateRelation(relId, sourceEntity, targetEntity, info);
+    storage.updateRelation(relId, source, target, info);
   }
 
   return { create, upsert, write, updateRelation };
