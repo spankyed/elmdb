@@ -1,22 +1,7 @@
-import type { Create, Write } from './write.ts';
+import type { Create } from './write.ts';
 import { getTimestamp } from './entity-utils.ts';
 import type { createEntityCounters } from './entity-utils.ts';
 import { EARS } from './entities.ts';
-
-export function prepareEntity<T extends { entityType: EARS.Entity }>(
-  entityType: EARS.Entity,
-  data: Partial<T>,
-  defaults?: Partial<T>
-): Omit<T, 'id'> {
-  const ts = getTimestamp();
-  return {
-    ...defaults,
-    ...data,
-    entityType,
-    createdAt: ts,
-    updatedAt: ts,
-  } as Omit<T, 'id'>;
-}
 
 /** Fields createEntityWithDefaults always writes, on top of the caller's data. */
 export interface CreatedEntityFields {
@@ -29,7 +14,7 @@ export interface CreatedEntityFields {
 }
 
 /** An engine's entity helpers, over its writes */
-export function createEntityHelpers({ create, write, counters }: { create: Create; write: Write; counters: ReturnType<typeof createEntityCounters> }) {
+export function createEntityHelpers({ create, counters }: { create: Create; counters: ReturnType<typeof createEntityCounters> }) {
   /**
    * T is the caller's own attribute shape — it need not declare the fields this
    * function fills in (entityType, shortCode, label, timestamps); those are added
@@ -45,29 +30,11 @@ export function createEntityHelpers({ create, write, counters }: { create: Creat
     const shortCode = data.shortCode || counters.generateShortCode(entityType, prefix || entityType.substring(0, 3).toUpperCase());
     const label = data.label || counters.generateLabelWithCount(`New ${entityType}`, entityType);
 
-    const fields = { ...data, shortCode, label, updatedAt: ts };
-    const id = create(entityType as never, { id: providedId, createdAt: ts }).setMany(fields).id();
+    const fields = { ...data, shortCode, label };
+    const id = create(entityType, { id: providedId, createdAt: ts }).setMany(fields).id();
 
-    return { ...fields, entityType, createdAt: ts, id } as unknown as T & CreatedEntityFields;
+    return { ...fields, entityType, createdAt: ts, updatedAt: ts, id } as unknown as T & CreatedEntityFields;
   }
 
-  function updateEntity(
-    id: EARS.EntityId,
-    updates: Record<string, unknown>,
-    skipTimestamp?: boolean
-  ): void {
-    const builder = write(id);
-
-    if (!skipTimestamp) {
-      builder.set('updatedAt', getTimestamp());
-    }
-
-    Object.entries(updates).forEach(([key, value]) => {
-      if (value === undefined) return;
-      if (value === null) builder.delete(key);
-      else builder.set(key, value);
-    });
-  }
-
-  return { createEntityWithDefaults, updateEntity };
+  return { createEntityWithDefaults };
 }

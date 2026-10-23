@@ -1,8 +1,9 @@
 // The engine's contract: create, upsert and write create, change and delete entities, each held to the claim it
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engine, type Id } from './helpers.ts';
+import { engine, recordingSink, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
+import type { WriteBuilder } from '../../src/index.ts';
 
 const NOW = 1_700_000_000_000;
 let e: EngineUnderTest;
@@ -17,7 +18,7 @@ describe('create', () => {
   it('creates an entity of a type with a new id and createdAt', () => {
     const id = e.create('Task').set('title', 'Write specs').id();
     expect(id).toMatch(/^Task-[a-z0-9]+$/);
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, title: 'Write specs' });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'Write specs' });
     expect(e.admin.getEntitiesOfType('Task')).toEqual([id]);
     expect(e.admin.getAllEntities()).toEqual([id]);
   });
@@ -32,7 +33,7 @@ describe('create', () => {
   it('uses an id and a creation time it is given', () => {
     const id = e.create('Task', { id: 'Task-custom' as Id, createdAt: 42 }).set('title', 'Mine').id();
     expect(id).toBe('Task-custom');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: 42, title: 'Mine' });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: 42, updatedAt: 42, title: 'Mine' });
   });
 
   it('refuses a name that is not a registered type, an id in use, and an id naming another type', () => {
@@ -95,11 +96,11 @@ describe('numbering', () => {
 });
 
 describe('write', () => {
-  it('writes to an existing entity, leaving its createdAt', () => {
+  it('writes to an existing entity, leaving its createdAt and stamping updatedAt', () => {
     const id = e.create('Task').id();
     vi.setSystemTime(NOW + 5);
     e.write(id).set('title', 'Later');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, title: 'Later' });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'Later' });
   });
 
   /** An id no entity has used to be written to anyway, leaving attributes with no entity of a type behind them */
@@ -118,7 +119,7 @@ describe('upsert', () => {
     e.upsert('Task', id).set('title', 'first');
     vi.setSystemTime(NOW + 5);
     e.upsert('Task', id).set('title', 'second');
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, title: 'second' });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 5, title: 'second' });
   });
 
   it('refuses an unregistered type, and an entity of another type', () => {
@@ -137,7 +138,7 @@ describe('attribute writes', () => {
     e.write(id).set('tag', 'z');
     expect(e.getAttr(id, 'tag')).toBe('z');
     e.write(id).setMany({ tag: 'x', other: 1 });
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, tag: 'x', other: 1 });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, tag: 'x', other: 1 });
   });
 
   it('a one-element list reads as a list, whichever write made it', () => {
@@ -176,7 +177,7 @@ describe('attribute writes', () => {
     expect(e.getAttr(id, 'tag')).toEqual([]);
     e.write(id).delete('tag');
     expect(e.getAttr(id, 'tag')).toBeNull();
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW });
+    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW });
   });
 
   it('never changes a list a read handed out', () => {
@@ -200,13 +201,58 @@ describe('attribute writes', () => {
     expect(e.getRow(id)).toEqual(before);
   });
 
-  it('updateEntity writes fields and updatedAt, deletes nulls and replaces arrays', () => {
-    const id = e.create('Task').set('title', 'A').set('gone', 1).add('list', 1).add('list', 2).id();
-    vi.setSystemTime(NOW + 10);
-    e.updateEntity(id, { title: 'B', gone: null, list: [3], skipped: undefined });
-    expect(e.findById(id)).toEqual({ id, entityType: 'Task', createdAt: NOW, updatedAt: NOW + 10, title: 'B', list: [3] });
-    e.updateEntity(id, { title: 'C' }, true);
+  it('null is a value, undefined leaves an attribute alone in setMany and is refused by set', () => {
+    const id = e.create('Task').setMany({ title: 'A', gone: 1 }).id();
+    e.write(id).setMany({ title: null, gone: undefined, list: [3] });
+    expect(e.getRow(id)).toMatchObject({ title: null, gone: 1, list: [3] });
+    expect(() => e.write(id).set('title', undefined)).toThrow(expect.objectContaining({ code: 'NO_VALUE' }));
+    e.write(id).delete('gone');
+    expect(e.getRow(id)).not.toHaveProperty('gone');
+  });
+});
+
+describe('updatedAt', () => {
+  const later = () => vi.setSystemTime(NOW + 10);
+
+  it('is the creation time on create, or the one given', () => {
+    const id = e.create('Task').set('title', 'A').id();
+    expect(e.getAttr(id, 'updatedAt')).toBe(NOW);
+    const imported = e.create('Task', { createdAt: 5, updatedAt: 9 }).id();
+    expect(e.getRow(imported)).toMatchObject({ createdAt: 5, updatedAt: 9 });
+  });
+
+  it.each([
+    ['set', (w: WriteBuilder<'Task'>) => w.set('title', 'B')],
+    ['setMany', (w: WriteBuilder<'Task'>) => w.setMany({ title: 'B' })],
+    ['add', (w: WriteBuilder<'Task'>) => w.add('tags', 'x')],
+    ['merge', (w: WriteBuilder<'Task'>) => w.merge('meta', { k: 1 })],
+    ['delete', (w: WriteBuilder<'Task'>) => w.delete('title')],
+    ['deleteAt', (w: WriteBuilder<'Task'>) => w.deleteAt('tags', 0)],
+    ['deleteValue', (w: WriteBuilder<'Task'>) => w.deleteValue('tags', 'a')],
+  ])('is stamped by %s', (_name, change) => {
+    const id = e.create('Task').setMany({ title: 'A', tags: ['a'] }).id();
+    later();
+    change(e.write(id));
     expect(e.getAttr(id, 'updatedAt')).toBe(NOW + 10);
+  });
+
+  it('is not stamped by links, roles, the trash or a write that asked not to touch it', () => {
+    const [id, other] = [e.create('Task').id(), e.create('Task').id()];
+    later();
+    e.write(id).link('blocks', other).grant('lead').trash().restore();
+    e.write(id, { touch: false }).set('lastSeen', 1);
+    e.upsert('Task', id, { touch: false }).set('lastSeen', 2);
+    expect(e.getAttr(id, 'updatedAt')).toBe(NOW);
+  });
+
+  it('is written once for a builder and only by the engine', () => {
+    const { sink, calls } = recordingSink();
+    const engineWithSink = engine(sink);
+    const id = engineWithSink.create('Task').id();
+    calls.length = 0;
+    engineWithSink.write(id).set('a', 1).set('b', 2).add('c', 3);
+    expect(calls.filter(([, kind]) => kind === 'updatedAt')).toHaveLength(1);
+    expect(() => e.write(e.create('Task').id()).set('updatedAt', 1)).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });
 });
 
@@ -281,7 +327,7 @@ describe('trash', () => {
 describe('rows', () => {
   it('a row is the id, the type and every attribute; none for an id no entity has; a trashed one all the same', () => {
     const id = e.create('Task').set('title', 'A').grant('lead').id();
-    const row = { id, entityType: 'Task', createdAt: NOW, title: 'A', role: ['lead'] };
+    const row = { id, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'A', role: ['lead'] };
     expect(e.getRow(id)).toEqual(row);
     expect(e.query.ids(id).pickAll()).toEqual([row]);
     expect(e.findById(id)).toEqual(row);
@@ -308,18 +354,19 @@ describe('finders', () => {
     const a = e.create('Task').set('title', 'A').set('tag', [1, 2]).id();
     const p = e.create('Project').id();
     e.write(p).link('contains', a);
-    expect(e.getRow(a)).toEqual({ id: a, entityType: 'Task', createdAt: NOW, title: 'A', tag: [1, 2] });
+    expect(e.getRow(a)).toEqual({ id: a, entityType: 'Task', createdAt: NOW, updatedAt: NOW, title: 'A', tag: [1, 2] });
     // `entityType` is read from the id, so it is on every row and in every read, and stored as no attribute
     expect(e.getAttr(a, 'entityType')).toBe('Task');
     expect(e.getAttr(p, 'entityType')).toBe('Project');
     expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getAttr('Task-gone' as Id, 'entityType')).toBeNull();
-    expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'title', 'tag', 'relationDetails']);
+    expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'updatedAt', 'title', 'tag', 'relationDetails']);
     expect(e.getAttributeStats('tag')).toEqual({ entityCount: 1, totalValues: 2 });
     expect(e.getSchemaStats()).toEqual({
       entities: { Task: 1, Project: 1, Relation: 1 },
       attributes: {
-        createdAt: { entityCount: 2, totalValues: 2 }, title: { entityCount: 1, totalValues: 1 },
+        createdAt: { entityCount: 2, totalValues: 2 }, updatedAt: { entityCount: 2, totalValues: 2 },
+        title: { entityCount: 1, totalValues: 1 },
         tag: { entityCount: 1, totalValues: 2 }, relationDetails: { entityCount: 1, totalValues: 1 },
       },
       relations: { contains: { totalRelations: 1, uniqueSources: 1, uniqueTargets: 1 } },

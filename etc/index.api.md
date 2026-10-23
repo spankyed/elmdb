@@ -87,6 +87,7 @@ export function createEarsEngine(input: EARSRuntimeDeps): EarsEngine;
 export interface CreateOptions {
     createdAt?: number;
     id?: EARS.EntityId;
+    updatedAt?: number;
 }
 
 // @public
@@ -236,8 +237,6 @@ export interface Ears {
     transact<T>(fn: () => T): T;
     // (undocumented)
     unregisterRepository(name: string): void;
-    // (undocumented)
-    updateEntity(id: EARS.EntityId, updates: Record<string, unknown>, skipTimestamp?: boolean): void;
     updateRelation(relId: EARS.EntityId, patch: {
         sourceEntity?: EARS.EntityId;
         targetEntity?: EARS.EntityId;
@@ -299,7 +298,7 @@ export type EarsErrorCode =
 | 'TYPE_MISMATCH'
 /** A write named an attribute the engine owns */
 | 'RESERVED_ATTRIBUTE'
-/** A `where` was given no value to compare with */
+/** A `where` was given no value to compare with, or `set` none to store */
 | 'NO_VALUE'
 /** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
 | 'NOT_A_LIST';
@@ -426,11 +425,6 @@ export interface PersistenceSink {
         info?: unknown;
     }): void;
 }
-
-// @public (undocumented)
-export function prepareEntity<T extends {
-    entityType: EARS.Entity;
-}>(entityType: EARS.Entity, data: Partial<T>, defaults?: Partial<T>): Omit<T, 'id'>;
 
 // @public
 export interface Query extends QueryEntries {
@@ -574,7 +568,7 @@ export const RepositoryErrorCode: {
 export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof RepositoryErrorCode];
 
 // @public
-export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "role", "relationDetails", "trashedAt"];
+export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "updatedAt", "role", "relationDetails", "trashedAt"];
 
 // @public
 export interface SchemaStats {
@@ -645,8 +639,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
     // (undocumented)
     transact: Ears['transact'];
     // (undocumented)
-    updateEntity: TypedUpdateEntity<S>;
-    // (undocumented)
     upsert: TypedUpsert<S, N>;
     // (undocumented)
     write: TypedWrite<S>;
@@ -693,23 +685,15 @@ export interface TypedQuery<S extends EntityShapes, N extends string = string> e
 }
 
 // @public
-export interface TypedUpdateEntity<S extends EntityShapes> {
-    // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>, updates: {
-        [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K] | null;
-    }, skipTimestamp?: boolean): void;
-}
-
-// @public
 export interface TypedUpsert<S extends EntityShapes, N extends string = string> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, id: EARS.EntityId): WriteBuilder<E, S>;
+    <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S>;
 }
 
 // @public
 export interface TypedWrite<S extends EntityShapes> {
     // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>): WriteBuilder<E, S>;
+    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S>;
 }
 
 // @public
@@ -718,13 +702,13 @@ export type TypeName<T extends string> = T extends `${string}-${string}` ? never
 // @public
 export interface Upsert {
     // (undocumented)
-    <E extends string>(type: TypeName<E>, id: EARS.EntityId): WriteBuilder<E>;
+    <E extends string>(type: TypeName<E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E>;
 }
 
 // @public
 export interface Write {
     // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>): WriteBuilder<E>;
+    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
 // @public
@@ -751,6 +735,11 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     trash(at?: number): WriteBuilder<E, S>;
     unlink(kind: string, target?: EARS.EntityId): WriteBuilder<E, S>;
     unlinkAll(): WriteBuilder<E, S>;
+}
+
+// @public
+export interface WriteOptions {
+    touch?: boolean;
 }
 
 // (No @packageDocumentation comment for this package)

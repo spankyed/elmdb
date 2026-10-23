@@ -150,7 +150,7 @@ describe('terminals', () => {
     expect(e.query('Task').where('rank', 1).pick(['id', 'title', 'nope'])).toEqual([{ id: t.d, title: 'apple', nope: null }]);
     expect(e.query('Task').pickOne(['title'])).toEqual({ id: t.a, title: 'banana' });
     expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeNull();
-    expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
+    expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), updatedAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
   });
 });
 

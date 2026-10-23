@@ -61,7 +61,8 @@ const writes: Record<string, () => void> = {
   'removeRelationById': () => e.removeRelationById(rel),
   'unlink': () => e.write(project).unlink('contains'),
   'unlinkAll': () => e.write(project).unlinkAll(),
-  'updateEntity': () => e.updateEntity(task, { title: 'changed', meta: null }),
+  'set null and delete': () => e.write(task).set('title', null).delete('meta'),
+  'trash': () => e.write(task).trash(),
   'destroy': () => e.write(task).destroy(),
   'destroy keeping it stored': () => e.write(task).destroy({ keepStored: true }),
   'destroy then create the same id': () => { e.write(task).destroy(); e.create('Task', { id: task }).set('title', 'again'); },
@@ -113,7 +114,7 @@ describe('a unit that returns', () => {
       e.write(other).set('title', 'two');
       expect(calls).toEqual([]);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
   });
 
   it('sends nothing, not even the bracket, when it wrote nothing', () => {
@@ -128,7 +129,7 @@ describe('a unit inside another', () => {
       e.transact(() => e.write(task).set('title', 'inner'));
       expect(calls).toEqual([]);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
   });
 
   it('that throws undoes only its own writes, and the outer keeps going', () => {
@@ -138,7 +139,7 @@ describe('a unit inside another', () => {
       expect(e.findById(task)).toMatchObject({ title: 'outer' });
       expect(e.findById(other)).toMatchObject({ title: 'b' });
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onUnitEnd']);
+    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
     expect(e.findById(task)).toMatchObject({ title: 'outer' });
   });
 

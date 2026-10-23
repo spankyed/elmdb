@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateOptions, QueryBuilder, WriteBuilder } from './runtime.ts';
+import type { CreateOptions, QueryBuilder, WriteBuilder, WriteOptions } from './runtime.ts';
 import { createEntity } from './attribute-storage.ts';
 import type { CreatedEntityFields } from './entity-helpers.ts';
 import type { Ears } from './engine.ts';
@@ -44,12 +44,12 @@ export interface TypedCreate<S extends EntityShapes, N extends string = string> 
 
 /** Writes to the entity with `id`, creating it as `type` when no entity has it */
 export interface TypedUpsert<S extends EntityShapes, N extends string = string> {
-  <E extends string>(type: Name<N, E>, id: EARS.EntityId): WriteBuilder<E, S>;
+  <E extends string>(type: Name<N, E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E, S>;
 }
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
 export interface TypedWrite<S extends EntityShapes> {
-  <E extends string>(id: EARS.EntityId<E>): WriteBuilder<E, S>;
+  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S>;
 }
 
 export interface TypedFindById<S extends EntityShapes> {
@@ -88,11 +88,6 @@ export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends stri
   providedId?: EARS.EntityId,
 ) => ShapeOf<S, E> & CreatedEntityFields;
 
-/** Writes the given fields (null drops one) and, unless skipped, `updatedAt`. */
-export interface TypedUpdateEntity<S extends EntityShapes> {
-  <E extends string>(id: EARS.EntityId<E>, updates: { [K in keyof ShapeOf<S, E>]?: ShapeOf<S, E>[K] | null }, skipTimestamp?: boolean): void;
-}
-
 export interface TypedEars<S extends EntityShapes, N extends string = string> {
   query: TypedQuery<S, N>;
   create: TypedCreate<S, N>;
@@ -104,7 +99,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string> {
   findWhere: TypedFindWhere<S, N>;
   createEntity: TypedCreateEntity<S, N>;
   createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
-  updateEntity: TypedUpdateEntity<S>;
   getAttr: TypedGetAttr<S>;
 }
 
@@ -136,7 +130,6 @@ export function defineEars<S extends EntityShapes, N extends string = string>(en
     findWhere: on('findWhere'),
     createEntity,
     createEntityWithDefaults: on('createEntityWithDefaults'),
-    updateEntity: on('updateEntity'),
     getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N>;
 }

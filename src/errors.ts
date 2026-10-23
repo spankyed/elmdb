@@ -10,7 +10,7 @@ export type EarsErrorCode =
   | 'TYPE_MISMATCH'
   /** A write named an attribute the engine owns */
   | 'RESERVED_ATTRIBUTE'
-  /** A `where` was given no value to compare with */
+  /** A `where` was given no value to compare with, or `set` none to store */
   | 'NO_VALUE'
   /** A list write (`add`, `deleteAt`, `deleteValue`) named an attribute whose value isn't a list */
   | 'NOT_A_LIST';
@@ -28,9 +28,10 @@ export class EarsError extends Error {
 
 /**
  * Attributes only the engine writes: its own kinds (a role is written by `grant`, a relation's details by
- * `link`, when an entity was trashed by `trash`) and an entity's identity, type and creation time.
+ * `link`, when an entity was trashed by `trash`) and an entity's identity, type, creation time and last change, which
+ * the engine stamps on every attribute write (`updatedAt`).
  */
-export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'createdAt', 'role', 'relationDetails', 'trashedAt'] as const;
+export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'createdAt', 'updatedAt', 'role', 'relationDetails', 'trashedAt'] as const;
 
 /** Throws `RESERVED_ATTRIBUTE` for a name only the engine writes */
 export function refuseReserved(name: string, via: string): void {

@@ -7,7 +7,10 @@ import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
-import type { CreateOptions, LinkOptions, WriteBuilder } from './runtime.ts';
+import type { CreateOptions, LinkOptions, WriteBuilder, WriteOptions } from './runtime.ts';
+
+/** When the entity last changed: stamped by the engine, never written by a caller */
+const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
 
 const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn', 'symmetric'] satisfies Array<keyof LinkOptions>;
 
@@ -21,12 +24,12 @@ export interface Create {
 
 /** Writes to the entity with this id, creating it as `type` when no entity has it */
 export interface Upsert {
-  <E extends string>(type: TypeName<E>, id: EARS.EntityId): WriteBuilder<E>;
+  <E extends string>(type: TypeName<E>, id: EARS.EntityId, options?: WriteOptions): WriteBuilder<E>;
 }
 
 /** Writes to the entity with this id, which must exist */
 export interface Write {
-  <E extends string>(id: EARS.EntityId<E>): WriteBuilder<E>;
+  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
 /** An engine's writes, over its storage, edge store and graph walks */
@@ -72,41 +75,60 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
     );
   }
 
-  function builder(id: EARS.EntityId): WriteBuilder {
+  /**
+   * The writes to one entity. Its attribute writes stamp `updatedAt` — once per builder, so a chain of them is one
+   * change — unless `touch` is off; links, roles and the trash don't.
+   */
+  function builder(id: EARS.EntityId, touch = true): WriteBuilder {
+    let stamped = !touch;
+    const changed = () => {
+      if (stamped) return;
+      stamped = true;
+      putAttr(id, UPDATED_AT, Date.now());
+    };
     const self: WriteBuilder = {
       set(k, v) {
         refuseReserved(k, 'set');
+        if (v === undefined) throw new EarsError('NO_VALUE', `set('${k}'): no value to store. delete('${k}') removes the attribute`);
         putAttr(id, attr(k), v);
+        changed();
         return self;
       },
       setMany(attrs) {
         for (const k of Object.keys(attrs)) refuseReserved(k, 'setMany');
-        for (const [k, v] of Object.entries(attrs)) putAttr(id, attr(k), v);
+        const defined = Object.entries(attrs).filter(([, v]) => v !== undefined);
+        for (const [k, v] of defined) putAttr(id, attr(k), v);
+        if (defined.length > 0) changed();
         return self;
       },
       add(k, v) {
         refuseReserved(k, 'add');
         appendAttr(id, attr(k), v);
+        changed();
         return self;
       },
       merge(k, v) {
         refuseReserved(k, 'merge');
         mergeAttr(id, attr(k), v);
+        changed();
         return self;
       },
       delete(k) {
         refuseReserved(k, 'delete');
         deleteAttr(id, attr(k));
+        changed();
         return self;
       },
       deleteAt(k, index) {
         refuseReserved(k, 'deleteAt');
         removeAt(id, attr(k), index);
+        changed();
         return self;
       },
       deleteValue(k, v) {
         refuseReserved(k, 'deleteValue');
         removeValue(id, attr(k), v);
+        changed();
         return self;
       },
 
@@ -169,7 +191,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
     return self;
   }
 
-  const create = ((type: string, { id: given, createdAt }: CreateOptions = {}) => {
+  const create = ((type: string, { id: given, createdAt, updatedAt }: CreateOptions = {}) => {
     requireType(type, 'create');
     let id: EARS.EntityId;
     if (given !== undefined) {
@@ -185,24 +207,27 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, journal 
       id = createEntity(type);
     }
     entityCreated(id, type);
-    putAttr(id, attr('createdAt'), createdAt ?? Date.now());
-    return builder(id);
+    const at = createdAt ?? Date.now();
+    putAttr(id, attr('createdAt'), at);
+    putAttr(id, UPDATED_AT, updatedAt ?? at);
+    // The creation is the entity's first change: what the builder writes now is part of it
+    return builder(id, false);
   }) as Create;
 
-  const write = ((id: EARS.EntityId) => {
+  const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
     if (!hasEntity(id)) {
       throw new EarsError('NO_SUCH_ENTITY', `write(${JSON.stringify(id)}): no entity has this id. create(type) makes one; upsert(type, id) makes it when missing`);
     }
-    return builder(id);
+    return builder(id, touch);
   }) as Write;
 
-  const upsert = ((type: string, id: EARS.EntityId) => {
+  const upsert = ((type: string, id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
     requireType(type, 'upsert');
     if (!hasEntity(id)) return create(type, { id });
     if (entityTypeOf(id) !== type) {
       throw new EarsError('TYPE_MISMATCH', `upsert(${JSON.stringify(type)}, ${JSON.stringify(id)}): that entity is a ${entityTypeOf(id)}`);
     }
-    return builder(id);
+    return builder(id, touch);
   }) as Upsert;
 
   /**

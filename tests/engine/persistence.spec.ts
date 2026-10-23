@@ -20,20 +20,24 @@ describe('persistence sink', () => {
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { info: { order: 2 } });
     e.write(b).link('contains', a, { replace: true });
-    e.updateEntity(a, { title: 'B', gone: null });
+    e.write(a).set('title', 'B').delete('gone');
     e.write(a).destroy();
     e.write(b).destroy({ keepStored: true });
 
     expect(calls).toEqual([
       ['onCreateEntity', '#1', 'Task'],
       ['onPutAttr', 'createdAt', '#1', 1000],
+      ['onPutAttr', 'updatedAt', '#1', 1000],
       ['onPutAttr', 'title', '#1', 'A'],
       ['onPutAttr', 'tag', '#1', ['x']],
       ['onPutAttr', 'tag', '#1', ['x', 'y']],
       ['onCreateEntity', '#2', 'Project'],
       ['onPutAttr', 'createdAt', '#2', 1000],
+      ['onPutAttr', 'updatedAt', '#2', 1000],
       ['onPutAttr', 'title', '#2', 'P'],
+      // A write's first attribute change stamps updatedAt, once for the builder
       ['onPutAttr', 'meta', '#1', { k: 1 }],
+      ['onPutAttr', 'updatedAt', '#1', 1000],
       ['onPutAttr', 'tag', '#1', ['y']],
       ['onPutAttr', 'tag', '#1', []],
       ['onPutAttr', 'role', '#1', ['lead']],
@@ -41,8 +45,8 @@ describe('persistence sink', () => {
       ['onUpdateRelation', '#3', { info: { order: 2 } }],
       ['onRemoveRelation', '#3'],
       ['onAddRelation', '#4', 'contains', '#2', '#1', undefined],
-      ['onPutAttr', 'updatedAt', '#1', 1000],
       ['onPutAttr', 'title', '#1', 'B'],
+      ['onPutAttr', 'updatedAt', '#1', 1000],
       ['onRemoveRelation', '#4', '#1'],
       ['onDestroyEntity', '#1'],
     ]);
@@ -59,13 +63,15 @@ describe('persistence sink', () => {
     e.admin.putAttr(a, 'x', [1, 2]);
     e.admin.deleteAttr(a, 'x');
     e.admin.deleteAttr(a, 'x');
-    // Each create: the entity with its type, then its createdAt; `entityType` is the id's, never stored
-    expect(calls.slice(0, 2)).toEqual([
+    // Each create: the entity with its type, then its createdAt and updatedAt; `entityType` is the id's, never stored
+    expect(calls.slice(0, 3)).toEqual([
       ['onCreateEntity', '#1', 'Task'],
       ['onPutAttr', 'createdAt', '#1', 1000],
+      ['onPutAttr', 'updatedAt', '#1', 1000],
     ]);
-    // A relation's details reach the sink as its row (onAddRelation, onUpdateRelation), never as an attribute
-    expect(calls.slice(6)).toEqual([
+    // A relation's details reach the sink as its row (onAddRelation, onUpdateRelation), never as an attribute; the
+    // admin's direct writes stamp nothing
+    expect(calls.slice(9)).toEqual([
       ['onAddRelation', '#4', 'refs', '#1', '#2', undefined],
       ['onUpdateRelation', '#4', { tgt: '#3', info: 'why' }],
       ['onPutAttr', 'x', '#1', 1],

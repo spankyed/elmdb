@@ -41,7 +41,6 @@ export interface Ears {
   createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(
     entityType: EARS.Entity, data: Partial<T>, prefix?: string, providedId?: EARS.EntityId,
   ): T & CreatedEntityFields;
-  updateEntity(id: EARS.EntityId, updates: Record<string, unknown>, skipTimestamp?: boolean): void;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
@@ -126,7 +125,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
   const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, journal });
   const finders = createQueryHelpers(query);
   const counters = createEntityCounters(storage);
-  const entityHelpers = createEntityHelpers({ create, write, counters });
+  const entityHelpers = createEntityHelpers({ create, counters });
   const relationReads = createRelationReads({ edgeStore, relations, storage });
   const repositories = createRepositoryRegistry();
 

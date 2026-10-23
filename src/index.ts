@@ -9,11 +9,10 @@ export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts'
 export type { EdgeStore, EdgeMatch } from './edge-store.ts';
 export type { RelationIndex, RelationIndexEntry } from './relation-index.ts';
 export type {
-  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, FieldValue, FieldValues, ListElement,
+  EARSRuntimeDeps, QueryBuilder, WriteBuilder, LinkOptions, CreateOptions, WriteOptions, FieldValue, FieldValues, ListElement,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, type EntityRow, type SchemaStats } from './attribute-storage.ts';
-export { prepareEntity } from './entity-helpers.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
 export { getTimestamp } from './entity-utils.ts';
 export type { RelationMatch, RelationRow, RelationStats } from './relations.ts';
@@ -29,6 +28,6 @@ export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entitie
 export {
   defineEars,
   type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedFindById, type TypedFindAll, type TypedFindWhere, type TypedCreateEntity,
-  type TypedGetAttr, type TypedCreateEntityWithDefaults, type TypedUpdateEntity,
+  type TypedGetAttr, type TypedCreateEntityWithDefaults,
 } from './typed.ts';
 export { bp, type Blueprint, type BlueprintBuilder } from './blueprint.ts';

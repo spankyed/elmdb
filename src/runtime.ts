@@ -179,6 +179,17 @@ export interface CreateOptions {
   id?: EARS.EntityId;
   /** When it was created, in place of now: an import keeping an original time */
   createdAt?: number;
+  /** When it last changed, in place of its creation time: an import keeping an original time */
+  updatedAt?: number;
+}
+
+/** What `write` and `upsert` are given besides the entity */
+export interface WriteOptions {
+  /**
+   * Whether the builder's attribute writes stamp `updatedAt` (they do by default). `false` is for a write that is no
+   * edit of the entity — when it was last viewed, a position kept for later.
+   */
+  touch?: boolean;
 }
 
 /**
@@ -199,12 +210,16 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * The writes to one entity, from `create`, `upsert` or `write`. `E` and `S` type them: started from a
  * declared entity type or an id tagged with one, the values of declared fields are checked; from a plain
  * id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
- * `entityType`, `createdAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write.
+ * `entityType`, `createdAt`, `updatedAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write, and
+ * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
  */
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}> {
-  /** Replaces the attribute's value with `v` (a list is one array value) */
+  /**
+   * Replaces the attribute's value with `v` (a list is one array value). `null` is a value; `undefined` is refused,
+   * since `delete(k)` is what removes an attribute
+   */
   set<K extends string>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S>;
-  /** `set` for each field; refuses them all, writing none, when one is the engine's */
+  /** `set` for each field, leaving one whose value is `undefined` as it is; refuses them all, writing none, when one is the engine's */
   setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S>;
   /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
   add<K extends string>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S>;
