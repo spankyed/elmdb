@@ -94,11 +94,11 @@ describe('openLmdbStore', () => {
       .set('tags', ['only']).add('grown', 'a').add('grown', 'b').set('meta', { k: [1] }).set('nothing', null)
       .grant('current').id();
     await flushed();
-    const written = engine.getAll(note);
+    const written = engine.getRow(note);
     first.close();
 
     await openStore().hydrate();
-    expect(engine.getAll(note)).toEqual(written);
+    expect(engine.getRow(note)).toEqual(written);
     expect(written).toMatchObject({ tags: ['only'], grown: ['a', 'b'], meta: { k: [1] }, nothing: null, role: ['current'] });
   });
 
@@ -271,7 +271,7 @@ describe('openLmdbStore', () => {
     const second = openStore();
     await second.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
-    expect(engine.getAll(id('Note-2'))).toEqual({});
+    expect(engine.getRow(id('Note-2'))).toBeUndefined();
     expect(engine.admin.getEntitiesOfType('Note')).toEqual(['Note-1']);
     expect(engine.admin.getEntitiesOfType('Relation')).toEqual([]);
   });

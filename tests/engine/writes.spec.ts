@@ -142,7 +142,7 @@ describe('attribute writes', () => {
 
   it('a one-element list reads as a list, whichever write made it', () => {
     const id = e.create('Task').set('written', ['only']).add('added', 'only').id();
-    expect(e.getAll(id)).toMatchObject({ written: ['only'], added: ['only'] });
+    expect(e.getRow(id)).toMatchObject({ written: ['only'], added: ['only'] });
     expect(e.query('Task').pickAll()[0]).toMatchObject({ written: ['only'], added: ['only'] });
   });
 
@@ -188,7 +188,7 @@ describe('attribute writes', () => {
 
   it.each(['id', 'entityType', 'createdAt', 'role', 'relationDetails'])('refuses %s, which only the engine writes', (name) => {
     const id = e.create('Task').id();
-    const before = e.getAll(id);
+    const before = e.getRow(id);
     const w = () => e.write(id);
     for (const attempt of [
       () => w().set(name, 'x'), () => w().add(name, 'x'), () => w().merge(name, {}), () => w().delete(name),
@@ -197,7 +197,7 @@ describe('attribute writes', () => {
       expect(attempt).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
     }
     // setMany refused before writing any field
-    expect(e.getAll(id)).toEqual(before);
+    expect(e.getRow(id)).toEqual(before);
   });
 
   it('updateEntity writes fields and updatedAt, deletes nulls and replaces arrays', () => {
@@ -258,7 +258,7 @@ describe('trash', () => {
     e.write(binned).restore();
     expect(e.query('Task').ids()).toEqual([kept, binned]);
     expect(e.query.trashed('Task').ids()).toEqual([]);
-    expect(e.getAll(binned)).not.toHaveProperty('trashedAt');
+    expect(e.getRow(binned)).not.toHaveProperty('trashedAt');
   });
 
   it('keeps the first time when trashed again, and refuses trashedAt as an attribute write', () => {
@@ -278,6 +278,20 @@ describe('trash', () => {
   });
 });
 
+describe('rows', () => {
+  it('a row is the id, the type and every attribute; none for an id no entity has; a trashed one all the same', () => {
+    const id = e.create('Task').set('title', 'A').grant('lead').id();
+    const row = { id, entityType: 'Task', createdAt: NOW, title: 'A', role: ['lead'] };
+    expect(e.getRow(id)).toEqual(row);
+    expect(e.query.ids(id).pickAll()).toEqual([row]);
+    expect(e.findById(id)).toEqual(row);
+    expect(e.getRow('Task-none' as Id)).toBeUndefined();
+    e.write(id).trash(7);
+    expect(e.getRow(id)).toEqual({ ...row, trashedAt: 7 });
+    expect(e.findById(id)).toBeUndefined();
+  });
+});
+
 describe('finders', () => {
   it('skip rows in the trash', () => {
     const a = e.create('Task').setMany({ title: 'A', status: 'open' }).id();
@@ -294,7 +308,7 @@ describe('finders', () => {
     const a = e.create('Task').set('title', 'A').set('tag', [1, 2]).id();
     const p = e.create('Project').id();
     e.write(p).link('contains', a);
-    expect(e.getAll(a)).toEqual({ entityType: 'Task', createdAt: NOW, title: 'A', tag: [1, 2] });
+    expect(e.getRow(a)).toEqual({ id: a, entityType: 'Task', createdAt: NOW, title: 'A', tag: [1, 2] });
     // `entityType` is read from the id, so it is on every row and in every read, and stored as no attribute
     expect(e.getAttr(a, 'entityType')).toBe('Task');
     expect(e.getAttr(p, 'entityType')).toBe('Project');

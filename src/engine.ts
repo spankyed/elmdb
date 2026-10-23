@@ -4,7 +4,7 @@
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createRelationIndex, type RelationIndex } from './relation-index.ts';
-import { createAttributeStorage, type SchemaStats } from './attribute-storage.ts';
+import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
 import { createEdgeStore, type EdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
@@ -44,8 +44,8 @@ export interface Ears {
   updateEntity(id: EARS.EntityId, updates: Record<string, unknown>, skipTimestamp?: boolean): void;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
-  /** Every attribute the entity holds, each exactly as written, with its `entityType` */
-  getAll(id: EARS.EntityId): Record<string, unknown>;
+  /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
+  getRow(id: EARS.EntityId): EntityRow | undefined;
   getRoles(id: EARS.EntityId): string[];
   getAllEntityTypes(): EARS.Entity[];
   getAllAttributeKinds(): EARS.AttrKind[];
@@ -139,7 +139,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType }: EARSR
     ...graph,
     spawn: createSpawn({ create, query }),
     getAttr: storage.getAttr,
-    getAll: storage.getAll,
+    getRow: storage.getRow,
     getRoles: storage.getRoles,
     getAllEntityTypes: storage.getAllEntityTypes,
     getAllAttributeKinds: storage.getAllAttributeKinds,

@@ -59,7 +59,7 @@ export interface Query extends QueryEntries {
 export function createQuery({ storage, relations, isEntityType }: { storage: AttributeStorage; relations: RelationIndexStore; isEntityType: (name: string) => boolean }): Query {
   const {
     getAllEntities, getEntitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, removals, getAttr, hasAttr,
-    findEntitiesInRelationTo, findEntitiesByRelationTo, getAll,
+    findEntitiesInRelationTo, findEntitiesByRelationTo, getRow,
   } = storage;
   const relationIndex = relations.index;
 
@@ -228,13 +228,8 @@ export function createQuery({ storage, relations, isEntityType }: { storage: Att
           return self.pick(f);
         }),
 
-        pickAll: () => {
-          return cur().map(i => {
-            const o: Record<string, unknown> = { id: i };
-            Object.assign(o, getAll(i));
-            return o as { id: EARS.EntityId } & { [K in string]: unknown };
-          });
-        },
+        // A step's ids are in the engine, so each has a row
+        pickAll: () => cur().map((i) => getRow(i)!),
 
         linksPick: <K extends string, A extends readonly string[]>(
           relKinds: K | readonly K[],

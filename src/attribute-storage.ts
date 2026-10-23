@@ -356,11 +356,12 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return roles === ABSENT ? [] : roles as unknown as string[];
   };
 
-  /** Every attribute the entity holds, each exactly as it was written */
-  const getAll = (id: EARS.EntityId) => {
-    const out: Record<string, unknown> = hasEntity(id) ? { [ENTITY_TYPE]: entityTypeOf(id) } : {};
-    for (const [k, b] of store) if (b.has(id)) out[k] = b.get(id);
-    return out;
+  /** The entity's row — its id, type and every attribute, each exactly as written — or undefined when no entity has the id */
+  const getRow = (id: EARS.EntityId): EntityRow | undefined => {
+    if (!hasEntity(id)) return undefined;
+    const row: EntityRow = { id, entityType: entityTypeOf(id) };
+    for (const [k, b] of store) if (b.has(id)) row[k] = b.get(id);
+    return row;
   };
 
   const getAllEntities = () => {
@@ -475,13 +476,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
-    getAttr, hasAttr, getRoles, getAll, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
+    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
     findEntitiesInRelationTo, findEntitiesByRelationTo,
     destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllEntityTypes, getAttributeStats, getSchemaStats,
   };
 }
 
 export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
+
+/** An entity as a read gives it: its id and type, and every attribute it holds */
+export type EntityRow = { id: EARS.EntityId; entityType: EARS.Entity } & Record<string, unknown>;
 
 /** Entities per type, and each attribute kind's and relation kind's use, over a whole engine */
 export interface SchemaStats {

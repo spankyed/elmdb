@@ -191,7 +191,6 @@ export interface Ears {
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
     // (undocumented)
     generateShortCode(entityType: EARS.Entity, prefix: string): string;
-    getAll(id: EARS.EntityId): Record<string, unknown>;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
     // (undocumented)
@@ -208,6 +207,7 @@ export interface Ears {
     getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
     getRoles(id: EARS.EntityId): string[];
+    getRow(id: EARS.EntityId): EntityRow | undefined;
     // (undocumented)
     getSchemaStats(): SchemaStats;
     isEntityType(name: string): boolean;
@@ -328,6 +328,12 @@ export interface EdgeStore {
 
 // @public
 export type EntityNameArg<N extends string, E extends string> = string extends E ? E : [E] extends [N] ? E : N;
+
+// @public
+export type EntityRow = {
+    id: EARS.EntityId;
+    entityType: EARS.Entity;
+} & Record<string, unknown>;
 
 // @public
 export type EntityShapes = {

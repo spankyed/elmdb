@@ -173,6 +173,6 @@ describe('roles', () => {
     e.write(b).revoke('free');
     e.write(b).revoke('owner');
     expect(e.getRoles(b)).toEqual([]);
-    expect(e.getAll(b)).not.toHaveProperty('role');
+    expect(e.getRow(b)).not.toHaveProperty('role');
   });
 });

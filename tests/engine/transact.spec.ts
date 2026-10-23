@@ -14,7 +14,7 @@ let calls: SinkCall[];
 function state() {
   const ids = [...e.admin.getAllEntities()].sort();
   return structuredClone({
-    rows: ids.map((id) => [id, e.getAll(id)]),
+    rows: ids.map((id) => [id, e.getRow(id)]),
     types: Object.fromEntries(e.getAllEntityTypes().map((t) => [t, [...e.admin.getEntitiesOfType(t)].sort()])),
     relations: Object.keys(e.admin.relationIndex).sort().map((kind) => {
       const entry = e.admin.relationIndex[kind];
