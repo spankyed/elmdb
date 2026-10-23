@@ -30,31 +30,15 @@ export interface Create {
 }
 
 // @public
-export interface CreatedEntityFields {
-    // (undocumented)
-    createdAt: number;
-    // (undocumented)
-    entityType: EARS.Entity;
-    // (undocumented)
-    id: EARS.EntityId;
-    // (undocumented)
-    label: string;
-    // (undocumented)
-    shortCode: string;
-    // (undocumented)
-    updatedAt: number;
-}
-
-// @public
 export function createEarsEngine(input: EARSRuntimeDeps): EarsEngine;
 
 // @public
 export type CreateFields<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? {
-    [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K];
+    [K in keyof ShapeOf<S, E> as K extends Exclude<RequiredField<S, E>, NumberedField<S, E>> ? K : never]: ShapeOf<S, E>[K];
 } & {
-    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K];
+    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> | NumberedField<S, E> ? K : never]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
 
 // @public
@@ -130,10 +114,6 @@ export namespace EARS {
 export interface Ears {
     ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
-    // (undocumented)
-    createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(entityType: EARS.Entity, data: Partial<T> & {
-        id?: EARS.EntityId;
-    }, prefix?: string): T & CreatedEntityFields;
     descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
     findAll<T = unknown>(entityType: EARS.Entity): T[];
@@ -143,10 +123,7 @@ export interface Ears {
     findRelations(match?: RelationMatch): RelationRow[];
     // (undocumented)
     findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
-    // (undocumented)
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
-    // (undocumented)
-    generateShortCode(entityType: EARS.Entity, prefix: string): string;
     // (undocumented)
     getAllAttributeKinds(): EARS.AttrKind[];
     // (undocumented)
@@ -243,7 +220,7 @@ export interface EARSRuntimeDeps {
     isRelationKind: (v: string) => boolean;
     isRole: (v: string) => boolean;
     persistence?: PersistenceSink;
-    requiredFields?: (type: string) => readonly string[];
+    rowRules?: (type: string) => RowRules | undefined;
 }
 
 // @public
@@ -299,6 +276,13 @@ export function makeShardedPersistence(policy: PartitionPolicy, sinks: Record<Pa
 
 // @public
 export const noopSink: PersistenceSink;
+
+// @public
+export type NumberedField<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? 'shortCode' extends RequiredField<S, E> ? (ShapeOf<S, E> extends {
+    shortCode: ShortCode<string>;
+} ? 'shortCode' : never) : never : never;
 
 // @public
 export type OptionalField<S extends EntityShapes, E extends string> = [
@@ -491,6 +475,12 @@ export interface RowIdentity {
 }
 
 // @public
+export interface RowRules {
+    required: readonly string[];
+    shortCode?: string;
+}
+
+// @public
 export interface SchemaStats {
     // (undocumented)
     attributes: Record<string, {
@@ -527,22 +517,18 @@ export interface ShardedPersistence extends PersistenceSink {
 }
 
 // @public
+export type ShortCode<P extends string> = `${P}-${number}`;
+
+// @public
 export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
     <E extends string>(type: Name<N, E>, ...row: RowArg<S, E, CreateFields<S, E> & RowIdentity>): WriteBuilder<E, S, R, O>;
 }
 
-// @public
-export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends string = string> = <E extends string>(entityType: Name<N, E>, data: DefaultedRow<S, E> & {
-    id?: EARS.EntityId;
-}, prefix?: string) => ShapeOf<S, E> & CreatedEntityFields;
-
 // @public (undocumented)
 export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
-    // (undocumented)
-    createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
     // (undocumented)
     findAll: TypedFindAll<S, N>;
     // (undocumented)

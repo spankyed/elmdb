@@ -11,7 +11,6 @@ import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createQueryHelpers } from './query-helpers.ts';
 import { createEntityCounters } from './entity-utils.ts';
-import { createEntityHelpers, type CreatedEntityFields } from './entity-helpers.ts';
 import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
@@ -42,9 +41,6 @@ export interface Ears {
   findById<T = unknown>(id: EARS.EntityId): T | undefined;
   findAll<T = unknown>(entityType: EARS.Entity): T[];
   findWhere<T = unknown>(entityType: EARS.Entity, field: string, value: unknown): T[];
-  createEntityWithDefaults<T extends Record<string, unknown> = Record<string, unknown>>(
-    entityType: EARS.Entity, data: Partial<T> & { id?: EARS.EntityId }, prefix?: string,
-  ): T & CreatedEntityFields;
   /** An attribute's value, exactly as written, or null */
   getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
@@ -66,7 +62,7 @@ export interface Ears {
   ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
   /** Whether linking `src` to `tgt` would close a cycle through `kinds` */
   wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
-  generateShortCode(entityType: EARS.Entity, prefix: string): string;
+  /** `<baseLabel> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
   generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
   /** The registered repositories; reading an unregistered name throws */
   repository: Record<string, unknown>;
@@ -111,7 +107,7 @@ export interface EarsEngine extends Ears {
  * a role write or a query by role may name; `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, requiredFields = () => [] }: EARSRuntimeDeps): EarsEngine {
+export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, rowRules = () => undefined }: EARSRuntimeDeps): EarsEngine {
   const names = createNameChecks({ isRelationKind, isRole });
   const { journal, unitSink, transact } = createJournal(persistence);
   const relations = createRelationIndex(journal);
@@ -119,18 +115,16 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const edgeStore = createEdgeStore({ relations, storage });
   const query = createQuery({ storage, isEntityType, names });
   const graph = createGraph({ query, names });
-  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, requiredFields, names, journal });
-  const finders = createQueryHelpers(query);
   const counters = createEntityCounters(storage);
-  const entityHelpers = createEntityHelpers({ create, counters });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal });
+  const finders = createQueryHelpers(query);
   const relationReads = createRelationReads({ edgeStore, relations, storage, names });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
     ...finders,
-    ...entityHelpers,
-    ...counters,
+    generateLabelWithCount: counters.generateLabelWithCount,
     ...relationReads,
     ...graph,
     getAttr: storage.getAttr,

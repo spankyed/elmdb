@@ -5,10 +5,11 @@ import type { Journal } from './journal.ts';
 import { newId, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
+import type { createEntityCounters } from './entity-utils.ts';
 import { EARS } from './entities.ts';
 import { EarsError, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
-import type { LinkOptions, RowIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions } from './runtime.ts';
 
 /** When the entity last changed: stamped by the engine, never written by a caller */
 const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
@@ -34,15 +35,17 @@ export interface Write {
 }
 
 /** An engine's writes, over its storage, edge store and graph walks */
-export function createWrites({ storage, edgeStore, graph, isEntityType, requiredFields, names, journal }: {
+export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal }: {
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
   graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle'>;
   isEntityType: (name: string) => boolean;
-  requiredFields: (type: string) => readonly string[];
+  rowRules: (type: string) => RowRules | undefined;
+  counters: Pick<ReturnType<typeof createEntityCounters>, 'generateShortCode'>;
   names: NameChecks;
 }) {
+  const requiredFields = (type: string) => rowRules(type)?.required ?? [];
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
@@ -208,7 +211,9 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
     // exists, so a create that fails leaves nothing behind
     const { id: given, createdAt, updatedAt, ...fields } = row;
     for (const field of Object.keys(fields)) refuseReserved(field, 'create');
-    const missing = requiredFields(type).filter((field) => fields[field] === undefined);
+    // A row that brings no short code is numbered, once every check has passed, so a refused create takes no number
+    const prefix = fields.shortCode === undefined ? rowRules(type)?.shortCode : undefined;
+    const missing = requiredFields(type).filter((field) => fields[field] === undefined && !(field === 'shortCode' && prefix));
     if (missing.length > 0) {
       throw new EarsError('REQUIRED_FIELD', `create(${JSON.stringify(type)}): the row lacks ${missing.map((field) => `"${field}"`).join(', ')}, which every ${type} holds`);
     }
@@ -225,6 +230,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, required
     } else {
       id = newId(type);
     }
+    if (prefix) fields.shortCode = counters.generateShortCode(type, prefix);
     entityCreated(id, type);
     const at = createdAt ?? Date.now();
     putAttr(id, attr('createdAt'), at);

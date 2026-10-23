@@ -13,7 +13,6 @@
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { CreateFields, QueryBuilder, RequiredField, RowIdentity, WhereValue, WriteBuilder, WriteOptions } from './runtime.ts';
 import { newId } from './attribute-storage.ts';
-import type { CreatedEntityFields } from './entity-helpers.ts';
 import type { Ears } from './engine.ts';
 
 /** An entity name argument: a declared name, or a name only known at runtime (see EntityNameArg) */
@@ -85,18 +84,6 @@ export interface TypedGetAttr<S extends EntityShapes> {
   (id: EARS.EntityId, field: string): unknown;
 }
 
-/** The row `createEntityWithDefaults` writes: `create`'s, with the short code and label it generates left optional */
-type DefaultedRow<S extends EntityShapes, E extends string> = [E] extends [keyof S]
-  ? Omit<CreateFields<S, E>, 'shortCode' | 'label'> & Partial<Pick<ShapeOf<S, E>, Extract<'shortCode' | 'label', keyof ShapeOf<S, E>>>>
-  : Record<string, unknown>;
-
-/** Creates an entity with a short code, label and timestamps filled in, and the id its row brings */
-export type TypedCreateEntityWithDefaults<S extends EntityShapes, N extends string = string> = <E extends string>(
-  entityType: Name<N, E>,
-  data: DefaultedRow<S, E> & { id?: EARS.EntityId },
-  prefix?: string,
-) => ShapeOf<S, E> & CreatedEntityFields;
-
 export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
   query: TypedQuery<S, N, R, O>;
   create: TypedCreate<S, N, R, O>;
@@ -107,7 +94,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
   findAll: TypedFindAll<S, N>;
   findWhere: TypedFindWhere<S, N>;
   newId: TypedNewId<S, N>;
-  createEntityWithDefaults: TypedCreateEntityWithDefaults<S, N>;
   getAttr: TypedGetAttr<S>;
 }
 
@@ -138,7 +124,6 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
     findAll: on('findAll'),
     findWhere: on('findWhere'),
     newId,
-    createEntityWithDefaults: on('createEntityWithDefaults'),
     getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N, R, O>;
 }

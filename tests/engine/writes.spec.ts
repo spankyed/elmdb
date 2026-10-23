@@ -52,52 +52,71 @@ describe('create', () => {
     expect(e.admin.getAllEntities()).toEqual([id]);
   });
 
-  it('createEntityWithDefaults fills in a short code, a label and timestamps', () => {
-    const created = e.createEntityWithDefaults('Project', { color: 'red' });
-    expect(created).toEqual({
-      id: expect.stringMatching(/^Project-/), color: 'red', entityType: 'Project',
-      shortCode: 'PRO-1', label: 'New Project 1', createdAt: NOW, updatedAt: NOW,
-    });
-    expect(e.findById(created.id)).toEqual({ ...created });
-    const second = e.createEntityWithDefaults('Project', { label: 'Named', id: 'Project-given' as Id }, 'PX');
-    expect(second).toMatchObject({ id: 'Project-given', shortCode: 'PX-1', label: 'Named' });
-    expect(e.generateShortCode('Project', 'P')).toBe('P-1');
-    expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 1');
+  it('numbers a row of a type with a short code prefix that brings none, and keeps one it brings', () => {
+    const e = numbered();
+    const id = e.create('Project', { color: 'red' }).id();
+    expect(e.findById(id)).toEqual({ id, entityType: 'Project', color: 'red', shortCode: 'PRO-1', createdAt: NOW, updatedAt: NOW });
+    expect(e.getAttr(e.create('Project', { shortCode: 'PRO-40' }).id(), 'shortCode')).toBe('PRO-40');
+    // A type with no prefix is not numbered
+    expect(e.getRow(e.create('Task', { shortCode: undefined, title: 'x' }).id())).not.toHaveProperty('shortCode');
+  });
+
+  it('takes no number for a create it refuses', () => {
+    const e = numbered();
+    expect(() => e.create('Project', { id: 'Task-1' as Id })).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
+    expect(() => e.create('Person', {})).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD', message: expect.stringContaining('"title"') }));
+    expect(e.getAttr(e.create('Project').id(), 'shortCode')).toBe('PRO-1');
+    expect(e.getAttr(e.create('Person', { title: 'x' }).id(), 'shortCode')).toBe('P-1');
   });
 });
 
+/** An engine whose Project rows are numbered `PRO-<n>` and Person rows `P-<n>`, a Person requiring its short code and title */
+const numbered = () => freshEngine({
+  isEntityType, isRelationKind, isRole,
+  rowRules: (type) => ({ Project: { required: [], shortCode: 'PRO' }, Person: { required: ['shortCode', 'title'], shortCode: 'P' } })[type],
+});
+const code = (e: EngineUnderTest, fields: Record<string, unknown> = {}) => e.getAttr(e.create('Project', fields).id(), 'shortCode');
+
 describe('numbering', () => {
   it('never hands a short code out twice, though the row holding the highest is destroyed', () => {
-    const first = e.createEntityWithDefaults('Project', {});
-    const second = e.createEntityWithDefaults('Project', {});
-    expect(second.shortCode).toBe('PRO-2');
-    e.write(second.id).destroy();
-    expect(e.createEntityWithDefaults('Project', {}).shortCode).toBe('PRO-3');
-    e.write(first.id).destroy();
-    expect(e.createEntityWithDefaults('Project', {}).shortCode).toBe('PRO-4');
+    const e = numbered();
+    const first = e.create('Project').id();
+    const second = e.create('Project').id();
+    expect(e.getAttr(second, 'shortCode')).toBe('PRO-2');
+    e.write(second).destroy();
+    expect(code(e)).toBe('PRO-3');
+    e.write(first).destroy();
+    expect(code(e)).toBe('PRO-4');
   });
 
   it('starts after the highest number a type already holds, and skips one a row took for itself', () => {
-    e.create('Task').set('shortCode', 'TSK-7');
-    e.create('Task').set('shortCode', 'TSK-x');
+    const e = numbered();
+    e.create('Project', { shortCode: 'PRO-7' });
+    e.create('Project', { shortCode: 'PRO-x' });
+    expect(code(e)).toBe('PRO-8');
+    e.create('Project', { shortCode: 'PRO-9' });
+    expect(code(e)).toBe('PRO-10');
+  });
+
+  it('numbers a default label per type and base the same way', () => {
     e.create('Task').set('label', 'New Task 2');
-    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-8');
-    e.create('Task').set('shortCode', 'TSK-9');
-    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-10');
     expect(e.generateLabelWithCount('New Task', 'Task')).toBe('New Task 3');
+    expect(e.generateLabelWithCount('Board', 'Project')).toBe('Board 1');
   });
 
   it('gives back the numbers a unit took when it throws', () => {
+    const e = numbered();
     expect(() => e.transact(() => {
-      e.generateShortCode('Task', 'TSK');
-      e.generateShortCode('Task', 'TSK');
+      e.create('Project');
+      e.create('Project');
       throw new Error('stop');
     })).toThrow('stop');
-    expect(e.generateShortCode('Task', 'TSK')).toBe('TSK-1');
+    expect(code(e)).toBe('PRO-1');
   });
 
   it('keeps its sequences out of query.all()', () => {
-    const id = e.createEntityWithDefaults('Task', {}).id;
+    const e = numbered();
+    const id = e.create('Project').id();
     expect(e.query.all().ids()).toEqual([id]);
   });
 });
@@ -121,7 +140,7 @@ describe('write', () => {
 });
 
 describe('required fields', () => {
-  const strict = () => freshEngine({ isEntityType, isRelationKind, isRole, requiredFields: (type) => (type === 'Task' ? ['title', 'done'] : []) });
+  const strict = () => freshEngine({ isEntityType, isRelationKind, isRole, rowRules: (type) => (type === 'Task' ? { required: ['title', 'done'] } : undefined) });
 
   it('refuses a created row without a field its type requires, before the entity exists', () => {
     const e = strict();

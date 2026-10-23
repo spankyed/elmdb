@@ -67,12 +67,29 @@ export interface EARSRuntimeDeps {
   isRelationKind: (v: string) => boolean;
   /** Whether a name is a role: `grant`, `revoke`, `grantExclusive` and `withRole` refuse one that isn't */
   isRole: (v: string) => boolean;
-  /**
-   * The fields an entity type's row must hold: `create` refuses a row without one, and `delete` one of them. None by
-   * default — an engine given no shapes knows of no required field
-   */
-  requiredFields?: (type: string) => readonly string[];
+  /** What a created row of a type is held to; nothing by default — an engine given no shapes knows of no rule */
+  rowRules?: (type: string) => RowRules | undefined;
 }
+
+/**
+ * What a created row of an entity type is held to, read off its shape by codegen (`apack pack generate-entries`), so
+ * a shape is the one place a rule is written
+ */
+export interface RowRules {
+  /** The fields its row must hold: the shape's required ones. `create` refuses a row without one, and `delete` one */
+  required: readonly string[];
+  /**
+   * The prefix `create` numbers the row's `shortCode` with, `<prefix>-<n>`, when the row brings none: the shape types
+   * the field `ShortCode<prefix>`. A number is never handed out twice for a type and prefix
+   */
+  shortCode?: string;
+}
+
+/**
+ * A short code, `<prefix>-<n>`. A shape whose `shortCode` field has this type has its rows numbered by `create`
+ * (`RowRules.shortCode`), so a typed `create` may leave the field out
+ */
+export type ShortCode<P extends string> = `${P}-${number}`;
 
 
 // ─── QueryBuilder fluent interface ─────────────────────────────────────
@@ -209,14 +226,23 @@ export type OptionalField<S extends EntityShapes, E extends string> =
 export type RequiredField<S extends EntityShapes, E extends string> =
   [E] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
 
+/** The field `create` writes when the row brings none: `shortCode`, where the shape types it as a `ShortCode` */
+export type NumberedField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? 'shortCode' extends RequiredField<S, E>
+      ? (ShapeOf<S, E> extends { shortCode: ShortCode<string> } ? 'shortCode' : never)
+      : never
+    : never;
+
 /**
- * The row `create` writes: for a declared shape, every required field and any optional one, so a row read back has
- * what its shape says it has; any fields otherwise (an undeclared type, or one known only at runtime)
+ * The row `create` writes: for a declared shape, every required field — but the short code `create` numbers — and
+ * any optional one, so a row read back has what its shape says it has; any fields otherwise (an undeclared type, or
+ * one known only at runtime)
  */
 export type CreateFields<S extends EntityShapes, E extends string> =
   [E] extends [keyof S]
-    ? { [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K] }
-      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
+    ? { [K in keyof ShapeOf<S, E> as K extends Exclude<RequiredField<S, E>, NumberedField<S, E>> ? K : never]: ShapeOf<S, E>[K] }
+      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> | NumberedField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
     : Record<string, unknown>;
 
 /** What `where(k, v)` and `findWhere` match field `K` against: a value, one element of a list field, or a predicate */

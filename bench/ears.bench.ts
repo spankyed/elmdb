@@ -17,7 +17,8 @@ const sink: PersistenceSink = {
   onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttr() {},
   onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
-const engine = freshEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink });
+// Task rows are numbered T-<n>, as an app's shapes number theirs
+const engine = freshEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T' } : undefined) });
 const { admin } = engine;
 
 const task = (i: number) => `Task-${i}` as Id;
@@ -92,7 +93,7 @@ describe('writes', () => {
   }, { iterations: 50, time: 0 });
 
   bench('1,000 short codes', () => {
-    for (let i = 0; i < 1000; i++) engine.generateShortCode('Task', 'T');
+    for (let i = 0; i < 1000; i++) engine.create('Task');
   }, { iterations: 20, time: 0 });
 
   // The same writes as one unit: what the journal costs
