@@ -459,11 +459,6 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     if (!unload) persistence.onDestroyEntity(id);
   }
 
-  const getAllAttributeKinds = (): EARS.AttrKind[] => Array.from(store.keys());
-  const getAllRelationKinds = (): string[] => Object.keys(relationIndex);
-  /** Every role an entity holds, once each */
-  const getAllRoles = (): string[] => [...new Set([...(store.get(EARS.AttrKind.Role)?.values() ?? [])].flat() as string[])];
-  const getAllEntityTypes = (): EARS.Entity[] => Array.from(entityIndex.keys());
 
   /** How many entities hold the attribute, and how many values they hold (a list's elements each count) */
   const getAttributeStats = (kind: EARS.AttrKind) => {
@@ -476,16 +471,24 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Tells the sink an entity was created */
   const entityCreated = (id: EARS.EntityId, entityType: EARS.Entity) => persistence.onCreateEntity(id, entityType);
 
-  /** The engine's data counted: entities per type, each attribute kind's use and each relation kind's */
+  /**
+   * The engine's data as it is, each map keyed by a name the data holds: entities per type, each attribute
+   * kind's use, each relation kind's, and the entities holding each role
+   */
   function getSchemaStats(): SchemaStats {
+    const roles: Record<string, number> = {};
+    for (const held of store.get(EARS.AttrKind.Role)?.values() ?? []) {
+      for (const role of new Set(held as string[])) roles[role] = (roles[role] ?? 0) + 1;
+    }
     return {
-      entities: Object.fromEntries(getAllEntityTypes().map((type) => [type, entityIndex.get(type)?.size ?? 0])),
-      attributes: Object.fromEntries(getAllAttributeKinds().map((kind) => [kind, getAttributeStats(kind)])),
+      entities: Object.fromEntries([...entityIndex].map(([type, ids]) => [type, ids.size])),
+      attributes: Object.fromEntries([...store.keys()].map((kind) => [kind, getAttributeStats(kind)])),
       relations: Object.fromEntries(Object.entries(relationIndex).map(([kind, { bySource, byTarget }]) => [kind, {
-        totalRelations: Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0),
+        total: Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0),
         uniqueSources: Object.keys(bySource).length,
         uniqueTargets: Object.keys(byTarget).length,
       }])),
+      roles,
     };
   }
 
@@ -495,7 +498,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById,
     getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
     findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf,
-    destroyEntity, getAllAttributeKinds, getAllRelationKinds, getAllRoles, getAllEntityTypes, getAttributeStats, getSchemaStats,
+    destroyEntity, getAttributeStats, getSchemaStats,
   };
 }
 
@@ -504,11 +507,26 @@ export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
 /** An entity as a read gives it: its id and type, and every attribute it holds */
 export type EntityRow = { id: EARS.EntityId; entityType: EARS.Entity } & Record<string, unknown>;
 
-/** Entities per type, and each attribute kind's and relation kind's use, over a whole engine */
+/** Counts for one relation kind */
+export interface RelationStats {
+  /** Relations of the kind */
+  total: number;
+  /** Distinct entities that are a source of one */
+  uniqueSources: number;
+  /** Distinct entities that are a target of one */
+  uniqueTargets: number;
+}
+
+/** What an engine holds, each map keyed by a name its data holds */
 export interface SchemaStats {
+  /** Entities per type, the trash included */
   entities: Record<string, number>;
+  /** Per attribute kind, the entities holding it and the values they hold (a list's elements each count) */
   attributes: Record<string, { entityCount: number; totalValues: number }>;
-  relations: Record<string, { totalRelations: number; uniqueSources: number; uniqueTargets: number }>;
+  /** Per relation kind, its relations and the distinct entities at each end */
+  relations: Record<string, RelationStats>;
+  /** Per role, the entities holding it */
+  roles: Record<string, number>;
 }
 
 /** Whether a stored value is `v`, or a list containing it: what `where(k, v)` matches */

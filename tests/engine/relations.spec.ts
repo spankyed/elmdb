@@ -27,8 +27,8 @@ describe('links', () => {
     expect(e.query('Task').linkedFrom('blocks', a).ids()).toEqual([b]);
     expect(e.query('Task').linkedTo('blocks', b).ids()).toEqual([a]);
     expect(e.query('Task').linkedWith(a).ids()).toEqual([b]);
-    expect(e.getRelationStats('blocks')).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
-    expect(e.getRelationStats('refs')).toEqual({ total: 0, uniqueSources: 0, uniqueTargets: 0 });
+    expect(e.getSchemaStats().relations.blocks).toEqual({ total: 1, uniqueSources: 1, uniqueTargets: 1 });
+    expect(e.getSchemaStats().relations.refs).toBeUndefined();
   });
 
   it('linkedTo and linkedFrom without an end, and unlinkedTo and unlinkedFrom, filter by having an edge of the kind at all', () => {
@@ -85,7 +85,7 @@ describe('links', () => {
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', c, undefined]]);
     e.write(a).unlink('blocks', c).unlink('refs', c);
     expect(edges()).toEqual([]);
-    expect(e.getAllRelationKinds()).toEqual([]);
+    expect(Object.keys(e.getSchemaStats().relations)).toEqual([]);
     // A relation is its details: a removed one leaves no entity behind
     expect(e.admin.getEntitiesOfType('Relation')).toEqual([]);
 
@@ -101,7 +101,7 @@ describe('links', () => {
     e.write(b).link('refs', c);
     e.write(e.findRelations()[0].id).destroy();
     expect(edges()).toEqual([]);
-    expect(e.getAllRelationKinds()).toEqual([]);
+    expect(Object.keys(e.getSchemaStats().relations)).toEqual([]);
   });
 
   it('destroying a relation removes that one edge, leaving the other edges between its ends and the ends themselves', () => {
@@ -169,7 +169,6 @@ describe('relation kinds', () => {
       ['linkedTo', () => e.query('Task').linkedTo('blokcs', b)],
       ['linkedFrom', () => e.query('Task').linkedFrom('blokcs', a)],
       ['findRelations', () => e.findRelations({ kind: 'blokcs' })],
-      ['getRelationStats', () => e.getRelationStats('blokcs')],
       ['descendants', () => e.query.ids(a).descendants('blokcs')],
       ['ancestors', () => e.query.ids(b).ancestors('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
@@ -244,7 +243,7 @@ describe('declared roles', () => {
     const a = task('A');
     e.admin.putAttr(a, 'role', ['retired']);
     expect(e.getRoles(a)).toEqual(['retired']);
-    expect(e.getAllRoles()).toEqual(['retired']);
+    expect(e.getSchemaStats().roles).toEqual({ retired: 1 });
   });
 });
 

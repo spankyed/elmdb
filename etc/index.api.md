@@ -114,20 +114,10 @@ export interface Ears {
     create: Create;
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
-    // (undocumented)
-    getAllAttributeKinds(): EARS.AttrKind[];
-    // (undocumented)
-    getAllEntityTypes(): EARS.Entity[];
-    // (undocumented)
-    getAllRelationKinds(): string[];
-    getAllRoles(): string[];
     getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
-    // (undocumented)
-    getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
     getRoles(id: EARS.EntityId): string[];
     getRow(id: EARS.EntityId): EntityRow | undefined;
-    // (undocumented)
     getSchemaStats(): SchemaStats;
     isEntityType(name: string): boolean;
     isRelationKind(name: string): boolean;
@@ -487,19 +477,13 @@ export interface RowRules {
 
 // @public
 export interface SchemaStats {
-    // (undocumented)
     attributes: Record<string, {
         entityCount: number;
         totalValues: number;
     }>;
-    // (undocumented)
     entities: Record<string, number>;
-    // (undocumented)
-    relations: Record<string, {
-        totalRelations: number;
-        uniqueSources: number;
-        uniqueTargets: number;
-    }>;
+    relations: Record<string, RelationStats>;
+    roles: Record<string, number>;
 }
 
 // @public

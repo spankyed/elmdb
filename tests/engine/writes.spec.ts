@@ -27,7 +27,7 @@ describe('create', () => {
     const ids = [e.create('Task').id(), e.create('Task').id(), e.create('Project').id()];
     expect(new Set(ids).size).toBe(3);
     expect(e.admin.getEntitiesOfType('Task')).toEqual(ids.slice(0, 2));
-    expect(e.getAllEntityTypes()).toEqual(['Task', 'Project']);
+    expect(Object.keys(e.getSchemaStats().entities)).toEqual(['Task', 'Project']);
   });
 
   it('takes its row in one object: the fields, and the id and creation time it is given', () => {
@@ -328,14 +328,14 @@ describe('destroy', () => {
     expect(e.getRow(a)?.title).toBeUndefined();
     expect(e.admin.getEntitiesOfType('Task')).toEqual([b]);
     expect(e.findRelations().map((r) => [r.source, r.kind, r.target])).toEqual([[c, 'contains', b]]);
-    expect(e.getAllRelationKinds()).toEqual(['contains']);
+    expect(Object.keys(e.getSchemaStats().relations)).toEqual(['contains']);
     expect(e.query.ids(c).out('contains').ids()).toEqual([b]);
   });
 
   it('destroy forgets an emptied type', () => {
     const a = e.create('Person').id();
     e.write(a).destroy();
-    expect(e.getAllEntityTypes()).toEqual([]);
+    expect(Object.keys(e.getSchemaStats().entities)).toEqual([]);
     expect(e.admin.getAllEntities()).toEqual([]);
   });
 });
@@ -445,7 +445,7 @@ describe('rows', () => {
     expect(e.getRow(p)?.entityType).toBe('Project');
     expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getRow('Task-gone' as Id)?.entityType).toBeUndefined();
-    expect(e.getAllAttributeKinds()).toEqual(['createdAt', 'updatedAt', 'title', 'tag', 'relationDetails']);
+    expect(Object.keys(e.getSchemaStats().attributes)).toEqual(['createdAt', 'updatedAt', 'title', 'tag', 'relationDetails']);
     expect(e.getSchemaStats()).toEqual({
       entities: { Task: 1, Project: 1, Relation: 1 },
       attributes: {
@@ -453,7 +453,8 @@ describe('rows', () => {
         title: { entityCount: 1, totalValues: 1 },
         tag: { entityCount: 1, totalValues: 2 }, relationDetails: { entityCount: 1, totalValues: 1 },
       },
-      relations: { contains: { totalRelations: 1, uniqueSources: 1, uniqueTargets: 1 } },
+      relations: { contains: { total: 1, uniqueSources: 1, uniqueTargets: 1 } },
+      roles: {},
     });
   });
 

@@ -1,6 +1,5 @@
 import { EARS } from './entities.ts';
 import type { EdgeStore } from './edge-store.ts';
-import type { RelationIndexStore } from './relation-index.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { NameChecks } from './names.ts';
 
@@ -16,17 +15,7 @@ export interface RelationRow extends EARS.RelationDetail {
   id: EARS.EntityId;
 }
 
-/** Counts for one relation kind */
-export interface RelationStats {
-  /** Relations of the kind */
-  total: number;
-  /** Distinct entities that are a source of one */
-  uniqueSources: number;
-  /** Distinct entities that are a target of one */
-  uniqueTargets: number;
-}
-
-export function createRelationReads({ edgeStore, relations, storage, names }: { edgeStore: EdgeStore; relations: RelationIndexStore; storage: AttributeStorage; names: NameChecks }) {
+export function createRelationReads({ edgeStore, storage, names }: { edgeStore: EdgeStore; storage: AttributeStorage; names: NameChecks }) {
   function findRelations(match: RelationMatch = {}): RelationRow[] {
     if (match.kind !== undefined) names.relationKinds(match.kind, 'findRelations');
     return edgeStore.relIds(match).flatMap((id) => {
@@ -35,14 +24,5 @@ export function createRelationReads({ edgeStore, relations, storage, names }: { 
     });
   }
 
-  function getRelationStats(kind: EARS.RelKind): RelationStats {
-    names.relationKinds(kind, 'getRelationStats');
-    const entry = relations.index[kind];
-    if (!entry) return { total: 0, uniqueSources: 0, uniqueTargets: 0 };
-    const ids = new Set<string>();
-    for (const relIds of Object.values(entry.bySource)) relIds.forEach((id) => ids.add(id));
-    return { total: ids.size, uniqueSources: Object.keys(entry.bySource).length, uniqueTargets: Object.keys(entry.byTarget).length };
-  }
-
-  return { findRelations, getRelationStats };
+  return { findRelations };
 }

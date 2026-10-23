@@ -10,10 +10,10 @@ export type {
   EARSRuntimeDeps, QueryBuilder, WriteBuilder, RelationEdge, LinkOptions, RowIdentity, WriteOptions, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, NumberedField, CreateFields, WhereValue, RowRules, ShortCode,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
-export { entityTypeOf, type EntityRow, type SchemaStats } from './attribute-storage.ts';
+export { entityTypeOf, type EntityRow, type RelationStats, type SchemaStats } from './attribute-storage.ts';
 export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
 export { getTimestamp } from './entity-utils.ts';
-export type { RelationMatch, RelationRow, RelationStats } from './relations.ts';
+export type { RelationMatch, RelationRow } from './relations.ts';
 // Types that appear in the signatures above, so pack authors can name them.
 export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
 export { noopSink } from './runtime.ts';

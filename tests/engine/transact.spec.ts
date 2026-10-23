@@ -16,9 +16,9 @@ function state() {
   const ids = [...e.admin.getAllEntities()].sort();
   return structuredClone({
     rows: ids.map((id) => [id, e.getRow(id)]),
-    types: Object.fromEntries(e.getAllEntityTypes().map((t) => [t, [...e.admin.getEntitiesOfType(t)].sort()])),
+    types: Object.fromEntries(Object.keys(e.getSchemaStats().entities).map((t) => [t, [...e.admin.getEntitiesOfType(t)].sort()])),
     relations: e.findRelations().sort((x, y) => x.id.localeCompare(y.id)),
-    edges: [...e.getAllRelationKinds()].sort().map((kind) => [kind, ids.map((id) => [
+    edges: Object.keys(e.getSchemaStats().relations).sort().map((kind) => [kind, ids.map((id) => [
       id, e.query.withTrashed.ids(id).outEdges(kind), e.query.withTrashed.ids(id).inEdges(kind),
     ])]),
   });

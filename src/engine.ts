@@ -10,7 +10,7 @@ import { createQuery, type Query } from './query.ts';
 import { createGraph } from './graph.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createEntityCounters } from './entity-utils.ts';
-import { createRelationReads, type RelationMatch, type RelationRow, type RelationStats } from './relations.ts';
+import { createRelationReads, type RelationMatch, type RelationRow } from './relations.ts';
 import { createRepositoryRegistry } from './repository.ts';
 import { createJournal } from './journal.ts';
 import { createNameChecks } from './names.ts';
@@ -42,16 +42,11 @@ export interface Ears {
   /** One field of the entity's row, read as `getRow` reads it (the trash included), or undefined when it holds none */
   getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
   getRoles(id: EARS.EntityId): string[];
-  getAllEntityTypes(): EARS.Entity[];
-  getAllAttributeKinds(): EARS.AttrKind[];
-  getAllRelationKinds(): string[];
-  /** Every role an entity holds, once each */
-  getAllRoles(): string[];
+  /** What the engine holds, keyed by the names its data holds: entities per type, attribute, relation and role use */
   getSchemaStats(): SchemaStats;
   /** Moves a relation to new ends, or replaces its info, keeping its id */
   updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
-  getRelationStats(kind: EARS.RelKind): RelationStats;
   /** Whether linking `source` to `target` would close a cycle through `kinds` */
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
@@ -109,7 +104,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const graph = createGraph({ query, names });
   const counters = createEntityCounters(storage);
   const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, graph, isEntityType, rowRules, counters, names, journal });
-  const relationReads = createRelationReads({ edgeStore, relations, storage, names });
+  const relationReads = createRelationReads({ edgeStore, storage, names });
   const repositories = createRepositoryRegistry();
 
   const operations: Ears = {
@@ -120,10 +115,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     getRow: storage.getRow,
     getAttr: (id, field) => (storage.hasAttr(id, field) ? storage.getAttr(id, field) : undefined),
     getRoles: storage.getRoles,
-    getAllEntityTypes: storage.getAllEntityTypes,
-    getAllAttributeKinds: storage.getAllAttributeKinds,
-    getAllRelationKinds: storage.getAllRelationKinds,
-    getAllRoles: storage.getAllRoles,
     getSchemaStats: storage.getSchemaStats,
     updateRelation,
     repository: repositories.repository,

@@ -49,7 +49,7 @@ describe('two engines in one process', () => {
     expect(two.query('Note').pick(['title']).map((row) => row.title)).toEqual(['two', 'loaded']);
     expect(one.findRelations()).toHaveLength(1);
     expect(two.findRelations()).toEqual([]);
-    expect(two.getAllRelationKinds()).toEqual([]);
+    expect(Object.keys(two.getSchemaStats().relations)).toEqual([]);
     expect(one.repository.noteQueries).toEqual({ name: 'one' });
     expect(() => two.repository.noteQueries).toThrow('"noteQueries" is not registered');
     expect(b.calls.every(([, , id]) => id !== x)).toBe(true);

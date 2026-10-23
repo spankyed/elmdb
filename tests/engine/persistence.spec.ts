@@ -122,7 +122,7 @@ describe('hydration', () => {
 
     e.admin.clear();
     expect(e.admin.getAllEntities()).toEqual([]);
-    expect(e.getAllAttributeKinds()).toEqual([]);
+    expect(Object.keys(e.getSchemaStats().attributes)).toEqual([]);
     expect(e.findRelations()).toEqual([]);
     expect(calls).toHaveLength(1);
   });
