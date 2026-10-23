@@ -1,6 +1,7 @@
 // The engine's writes. Each entry point makes one claim about its argument and is held to it: `create` names a
 // type, `write` an entity that exists, and `upsert` a type and an id that is either free or that type's.
 import type { AttributeStorage } from './attribute-storage.ts';
+import type { Journal } from './journal.ts';
 import { createEntity, entityTypeOf } from './attribute-storage.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { createGraph } from './graph.ts';
@@ -29,8 +30,9 @@ export interface Write {
 }
 
 /** An engine's writes, over its storage, edge store and graph walks */
-export function createWrites({ storage, edgeStore, graph, isEntityType }: {
+export function createWrites({ storage, edgeStore, graph, isEntityType, journal }: {
   storage: AttributeStorage;
+  journal: Pick<Journal, 'atCommit' | 'open'>;
   edgeStore: EdgeStore;
   graph: Pick<ReturnType<typeof createGraph>, 'wouldCreateCycle' | 'linkSymmetric'>;
   isEntityType: (name: string) => boolean;
@@ -38,8 +40,25 @@ export function createWrites({ storage, edgeStore, graph, isEntityType }: {
   const {
     destroyEntity, entityCreated, hasEntity,
     putAttr, addAttr, mergeAttr, dropAttr, deleteAttr, dropIf,
-    grantRole, revokeRole, getRoles, addRelation,
+    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo,
   } = storage;
+
+  /**
+   * A relation has two ends when it is committed. Inside a unit that is checked when the unit commits, so the unit
+   * may link to an entity it creates later — a forward reference — and a link whose target it destroyed meanwhile
+   * is gone with it, since destroying an entity removes its relations. Outside a unit a write is committed as it
+   * is made, so the target must already be there.
+   */
+  function requireTarget(kind: string, target: EARS.EntityId): void {
+    const missing = () => new EarsError('NO_SUCH_ENTITY', `link(${kind}, ${JSON.stringify(target)}): no entity has this id`);
+    if (!journal.open) {
+      if (!hasEntity(target)) throw missing();
+      return;
+    }
+    journal.atCommit(() => {
+      if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).length > 0) throw missing();
+    });
+  }
   const { wouldCreateCycle, linkSymmetric } = graph;
   const attr = (k: string) => EARS.AttrKind.Custom(k);
 
@@ -101,6 +120,7 @@ export function createWrites({ storage, edgeStore, graph, isEntityType }: {
             ? `Cannot create a ${kind} relation that would form a cycle`
             : `Cannot create a ${kind} relation that would form a cycle within [${acyclicIn.join(', ')}]`);
         }
+        requireTarget(kind, target);
         if (symmetric) linkSymmetric(id, target, kind, info);
         else if (replace) edgeStore.linkOne(id, kind, target, info);
         else addRelation(id, kind, target, info);

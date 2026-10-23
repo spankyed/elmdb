@@ -68,6 +68,7 @@ describe('openLmdbStore', () => {
   it('persists writes across a close and a new store on the same paths', async () => {
     const first = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'kept');
+    engine.create('Note', { id: id('Note-2') }).set('title', 'mentioned');
     engine.create('Trace', { id: id('Trace-1') }).set('step', 'volatile');
     engine.write(id('Note-1')).link('mentions', id('Note-2'));
     await flushed();
@@ -251,6 +252,7 @@ describe('openLmdbStore', () => {
 
   it('opens existing files read-only: it hydrates them, and refuses writes and a reset', async () => {
     const first = openStore();
+    engine.create('Note', { id: id('Note-2') }).set('title', 'mentioned');
     engine.create('Note', { id: id('Note-1') }).set('title', 'kept').link('mentions', id('Note-2'));
     await flushed();
     first.close();

@@ -98,8 +98,10 @@ describe('filters', () => {
       { relation: 'owns', id: t.c }, { relation: 'contains', id: t.a }, { relation: 'contains', id: t.b },
     ]);
     expect(e.query.ids(p).links('contains', 'Project')).toEqual([]);
-    // A link to an id that isn't in the engine is followed by links, not by linksTo
-    e.write(p).link('refers', 'Task-ghost' as Id).link('refers', t.d);
+    // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
+    // one — is followed by links, not by linksTo
+    e.admin.addRelation(p, 'refers', 'Task-ghost' as Id);
+    e.write(p).link('refers', t.d);
     expect(e.query.ids(p).links('refers')).toEqual([{ relation: 'refers', id: 'Task-ghost' }, { relation: 'refers', id: t.d }]);
     expect(e.query.ids(p).linksTo('refers').ids()).toEqual([t.d]);
     expect(e.query.ids(p).linksPick('contains', ['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);

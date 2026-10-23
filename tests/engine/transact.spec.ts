@@ -163,6 +163,43 @@ describe('a unit inside another', () => {
   });
 });
 
+describe('a link\'s target', () => {
+  it('must exist when the link is made outside a unit, and nothing is written when it does not', () => {
+    const before = state();
+    expect(() => e.write(task).link('refers', 'Task-ghost' as Id)).toThrow(/link\(refers, "Task-ghost"\): no entity has this id/);
+    expect(state()).toEqual(before);
+    expect(calls).toEqual([]);
+  });
+
+  it('may be created later in the same unit: a forward reference', () => {
+    let later!: Id;
+    e.transact(() => {
+      e.write(task).link('refers', 'Task-later' as Id);
+      later = e.create('Task', { id: 'Task-later' as Id }).set('title', 'later').id();
+    });
+    expect(e.findRelations({ sourceEntity: task, relationType: 'refers' }).map((r) => r.targetEntity)).toEqual([later]);
+  });
+
+  it('missing when the unit commits rolls the whole unit back, a nested unit\'s links included', () => {
+    const before = state();
+    expect(() => e.transact(() => {
+      e.write(task).set('title', 'changed');
+      e.transact(() => { e.write(other).link('refers', 'Task-never' as Id); });
+    })).toThrow(/link\(refers, "Task-never"\): no entity has this id/);
+    expect(state()).toEqual(before);
+    expect(calls).toEqual([]);
+  });
+
+  it('destroyed later in the unit takes the link with it, which is no error', () => {
+    e.transact(() => {
+      const gone = e.create('Task').set('title', 'gone').id();
+      e.write(task).link('refers', gone);
+      e.write(gone).destroy();
+    });
+    expect(e.findRelations({ sourceEntity: task, relationType: 'refers' })).toEqual([]);
+  });
+});
+
 describe('what transact refuses', () => {
   it('an async function, undoing what it wrote before its first await', () => {
     const before = state();
