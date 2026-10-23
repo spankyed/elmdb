@@ -52,10 +52,6 @@ export interface Ears {
   updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   findRelations(match?: RelationMatch): RelationRow[];
   getRelationStats(kind: EARS.RelKind): RelationStats;
-  /** Every entity `start` reaches through `relKind`, each once, `start` excluded */
-  descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
-  /** Every entity that reaches `start` through `relKind`, each once, `start` excluded: in a tree, its parent first and its root last */
-  ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
   /** Whether linking `src` to `tgt` would close a cycle through `kinds` */
   wouldCreateCycle(src: EARS.EntityId, tgt: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<baseLabel> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */

@@ -134,6 +134,32 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
       };
 
       /**
+       * Every entity the set reaches through edges of the kinds, out or in, any number deep: nearest first, each
+       * once, never an entity of the set itself. The walk goes only through entities the query could reach, so a
+       * cycle in the data ends it; `type` keeps the reached entities of the types and walks through the rest.
+       */
+      const reach = (kinds: MaybeArr<string>, type: MaybeArr<EARS.Entity> | undefined, outward: boolean) => {
+        names.relationKinds(kinds, outward ? 'descendants' : 'ancestors');
+        const matches = ofTypes(type);
+        let frontier = cur();
+        const seen = new Set(frontier);
+        const reached: EARS.EntityId[] = [];
+        while (frontier.length) {
+          const next: EARS.EntityId[] = [];
+          for (const from of frontier) for (const k of asArr(kinds)) {
+            for (const i of findEntitiesByRelationTo(k, from, outward)) {
+              if (seen.has(i) || !alive(i)) continue;
+              seen.add(i);
+              next.push(i);
+            }
+          }
+          reached.push(...next);
+          frontier = next;
+        }
+        return qxImpl(reached.filter(matches));
+      };
+
+      /**
        * The entities that have — or, with `keep` false, don't have — an edge of the kind going out (or coming in) whose
        * far end is `other`, or with none named, any entity this query could reach: the far end of a relation can be
        * missing or in the trash, as out and in step around
@@ -207,6 +233,8 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
 
         out: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, true),
         in: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => walk(kinds, type, false),
+        descendants: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => reach(kinds, type, true),
+        ancestors: (kinds: MaybeArr<string>, type?: MaybeArr<EARS.Entity>) => reach(kinds, type, false),
 
         outEdges: <K extends string>(kinds: K | readonly K[], type?: MaybeArr<EARS.Entity>) => edges(kinds, type, true),
         inEdges: <K extends string>(kinds: K | readonly K[], type?: MaybeArr<EARS.Entity>) => edges(kinds, type, false),

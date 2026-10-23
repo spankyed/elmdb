@@ -111,9 +111,7 @@ export namespace EARS {
 
 // @public
 export interface Ears {
-    ancestors(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     create: Create;
-    descendants(start: EARS.EntityId, relKind: EARS.RelKind): EARS.EntityId[];
     // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
     generateLabelWithCount(baseLabel: string, entityType: EARS.Entity): string;
@@ -340,8 +338,14 @@ export interface Query extends QueryEntries {
 
 // @public
 export interface QueryBuilder<E extends string = string, S extends EntityShapes = {}, N extends string = string, R extends string = string, O extends string = string> {
+    ancestors<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+    // (undocumented)
+    ancestors(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
     // (undocumented)
     count(): number;
+    descendants<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+    // (undocumented)
+    descendants(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
     // (undocumented)
     distinct(field?: keyof ShapeOf<S, E> & string): QueryBuilder<E, S, N, R, O>;
     // (undocumented)

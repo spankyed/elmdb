@@ -170,8 +170,8 @@ describe('relation kinds', () => {
       ['linkedFrom', () => e.query('Task').linkedFrom('blokcs', a)],
       ['findRelations', () => e.findRelations({ kind: 'blokcs' })],
       ['getRelationStats', () => e.getRelationStats('blokcs')],
-      ['descendants', () => e.descendants(a, 'blokcs')],
-      ['ancestors', () => e.ancestors(b, 'blokcs')],
+      ['descendants', () => e.query.ids(a).descendants('blokcs')],
+      ['ancestors', () => e.query.ids(b).ancestors('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -191,19 +191,37 @@ describe('hierarchy walks', () => {
     e.write(root).link('child', left).link('child', right);
     e.write(left).link('child', leaf);
     e.write(right).link('child', leaf);
-    expect(e.descendants(root, 'child').sort()).toEqual([left, right, leaf].sort());
-    expect(e.ancestors(leaf, 'child').sort()).toEqual([root, left, right].sort());
-    expect(e.descendants(leaf, 'child')).toEqual([]);
-    expect(e.ancestors(left, 'child')).toEqual([root]);
+    expect(e.query.ids(root).descendants('child').ids().sort()).toEqual([left, right, leaf].sort());
+    expect(e.query.ids(leaf).ancestors('child').ids().sort()).toEqual([root, left, right].sort());
+    expect(e.query.ids(leaf).descendants('child').ids()).toEqual([]);
+    expect(e.query.ids(left).ancestors('child').ids()).toEqual([root]);
 
     const [a, b, c] = [task('a'), task('b'), task('c')];
     e.write(a).link('child', b);
     e.write(b).link('child', c);
-    expect(e.ancestors(c, 'child')).toEqual([b, a]);
+    expect(e.query.ids(c).ancestors('child').ids()).toEqual([b, a]);
     // A cycle in the data ends the walk rather than the stack
     e.write(c).link('child', a);
-    expect(e.descendants(a, 'child')).toEqual([b, c]);
-    expect(e.ancestors(a, 'child')).toEqual([c, b]);
+    expect(e.query.ids(a).descendants('child').ids()).toEqual([b, c]);
+    expect(e.query.ids(a).ancestors('child').ids()).toEqual([c, b]);
+  });
+
+  it('walks nearest first, keeps the reached entities of a type, and goes only where the query could reach', () => {
+    const root = e.create('Project').id();
+    const [mid, deep] = [task('mid'), task('deep')];
+    const leaf = e.create('Project').id();
+    e.write(root).link('child', mid);
+    e.write(mid).link('child', deep);
+    e.write(deep).link('child', leaf);
+    expect(e.query.ids(root).descendants('child').ids()).toEqual([mid, deep, leaf]);
+    // A type keeps what it names and walks through the rest
+    expect(e.query.ids(root).descendants('child', 'Project').ids()).toEqual([leaf]);
+    expect(e.query.ids(leaf).ancestors('child', 'Task').ids()).toEqual([deep, mid]);
+
+    // A trashed entity ends the walk there, unless the query reaches the trash
+    e.write(mid).trash();
+    expect(e.query.ids(leaf).ancestors('child').ids()).toEqual([deep]);
+    expect(e.query.withTrashed.ids(leaf).ancestors('child').ids()).toEqual([deep, mid, root]);
   });
 });
 

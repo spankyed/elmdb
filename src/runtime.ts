@@ -162,6 +162,24 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   ): QueryBuilder<T, S, N, R, O>;
   in(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
   /**
+   * Every entity the set reaches through outgoing edges of the kinds, any number deep: a subtree, nearest first,
+   * each once, never an entity of the set itself. `type` keeps the reached entities of the types.
+   */
+  descendants<T extends string>(
+    kinds: R | readonly R[],
+    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
+  ): QueryBuilder<T, S, N, R, O>;
+  descendants(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+  /**
+   * Every entity that reaches the set through edges of the kinds, any number deep: in a tree, the parent first
+   * and the root last, each once, never an entity of the set itself. `type` keeps the reached entities of the types.
+   */
+  ancestors<T extends string>(
+    kinds: R | readonly R[],
+    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
+  ): QueryBuilder<T, S, N, R, O>;
+  ancestors(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+  /**
    * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
    * `findRelations`' shape, one per edge
    */
