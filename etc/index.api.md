@@ -425,29 +425,6 @@ export interface RelationStats {
     uniqueTargets: number;
 }
 
-// @public (undocumented)
-export class RepositoryError extends Error {
-    constructor(message: string, code?: RepositoryErrorCode, details?: unknown | undefined);
-    // (undocumented)
-    code: RepositoryErrorCode;
-    // (undocumented)
-    details?: unknown | undefined;
-}
-
-// @public (undocumented)
-export const RepositoryErrorCode: {
-    readonly NOT_FOUND: "NOT_FOUND";
-    readonly VALIDATION_ERROR: "VALIDATION_ERROR";
-    readonly CONSTRAINT_VIOLATION: "CONSTRAINT_VIOLATION";
-    readonly PERMISSION_DENIED: "PERMISSION_DENIED";
-    readonly CONCURRENCY_ERROR: "CONCURRENCY_ERROR";
-    readonly OPERATION_FAILED: "OPERATION_FAILED";
-    readonly UNKNOWN: "UNKNOWN";
-};
-
-// @public (undocumented)
-export type RepositoryErrorCode = typeof RepositoryErrorCode[keyof typeof RepositoryErrorCode];
-
 // @public
 export type RequiredField<S extends EntityShapes, E extends string> = [
 E

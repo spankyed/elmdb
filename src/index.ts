@@ -11,7 +11,6 @@ export type {
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, type EntityRow, type RelationStats, type SchemaStats } from './attribute-storage.ts';
-export { RepositoryError, RepositoryErrorCode } from './repository-errors.ts';
 export { getTimestamp } from './numbering.ts';
 export type { RelationMatch, RelationRow } from './relations.ts';
 // Types that appear in the signatures above, so pack authors can name them.
