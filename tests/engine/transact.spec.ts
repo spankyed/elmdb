@@ -141,6 +141,16 @@ describe('a unit inside another', () => {
     expect(e.findById(task)).toMatchObject({ title: 'outer' });
   });
 
+  it('that throws after growing a list the outer wrote sends the outer\'s list, not the grown one', () => {
+    e.transact(() => {
+      e.write(task).add('tags', 'a');
+      expect(() => e.transact(() => { e.write(task).add('tags', 'b'); throw new Error('stop'); })).toThrow();
+    });
+    expect(e.getAttrs(task, 'tags')).toEqual(['x', 'a']);
+    const sent = calls.filter(([method, kind]) => method === 'onPutAttrArray' && kind === 'tags');
+    expect(sent.at(-1)?.[3]).toEqual(['x', 'a']);
+  });
+
   it('that commits is undone with the outer when the outer throws', () => {
     const before = state();
     expect(() => e.transact(() => {
@@ -159,6 +169,19 @@ describe('what transact refuses', () => {
     expect(() => e.transact(async () => { e.write(task).set('title', 'sync part'); })).toThrow(/synchronous/);
     expect(state()).toEqual(before);
     expect(calls).toEqual([]);
+  });
+
+  it('an async function, without leaving its rejection unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', listener);
+    try {
+      expect(() => e.transact(async () => { throw new Error('async body'); })).toThrow(/synchronous/);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', listener);
+    }
+    expect(unhandled).toEqual([]);
   });
 
   it('emptying the engine inside it', () => {

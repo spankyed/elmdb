@@ -41,13 +41,14 @@ function checkFormat(root: RootDatabase, basePath: string, readOnly: boolean): v
     if (holdsData(root)) {
       format = 1;
     } else {
-      // Recording it is what a writer can do for the next reader, not a condition of opening: a full disk mustn't
-      // stop an app opening a database it could read before
+      // An empty environment is stamped before anything is written to it, and a stamp that fails refuses the open:
+      // the next open would read this version's writes, unstamped, as format 1 and refuse them. Refusing now costs
+      // nothing, since there is nothing in it yet
       if (!readOnly && meta) {
         try {
           meta.putSync(FORMAT_KEY, LMDB_FORMAT_VERSION);
         } catch (error) {
-          console.warn(`[LMDB] Couldn't record the storage format of ${basePath}:`, (error as Error).message);
+          throw new Error(`Couldn't record the storage format of ${basePath}, so it isn't opened: ${(error as Error).message}`);
         }
       }
       return;

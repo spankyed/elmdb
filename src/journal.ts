@@ -36,9 +36,12 @@ export function createJournal(sink: PersistenceSink) {
     },
   };
 
+  // A held call copies its value lists: the storage passes its live list, which a later write in the unit — or
+  // a nested unit that then rolls back — would otherwise change before the call is sent
   const hold = <A extends unknown[]>(write: (...args: A) => void) => (...args: A): void => {
-    if (levels.length === 0) write(...args);
-    else held.push(() => write(...args));
+    if (levels.length === 0) return write(...args);
+    const copied = args.map((arg) => (Array.isArray(arg) ? [...arg] : arg)) as A;
+    held.push(() => write(...copied));
   };
 
   /** `sink`, except that its writes wait for the outermost unit to commit */
@@ -64,6 +67,9 @@ export function createJournal(sink: PersistenceSink) {
     try {
       result = fn();
       if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
+        // The body has already started and cannot be stopped; what it does after its first await lands outside
+        // any unit. Its own rejection is handled here so it isn't an unhandled one: the refusal is the report
+        (result as unknown as PromiseLike<unknown>).then(undefined, () => {});
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
     } catch (error) {
