@@ -10,7 +10,7 @@
  * Overload order here is part of the contract: a signature that accepts more than the one before
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
-import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
+import type { EARS, EntityNameArg, EntityShapes } from './entities.ts';
 import type { CreateFields, QueryBuilder, RequiredField, RowIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
 import { newId } from './attribute-storage.ts';
 import type { Ears } from './engine.ts';
@@ -61,12 +61,6 @@ export interface TypedWrite<S extends EntityShapes, R extends string = string, O
 export type TypedNewId<S extends EntityShapes, N extends string = string> =
   <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
 
-/** A field's value on an entity whose id names its type; `unknown` when the id isn't branded. */
-export interface TypedGetAttr<S extends EntityShapes> {
-  <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | null;
-  (id: EARS.EntityId, field: string): unknown;
-}
-
 export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
   query: TypedQuery<S, N, R, O>;
   create: TypedCreate<S, N, R, O>;
@@ -74,7 +68,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
   write: TypedWrite<S, R, O>;
   transact: Ears['transact'];
   newId: TypedNewId<S, N>;
-  getAttr: TypedGetAttr<S>;
 }
 
 /**
@@ -101,6 +94,5 @@ export function defineEars<S extends EntityShapes, N extends string = string, R 
     write: on('write'),
     transact: on('transact'),
     newId,
-    getAttr: on('getAttr'),
   } as unknown as TypedEars<S, N, R, O>;
 }

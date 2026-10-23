@@ -45,7 +45,7 @@ describe('two engines in one process', () => {
     two.create('Note').set('title', 'two');
     two.admin.bulkLoadAttr('Note-loaded' as EARS.EntityId, 'title', 'loaded');
 
-    expect(one.query('Note').pick(['title']).map((row) => row.title)).toEqual(['one', null]);
+    expect(one.query('Note').pick(['title']).map((row) => row.title)).toEqual(['one', undefined]);
     expect(two.query('Note').pick(['title']).map((row) => row.title)).toEqual(['two', 'loaded']);
     expect(one.findRelations()).toHaveLength(1);
     expect(two.findRelations()).toEqual([]);

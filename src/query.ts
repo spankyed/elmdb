@@ -206,17 +206,19 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
         pick: <A extends readonly string[]>(fields: A) =>
           cur().map(i => {
             const o: Record<string, unknown> = { id: i };
+            // A field the row lacks is left out, as getRow leaves it: a stored null reads as null
             fields.forEach(k => {
               if (k === "id") return;
-              o[k] = getAttr(i, EARS.AttrKind.Custom(k));
+              const kind = EARS.AttrKind.Custom(k);
+              if (hasAttr(i, kind)) o[k] = getAttr(i, kind);
             });
             return o as { id: EARS.EntityId } & { [K in A[number]]: unknown };
           }),
         // The first row: the fields picked, or with none the whole row, as pickAll reads it
         pickOne: (f?: readonly string[]) => {
-          if (f) return self.pick(f)[0] ?? null;
+          if (f) return self.pick(f)[0];
           const [first] = cur();
-          return first === undefined ? null : getRow(first)!;
+          return first === undefined ? undefined : getRow(first)!;
         },
 
         // A step's ids are in the engine, so each has a row
@@ -279,8 +281,8 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
 
         ids: () => [...cur()],
         count: () => cur().length,
-        first: () => cur()[0] ?? null,
-        last: () => (cur().length ? cur()[cur().length - 1] : null),
+        first: () => cur()[0],
+        last: () => cur().at(-1),
         exists: () => cur().length > 0,
 
         map: <T>(fn: (i: EARS.EntityId) => T) => cur().map(fn),

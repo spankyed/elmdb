@@ -147,7 +147,7 @@ describe('a unit inside another', () => {
       e.write(task).add('tags', 'a');
       expect(() => e.transact(() => { e.write(task).add('tags', 'b'); throw new Error('stop'); })).toThrow();
     });
-    expect(e.getAttr(task, 'tags')).toEqual(['x', 'a']);
+    expect(e.getRow(task)?.tags).toEqual(['x', 'a']);
     const sent = calls.filter(([method, kind]) => method === 'onPutAttr' && kind === 'tags');
     expect(sent.at(-1)?.[3]).toEqual(['x', 'a']);
   });

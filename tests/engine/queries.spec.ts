@@ -107,7 +107,8 @@ describe('filters', () => {
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);
     expect(e.query.ids(p).out('contains').pick(['title'])).toEqual([{ id: t.a, title: 'banana' }, { id: t.b, title: 'apple' }]);
     expect(e.query.ids(p).out(['contains', 'owns'], 'Task').pick(['rank'])).toEqual([
-      { id: t.a, rank: 2 }, { id: t.b, rank: 10 }, { id: t.c, rank: null },
+      // A field the row lacks is left out, as getRow leaves it
+      { id: t.a, rank: 2 }, { id: t.b, rank: 10 }, { id: t.c },
     ]);
     // Walking in is the same walk the other way
     expect(e.query.ids(t.a).in('contains').ids()).toEqual([p]);
@@ -139,7 +140,7 @@ describe('terminals', () => {
     const q = e.query('Task').where('status', 'open');
     expect([q.count(), q.first(), q.last(), q.exists()]).toEqual([3, t.a, t.d, true]);
     const none = e.query('Task').where('status', 'gone');
-    expect([none.count(), none.first(), none.last(), none.exists()]).toEqual([0, null, null, false]);
+    expect([none.count(), none.first(), none.last(), none.exists()]).toEqual([0, undefined, undefined, false]);
     expect(q.map((id) => id.length > 0)).toEqual([true, true, true]);
     const seen: Id[] = [];
     expect(q.forEach((id) => seen.push(id)).count()).toBe(3);
@@ -151,9 +152,9 @@ describe('terminals', () => {
   });
 
   it('pick, pickOne and pickAll', () => {
-    expect(e.query('Task').where('rank', 1).pick(['id', 'title', 'nope'])).toEqual([{ id: t.d, title: 'apple', nope: null }]);
+    expect(e.query('Task').where('rank', 1).pick(['id', 'title', 'nope'])).toEqual([{ id: t.d, title: 'apple' }]);
     expect(e.query('Task').pickOne(['title'])).toEqual({ id: t.a, title: 'banana' });
-    expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeNull();
+    expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeUndefined();
     expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), updatedAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
   });
 });
@@ -192,13 +193,13 @@ describe('the value index', () => {
   /** What `where(k, v)` must answer, read by walking every entity of the types */
   const walked = (types: string[], k: string, v: unknown) =>
     e.query.withTrashed(types).ids().filter((id) => {
-      if (e.query.trashed(e.getAttr(id, 'entityType') as never).ids().includes(id)) return false;
-      const value = e.getAttr(id, k);
+      if (e.query.trashed(e.getRow(id)?.entityType as never).ids().includes(id)) return false;
+      const value = e.getRow(id)?.[k];
       return value === v || (Array.isArray(value) && value.includes(v));
     });
 
   it('answers where and withRole as a walk would, through every kind of write once it is built', () => {
-    const tags = (id: Id) => e.getAttr(id, 'tags') as string[] | null;
+    const tags = (id: Id) => e.getRow(id)?.tags as string[] | null;
     // Built by the first read, before any of the writes below
     expect(e.query('Task').where('status', 'open').ids()).toEqual([t.a, t.c, t.d]);
     expect(e.query('Task').where('tags', 'x').ids()).toEqual([]);

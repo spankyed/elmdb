@@ -152,12 +152,12 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>)[];
-  /** The first entity's fields picked, or null when the query reaches none */
+  /** The first entity's fields picked (a field it lacks left out), or undefined when the query reaches none */
   pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
     f: A,
-  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>) | null;
-  /** The first entity's whole row (`pickAll`'s, `getRow`'s), or null when the query reaches none: `query.ids(id).pickOne()` is the live row with an id */
-  pickOne(): ShapeOf<S, E> | null;
+  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>) | undefined;
+  /** The first entity's whole row (`pickAll`'s, `getRow`'s), or undefined when the query reaches none: `query.ids(id).pickOne()` is the live row with an id */
+  pickOne(): ShapeOf<S, E> | undefined;
   pickAll(): ShapeOf<S, E>[];
   orderBy(field: keyof ShapeOf<S, E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, S, N, R, O>;
   reverse(): QueryBuilder<E, S, N, R, O>;
@@ -166,8 +166,10 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, QueryBuilder<E, S, N, R, O>>;
   ids(): EARS.EntityId<E>[];
   count(): number;
-  first(): EARS.EntityId<E> | null;
-  last(): EARS.EntityId<E> | null;
+  /** The first entity's id, or undefined when the query reaches none */
+  first(): EARS.EntityId<E> | undefined;
+  /** The last entity's id, or undefined when the query reaches none */
+  last(): EARS.EntityId<E> | undefined;
   exists(): boolean;
   map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
   forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, S, N, R, O>;

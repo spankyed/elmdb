@@ -25,5 +25,4 @@ export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entitie
 export {
   defineEars,
   type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedNewId,
-  type TypedGetAttr,
 } from './typed.ts';

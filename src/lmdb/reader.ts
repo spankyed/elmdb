@@ -78,12 +78,12 @@ export class LmdbReader {
 
   // ───────────────────────────── Attributes ─────────────────────────────
 
-  /** An attribute's value, or null */
-  getAttr(kind: string, entityId: string): unknown {
-    assertKeySafe(kind, 'kind');
+  /** An entity's attribute value as stored, or undefined when it holds none (a stored null reads as null) */
+  getAttr(entityId: string, kind: string): unknown {
     assertKeySafe(entityId, 'entityId');
+    assertKeySafe(kind, 'kind');
     const rec = this.dbs.attrs.get(attrKey(kind, entityId)) as AttrRecord | undefined;
-    return decodeAttr(rec ?? null);
+    return rec === undefined ? undefined : decodeAttr(rec);
   }
 
   /** The entityIds holding the attribute, in key order */

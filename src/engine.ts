@@ -37,8 +37,6 @@ export interface Ears {
   isRelationKind(name: string): boolean;
   /** Whether `name` is a role the engine's creator registered */
   isRole(name: string): boolean;
-  /** An attribute's value, exactly as written, or null */
-  getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
   /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
   getRow(id: EARS.EntityId): EntityRow | undefined;
   getRoles(id: EARS.EntityId): string[];
@@ -121,7 +119,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     generateLabelWithCount: counters.generateLabelWithCount,
     ...relationReads,
     ...graph,
-    getAttr: storage.getAttr,
     getRow: storage.getRow,
     getRoles: storage.getRoles,
     getAllEntityTypes: storage.getAllEntityTypes,

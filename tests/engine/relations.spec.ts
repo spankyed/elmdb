@@ -18,7 +18,7 @@ describe('links', () => {
     e.write(a).link('blocks', b, { info: { weight: 2 } });
     const [rel] = e.findRelations();
     expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
-    expect(e.getAttr(rel.id, 'relationDetails')).toEqual({ sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
+    expect(e.getRow(rel.id)?.relationDetails).toEqual({ sourceEntity: a, targetEntity: b, relationType: 'blocks', info: { weight: 2 } });
     expect(e.admin.getEntitiesOfType('Relation')).toEqual([rel.id]);
     expect(e.query.ids(a).out('blocks').ids()).toEqual([b]);
     expect(e.query.ids(b).in('blocks').ids()).toEqual([a]);

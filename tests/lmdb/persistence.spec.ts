@@ -542,9 +542,9 @@ describe('Query Layer', () => {
   });
 
   it('getAttr reads an attribute\'s one value, a list whole', () => {
-    expect(query.getAttr('TestKind', 'Entity-123')).toEqual(['valid1', 'valid2', 'valid3']);
-    expect(query.getAttr('Index', 'Page-4')).toBe(4);
-    expect(query.getAttr('Index', 'Page-none')).toBeNull();
+    expect(query.getAttr('Entity-123', 'TestKind')).toEqual(['valid1', 'valid2', 'valid3']);
+    expect(query.getAttr('Page-4', 'Index')).toBe(4);
+    expect(query.getAttr('Page-none', 'Index')).toBeUndefined();
   });
 
   it('findEntitiesByAttr matches a value or an element of a list, and a predicate sees the whole value', () => {

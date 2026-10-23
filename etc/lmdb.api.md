@@ -111,7 +111,7 @@ export class LmdbReader {
     entitiesOfType(type: string): Iterable<string>;
     findEntitiesByAttr(kind: string, opts?: FindByAttrOpts): string[];
     findEntitiesByAttrIter(kind: string, opts?: FindByAttrOpts): Iterable<string>;
-    getAttr(kind: string, entityId: string): unknown;
+    getAttr(entityId: string, kind: string): unknown;
     getEntityMeta(entityId: string): EntityMeta | null;
     neighbors(id: string, opts?: {
         kind?: string;

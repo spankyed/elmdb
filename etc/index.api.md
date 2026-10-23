@@ -125,7 +125,6 @@ export interface Ears {
     // (undocumented)
     getAllRelationKinds(): string[];
     getAllRoles(): string[];
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | null;
     // (undocumented)
     getRelationStats(kind: EARS.RelKind): RelationStats;
     // (undocumented)
@@ -347,8 +346,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     distinct(field?: keyof ShapeOf<S, E> & string): QueryBuilder<E, S, N, R, O>;
     // (undocumented)
     exists(): boolean;
-    // (undocumented)
-    first(): EARS.EntityId<E> | null;
+    first(): EARS.EntityId<E> | undefined;
     // (undocumented)
     forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, S, N, R, O>;
     // (undocumented)
@@ -364,8 +362,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
         id: EARS.EntityId<NoInferType<T>>;
     }>;
     lacks<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
-    // (undocumented)
-    last(): EARS.EntityId<E> | null;
+    last(): EARS.EntityId<E> | undefined;
     // (undocumented)
     limit(n: number): QueryBuilder<E, S, N, R, O>;
     linkedFrom(kind: R, other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
@@ -392,8 +389,8 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     pickAll(): ShapeOf<S, E>[];
     pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(f: A): ({
         id: EARS.EntityId<E>;
-    } & Pick<ShapeOf<S, E>, A[number]>) | null;
-    pickOne(): ShapeOf<S, E> | null;
+    } & Pick<ShapeOf<S, E>, A[number]>) | undefined;
+    pickOne(): ShapeOf<S, E> | undefined;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -524,8 +521,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     // (undocumented)
     create: TypedCreate<S, N, R, O>;
     // (undocumented)
-    getAttr: TypedGetAttr<S>;
-    // (undocumented)
     newId: TypedNewId<S, N>;
     // (undocumented)
     query: TypedQuery<S, N, R, O>;
@@ -535,14 +530,6 @@ export interface TypedEars<S extends EntityShapes, N extends string = string, R 
     upsert: TypedUpsert<S, N, R, O>;
     // (undocumented)
     write: TypedWrite<S, R, O>;
-}
-
-// @public
-export interface TypedGetAttr<S extends EntityShapes> {
-    // (undocumented)
-    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | null;
-    // (undocumented)
-    (id: EARS.EntityId, field: string): unknown;
 }
 
 // @public
