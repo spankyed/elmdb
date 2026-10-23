@@ -199,8 +199,11 @@ export function createWrites({ storage, edgeStore, graph, isEntityType, rowRules
         return self;
       },
 
-      destroy({ keepStored = false } = {}) {
-        destroyEntity(id, keepStored);
+      destroy() {
+        destroyEntity(id);
+      },
+      unload() {
+        destroyEntity(id, true);
       },
 
       id: () => id,

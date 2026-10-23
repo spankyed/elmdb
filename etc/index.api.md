@@ -606,9 +606,7 @@ export interface Write {
 export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
     append<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
     delete(k: OptionalField<S, E>): WriteBuilder<E, S, R, O>;
-    destroy(options?: {
-        keepStored?: boolean;
-    }): void;
+    destroy(): void;
     // (undocumented)
     grant(role: O): WriteBuilder<E, S, R, O>;
     grantExclusive(role: O, among: readonly EARS.EntityId[]): WriteBuilder<E, S, R, O>;
@@ -627,6 +625,7 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
     trash(at?: number): WriteBuilder<E, S, R, O>;
     unlink(kind: R, target?: EARS.EntityId): WriteBuilder<E, S, R, O>;
     unlinkAll(): WriteBuilder<E, S, R, O>;
+    unload(): void;
 }
 
 // @public

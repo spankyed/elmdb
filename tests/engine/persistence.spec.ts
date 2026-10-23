@@ -22,7 +22,7 @@ describe('persistence sink', () => {
     e.write(b).link('contains', a, { replace: true });
     e.write(a).set('title', 'B').delete('gone');
     e.write(a).destroy();
-    e.write(b).destroy({ keepStored: true });
+    e.write(b).unload();
 
     expect(calls).toEqual([
       ['onCreateEntity', '#1', 'Task'],

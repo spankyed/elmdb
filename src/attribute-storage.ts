@@ -324,10 +324,11 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   }
 
   /**
-   * Removes a relation from memory and tells the sink. `destroyed` is the entity being deleted when that's why
-   * the relation goes (destroyEntity); it's passed on so the sink can tell a deletion from an unlink.
+   * Removes a relation from memory and tells the sink, unless it is only being unloaded. `destroyed` is the
+   * entity being deleted when that's why the relation goes (destroyEntity); it's passed on so the sink can tell
+   * a deletion from an unlink.
    */
-  const removeRelation = (relId: EARS.EntityId, destroyed?: EARS.EntityId) => {
+  const removeRelation = (relId: EARS.EntityId, destroyed?: EARS.EntityId, unload = false) => {
     const d = getAttr(
       relId,
       EARS.AttrKind.RelationDetails,
@@ -337,6 +338,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     deleteAttr(relId, EARS.AttrKind.RelationDetails);
     // A relation is its details: with them gone, so is the relation's entity
     unindexEntity(relId);
+    if (unload) return;
     if (destroyed) persistence.onRemoveRelation(relId, destroyed);
     else persistence.onRemoveRelation(relId);
   };
@@ -433,15 +435,19 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       .map((rel) => ({ ...(getAttr(rel, EARS.AttrKind.RelationDetails) as EARS.RelationDetail), id: rel }));
   };
 
-  function destroyEntity(id: EARS.EntityId, skipPersistence = false) {
+  /**
+   * Takes the entity and every edge to or from it out of memory. Destroying tells the sink to delete them;
+   * unloading tells it nothing, so what is stored of the entity and its edges stays as it was.
+   */
+  function destroyEntity(id: EARS.EntityId, unload = false) {
     // A relation is its details, so destroying one is removing it, as an unlink of that one edge would
-    if (entityTypeOf(id) === EARS.Entity.Relation) return removeRelation(id);
+    if (entityTypeOf(id) === EARS.Entity.Relation) return removeRelation(id, undefined, unload);
     removals++;
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
       const relIds = [...(bySource[id] ?? []), ...(byTarget[id] ?? [])];
       // Every link to or from the entity goes from memory; the sink is told it's because `id` is being deleted
-      for (const relId of relIds) removeRelation(relId, id);
+      for (const relId of relIds) removeRelation(relId, id, unload);
       relations.forgetEntity(k, id);
     }
     for (const [k, b] of store) {
@@ -450,9 +456,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       place(id, k, ABSENT);
     }
     unindexEntity(id);
-    if (!skipPersistence) {
-      persistence.onDestroyEntity(id);
-    }
+    if (!unload) persistence.onDestroyEntity(id);
   }
 
   const getAllAttributeKinds = (): EARS.AttrKind[] => Array.from(store.keys());

@@ -193,6 +193,31 @@ describe('openLmdbStore', () => {
     expect(engine.findRelations({ source: id('Trace-1') })).toEqual([]);
   });
 
+  it('keeps unloaded runs stored whole, their links between runs and to what they ran included', async () => {
+    const store = openStore();
+    engine.create('Note', { id: id('Note-1') }).set('title', 'ran');
+    engine.create('Trace', { id: id('Trace-1') }).set('step', 'flow');
+    engine.create('Trace', { id: id('Trace-2') }).set('step', 'step');
+    engine.write(id('Trace-1')).link('spawned', id('Trace-2'));
+    engine.write(id('Trace-2')).link('instance_of', id('Note-1'));
+    await flushed();
+
+    for (const run of engine.query('Trace').ids()) engine.write(run).unload();
+    await flushed();
+    expect(engine.query('Trace').ids()).toEqual([]);
+    expect(engine.findRelations()).toEqual([]);
+    store.close();
+
+    const reopened = openStore();
+    await reopened.hydrate({ includeVolatile: true });
+    expect(getAttr(id('Trace-2'), 'step')).toBe('step');
+    expect(engine.findRelations().map(({ kind, source, target }) => [source, kind, target])).toEqual(expect.arrayContaining([
+      ['Trace-1', 'spawned', 'Trace-2'],
+      ['Trace-2', 'instance_of', 'Note-1'],
+    ]));
+    expect(engine.findRelations()).toHaveLength(2);
+  });
+
   it("keeps a history link it didn't see written when the other end is destroyed", async () => {
     const store = openStore();
     engine.create('Note', { id: id('Note-1') }).set('title', 'ran');
