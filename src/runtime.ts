@@ -195,7 +195,8 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   reverse(): QueryBuilder<E, S, N, R, O>;
   limit(n: number): QueryBuilder<E, S, N, R, O>;
   distinct(field?: keyof ShapeOf<S, E> & string): QueryBuilder<E, S, N, R, O>;
-  groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, QueryBuilder<E, S, N, R, O>>;
+  /** The ids reached, by their value of `field`, each group in query order; `query.ids(ids)` queries a group on */
+  groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, EARS.EntityId<E>[]>;
   ids(): EARS.EntityId<E>[];
   count(): number;
   /** The first entity's id, or undefined when the query reaches none */

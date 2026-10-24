@@ -340,8 +340,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
     first(): EARS.EntityId<E> | undefined;
     // (undocumented)
     forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, S, N, R, O>;
-    // (undocumented)
-    groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, QueryBuilder<E, S, N, R, O>>;
+    groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, EARS.EntityId<E>[]>;
     has<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
     // (undocumented)
     ids(): EARS.EntityId<E>[];

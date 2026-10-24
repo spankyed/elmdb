@@ -310,9 +310,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
               groups.set(key, [id]);
             }
           });
-          const result = new Map<unknown, QueryBuilder<string>>();
-          groups.forEach((ids, key) => result.set(key, setIds(ids) as unknown as QueryBuilder<string>));
-          return result;
+          return groups;
         },
 
         ids: () => [...cur()],

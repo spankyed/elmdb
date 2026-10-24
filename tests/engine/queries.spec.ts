@@ -131,8 +131,8 @@ describe('ordering', () => {
     expect(e.query('Task').distinct('title').ids()).toEqual([t.a, t.b, t.c]);
     const groups = e.query('Task').groupBy('status');
     expect([...groups.keys()]).toEqual(['open', 'done']);
-    expect(groups.get('open')!.ids()).toEqual([t.a, t.c, t.d]);
-    expect(groups.get('done')!.pick(['title'])).toEqual([{ id: t.b, title: 'apple' }]);
+    expect(groups.get('open')).toEqual([t.a, t.c, t.d]);
+    expect(groups.get('done')).toEqual([t.b]);
   });
 });
 
