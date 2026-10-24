@@ -1,0 +1,72 @@
+import type { Database, RootDatabase, Transaction } from 'lmdb';
+import type { ByteReader, ByteWriter, KvBackend } from '../kv.ts';
+
+/**
+ * How a unit commits: synchronously and abortably, without waiting for the disk (`NO_SYNC_FLUSH`). The commit is
+ * visible at once and survives the process crashing; what makes it durable against the machine failing is a sync,
+ * which is the store's to schedule.
+ */
+const COMMIT = 1 /* ABORTABLE */ | 2 /* SYNCHRONOUS_COMMIT */ | 0x10000 /* NO_SYNC_FLUSH */;
+
+/** The bytes of one database, read inside `transaction` (none: the open write unit, or the latest committed) */
+function bytes(db: Database<Uint8Array, Uint8Array>, transaction?: Transaction): ByteReader {
+  const options = transaction && { transaction };
+  return {
+    get: (key) => db.get(key as Buffer, options),
+    scan(low, high, reverse, values, visit) {
+      // A reverse range starts at the high bound, which LMDB includes and the seam doesn't, and ends at the low one,
+      // which LMDB excludes and the seam includes: the walk below skips the one and visits the other last
+      // An empty bound is no bound: LMDB holds no empty key
+      const lowBound = low.length > 0 ? low : undefined;
+      const options_ = { start: reverse ? high : lowBound, end: reverse ? lowBound : high, reverse, ...options };
+      // for…of closes the cursor however the loop ends — a false visit, a throw — which frees its reader slot
+      if (values) {
+        for (const { key, value } of db.getRange(options_ as Parameters<typeof db.getRange>[0])) {
+          if (reverse && high && Buffer.compare(key as Buffer, high) === 0) continue;
+          if (!visit(key as Uint8Array, value)) return;
+        }
+      } else {
+        for (const key of db.getKeys(options_ as Parameters<typeof db.getKeys>[0])) {
+          if (reverse && high && Buffer.compare(key as Buffer, high) === 0) continue;
+          if (!visit(key as Uint8Array, undefined)) return;
+        }
+      }
+      if (reverse && lowBound) {
+        // `end` excluded `low` itself: visit it last, as a forward range visits it first
+        const own = db.get(low as Buffer, options);
+        if (own !== undefined) visit(low, values ? own : undefined);
+      }
+    },
+  };
+}
+
+/**
+ * The seam's backend over one LMDB database holding binary keys and values: `root` is its environment, which
+ * transactions are taken on. A read is one read transaction, released however `fn` ends; a write is one
+ * `transactionSync` (`COMMIT`), whose reads see its writes.
+ */
+export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array, Uint8Array>): KvBackend {
+  return {
+    read(fn) {
+      const transaction = root.useReadTransaction();
+      try {
+        return fn(bytes(db, transaction));
+      } finally {
+        transaction.done();
+      }
+    },
+    write(fn) {
+      let result!: ReturnType<typeof fn>;
+      // A block body: a callback returning a promise would make the transaction asynchronous
+      root.transactionSync(() => {
+        const writer: ByteWriter = {
+          ...bytes(db),
+          put: (key, value) => { db.putSync(key as Buffer, value as Buffer); },
+          del: (key) => { db.removeSync(key as Buffer); },
+        };
+        result = fn(writer);
+      }, COMMIT);
+      return result;
+    },
+  };
+}

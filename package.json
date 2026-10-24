@@ -56,5 +56,9 @@
   "publishConfig": {
     "access": "public",
     "provenance": true
+  },
+  "dependencies": {
+    "msgpackr": "^1.11.9",
+    "ordered-binary": "^1.6.3"
   }
 }
