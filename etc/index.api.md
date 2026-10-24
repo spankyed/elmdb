@@ -68,14 +68,12 @@ export namespace EARS {
     };
     // (undocumented)
     export type AttributeType = AttrKind;
-    // (undocumented)
-    export type AttributeTypeMap = Record<EntityId, AttributeValue[]>;
     const // (undocumented)
     RoleKind: {
         readonly Custom: <T extends string>(k: T) => T & RoleKind;
     };
     // (undocumented)
-    export type AttributeValue<K extends AttrKind = AttrKind> = K extends keyof AttributePayloads ? AttributePayloads[K] : unknown;
+    export type AttributeTypeMap = Record<EntityId, AttributeValue[]>;
     const // (undocumented)
     AttrKindValues: {
         readonly Role: "role";
@@ -86,22 +84,14 @@ export namespace EARS {
         readonly Role: "role";
     };
     // (undocumented)
+    export type AttributeValue<K extends AttrKind = AttrKind> = K extends keyof AttributePayloads ? AttributePayloads[K] : unknown;
+    // (undocumented)
     export type AttrKind = typeof AttrKindValues[keyof typeof AttrKindValues] | (string & {});
     // (undocumented)
     export type Entity = string & {};
     export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
         readonly __entity?: E;
     };
-    export interface RelationDetail {
-        // (undocumented)
-        info?: AttributeValue;
-        // (undocumented)
-        kind: RelKind;
-        // (undocumented)
-        source: EntityId;
-        // (undocumented)
-        target: EntityId;
-    }
     // (undocumented)
     export type RelKind = string & {};
     // (undocumented)
@@ -178,6 +168,8 @@ export type EarsErrorCode =
 | 'TYPE_MISMATCH'
 /** A write named an attribute the engine owns */
 | 'RESERVED_ATTRIBUTE'
+/** `create` or `upsert` named one of the engine's own types, which its ids are written with (`RESERVED_ENTITY_TYPES`) */
+| 'RESERVED_ENTITY_TYPE'
 /** A `where` was given no value to compare with, or `set` none to store */
 | 'NO_VALUE'
 /** A list write (`append`, `removeAt`, `removeValue`) named an attribute whose value isn't a list */

@@ -1,22 +1,21 @@
 import type { RelationIndexStore } from './relation-index.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
 import { EARS } from './entities.ts';
+import type { RelationRow } from './relations.ts';
 
 /** Which relations an edge store call matches: any combination of source, kind and target */
-export type EdgeMatch = Partial<Pick<EARS.RelationDetail, 'source' | 'kind' | 'target'>>;
+export type EdgeMatch = Partial<Pick<RelationRow, 'source' | 'kind' | 'target'>>;
 
 /** Relation reads and writes by their ends */
 export interface EdgeStore {
   /** The ids of the matching relations */
   relIds(w: EdgeMatch): EARS.EntityId[];
-  /** The matching relations' details */
-  find(w: Partial<EARS.RelationDetail>): EARS.RelationDetail[];
   /** Removes the matching relations */
-  unlink(w: Partial<EARS.RelationDetail>): void;
+  unlink(w: EdgeMatch): void;
   /** Replaces the relations between `source` and `target` of `kind` with one; returns its id */
   linkOne(source: EARS.EntityId, kind: EARS.RelKind, target: EARS.EntityId, info?: unknown): EARS.EntityId;
   /** Moves the first matching relation; whether one matched */
-  patchOne(w: Partial<EARS.RelationDetail>, u: { newSource?: EARS.EntityId; newTarget?: EARS.EntityId; newInfo?: unknown }): boolean;
+  patchOne(w: EdgeMatch, u: { newSource?: EARS.EntityId; newTarget?: EARS.EntityId; newInfo?: unknown }): boolean;
 }
 
 export function createEdgeStore({ relations, storage }: { relations: RelationIndexStore; storage: AttributeStorage }): EdgeStore {
@@ -57,11 +56,6 @@ export function createEdgeStore({ relations, storage }: { relations: RelationInd
   const edgeStore: EdgeStore = {
     relIds: (w) =>
       matchIds(w),
-
-    find: (w) =>
-      matchIds(w).map(
-        (id) => storage.relationOf(id)!,
-      ),
 
     unlink: (w) =>
       matchIds(w).forEach(storage.removeRelationById),

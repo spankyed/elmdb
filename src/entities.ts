@@ -38,15 +38,6 @@ export namespace EARS {
 
   export type RelKind = string & {};
 
-  // ─── Relations ─────────────────────────────────────────────────────────
-  /** A relation's details: its kind, the entity it goes from and the one it goes to, and its info */
-  export interface RelationDetail {
-    kind   : RelKind;
-    source : EntityId;
-    target : EntityId;
-    info?  : AttributeValue;
-  }
-
   // ─── RoleKind ──────────────────────────────────────────────────────────
   const _roleCustom = <T extends string>(k: T) => k as T & RoleKind;
 

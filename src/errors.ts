@@ -12,6 +12,8 @@ export type EarsErrorCode =
   | 'TYPE_MISMATCH'
   /** A write named an attribute the engine owns */
   | 'RESERVED_ATTRIBUTE'
+  /** `create` or `upsert` named one of the engine's own types, which its ids are written with (`RESERVED_ENTITY_TYPES`) */
+  | 'RESERVED_ENTITY_TYPE'
   /** A `where` was given no value to compare with, or `set` none to store */
   | 'NO_VALUE'
   /** A list write (`append`, `removeAt`, `removeValue`) named an attribute whose value isn't a list */

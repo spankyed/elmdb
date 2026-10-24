@@ -7,7 +7,7 @@ import type { EdgeStore } from './edge-store.ts';
 import type { createHierarchy } from './hierarchy.ts';
 import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
-import { EarsError, refuseReserved } from './errors.ts';
+import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
 import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions } from './runtime.ts';
 
@@ -76,6 +76,11 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   const attr = (k: string) => EARS.AttrKind.Custom(k);
 
   function requireType(type: string, via: string): void {
+    // The engine's own, whatever its creator registers: a row of one would stand where a relation or a numbering
+    // sequence is kept
+    if ((Object.values(RESERVED_ENTITY_TYPES) as string[]).includes(type)) {
+      throw new EarsError('RESERVED_ENTITY_TYPE', `${via}(${JSON.stringify(type)}): the engine's own type, which its ids are written with: no entity is created as one`);
+    }
     if (typeof type === 'string' && isEntityType(type)) return;
     throw new EarsError(
       'UNKNOWN_ENTITY_TYPE',

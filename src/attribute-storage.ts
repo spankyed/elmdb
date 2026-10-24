@@ -3,6 +3,7 @@ import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject, sameValue } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
+import type { RelationRow } from './relations.ts';
 import { EarsError, RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /**
@@ -77,8 +78,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   // What `holders` answers for a value nobody holds; never written to, since only `indexValue` adds and it adds to its own
   const none: ReadonlySet<EARS.EntityId> = new Set();
   const relationIndex = relations.index;
-  // Each relation's row, by id: a relation is not an entity, so it holds no attributes and no type's index lists it
-  const relationRows = new Map<EARS.EntityId, EARS.RelationDetail>();
+  /**
+   * Each relation's row, by id: a relation is not an entity, so it holds no attributes and no type's index lists it.
+   * A row is frozen and replaced whole on a change, so a read hands out the stored row itself
+   */
+  const relationRows = new Map<EARS.EntityId, RelationRow>();
+  const relationRow = (id: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info: unknown): RelationRow =>
+    Object.freeze({ id, kind, source, target, info: info as EARS.AttributeValue | undefined });
 
   function clear() {
     if (journal.open) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
@@ -278,7 +284,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   };
 
   /** A relation's row, or undefined when no relation has the id */
-  const relationOf = (relId: EARS.EntityId): EARS.RelationDetail | undefined => relationRows.get(relId);
+  const relationOf = (relId: EARS.EntityId): RelationRow | undefined => relationRows.get(relId);
   const hasRelation = (relId: EARS.EntityId) => relationRows.has(relId);
 
   /** Records how to put back the relation's row */
@@ -292,7 +298,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     });
 
   /** Puts the relation's row, recording how to put back the one before */
-  const placeRelation = (relId: EARS.EntityId, row: EARS.RelationDetail | undefined) => {
+  const placeRelation = (relId: EARS.EntityId, row: RelationRow | undefined) => {
     touchRelation(relId);
     if (row) relationRows.set(relId, row);
     else relationRows.delete(relId);
@@ -314,7 +320,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       }
     }
     const relId = newId(RELATION_ID);
-    placeRelation(relId, { source, target, kind, info } as EARS.RelationDetail);
+    placeRelation(relId, relationRow(relId, kind, source, target, info));
     relations.addToIndex(kind, source, target, relId);
     persistence.onAddRelation(relId, kind, source, target, info);
     return relId;
@@ -322,7 +328,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   /** A stored relation, loaded without telling persistence */
   function bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown) {
-    relationRows.set(relId, { source, target, kind, info } as EARS.RelationDetail);
+    relationRows.set(relId, relationRow(relId, kind, source, target, info));
     relations.addToIndex(kind, source, target, relId);
   }
 
@@ -335,12 +341,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     const d = relationOf(relId);
     if (!d) return;
     const { source: oS, target: oT, kind: k } = d;
-    const next: EARS.RelationDetail = {
-      ...d,
-      ...(newS && { source: newS }),
-      ...(newT && { target: newT }),
-      ...(info !== undefined && { info }),
-    };
+    const next = relationRow(relId, k, newS || oS, newT || oT, info !== undefined ? info : d.info);
     placeRelation(relId, next);
     if (newS || newT)
       relations.updateIndex(k, relId, oS, oT, next.source, next.target);
@@ -447,7 +448,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     const dir = relationIndex[relKind];
     if (!dir) return [];
     return (outward ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [])
-      .map((rel) => ({ ...relationRows.get(rel)!, id: rel }));
+      .map((rel) => relationRows.get(rel)!);
   };
 
   /** Deletes the entity and every edge to or from it, from memory and the sink */

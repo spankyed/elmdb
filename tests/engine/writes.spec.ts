@@ -43,6 +43,15 @@ describe('create', () => {
     expect(e.admin.getAllEntities()).toEqual([]);
   });
 
+  it("refuses the engine's own types, which its ids are written with, whatever its creator registers", () => {
+    const everything = freshEngine({ isEntityType: () => true, isRelationKind, isRole });
+    for (const type of ['Relation', 'Sequence']) {
+      expect(() => everything.create(type), type).toThrow(expect.objectContaining({ code: 'RESERVED_ENTITY_TYPE' }));
+      expect(() => everything.upsert(type, { id: `${type}-1` as Id }), type).toThrow(expect.objectContaining({ code: 'RESERVED_ENTITY_TYPE' }));
+    }
+    expect(everything.admin.getAllEntities()).toEqual([]);
+  });
+
   it('refuses a name that is not a registered type, an id in use, and an id naming another type', () => {
     expect(() => e.create('Memo' as never)).toThrow(expect.objectContaining({ code: 'UNKNOWN_ENTITY_TYPE' }));
     expect(() => e.create('Task-1' as never)).toThrow(/looks like an id: use write\(id\)/);
