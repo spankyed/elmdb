@@ -277,7 +277,8 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
 
     onUpdateRelation(relId: string, patch: { source?: string; target?: string; info?: unknown }) {
       if (closed) return;
-      const r = relations.get(relId) || relUpserts.get(relId);
+      // The relation as the last write left it: one buffered is newer than the stored row, and one removed is gone
+      const r = relDeletes.has(relId) ? undefined : relUpserts.get(relId) ?? relations.get(relId);
       if (!r) {
         dropRelation(relId, `onUpdateRelation called on missing relId: ${relId}`);
         return;

@@ -122,6 +122,32 @@ describe('LMDB Adapter', () => {
     adapter.close?.();
   });
 
+  it('stores every update made to a stored relation before a flush, each on the one before', () => {
+    const first = makeLmdbAdapter(dbs);
+    first.onAddRelation('Relation-moved', 'TEST', 'Doc-a', 'Doc-b', null);
+    first.close?.();
+
+    const adapter = makeLmdbAdapter(dbs);
+    adapter.onUpdateRelation('Relation-moved', { target: 'Doc-c' });
+    adapter.onUpdateRelation('Relation-moved', { info: { x: 1 } });
+    adapter.close?.();
+    expect(dbs.relations.get('Relation-moved')).toMatchObject({ src: 'Doc-a', tgt: 'Doc-c', info: { x: 1 } });
+  });
+
+  it('reports an update to a relation removed before the flush, and stores nothing for it', () => {
+    const first = makeLmdbAdapter(dbs);
+    first.onAddRelation('Relation-gone', 'TEST', 'Doc-a', 'Doc-b', null);
+    first.close?.();
+
+    const onWriteFailure = vi.fn();
+    const adapter = makeLmdbAdapter(dbs, onWriteFailure);
+    adapter.onRemoveRelation('Relation-gone');
+    adapter.onUpdateRelation('Relation-gone', { info: 'late' });
+    adapter.close?.();
+    expect(onWriteFailure).toHaveBeenCalledWith(expect.objectContaining({ op: 'relation', key: 'Relation-gone' }));
+    expect(dbs.relations.get('Relation-gone')).toBeUndefined();
+  });
+
   it('onUpdateRelation counts an update to a relation that is not there', () => {
     const onWriteFailure = vi.fn();
     const adapter = makeLmdbAdapter(dbs, onWriteFailure);
