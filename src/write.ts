@@ -298,12 +298,16 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
   }) as Upsert;
 
   /**
-   * Moves a relation's ends or changes its info, held to the rule `link` is: an end it names must exist — at once
+   * Moves a relation's ends or changes its info, refusing an id no relation has (`NO_SUCH_RELATION`), as
+   * `removeRelation` does, and held to the rule `link` is: an end it names must exist — at once
    * outside a unit, before anything is written, and when the unit commits inside one, where it reads the relation's
    * ends as they are then. `admin.updateRelation` stays unchecked, as `admin.addRelation` does: loading data is the
    * creator's to vouch for.
    */
   function updateRelation(relId: EARS.RelationId, { source, target, info }: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void {
+    if (!relations.has(relId)) {
+      throw new EarsError('NO_SUCH_RELATION', `updateRelation(${JSON.stringify(relId)}): no relation has this id`);
+    }
     const missing = (end: EARS.EntityId) => new EarsError('NO_SUCH_ENTITY', `updateRelation(${JSON.stringify(relId)}): no entity has the id ${JSON.stringify(end)}`);
     if (!journal.open) {
       for (const end of [source, target]) if (end !== undefined && !hasEntity(end)) throw missing(end);

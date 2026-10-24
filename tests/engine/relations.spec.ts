@@ -131,7 +131,7 @@ describe('links', () => {
     expect(() => e.removeRelation(first.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
-  it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id', () => {
+  it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id, and refuses an id no relation has', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('refs', b, { info: 1 }).link('refs', b, { info: 2 });
     e.write(a).link('refs', b, { info: 3, replace: true });
@@ -146,7 +146,7 @@ describe('links', () => {
     expect(e.findRelations()[0].id).toBe(rel);
     expect(e.query.ids(a).out('refs').ids()).toEqual([]);
     expect(e.query.ids(b).out('refs').ids()).toEqual([c]);
-    e.updateRelation('Relation-missing' as RelId, { info: 6 });
+    expect(() => e.updateRelation('Relation-missing' as RelId, { info: 6 })).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
   it('link refuses a cycle within acyclicIn', () => {

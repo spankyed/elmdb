@@ -45,7 +45,7 @@ export interface Ears {
   getRelation(relId: EARS.RelationId): RelationRow | undefined;
   /** The rows of the relations matching every end and kind named; with none named, every relation */
   findRelations(match?: RelationMatch): RelationRow[];
-  /** Moves a relation to new ends, or replaces its info, keeping its id */
+  /** Moves a relation to new ends, or replaces its info, keeping its id; refuses an id no relation has */
   updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   /** Removes the relation with the id, refusing an id no relation has */
   removeRelation(relId: EARS.RelationId): void;

@@ -164,7 +164,7 @@ export type EarsErrorCode =
 'UNKNOWN_ENTITY_TYPE'
 /** `write` was given an id no entity in the engine has */
 | 'NO_SUCH_ENTITY'
-/** `removeRelation` was given an id no relation in the engine has */
+/** `updateRelation` or `removeRelation` was given an id no relation in the engine has */
 | 'NO_SUCH_RELATION'
 /** `create` was given an id an entity already has */
 | 'ID_IN_USE'
