@@ -473,3 +473,14 @@ describe('rows', () => {
     expect(e.isEntityType('Memo')).toBe(false);
   });
 });
+
+describe('schema stats', () => {
+  it('count a field named for an Object.prototype member, and change no other object', () => {
+    e.create('Task').setMany({ constructor: 1, toString: 'x' }).set('__proto__', 5);
+    const { attributes } = e.getSchemaStats();
+    expect(Object.getOwnPropertyDescriptor(attributes, '__proto__')?.value).toEqual({ entityCount: 1, totalValues: 1 });
+    expect(Object.getOwnPropertyDescriptor(attributes, 'constructor')?.value).toEqual({ entityCount: 1, totalValues: 1 });
+    expect(Object.getOwnPropertyDescriptor(attributes, 'toString')?.value).toEqual({ entityCount: 1, totalValues: 1 });
+    expect(({} as Record<string, unknown>).entityCount).toBeUndefined();
+  });
+});

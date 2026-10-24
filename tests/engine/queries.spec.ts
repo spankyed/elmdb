@@ -33,6 +33,24 @@ describe('starts', () => {
     expect(e.admin.getEntitiesOfType('Relation')).toHaveLength(3);
   });
 
+  it('a builder kept across writes answers as one made after them, whatever its steps', () => {
+    const held = {
+      indexed: e.query('Task').where('status', 'open'),
+      role: e.query('Task').withRole('focus'),
+      filtered: e.query('Task').has('rank'),
+      ordered: e.query('Task').orderBy('title'),
+      everything: e.query.all(),
+    };
+    // A terminal run before the write doesn't fix what the builder answers after it
+    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d]);
+    const late = e.create('Task').setMany({ title: 'aardvark', rank: 3, status: 'open' }).grant('focus').id();
+    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d, late]);
+    expect(held.role.ids()).toEqual([t.a, late]);
+    expect(held.filtered.count()).toBe(4);
+    expect(held.ordered.first()).toBe(late);
+    expect(held.everything.ids()).toContain(late);
+  });
+
   /**
    * A type and an id are claims made to different functions, so each can be held to its own: a name that isn't a
    * registered type is a mistake to report, where one start taking both had to read it as an id that matched
@@ -199,6 +217,20 @@ describe('terminals', () => {
     const ids = e.query('Task').where('title', () => (make(), true)).ids();
     expect(ids).toEqual([t.a, t.b, t.c, t.d]);
     expect(made).toHaveLength(4);
+  });
+
+  it("limit takes the first n, rounded down, and none for a count below one or one that isn't a number", () => {
+    expect(e.query('Task').limit(2.5).ids()).toEqual([t.a, t.b]);
+    expect(e.query('Task').limit(Number.NaN).ids()).toEqual([]);
+    expect(e.query('Task').limit(-1).ids()).toEqual([]);
+    expect(e.query('Task').limit(Number.POSITIVE_INFINITY).count()).toBe(4);
+  });
+
+  it('pick holds a field named __proto__ as its own, as getRow does', () => {
+    e.write(t.a).set('__proto__', { x: 1 });
+    const [row] = e.query.ids(t.a).pick(['__proto__']);
+    expect(Object.getOwnPropertyDescriptor(row, '__proto__')?.value).toEqual({ x: 1 });
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
   });
 
   it('pick, pickOne and pickAll', () => {

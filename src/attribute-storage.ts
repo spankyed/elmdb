@@ -40,7 +40,7 @@ export const entityTypeOf = (id: EARS.EntityId) => {
  */
 type Row = Record<string, EARS.AttributeValue>;
 const newRow = (): Row => ({});
-const setField = (row: Row, kind: string, value: EARS.AttributeValue) => {
+export const setField = <V>(row: Record<string, V>, kind: string, value: V) => {
   if (kind === '__proto__') Object.defineProperty(row, kind, { value, writable: true, enumerable: true, configurable: true });
   else row[kind] = value;
 };
@@ -77,12 +77,9 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
   // what hydration rebuilds the attribute from; storing the attribute too would be a second record of it
   const persisted = (kind: EARS.AttrKind) => kind !== EARS.AttrKind.RelationDetails;
-  // Counts the writes that take entities out of the engine, so a query kept across them knows to check its ids
-  let removals = 0;
 
   function clear() {
     if (journal.open) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
-    removals++;
     rows.clear();
     entityIndex.clear();
     trashed.clear();
@@ -146,11 +143,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     }
     if (kind !== TRASHED_AT) return;
     if (next === ABSENT) trashed.delete(id);
-    else if (!trashed.has(id)) {
-      trashed.add(id);
-      // A query kept across a trash drops the row at its next step, as it does a destroyed one
-      removals++;
-    }
+    else trashed.add(id);
   };
 
   /** Records how to put back the entity's value of a kind */
@@ -167,7 +160,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       const was = entityIndex.get(type)?.has(id) ?? false;
       return () => {
         if (was) enter(id);
-        else if (leave(id)) removals++;
+        else leave(id);
       };
     });
 
@@ -463,7 +456,6 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   function destroyEntity(id: EARS.EntityId) {
     // A relation is its details, so destroying one is removing it, as an unlink of that one edge would
     if (entityTypeOf(id) === EARS.Entity.Relation) return removeRelation(id);
-    removals++;
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
       const relIds = [...(bySource[id] ?? []), ...(byTarget[id] ?? [])];
@@ -487,27 +479,29 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
    * kind's use, each relation kind's, and the entities holding each role
    */
   function getSchemaStats(): SchemaStats {
-    const roles: Record<string, number> = {};
-    const attributes: Record<string, { entityCount: number; totalValues: number }> = {};
+    // Maps while counting, since a field may be named for an Object.prototype member (`__proto__`, `constructor`)
+    const roles = new Map<string, number>();
+    const attributes = new Map<string, { entityCount: number; totalValues: number }>();
     // One walk of the rows: each kind's holders and values, and the roles
     for (const row of rows.values()) {
       for (const [kind, value] of Object.entries(row)) {
-        const stats = attributes[kind] ??= { entityCount: 0, totalValues: 0 };
+        let stats = attributes.get(kind);
+        if (!stats) attributes.set(kind, stats = { entityCount: 0, totalValues: 0 });
         stats.entityCount++;
         stats.totalValues += Array.isArray(value) ? value.length : 1;
       }
       const held = owns(row, EARS.AttrKind.Role) ? row[EARS.AttrKind.Role] : undefined;
-      if (held) for (const role of new Set(held as unknown as string[])) roles[role] = (roles[role] ?? 0) + 1;
+      if (held) for (const role of new Set(held as unknown as string[])) roles.set(role, (roles.get(role) ?? 0) + 1);
     }
     return {
       entities: Object.fromEntries([...entityIndex].map(([type, ids]) => [type, ids.size])),
-      attributes,
+      attributes: Object.fromEntries(attributes),
       relations: Object.fromEntries(Object.entries(relationIndex).map(([kind, { bySource, byTarget }]) => [kind, {
         total: Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0),
         uniqueSources: Object.keys(bySource).length,
         uniqueTargets: Object.keys(byTarget).length,
       }])),
-      roles,
+      roles: Object.fromEntries(roles),
     };
   }
 
@@ -515,7 +509,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById: removeRelation,
-    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
+    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf,
     findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf,
     destroyEntity, getSchemaStats,
   };
