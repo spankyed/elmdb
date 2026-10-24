@@ -1,7 +1,7 @@
 import type { EARS, PersistenceSink } from '../../src/index.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
-export const TYPES = new Set(['Task', 'Project', 'Person', 'Relation']);
+export const TYPES = new Set(['Task', 'Project', 'Person']);
 
 export const isEntityType = (name: string) => TYPES.has(name);
 
