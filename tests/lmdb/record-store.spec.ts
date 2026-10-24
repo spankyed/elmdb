@@ -133,7 +133,7 @@ describe('openRecordStore', () => {
 
   it('refuses an EARS database, and an EARS environment refuses it', () => {
     const ears = path.join(path.dirname(dir), 'ears');
-    closeEnv(openEnvAt(ears), () => {});
+    closeEnv(openEnvAt(ears));
     expect(() => store({ at: ears })).toThrow('are an EARS database, not a record store');
 
     store().close();

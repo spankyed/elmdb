@@ -14,7 +14,7 @@ function dec(e: { t: string; v: unknown }): unknown {
 export async function hydrate(params: {
   engine: EarsAdmin;
   env: LmdbDbs;
-  /** Where the counts go; `console.log` by default */
+  /** Where the counts and the relations it skips go; `console.log` by default */
   log?: (message: string) => void;
 }) {
   const { engine, env, log = console.log } = params;
@@ -35,15 +35,15 @@ export async function hydrate(params: {
     const relIdStr = String(relId);
 
     if (!r.src || typeof r.src !== 'string' || r.src.length === 0) {
-      console.warn(`[Hydrate] Skipping relation with invalid src: relId=${relIdStr}, src=${r.src}`);
+      log(`[Hydrate] Skipping relation with invalid src: relId=${relIdStr}, src=${r.src}`);
       continue;
     }
     if (!r.tgt || typeof r.tgt !== 'string' || r.tgt.length === 0) {
-      console.warn(`[Hydrate] Skipping relation with invalid tgt: relId=${relIdStr}, tgt=${r.tgt}`);
+      log(`[Hydrate] Skipping relation with invalid tgt: relId=${relIdStr}, tgt=${r.tgt}`);
       continue;
     }
     if (!r.kind || typeof r.kind !== 'string') {
-      console.warn(`[Hydrate] Skipping relation with invalid kind: relId=${relIdStr}, kind=${r.kind}`);
+      log(`[Hydrate] Skipping relation with invalid kind: relId=${relIdStr}, kind=${r.kind}`);
       continue;
     }
 

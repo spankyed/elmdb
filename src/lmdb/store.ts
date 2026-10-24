@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import type { PersistenceSink, PersistenceErrorStats } from '../runtime.ts';
 import type { EarsAdmin } from '../engine.ts';
-import { openEnvAt, closeEnv, type LmdbDbs } from './envs.ts';
+import { openEnvAt, closeEnv, isAlreadyClosed, type LmdbDbs } from './envs.ts';
 import { makeLmdbAdapter, type WriteFailure } from './adapter.ts';
 import { hydrate } from './hydrate.ts';
 import { LmdbReader } from './reader.ts';
@@ -46,9 +46,6 @@ export interface LmdbStore {
   reset(): Promise<void>;
 }
 
-const ignoresClosed = (error: unknown) =>
-  error instanceof Error && (error.message.includes('Dbi is not open') || error.message.includes('already been closed'));
-
 /** What an LMDB store is opened with */
 export interface LmdbStoreOptions {
   /** The database directory */
@@ -60,7 +57,7 @@ export interface LmdbStoreOptions {
   engine: () => EarsAdmin;
   /** Opens existing environments without writing to them (tools reading a copy, or a running app's files) */
   readOnly?: boolean;
-  /** Where the store's progress lines go (hydration counts, closing); `console.log` by default */
+  /** Where the store's lines go (hydration counts, relations it skipped, errors closing); `console.log` by default */
   log?: (message: string) => void;
   /**
    * Told when a write is dropped, with the row it was for.
@@ -103,19 +100,20 @@ export function openLmdbStore({ path, engine, readOnly = false, log = console.lo
     env = null;
     current = null;
     if (!closingEnv) return NO_ERRORS;
-    const warn = (error: unknown) => {
-      if (!ignoresClosed(error)) console.warn('[Persistence] Non-critical close error:', (error as Error).message);
+    const report = (error: unknown) => {
+      if (!isAlreadyClosed(error)) log(`[LMDB] Closing ${path} met an error: ${(error as Error).message}`);
     };
     // The environments close even if the final flush throws
     try {
       closingSink?.close?.();
     } catch (error) {
-      warn(error);
+      report(error);
     } finally {
       try {
-        closeEnv(closingEnv, log);
+        closeEnv(closingEnv);
+        log('[LMDB] Environment closed successfully');
       } catch (error) {
-        warn(error);
+        report(error);
       }
     }
     return closingSink?.getErrorStats?.() ?? NO_ERRORS;

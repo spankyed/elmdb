@@ -46,7 +46,7 @@ function* storedKinds(attrs: LmdbDbs['attrs']): Iterable<string> {
 
 /** What the app is told when a write is dropped. The engine reports; the app decides what to do about it. */
 export interface WriteFailure {
-  /** `entity` | `entity-remove` | `attrs` | `relation` | `relation-remove`, or `destroy` for a unit's destroy */
+  /** `entity` | `entity-remove` | `attrs` | `relation` | `relation-remove`, or `destroy` for an entity's destroy */
   op: string;
   /** The row the dropped write was for, which is what a diagnosis needs and the logs never had */
   key: string;
@@ -188,14 +188,12 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
     runSteps(takeSteps(), 'final flush');
   }
 
-  /**
-   * A relation write this adapter refuses: counted like any other failed write, so `close()` reports it instead of
-   * the write disappearing with a line in the console
-   */
+  /** A relation write this adapter refuses: counted and reported like any other dropped write */
   function dropRelation(relId: string, reason: string): void {
+    const error = new Error(reason);
     errorCount++;
-    lastError = { op: 'relation', key: relId, error: new Error(reason) };
-    console.warn(`[LMDB] ${reason}`);
+    lastError = { op: 'relation', key: relId, error };
+    onWriteFailure?.({ op: 'relation', key: relId, error });
   }
 
   return {
@@ -219,7 +217,7 @@ export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFa
       } catch (error) {
         errorCount++;
         lastError = { op: 'destroy', key: entityId, error };
-        console.error(`[LMDB] Failed to delete entity ${entityId}:`, error);
+        onWriteFailure?.({ op: 'destroy', key: entityId, error });
       }
     },
 

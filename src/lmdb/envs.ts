@@ -73,20 +73,21 @@ export function openEnvAt(basePath: string, { readOnly = false }: { readOnly?: b
   };
 }
 
-export function closeEnv(dbs: LmdbDbs, log: (message: string) => void = console.log): void {
+/** Whether `error` says only that a database was already closed, which closing it again is allowed to meet */
+export const isAlreadyClosed = (error: unknown) =>
+  error instanceof Error && (error.message.includes('Dbi is not open') || error.message.includes('already been closed'));
+
+/**
+ * Closes an environment's databases, then its root, so the root closes even when a child was closed already.
+ * Throws anything else it meets: what to do with it is the caller's.
+ */
+export function closeEnv(dbs: LmdbDbs): void {
   try {
-    // Close child databases first, then root
-    // This ensures clean shutdown even if root close fails
     dbs.entities?.close();
     dbs.attrs?.close();
     dbs.relations?.close();
     dbs.root?.close();
-    log('[LMDB] Environment closed successfully');
-  } catch (error: any) {
-    // Only log unexpected errors (not "already closed" errors)
-    if (!error?.message?.includes('Dbi is not open') &&
-        !error?.message?.includes('already been closed')) {
-      console.error('[LMDB] Error closing environment:', error);
-    }
+  } catch (error) {
+    if (!isAlreadyClosed(error)) throw error;
   }
 }

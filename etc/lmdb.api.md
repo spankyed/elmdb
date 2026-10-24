@@ -13,8 +13,8 @@ export type AttrRecord = {
     v: any;
 };
 
-// @public (undocumented)
-export function closeEnv(dbs: LmdbDbs, log?: (message: string) => void): void;
+// @public
+export function closeEnv(dbs: LmdbDbs): void;
 
 // @public
 export function convertToCurrentFormat(basePath: string): FormatSteps;

@@ -113,23 +113,21 @@ describe('LMDB Adapter', () => {
     { src: 'nohyphen', tgt: 'Document-1', label: 'no-hyphen src' },
     { src: 'Document-1', tgt: 'nohyphen', label: 'no-hyphen tgt' },
   ])('onAddRelation refuses invalid input, and counts the write it drops: $label', ({ src, tgt }) => {
-    const adapter = makeLmdbAdapter(dbs);
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onWriteFailure = vi.fn();
+    const adapter = makeLmdbAdapter(dbs, onWriteFailure);
     adapter.onAddRelation('Relation-bad', 'TEST', src, tgt, null);
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('[LMDB] Invalid'));
-    // Counted, so the store's close() reports it rather than the write vanishing with a console line
+    expect(onWriteFailure).toHaveBeenCalledWith({ op: 'relation', key: 'Relation-bad', error: expect.objectContaining({ message: expect.stringContaining('Invalid') }) });
+    // Counted too, so the store's close() reports it
     expect(adapter.getErrorStats?.()).toMatchObject({ errorCount: 1, lastError: { op: 'relation', key: 'Relation-bad' } });
-    spy.mockRestore();
     adapter.close?.();
   });
 
   it('onUpdateRelation counts an update to a relation that is not there', () => {
-    const adapter = makeLmdbAdapter(dbs);
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onWriteFailure = vi.fn();
+    const adapter = makeLmdbAdapter(dbs, onWriteFailure);
     adapter.onUpdateRelation('Relation-nonexistent', { info: 'test' });
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('missing relId'));
+    expect(onWriteFailure).toHaveBeenCalledWith({ op: 'relation', key: 'Relation-nonexistent', error: expect.objectContaining({ message: expect.stringContaining('missing relId') }) });
     expect(adapter.getErrorStats?.()).toMatchObject({ errorCount: 1, lastError: { op: 'relation', key: 'Relation-nonexistent' } });
-    spy.mockRestore();
     adapter.close?.();
   });
 
@@ -146,12 +144,11 @@ describe('LMDB Adapter', () => {
     adapter.onAddRelation('Relation-valid', 'TEST', 'Doc-1', 'Doc-2', null);
     adapter.close?.(); // flush to DB
 
-    const adapter2 = makeLmdbAdapter(dbs);
-    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const onWriteFailure = vi.fn();
+    const adapter2 = makeLmdbAdapter(dbs, onWriteFailure);
     adapter2.onUpdateRelation('Relation-valid', patch);
-    expect(spy).toHaveBeenCalledWith(expect.stringContaining('[LMDB] Invalid'));
+    expect(onWriteFailure).toHaveBeenCalledWith({ op: 'relation', key: 'Relation-valid', error: expect.objectContaining({ message: expect.stringContaining('Invalid') }) });
     expect(adapter2.getErrorStats?.()).toMatchObject({ errorCount: 1, lastError: { op: 'relation', key: 'Relation-valid' } });
-    spy.mockRestore();
     adapter2.close?.();
   });
 });
