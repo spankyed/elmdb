@@ -85,8 +85,7 @@ export interface LmdbStore {
   durable(): Promise<void>;
   /**
    * Writes a consistent copy of the database into `targetDir` (as `data.mdb`): one read transaction's worth, so a
-   * copy made while the app writes is one moment of the database. The copy is compacted: it holds the pages in use
-   * and none of those deletes freed, which the store's own file keeps for later writes
+   * copy made while the app writes is one moment of the database
    */
   copyTo(targetDir: string): Promise<void>;
   /** Replaces every entry with those of the database at `dir`, in one unit: a reader sees the old or the new */
@@ -206,7 +205,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     async copyTo(targetDir) {
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });
-      await root.backup(targetDir, true);
+      await root.backup(targetDir, false);
     },
     replaceWith(source) {
       refuseReadOnly('be replaced');

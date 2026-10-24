@@ -83,17 +83,6 @@ describe('openLmdbStore', () => {
     expect(engine.query('Note').count()).toBe(1);
   });
 
-  it('copies the database without the pages its deletes freed', async () => {
-    const { store, engine } = openStore();
-    engine.transact(() => { for (let i = 0; i < 200; i++) engine.create('Note', { id: id(`Note-${i}`), title: 'x'.repeat(10_000) }); });
-    engine.transact(() => { for (let i = 1; i < 200; i++) engine.write(id(`Note-${i}`)).destroy(); });
-    const copy = path.join(path.dirname(dbPath), 'compacted');
-    await store.copyTo(copy);
-    expect(fs.statSync(path.join(copy, 'data.mdb')).size).toBeLessThan(fs.statSync(path.join(dbPath, 'data.mdb')).size / 10);
-    const { engine: copied } = openStore({ readOnly: true }, copy);
-    expect(copied.query('Note').ids()).toEqual(['Note-0']);
-  });
-
   it('copies one moment of the database, which opens on its own', async () => {
     const { store, engine } = openStore();
     engine.create('Note', { id: id('Note-1'), title: 'before' });

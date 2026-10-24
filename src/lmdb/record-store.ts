@@ -166,8 +166,7 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     },
     async copyTo(targetDir) {
       fs.mkdirSync(targetDir, { recursive: true });
-      // Compacted, as the database's copy is: the pages a removed session freed stay behind
-      await current().root.backup(targetDir, true);
+      await current().root.backup(targetDir, false);
     },
     replaceWith(source) {
       const open = writable();

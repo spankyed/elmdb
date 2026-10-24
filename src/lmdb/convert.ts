@@ -245,37 +245,6 @@ export function convertToCurrentFormat(basePath: string): FormatSteps {
   return steps;
 }
 
-/** What compacting an environment did: its file's size before and after, in bytes */
-export interface Compaction {
-  before: number;
-  after: number;
-}
-
-/**
- * Rewrites the environment at `basePath` without the pages its deletes freed, in place: LMDB never shrinks a file,
- * and a conversion writes the new format beside the old tables before it empties them, so a converted file holds
- * both. A compacting copy is written beside it and its `data.mdb` renamed over the original's, so the file is the
- * old one or the new one whatever happens part way. Run on a closed environment, as a conversion is.
- */
-export async function compactEnvironment(basePath: string): Promise<Compaction> {
-  const file = path.join(basePath, 'data.mdb');
-  if (!fs.existsSync(file)) throw new Error(`No LMDB database at ${basePath}`);
-  const before = fs.statSync(file).size;
-  const beside = fs.mkdtempSync(`${basePath}.compacting-`);
-  try {
-    const root = open({ path: basePath, maxDbs: 8, readOnly: true });
-    try {
-      await root.backup(beside, true);
-    } finally {
-      root.close();
-    }
-    fs.renameSync(path.join(beside, 'data.mdb'), file);
-  } finally {
-    fs.rmSync(beside, { recursive: true, force: true });
-  }
-  return { before, after: fs.statSync(file).size };
-}
-
 /** The format an environment records, 1 when it records none */
 function recordedFormat(basePath: string): unknown {
   return withEnv(basePath, undefined, ({ meta }) => meta.get('format') ?? 1);
