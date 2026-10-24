@@ -24,6 +24,7 @@ interface Stream {
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
 import type { TypeName } from './write.ts';
 import type { NameChecks } from './names.ts';
+import type { Relations } from './relations.ts';
 
 type MaybeArr<T> = T | readonly T[];
 function asArr<T>(v: MaybeArr<T>): readonly T[] {
@@ -63,12 +64,12 @@ export interface Query extends QueryEntries {
   trashed: QueryEntries;
 }
 
-/** An engine's untyped query entry points, over its storage (which reads the relation index for them) */
-export function createQuery({ storage, isEntityType, names }: { storage: AttributeStorage; isEntityType: (name: string) => boolean; names: NameChecks }): Query {
+/** An engine's untyped query entry points, over its attribute storage and its relations */
+export function createQuery({ storage, relations, isEntityType, names }: { storage: AttributeStorage; relations: Relations; isEntityType: (name: string) => boolean; names: NameChecks }): Query {
   const {
-    getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, getAttr, hasAttr,
-    findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf, getRow,
+    getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, getAttr, hasAttr, getRow,
   } = storage;
+  const { farEnds, edges: relationEdges, linkedWith: linkedWithOf } = relations;
 
   const prefixCache = new Map<EARS.Entity, (id: EARS.EntityId) => boolean>();
   const hasPrefix = (t: EARS.Entity) => {
@@ -200,7 +201,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
             const reached = new Set<EARS.EntityId>();
             pull((from) => {
               for (const k of kindList) {
-                for (const i of findEntitiesByRelationTo(k, from, outward)) {
+                for (const i of farEnds(k, from, outward)) {
                   if (i === from || !matches(i) || reached.has(i)) continue;
                   reached.add(i);
                   // A relation's far end may not be in the engine, or be in the trash
@@ -228,7 +229,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
           while (frontier.length) {
             const next: EARS.EntityId[] = [];
             for (const from of frontier) for (const k of asArr(kinds)) {
-              for (const i of findEntitiesByRelationTo(k, from, outward)) {
+              for (const i of farEnds(k, from, outward)) {
                 if (seen.has(i) || !alive(i)) continue;
                 seen.add(i);
                 next.push(i);
@@ -248,7 +249,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
        */
       const filterByLink = (via: string, kind: string, other: EARS.EntityId | undefined, outward: boolean, keep: boolean) => {
         names.relationKinds(kind, via);
-        const linked = (i: EARS.EntityId) => findEntitiesByRelationTo(kind, i, outward)
+        const linked = (i: EARS.EntityId) => farEnds(kind, i, outward)
           .some((end) => (other === undefined ? end !== i && alive(end) : end === other));
         return keepIds(() => (i) => linked(i) === keep);
       };
@@ -259,7 +260,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
         const matches = ofTypes(type);
         const rows: RelationEdge[] = [];
         for (const from of cur()) for (const k of asArr(kinds)) {
-          for (const row of relationsOf(k, from, outward)) {
+          for (const row of relationEdges(k, from, outward)) {
             const far = outward ? row.target : row.source;
             if (matches(far) && alive(far)) rows.push(row);
           }
@@ -325,7 +326,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
         },
 
         linkedWith: (other: EARS.EntityId) => keepIds(() => {
-          const linked = new Set(findEntitiesInRelationTo(other));
+          const linked = new Set(linkedWithOf(other));
           return (i) => linked.has(i);
         }),
 

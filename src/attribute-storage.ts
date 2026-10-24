@@ -1,10 +1,9 @@
-import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
-import { idSuffix, isPlainObject, sameValue } from './utils.ts';
+import { idSuffix, isPlainObject } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
-import type { RelationRow } from './relations.ts';
-import { EarsError, RESERVED_ENTITY_TYPES } from './errors.ts';
+import type { RelationStats } from './relations.ts';
+import { EarsError } from './errors.ts';
 
 /**
  * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this
@@ -16,9 +15,6 @@ export const newId = <E extends EARS.Entity>(t: E): EARS.EntityId =>
   `${t}-${idSuffix()}` as EARS.EntityId;
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
-
-/** What a relation's id starts with: a relation is no entity, but its id has an entity id's form, `<prefix>-<suffix>` */
-const RELATION_ID = RESERVED_ENTITY_TYPES.relation as EARS.Entity;
 
 /** When an entity was put in the trash: an entity holding it is trashed, and reads by type, id or link skip it */
 export const TRASHED_AT = 'trashedAt' as EARS.AttrKind;
@@ -56,7 +52,7 @@ const isEmpty = (row: Row) => {
 };
 
 /** An engine's attributes (by entity, then kind), its entity index by type, and the writes and reads over them */
-export function createAttributeStorage({ relations, persistence, journal }: { relations: RelationIndexStore; persistence: PersistenceSink; journal: Journal }) {
+export function createAttributeStorage({ persistence, journal }: { persistence: PersistenceSink; journal: Journal }) {
   // One value per attribute: a list is an array value. A stored value is never changed in place, so the value an
   // undo or a held sink call keeps is the value that was there. Kept by entity, so a row is read from its own
   // fields; what is read by kind across entities is the value index, derived from these
@@ -77,23 +73,12 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const valueIndex = new Map<EARS.AttrKind, Map<unknown, EARS.EntityId | Set<EARS.EntityId>>>();
   // What `holders` answers for a value nobody holds; never written to, since only `indexValue` adds and it adds to its own
   const none: ReadonlySet<EARS.EntityId> = new Set();
-  const relationIndex = relations.index;
-  /**
-   * Each relation's row, by id: a relation is not an entity, so it holds no attributes and no type's index lists it.
-   * A row is frozen and replaced whole on a change, so a read hands out the stored row itself
-   */
-  const relationRows = new Map<EARS.EntityId, RelationRow>();
-  const relationRow = (id: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info: unknown): RelationRow =>
-    Object.freeze({ id, kind, source, target, info: info as EARS.AttributeValue | undefined });
-
   function clear() {
     if (journal.open) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
     rows.clear();
-    relationRows.clear();
     entityIndex.clear();
     trashed.clear();
     valueIndex.clear();
-    relations.clear();
   }
 
   const indexKey = (index: Map<unknown, EARS.EntityId | Set<EARS.EntityId>>, id: EARS.EntityId, key: unknown, add: boolean) => {
@@ -283,84 +268,6 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     assign(id, EARS.AttrKind.Role, rest.length ? rest as unknown as EARS.AttributeValue : ABSENT);
   };
 
-  /** A relation's row, or undefined when no relation has the id */
-  const relationOf = (relId: EARS.EntityId): RelationRow | undefined => relationRows.get(relId);
-  const hasRelation = (relId: EARS.EntityId) => relationRows.has(relId);
-
-  /** Records how to put back the relation's row */
-  const touchRelation = (relId: EARS.EntityId) =>
-    journal.open && journal.touch(`rel\x1F${relId}`, () => {
-      const before = relationRows.get(relId);
-      return () => {
-        if (before) relationRows.set(relId, before);
-        else relationRows.delete(relId);
-      };
-    });
-
-  /** Puts the relation's row, recording how to put back the one before */
-  const placeRelation = (relId: EARS.EntityId, row: RelationRow | undefined) => {
-    touchRelation(relId);
-    if (row) relationRows.set(relId, row);
-    else relationRows.delete(relId);
-  };
-
-  function addRelation(
-    source: EARS.EntityId,
-    kind: string,
-    target: EARS.EntityId,
-    info?: unknown,
-  ) {
-    const entry = relationIndex[kind];
-    if (entry?.bySource?.[source] && entry?.byTarget?.[target]) {
-      const fromTarget = new Set(entry.byTarget[target]);
-      for (const existingRelId of entry.bySource[source]) {
-        if (!fromTarget.has(existingRelId)) continue;
-        // The same edge: linking it again is a no-op, which keeps its id and its place among its siblings
-        if (info === undefined || sameValue(relationOf(existingRelId)?.info, info)) return existingRelId;
-      }
-    }
-    const relId = newId(RELATION_ID);
-    placeRelation(relId, relationRow(relId, kind, source, target, info));
-    relations.addToIndex(kind, source, target, relId);
-    persistence.onAddRelation(relId, kind, source, target, info);
-    return relId;
-  }
-
-  /** A stored relation, loaded without telling persistence */
-  function bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown) {
-    relationRows.set(relId, relationRow(relId, kind, source, target, info));
-    relations.addToIndex(kind, source, target, relId);
-  }
-
-  function updateRelation(
-    relId: EARS.EntityId,
-    newS?: EARS.EntityId,
-    newT?: EARS.EntityId,
-    info?: unknown,
-  ) {
-    const d = relationOf(relId);
-    if (!d) return;
-    const { source: oS, target: oT, kind: k } = d;
-    const next = relationRow(relId, k, newS || oS, newT || oT, info !== undefined ? info : d.info);
-    placeRelation(relId, next);
-    if (newS || newT)
-      relations.updateIndex(k, relId, oS, oT, next.source, next.target);
-    const patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown } = {};
-    if (newS) patch.source = newS;
-    if (newT) patch.target = newT;
-    if (info !== undefined) patch.info = info;
-    persistence.onUpdateRelation(relId, patch);
-  }
-
-  /** Removes a relation from memory and tells the sink; an id no relation has is ignored */
-  const removeRelation = (relId: EARS.EntityId) => {
-    const d = relationOf(relId);
-    if (!d) return;
-    relations.removeFromIndex(d.kind, d.source, d.target, relId);
-    placeRelation(relId, undefined);
-    persistence.onRemoveRelation(relId);
-  };
-
   // `entityType` is read from the id rather than stored, so every row carries it and none can disagree
   const getAttr = (id: EARS.EntityId, k: EARS.AttrKind): EARS.AttributeValue | null => {
     if (k === ENTITY_TYPE) return hasEntity(id) ? entityTypeOf(id) : null;
@@ -416,51 +323,11 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   /** Whether the entity is in the engine and not in the trash: what a read by type, id or link reaches */
   const isLive = (id: EARS.EntityId) => hasEntity(id) && !trashed.has(id);
 
-  /** Every entity `id` has a relation to or from, of any kind */
-  const findEntitiesInRelationTo = (id: EARS.EntityId) => {
-    const out = new Set<EARS.EntityId>();
-    for (const k of Object.keys(relationIndex)) {
-      const { bySource, byTarget } = relationIndex[k];
-      bySource[id]?.forEach((relId) => out.add(relationRows.get(relId)!.target));
-      byTarget[id]?.forEach((relId) => out.add(relationRows.get(relId)!.source));
-    }
-    return [...out];
-  };
-
-  const findEntitiesByRelationTo = (
-    relKind: string,
-    id: EARS.EntityId,
-    asSource = false,
-  ) => {
-    const dir = relationIndex[relKind];
-    if (!dir) return [];
-    const relIds = asSource ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [];
-    return relIds
-      .map((rel) => {
-        const d = relationRows.get(rel)!;
-        return asSource ? d.target : d.source;
-      })
-      .filter(Boolean);
-  };
-
-  /** The relations of a kind going out of `id` (or, with `outward` false, coming in), each a relation row */
-  const relationsOf = (relKind: string, id: EARS.EntityId, outward: boolean) => {
-    const dir = relationIndex[relKind];
-    if (!dir) return [];
-    return (outward ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [])
-      .map((rel) => relationRows.get(rel)!);
-  };
-
-  /** Deletes the entity and every edge to or from it, from memory and the sink */
+  /**
+   * Deletes the entity's attributes and its place in its type's index, from memory and the sink. Its relations are the
+   * relations module's, removed before this
+   */
   function destroyEntity(id: EARS.EntityId) {
-    // Destroying a relation by its id removes it, as an unlink of that one edge would
-    if (relationRows.has(id)) return removeRelation(id);
-    for (const k of Object.keys(relationIndex)) {
-      const { bySource, byTarget } = relationIndex[k];
-      const relIds = [...(bySource[id] ?? []), ...(byTarget[id] ?? [])];
-      for (const relId of relIds) removeRelation(relId);
-      relations.forgetEntity(k, id);
-    }
     for (const k of Object.keys(rows.get(id) ?? {}) as EARS.AttrKind[]) {
       touchValue(id, k);
       place(id, k, ABSENT);
@@ -474,10 +341,10 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   const entityCreated = (id: EARS.EntityId, entityType: EARS.Entity) => persistence.onCreateEntity(id, entityType);
 
   /**
-   * The engine's data as it is, each map keyed by a name the data holds: entities per type, each attribute
-   * kind's use, each relation kind's, and the entities holding each role
+   * The entities' data as it is, each map keyed by a name the data holds: entities per type, each attribute kind's use,
+   * and the entities holding each role (each relation kind's use is the relations module's)
    */
-  function getSchemaStats(): SchemaStats {
+  function entityStats(): Omit<SchemaStats, 'relations'> {
     // Maps while counting, since a field may be named for an Object.prototype member (`__proto__`, `constructor`)
     const roles = new Map<string, number>();
     const attributes = new Map<string, { entityCount: number; totalValues: number }>();
@@ -495,22 +362,16 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     return {
       entities: Object.fromEntries([...entityIndex].map(([type, ids]) => [type, ids.size])),
       attributes: Object.fromEntries(attributes),
-      relations: Object.fromEntries(Object.entries(relationIndex).map(([kind, { bySource, byTarget }]) => [kind, {
-        total: Object.values(bySource).reduce((total, relIds) => total + relIds.length, 0),
-        uniqueSources: Object.keys(bySource).length,
-        uniqueTargets: Object.keys(byTarget).length,
-      }])),
       roles: Object.fromEntries(roles),
     };
   }
 
   return {
-    clear, bulkLoadAttr, bulkLoadRelation, relationOf, hasRelation,
+    clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
-    entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById: removeRelation,
+    entityCreated, grantRole, revokeRole,
     getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf,
-    findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf,
-    destroyEntity, getSchemaStats,
+    destroyEntity, entityStats,
   };
 }
 
@@ -518,16 +379,6 @@ export type AttributeStorage = ReturnType<typeof createAttributeStorage>;
 
 /** An entity as a read gives it: its id and type, and every attribute it holds */
 export type EntityRow = { id: EARS.EntityId; entityType: EARS.Entity } & Record<string, unknown>;
-
-/** Counts for one relation kind */
-export interface RelationStats {
-  /** Relations of the kind */
-  total: number;
-  /** Distinct entities that are a source of one */
-  uniqueSources: number;
-  /** Distinct entities that are a target of one */
-  uniqueTargets: number;
-}
 
 /** What an engine holds, each map keyed by a name its data holds */
 export interface SchemaStats {

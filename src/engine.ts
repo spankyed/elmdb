@@ -3,14 +3,12 @@
 // the faces define the contract, not a security boundary (packs run in-process).
 import type { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
-import { createRelationIndex } from './relation-index.ts';
 import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
-import { createEdgeStore } from './edge-store.ts';
 import { createQuery, type Query } from './query.ts';
 import { createHierarchy } from './hierarchy.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createEntityCounters } from './numbering.ts';
-import { createRelationReads, type RelationMatch, type RelationRow } from './relations.ts';
+import { createRelations, type RelationMatch, type RelationRow } from './relations.ts';
 import { createJournal } from './journal.ts';
 import { createNameChecks } from './names.ts';
 
@@ -88,37 +86,42 @@ export interface EarsEngine extends Ears {
 export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, rowRules = () => undefined }: EARSRuntimeDeps): EarsEngine {
   const names = createNameChecks({ isRelationKind, isRole });
   const { journal, unitSink, transact } = createJournal(persistence);
-  const relations = createRelationIndex(journal);
-  const storage = createAttributeStorage({ relations, persistence: unitSink, journal });
-  const edgeStore = createEdgeStore({ relations, storage });
-  const query = createQuery({ storage, isEntityType, names });
+  const storage = createAttributeStorage({ persistence: unitSink, journal });
+  const relations = createRelations({ persistence: unitSink, journal });
+  const query = createQuery({ storage, relations, isEntityType, names });
   const hierarchy = createHierarchy({ query, names });
   const counters = createEntityCounters(storage);
-  const { create, upsert, write, updateRelation } = createWrites({ storage, edgeStore, hierarchy, isEntityType, rowRules, counters, names, journal });
-  const relationReads = createRelationReads({ edgeStore, storage, names });
+  const { create, upsert, write, updateRelation } = createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal });
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
     nextLabel: counters.nextLabel,
-    ...relationReads,
     ...hierarchy,
     getRow: storage.getRow,
     getAttr: (id, field) => (storage.hasAttr(id, field) ? storage.getAttr(id, field) : undefined),
     getRoles: storage.getRoles,
-    getSchemaStats: storage.getSchemaStats,
+    getSchemaStats: () => ({ ...storage.entityStats(), relations: relations.stats() }),
+    findRelations: (match = {}) => {
+      if (match.kind !== undefined) names.relationKinds(match.kind, 'findRelations');
+      return relations.find(match);
+    },
     updateRelation,
   };
 
   const admin: EarsAdmin = {
-    clear: storage.clear,
+    // Attribute storage refuses a clear inside a unit before anything is emptied
+    clear: () => {
+      storage.clear();
+      relations.clear();
+    },
     getAllEntities: storage.getAllEntities,
     getEntitiesOfType: storage.getEntitiesOfType,
     bulkLoadAttr: storage.bulkLoadAttr,
     putAttr: storage.putAttr,
     deleteAttr: storage.deleteAttr,
-    addRelation: storage.addRelation,
-    updateRelation: (relId, { source, target, info }) => storage.updateRelation(relId, source, target, info),
-    bulkLoadRelation: storage.bulkLoadRelation,
+    addRelation: relations.add,
+    updateRelation: (relId, { source, target, info }) => relations.update(relId, source, target, info),
+    bulkLoadRelation: relations.bulkLoad,
   };
 
   return { ...operations, admin };

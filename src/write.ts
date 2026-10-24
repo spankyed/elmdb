@@ -3,7 +3,7 @@
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { Journal } from './journal.ts';
 import { newId, entityTypeOf, TRASHED_AT } from './attribute-storage.ts';
-import type { EdgeStore } from './edge-store.ts';
+import type { Relations } from './relations.ts';
 import type { createHierarchy } from './hierarchy.ts';
 import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
@@ -37,11 +37,11 @@ export interface Write {
   <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
-/** An engine's writes, over its storage, edge store and cycle check */
-export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowRules, counters, names, journal }: {
+/** An engine's writes, over its attribute storage, its relations and its cycle check */
+export function createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal }: {
   storage: AttributeStorage;
   journal: Pick<Journal, 'atCommit' | 'open'>;
-  edgeStore: EdgeStore;
+  relations: Relations;
   hierarchy: Pick<ReturnType<typeof createHierarchy>, 'wouldCreateCycle'>;
   isEntityType: (name: string) => boolean;
   rowRules: (type: string) => RowRules | undefined;
@@ -52,7 +52,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
-    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getRow, getAttr, holders,
+    grantRole, revokeRole, getRoles, getRow, getAttr, holders,
   } = storage;
 
   const SHORT_CODE = EARS.AttrKind.Custom('shortCode');
@@ -91,7 +91,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
     }
     journal.atCommit(() => {
       // This link's own edge: another entity's relation to the same missing id, loaded from files, is not this unit's
-      if (!hasEntity(target) && findEntitiesByRelationTo(kind, target).includes(source)) throw missing();
+      if (!hasEntity(target) && relations.farEnds(kind, target, false).includes(source)) throw missing();
     });
   }
   const { wouldCreateCycle } = hierarchy;
@@ -185,17 +185,17 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
             : `Cannot create a ${kind} relation that would form a cycle within [${acyclicIn.join(', ')}]`);
         }
         requireTarget(id, kind, target);
-        if (replace) edgeStore.linkOne(id, kind, target, info);
-        else addRelation(id, kind, target, info);
+        if (replace) relations.replace(id, kind, target, info);
+        else relations.add(id, kind, target, info);
         return self;
       },
       unlink(kind, target) {
         names.relationKinds(kind, 'unlink');
-        edgeStore.unlink({ source: id, kind, target });
+        relations.unlink({ source: id, kind, target });
         return self;
       },
       unlinkAll() {
-        edgeStore.unlink({ source: id });
+        relations.unlink({ source: id });
         return self;
       },
 
@@ -227,6 +227,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
       },
 
       destroy() {
+        relations.removeEntity(id);
         destroyEntity(id);
       },
 
@@ -248,7 +249,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
     };
     const self = Object.fromEntries(Object.keys(builder(relId, false)).map((member) => [member, refuse(member)])) as unknown as WriteBuilder;
     return Object.assign(self, {
-      destroy: () => storage.removeRelationById(relId),
+      destroy: () => relations.remove(relId),
       id: () => relId,
     });
   }
@@ -288,7 +289,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   }) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
-    if (storage.hasRelation(id)) return relationBuilder(id);
+    if (relations.has(id)) return relationBuilder(id);
     if (!hasEntity(id)) {
       throw new EarsError('NO_SUCH_ENTITY', `write(${JSON.stringify(id)}): no entity has this id. create(type) makes one; upsert(type, id) makes it when missing`);
     }
@@ -321,12 +322,12 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
       for (const end of [source, target]) if (end !== undefined && !hasEntity(end)) throw missing(end);
     } else {
       journal.atCommit(() => {
-        const details = storage.relationOf(relId);
+        const details = relations.get(relId);
         if (!details) return;
         for (const end of [details.source, details.target]) if (!hasEntity(end)) throw missing(end);
       });
     }
-    storage.updateRelation(relId, source, target, info);
+    relations.update(relId, source, target, info);
   }
 
   return { create, upsert, write, updateRelation };
