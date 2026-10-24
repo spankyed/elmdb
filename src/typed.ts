@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
 import { newId } from './attribute-storage.ts';
 import type { Ears } from './engine.ts';
 
@@ -44,7 +44,7 @@ type RowArg<S extends EntityShapes, E extends string, Row> = [RequiredField<S, E
  * and times it keeps when it brings them (`RowIdentity`) — one argument, so nothing lands in the wrong place
  */
 export interface TypedCreate<D extends EarsSchema> {
-  <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity>): WriteBuilder<E, D>;
+  <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
 }
 
 /**
@@ -52,7 +52,7 @@ export interface TypedCreate<D extends EarsSchema> {
  * with the id always given — one argument, as `create` takes
  */
 export interface TypedUpsert<D extends EarsSchema> {
-  <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & { id: EARS.EntityId }): WriteBuilder<E, D>;
+  <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & { id: EARS.EntityId }): WriteBuilder<E, D>;
 }
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */

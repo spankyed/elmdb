@@ -70,6 +70,28 @@ describe('create', () => {
     expect(e.getRow(e.create('Task', { shortCode: undefined, title: 'x' }).id())).not.toHaveProperty('shortCode');
   });
 
+  it("refuses a short code that isn't the type's next form, one in use, and one for a type that numbers none", () => {
+    const e = numbered();
+    e.create('Project', { shortCode: 'PRO-3' });
+    for (const shortCode of ['PRO-x', 'PRO-0', 'PRO-03', 'P-3', 'DOC-3', 3]) {
+      expect(() => e.create('Project', { shortCode } as never), String(shortCode)).toThrow(expect.objectContaining({ code: 'INVALID_SHORT_CODE' }));
+    }
+    expect(() => e.create('Project', { shortCode: 'PRO-3' })).toThrow(expect.objectContaining({ code: 'SHORT_CODE_IN_USE' }));
+    expect(() => e.create('Task', { shortCode: 'TSK-1', title: 'x' } as never)).toThrow(expect.objectContaining({ code: 'INVALID_SHORT_CODE' }));
+    expect(e.query('Project').count()).toBe(1);
+  });
+
+  it('keeps a short code once written: no write changes or removes it, and an upsert may only repeat it', () => {
+    const e = numbered();
+    const id = e.create('Project').id();
+    expect(() => e.write(id).set('shortCode', 'PRO-9')).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+    expect(() => e.write(id).delete('shortCode')).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+    expect(() => e.write(id).setMany({ shortCode: 'PRO-9' })).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
+    e.upsert('Project', { id, shortCode: 'PRO-1', color: 'blue' });
+    expect(() => e.upsert('Project', { id, shortCode: 'PRO-9' })).toThrow(expect.objectContaining({ code: 'INVALID_SHORT_CODE' }));
+    expect(e.getRow(id)).toMatchObject({ shortCode: 'PRO-1', color: 'blue' });
+  });
+
   it('takes no number for a create it refuses', () => {
     const e = numbered();
     expect(() => e.create('Project', { id: 'Task-1' as Id })).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
@@ -79,10 +101,10 @@ describe('create', () => {
   });
 });
 
-/** An engine whose Project rows are numbered `PRO-<n>` and Person rows `P-<n>`, a Person requiring its short code and title */
+/** An engine whose Project rows are numbered `PRO-<n>` and Person rows `P-<n>`, a Person requiring its title */
 const numbered = () => freshEngine({
   isEntityType, isRelationKind, isRole,
-  rowRules: (type) => ({ Project: { required: [], shortCode: 'PRO' }, Person: { required: ['shortCode', 'title'], shortCode: 'P' } })[type],
+  rowRules: (type) => ({ Project: { required: [], shortCode: 'PRO' }, Person: { required: ['title'], shortCode: 'P' } })[type],
 });
 const code = (e: EngineUnderTest, fields: Record<string, unknown> = {}) => e.getRow(e.create('Project', fields).id())?.shortCode;
 
@@ -101,7 +123,6 @@ describe('numbering', () => {
   it('starts after the highest number a type already holds, and skips one a row took for itself', () => {
     const e = numbered();
     e.create('Project', { shortCode: 'PRO-7' });
-    e.create('Project', { shortCode: 'PRO-x' });
     expect(code(e)).toBe('PRO-8');
     e.create('Project', { shortCode: 'PRO-9' });
     expect(code(e)).toBe('PRO-10');

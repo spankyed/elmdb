@@ -7,7 +7,7 @@ import type { EdgeStore } from './edge-store.ts';
 import type { createHierarchy } from './hierarchy.ts';
 import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
-import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
+import { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
 import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions } from './runtime.ts';
 
@@ -48,12 +48,35 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   counters: Pick<ReturnType<typeof createEntityCounters>, 'generateShortCode'>;
   names: NameChecks;
 }) {
-  const requiredFields = (type: string) => rowRules(type)?.required ?? [];
+  // The engine's own fields are its to write, so a type's rules never require a row to bring one
+  const requiredFields = (type: string) => (rowRules(type)?.required ?? []).filter((field) => !(RESERVED_ATTRIBUTES as readonly string[]).includes(field));
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
-    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getRow,
+    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getRow, getAttr, holders,
   } = storage;
+
+  const SHORT_CODE = EARS.AttrKind.Custom('shortCode');
+
+  /**
+   * The short code a created row of `type` gets: the one it brought — an import keeping the code it had, held to the
+   * type's `<prefix>-<n>` and to no other entity holding it — or, with none, the next number of the type's prefix.
+   * Undefined for a type that numbers none, which a row may then bring no code to either.
+   */
+  function shortCodeFor(type: string, brought: unknown): (() => string) | undefined {
+    const prefix = rowRules(type)?.shortCode;
+    if (brought === undefined) return prefix ? () => counters.generateShortCode(type, prefix) : undefined;
+    if (!prefix) {
+      throw new EarsError('INVALID_SHORT_CODE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): a ${type} is not numbered, so it holds no short code`);
+    }
+    if (typeof brought !== 'string' || !new RegExp(`^${prefix}-[1-9][0-9]*$`).test(brought)) {
+      throw new EarsError('INVALID_SHORT_CODE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): a ${type}'s short code is ${prefix}-<n>`);
+    }
+    if (holders(SHORT_CODE, brought).size > 0) {
+      throw new EarsError('SHORT_CODE_IN_USE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): another entity holds this short code`);
+    }
+    return () => brought;
+  }
 
   /**
    * A relation has two ends when it is committed. Inside a unit that is checked when the unit commits, so the unit
@@ -233,13 +256,13 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
 
   const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => {
     requireType(type, 'create');
-    // The row's id and times are the engine's to write; its other reserved names are refused before the entity
-    // exists, so a create that fails leaves nothing behind
-    const { id: given, createdAt, updatedAt, ...fields } = row;
+    // The row's id, short code and times are the engine's to write; its other reserved names are refused before the
+    // entity exists, so a create that fails leaves nothing behind
+    const { id: given, shortCode: brought, createdAt, updatedAt, ...fields } = row;
     for (const field of Object.keys(fields)) refuseReserved(field, 'create');
-    // A row that brings no short code is numbered, once every check has passed, so a refused create takes no number
-    const prefix = fields.shortCode === undefined ? rowRules(type)?.shortCode : undefined;
-    const missing = requiredFields(type).filter((field) => fields[field] === undefined && !(field === 'shortCode' && prefix));
+    // Numbered once every check has passed, so a refused create takes no number
+    const shortCode = shortCodeFor(type, brought);
+    const missing = requiredFields(type).filter((field) => fields[field] === undefined);
     if (missing.length > 0) {
       throw new EarsError('REQUIRED_FIELD', `create(${JSON.stringify(type)}): the row lacks ${missing.map((field) => `"${field}"`).join(', ')}, which every ${type} holds`);
     }
@@ -256,8 +279,8 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
     } else {
       id = newId(type);
     }
-    if (prefix) fields.shortCode = counters.generateShortCode(type, prefix);
     entityCreated(id, type);
+    if (shortCode) putAttr(id, SHORT_CODE, shortCode());
     const at = createdAt ?? Date.now();
     putAttr(id, attr('createdAt'), at);
     putAttr(id, UPDATED_AT, updatedAt ?? at);
@@ -274,11 +297,15 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   }) as Write;
 
   // An entity that exists keeps its times: setMany refuses a createdAt or updatedAt in the row, as any write of them
-  const upsert = ((type: string, { id, ...fields }: Record<string, unknown> & { id: EARS.EntityId }) => {
+  const upsert = ((type: string, { id, shortCode, ...fields }: Record<string, unknown> & { id: EARS.EntityId }) => {
     requireType(type, 'upsert');
-    if (!hasEntity(id)) return create(type, { ...fields, id });
+    if (!hasEntity(id)) return create(type, { ...fields, ...(shortCode !== undefined && { shortCode }), id });
     if (entityTypeOf(id) !== type) {
       throw new EarsError('TYPE_MISMATCH', `upsert(${JSON.stringify(type)}, { id: ${JSON.stringify(id)} }): that entity is a ${entityTypeOf(id)}`);
+    }
+    // An entity keeps the short code it was numbered with: a row may repeat it, as an import's does, and not change it
+    if (shortCode !== undefined && shortCode !== getAttr(id, SHORT_CODE)) {
+      throw new EarsError('INVALID_SHORT_CODE', `upsert(${JSON.stringify(type)}, { id: ${JSON.stringify(id)}, shortCode: ${JSON.stringify(shortCode)} }): the entity's short code is ${JSON.stringify(getAttr(id, SHORT_CODE))}, and nothing changes it`);
     }
     return builder(id, true).setMany(fields);
   }) as Upsert;

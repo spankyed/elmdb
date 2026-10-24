@@ -36,9 +36,9 @@ export function createEarsEngine(input: EARSRuntimeDeps): EarsEngine;
 export type CreateFields<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? {
-    [K in keyof ShapeOf<S, E> as K extends Exclude<RequiredField<S, E>, NumberedField<S, E>> ? K : never]: ShapeOf<S, E>[K];
+    [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K];
 } & {
-    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> | NumberedField<S, E> ? K : never]?: ShapeOf<S, E>[K];
+    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
 
 // @public
@@ -179,7 +179,14 @@ export type EarsErrorCode =
 /** A role write, or a query by role, named a role that is not registered */
 | 'UNKNOWN_ROLE'
 /** A created row lacked a field its type requires, or a delete named one */
-| 'REQUIRED_FIELD';
+| 'REQUIRED_FIELD'
+/**
+* A created row brought a short code its type doesn't number, or one that isn't the type's `<prefix>-<n>`, or an
+* upsert's row one other than the entity's
+*/
+| 'INVALID_SHORT_CODE'
+/** A created row brought a short code another entity holds */
+| 'SHORT_CODE_IN_USE';
 
 // @public
 export interface EARSRuntimeDeps {
@@ -261,13 +268,6 @@ export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
 // @public
 export const noopSink: PersistenceSink;
-
-// @public
-export type NumberedField<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? 'shortCode' extends RequiredField<S, E> ? (ShapeOf<S, E> extends {
-    shortCode: ShortCode<string>;
-} ? 'shortCode' : never) : never : never;
 
 // @public
 export type OptionalField<S extends EntityShapes, E extends string> = [
@@ -445,7 +445,7 @@ E
 ] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
 
 // @public
-export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "updatedAt", "role", "trashedAt"];
+export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "shortCode", "createdAt", "updatedAt", "role", "trashedAt"];
 
 // @public
 export const RESERVED_ENTITY_TYPES: {
@@ -488,6 +488,17 @@ E
 export type ShortCode<P extends string> = `${P}-${number}`;
 
 // @public
+export type ShortCodeIdentity<S extends EntityShapes, E extends string> = [
+E
+] extends [keyof S] ? (ShapeOf<S, E> extends {
+    shortCode?: infer C;
+} ? {
+    shortCode?: C;
+} : {}) : {
+    shortCode?: string;
+};
+
+// @public
 export type StoredRecord = {
     id: string;
 } & Record<string, unknown>;
@@ -495,7 +506,7 @@ export type StoredRecord = {
 // @public
 export interface TypedCreate<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity>): WriteBuilder<E, D>;
+    <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
 }
 
 // @public (undocumented)
@@ -538,7 +549,7 @@ export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
 // @public
 export interface TypedUpsert<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & {
+    <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & {
         id: EARS.EntityId;
     }): WriteBuilder<E, D>;
 }

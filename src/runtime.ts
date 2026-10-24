@@ -76,22 +76,23 @@ export interface EARSRuntimeDeps {
 }
 
 /**
- * What a created row of an entity type is held to, read off its shape by codegen (`apack pack generate-entries`), so
- * a shape is the one place a rule is written
+ * What a created row of an entity type is held to, which codegen (`apack pack generate-entries`) writes from the pack's
+ * declarations: the required fields read off its shape, and the short code prefix its manifest declares
  */
 export interface RowRules {
   /** The fields its row must hold: the shape's required ones. `create` refuses a row without one, and `delete` one */
   required: readonly string[];
   /**
-   * The prefix `create` numbers the row's `shortCode` with, `<prefix>-<n>`, when the row brings none: the shape types
-   * the field `ShortCode<prefix>`. A number is never handed out twice for a type and prefix
+   * The prefix `create` numbers the row's `shortCode` with, `<prefix>-<n>`: the one the manifest declares for the type
+   * (`shortCodes`), which its shape types the field as (`ShortCode<prefix>`). A number is never handed out twice
+   * for a type and prefix, and a type with none holds no short code
    */
   shortCode?: string;
 }
 
 /**
- * A short code, `<prefix>-<n>`. A shape whose `shortCode` field has this type has its rows numbered by `create`
- * (`RowRules.shortCode`), so a typed `create` may leave the field out
+ * A short code, `<prefix>-<n>`: how a shape types `shortCode` for an entity type whose manifest declares the prefix
+ * (`shortCodes`), which codegen checks the two agree on. `create` numbers it, and nothing writes it after
  */
 export type ShortCode<P extends string> = `${P}-${number}`;
 
@@ -256,6 +257,17 @@ export interface RowIdentity {
   updatedAt?: number;
 }
 
+/**
+ * The short code a created row may bring as identity, in place of the next number — an import keeping the code it
+ * had: for a declared shape, its own `shortCode` type (`ShortCode<prefix>`), so another type's code fails to compile,
+ * and no such key when the shape has no short code; any string for an undeclared type. The engine holds every one to
+ * the type's `<prefix>-<n>` and to no other entity holding it at runtime
+ */
+export type ShortCodeIdentity<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? (ShapeOf<S, E> extends { shortCode?: infer C } ? { shortCode?: C } : {})
+    : { shortCode?: string };
+
 /** What `write` is given besides the entity */
 export interface WriteOptions {
   /**
@@ -285,23 +297,16 @@ export type OptionalField<S extends EntityShapes, E extends string> =
 export type RequiredField<S extends EntityShapes, E extends string> =
   [E] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
 
-/** The field `create` writes when the row brings none: `shortCode`, where the shape types it as a `ShortCode` */
-export type NumberedField<S extends EntityShapes, E extends string> =
-  [E] extends [keyof S]
-    ? 'shortCode' extends RequiredField<S, E>
-      ? (ShapeOf<S, E> extends { shortCode: ShortCode<string> } ? 'shortCode' : never)
-      : never
-    : never;
-
 /**
- * The row `create` writes: for a declared shape, every required field — but the short code `create` numbers — and
- * any optional one, so a row read back has what its shape says it has; any fields otherwise (an undeclared type, or
- * one known only at runtime)
+ * The row `create` writes: for a declared shape, every required field and any optional one, so a row read back has
+ * what its shape says it has; any fields otherwise (an undeclared type, or one known only at runtime). The engine's
+ * own fields, the short code among them, are not fields of a row: an import brings them as its identity
+ * (`RowIdentity`, `ShortCodeIdentity`)
  */
 export type CreateFields<S extends EntityShapes, E extends string> =
   [E] extends [keyof S]
-    ? { [K in keyof ShapeOf<S, E> as K extends Exclude<RequiredField<S, E>, NumberedField<S, E>> ? K : never]: ShapeOf<S, E>[K] }
-      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> | NumberedField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
+    ? { [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K] }
+      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
     : Record<string, unknown>;
 
 /** What `where(k, v)` matches field `K` against: a value, one element of a list field, or a predicate */

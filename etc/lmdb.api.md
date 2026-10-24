@@ -7,6 +7,13 @@
 import { Database } from 'lmdb';
 import { RootDatabase } from 'lmdb';
 
+// @public
+export interface AttributeRewrite {
+    removed: number;
+    removedEntities: number;
+    rewritten: number;
+}
+
 // @public (undocumented)
 export type AttrRecord = {
     t: 'null' | 'string' | 'number' | 'boolean' | 'object' | 'array' | 'date' | 'blob';
@@ -195,6 +202,11 @@ export type RelationRecord = {
     info?: any;
     createdAt: number;
 };
+
+// @public
+export function rewriteAttributes(basePath: string, rewrite: (kind: string, id: string, value: unknown) => unknown, input?: {
+    removeEntities?: readonly string[];
+}): AttributeRewrite;
 
 // @public
 export interface WriteFailure {

@@ -23,7 +23,14 @@ export type EarsErrorCode =
   /** A role write, or a query by role, named a role that is not registered */
   | 'UNKNOWN_ROLE'
   /** A created row lacked a field its type requires, or a delete named one */
-  | 'REQUIRED_FIELD';
+  | 'REQUIRED_FIELD'
+  /**
+   * A created row brought a short code its type doesn't number, or one that isn't the type's `<prefix>-<n>`, or an
+   * upsert's row one other than the entity's
+   */
+  | 'INVALID_SHORT_CODE'
+  /** A created row brought a short code another entity holds */
+  | 'SHORT_CODE_IN_USE';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {
@@ -38,10 +45,11 @@ export class EarsError extends Error {
 
 /**
  * Attributes only the engine writes: its own kinds (a role is written by `grant`, when an entity was trashed by
- * `trash`) and an entity's identity, type, creation time and last change, which
- * the engine stamps on every attribute write (`updatedAt`).
+ * `trash`) and an entity's identity, type, short code, creation time and last change, which the engine stamps on
+ * every attribute write (`updatedAt`). A short code is numbered by `create` from the prefix the type's manifest
+ * declares, and references name it, so nothing changes it once it is written.
  */
-export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'createdAt', 'updatedAt', 'role', 'trashedAt'] as const;
+export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'shortCode', 'createdAt', 'updatedAt', 'role', 'trashedAt'] as const;
 
 /**
  * Entity types no pack declares: the engine's own ids are written with them — a relation's `Relation-<suffix>` and a
@@ -57,6 +65,7 @@ export function refuseReserved(name: string, via: string): void {
       `${via}('${name}'): "${name}" is written by the engine, not through ${via}. ` +
         (name === 'createdAt' ? 'Pass it to create(type, { createdAt }).'
           : name === 'role' ? 'Use grant() and revoke().'
+            : name === 'shortCode' ? 'create numbers it from the prefix the type declares; an import passes it to create(type, { shortCode }).'
               : 'It is set when the entity is created.'),
     );
   }

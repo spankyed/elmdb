@@ -167,6 +167,51 @@ function withEnv<T>(basePath: string, from: number | undefined, fn: (env: { root
   }
 }
 
+/** What `rewriteAttributes` changed */
+export interface AttributeRewrite {
+  /** Attribute rows given a new value */
+  rewritten: number;
+  /** Attribute rows removed with their entity */
+  removed: number;
+  /** Entity rows removed (`removeEntities`) */
+  removedEntities: number;
+}
+
+/**
+ * Rewrites the attribute rows of a copy of a database in this version's format, in place and in one transaction: a
+ * data change made explicitly, on a copy, as a format conversion is — never at boot. `rewrite` is given each
+ * attribute's kind, entity id and value, as a read gives it back, and answers its new value, or undefined to leave
+ * it; `removeEntities` names entities to remove, their rows and every attribute of theirs.
+ * Refuses a database in another format.
+ */
+export function rewriteAttributes(
+  basePath: string,
+  rewrite: (kind: string, id: string, value: unknown) => unknown,
+  { removeEntities = [] }: { removeEntities?: readonly string[] } = {},
+): AttributeRewrite {
+  return withEnv(basePath, LMDB_FORMAT_VERSION, ({ root }) => {
+    const entities = root.openDB({ name: 'entities', encoding: 'json' }) as Database<unknown>;
+    const attrs = root.openDB({ name: 'attrs', encoding: 'json' }) as Database<AttrRecord>;
+    const removing = new Set(removeEntities);
+    const result: AttributeRewrite = { rewritten: 0, removed: 0, removedEntities: 0 };
+    root.transactionSync(() => {
+      // Materialised, since the body writes and removes keys of the range it walks
+      for (const { key, value } of [...attrs.getRange()] as Array<{ key: string; value: AttrRecord }>) {
+        const sep = key.indexOf(SEP);
+        const kind = key.slice(0, sep);
+        const id = key.slice(sep + 1);
+        if (removing.has(id)) { attrs.remove(key); result.removed++; continue; }
+        const next = rewrite(kind, id, decodeAttr(value));
+        if (next === undefined) continue;
+        attrs.put(key, encode(next));
+        result.rewritten++;
+      }
+      for (const id of removing) if (entities.get(id) !== undefined) { entities.remove(id); result.removedEntities++; }
+    });
+    return result;
+  });
+}
+
 /** An attribute record, as the adapter writes one */
 function encode(value: unknown): AttrRecord {
   if (value instanceof Date) return { t: 'date', v: value.toISOString() };
