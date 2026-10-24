@@ -13,7 +13,7 @@ const [ops] = fc.sample(crashWorkload(Number(length)), { seed: Number(seed), num
 const store = openLmdbStore({ path: dir });
 const engine = newEngine(store.kv);
 for (let i = 0; i < ops.length; i++) {
-  applyTo(engine, ops[i], () => {});
+  applyTo(engine, ops[i]);
   fs.writeSync(1, `${i + 1}\n`);
 }
 fs.writeSync(1, 'done\n');

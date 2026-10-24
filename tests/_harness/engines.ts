@@ -1,17 +1,25 @@
-// The harness's engines: over the two types its workload writes, and a backend that can refuse a commit
+// The harness's engines: over the two types its workload writes, each indexing one field, and a backend that can
+// refuse a commit
 import { createEarsEngine } from '../../src/index.ts';
 import type { KvBackend, OrderedKV } from '../../src/kv.ts';
+import { INDEXED, TYPES } from './model.ts';
 
-const TYPES = new Set(['Task', 'Note']);
+const types = new Set<string>(TYPES);
 
-export const newEngine = (kv: OrderedKV) =>
-  createEarsEngine({ kv, isEntityType: (name) => TYPES.has(name), isRelationKind: () => true, isRole: () => true });
+export const newEngine = (kv: OrderedKV) => createEarsEngine({
+  kv, isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true,
+  rowRules: () => ({ required: [], indexes: [INDEXED] }),
+});
 
-/** A backend that refuses the next unit that writes when told to, as a full disk would */
-export function refusable(backend: KvBackend): { backend: KvBackend; refuseNext: () => void } {
+/**
+ * A backend that refuses the next unit that writes while it is told to, as a full disk would. It is told to only while
+ * one of the workload's ops runs: a read builds an index in a unit of its own, which a full disk refuses too, and which
+ * the model, knowing nothing of indexes, can't count
+ */
+export function refusable(backend: KvBackend): { backend: KvBackend; refusing: (on: boolean) => void } {
   let refusing = false;
   return {
-    refuseNext: () => { refusing = true; },
+    refusing: (on) => { refusing = on; },
     backend: {
       read: (fn) => backend.read(fn),
       durable: () => backend.durable(),
