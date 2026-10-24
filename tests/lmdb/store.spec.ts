@@ -55,6 +55,19 @@ describe('openLmdbStore', () => {
     expect(() => openLmdbStore({ path: path.join(root, 'nowhere'), readOnly: true })).toThrow('No LMDB database');
   });
 
+  it('answers an index lookup on a read-only store whose index was never built, from the type\'s rows', () => {
+    // Indexes are built on their first read, which a read-only store can't write: a converted database has none built
+    const indexing = (store: LmdbStore) => createEarsEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], indexes: ['status'] }) });
+    const writer = openLmdbStore({ path: dbPath });
+    indexing(writer).create('Note', { id: id('Note-1'), status: 'open' }).grant('pinned');
+    writer.close();
+    const reader = openLmdbStore({ path: dbPath, readOnly: true });
+    opened.push(reader);
+    const engine = indexing(reader);
+    expect(engine.query('Note').where('status', 'open').ids()).toEqual(['Note-1']);
+    expect(engine.query('Note').withRole('pinned').ids()).toEqual(['Note-1']);
+  });
+
   it('resets to empty, and replaces its entries with another database\'s in one unit', async () => {
     const { store, engine } = openStore();
     engine.create('Note', { id: id('Note-old'), title: 'old' });

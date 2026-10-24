@@ -143,7 +143,8 @@ export function createAttributeStorage({ access, inUnit }: {
   /**
    * The type's entities holding `value` under `kind`, or a list with it, the trash included, in the type's order: from
    * the index, which its first read builds. That read walks the type, as an index that isn't there yet is built in a
-   * unit of its own, which a snapshot already open doesn't see
+   * unit of its own, which a snapshot already open doesn't see. The index is a cache of that walk, so a store that
+   * refuses the build — read-only, or full — leaves it unbuilt and the read answers from the walk all the same
    */
   const holders = (type: EARS.Entity, kind: EARS.AttrKind, value: unknown): EARS.EntityId[] => read((r) => {
     if (isBuilt(r, type, kind)) {
@@ -156,7 +157,11 @@ export function createAttributeStorage({ access, inUnit }: {
       if (holds(r.get(['v', id, kind]), value)) found.push(id);
       return true;
     }, 'all');
-    build(type, kind);
+    try {
+      build(type, kind);
+    } catch {
+      // Unbuilt, as the refused unit left it: the next read walks the type again
+    }
     return found;
   });
 
