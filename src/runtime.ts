@@ -84,7 +84,7 @@ export interface RowRules {
   required: readonly string[];
   /**
    * The prefix `create` numbers the row's `shortCode` with, `<prefix>-<n>`: the one the manifest declares for the type
-   * (`shortCodes`), which its shape types the field as (`ShortCode<prefix>`). A number is never handed out twice
+   * (its entry's `shortCode`), which its shape types the field as (`ShortCode<prefix>`). A number is never handed out twice
    * for a type and prefix, and a type with none holds no short code
    */
   shortCode?: string;
@@ -92,7 +92,7 @@ export interface RowRules {
 
 /**
  * A short code, `<prefix>-<n>`: how a shape types `shortCode` for an entity type whose manifest declares the prefix
- * (`shortCodes`), which codegen checks the two agree on. `create` numbers it, and nothing writes it after
+ * (its entry's `shortCode`), which codegen checks the two agree on. `create` numbers it, and nothing writes it after
  */
 export type ShortCode<P extends string> = `${P}-${number}`;
 
