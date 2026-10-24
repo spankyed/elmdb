@@ -14,10 +14,12 @@ export default defineConfig({
     fileParallelism: true,
     benchmark: { include: ['bench/**/*.bench.ts'] },
     projects: [
-      { test: { ...deadlines, setupFiles, name: 'ears', include: ['tests/**/*.spec.ts'] } },
+      // The harness's LMDB and process halves run in the integration pool (vitest.integration.config.ts)
+      { test: { ...deadlines, setupFiles, name: 'ears', include: ['tests/**/*.spec.ts'], exclude: ['**/*.integration.spec.ts', '**/node_modules/**'] } },
       // The engine's contract once more, every engine on an LMDB store (`tests/engine/engine-under-test.ts`): what
-      // holds on memory, where the other specs run, holds on the app's backend
-      { test: { ...deadlines, setupFiles, name: 'ears-on-lmdb', include: ['tests/engine/**/*.spec.ts'], env: { EARS_KV: 'lmdb' } } },
+      // holds on memory, where the other specs run, holds on the app's backend. The model-based spec builds its own
+      // store, one that can refuse a commit, so it runs once
+      { test: { ...deadlines, setupFiles, name: 'ears-on-lmdb', include: ['tests/engine/**/*.spec.ts'], exclude: ['tests/engine/model-based.spec.ts', '**/node_modules/**'], env: { EARS_KV: 'lmdb' } } },
     ],
   },
 });
