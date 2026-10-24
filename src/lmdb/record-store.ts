@@ -37,6 +37,11 @@ type Dbs = { root: RootDatabase; records: Database<StoredRecord, string>; index:
  */
 export function openRecordStore<R extends { id: string } = StoredRecord>({ path: dir, indexes, readOnly = false }: RecordStoreOptions<R>): RecordStore<R> {
   let dbs: Dbs | null = null;
+  /**
+   * Why opening the files again failed, while it has: the store has nowhere to write, so a write throws rather than
+   * being dropped as it is while files are being replaced
+   */
+  let openFailure: Error | null = null;
   const newId = _idClock();
 
   function openDbs(): Dbs {
@@ -68,7 +73,24 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
    */
   function writable(): Dbs | null {
     if (readOnly) throw new Error(`The record store at ${dir} is open read-only`);
+    if (openFailure) {
+      throw new Error(
+        `The record store at ${dir} is closed: opening it again failed (${openFailure.message}). `
+        + 'Nothing can be saved until the app is started again.',
+      );
+    }
     return dbs;
+  }
+
+  /** Opens the files again, remembering a failure for the writes that follow */
+  function reopenDbs(): void {
+    try {
+      dbs = openDbs();
+      openFailure = null;
+    } catch (error) {
+      openFailure = error instanceof Error ? error : new Error(String(error));
+      throw error;
+    }
   }
 
   const entries = (record: StoredRecord): IndexKey[] =>
@@ -122,8 +144,8 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
         const id = key[2];
         if (id === cursor) continue;
         const record = records.get(id) as R | undefined;
-        if (record) found.push(record);
         if (limit !== undefined && found.length >= limit) break;
+        if (record) found.push(record);
       }
       return found;
     },
@@ -131,7 +153,7 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     close,
     reopen() {
       close();
-      dbs = openDbs();
+      reopenDbs();
     },
     async reset() {
       if (readOnly) throw new Error(`The record store at ${dir} is open read-only`);
@@ -139,7 +161,7 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
       // Let LMDB release the files before deleting them
       await new Promise((resolve) => setTimeout(resolve, 100));
       fs.rmSync(dir, { recursive: true, force: true });
-      dbs = openDbs();
+      reopenDbs();
     },
     async copyTo(targetDir) {
       fs.mkdirSync(targetDir, { recursive: true });

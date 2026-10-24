@@ -83,6 +83,12 @@ describe.each(Object.keys(STORES))('a record store %s', (where) => {
     expect(ids(s.findBy('parentId', 'P', { reverse: true, limit: 2, cursor: made[3] }))).toEqual([made[2], made[1]]);
   });
 
+  it('finds nothing for a limit of none', () => {
+    const s = fresh();
+    s.put({ id: s.newId('R'), parentId: 'P' });
+    expect(s.findBy('parentId', 'P', { limit: 0 })).toEqual([]);
+  });
+
   it('is empty after a reset', async () => {
     const s = fresh();
     s.put({ id: 'R-1', parentId: 'P' });
@@ -129,6 +135,17 @@ describe('openRecordStore', () => {
     expect(readOnly.get('R-1')).toBeDefined();
     expect(() => readOnly.put({ id: 'R-2' })).toThrow('read-only');
     expect(() => store({ readOnly: true, at: path.join(root, 'nothing-here') })).toThrow('No record store');
+  });
+
+  it('refuses a write once opening its files again has failed, rather than dropping it', () => {
+    const s = store();
+    s.close();
+    // Its files replaced by ones it refuses to open
+    fs.rmSync(dir, { recursive: true, force: true });
+    closeEnv(openEnvAt(dir));
+    expect(() => s.reopen()).toThrow('are an EARS database, not a record store');
+    expect(() => s.put({ id: 'R-1' })).toThrow('opening it again failed');
+    expect(s.findBy('status', 'active')).toEqual([]);
   });
 
   it('refuses an EARS database, and an EARS environment refuses it', () => {
