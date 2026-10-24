@@ -94,7 +94,6 @@ export interface LmdbStore {
     // (undocumented)
     readonly readOnly: boolean;
     replaceWith(dir: string): void;
-    requestSync(): void;
     reset(): void;
     readonly syncs: number;
 }
@@ -103,6 +102,7 @@ export interface LmdbStore {
 export interface LmdbStoreOptions {
     path: string;
     readOnly?: boolean;
+    syncIdleMs?: number;
     syncIntervalMs?: number;
 }
 
@@ -136,6 +136,9 @@ export interface RecordStoreOptions<R extends {
 }
 
 // @public
-export const SYNC_INTERVAL_MS = 200;
+export const SYNC_IDLE_MS = 100;
+
+// @public
+export const SYNC_INTERVAL_MS = 1000;
 
 ```

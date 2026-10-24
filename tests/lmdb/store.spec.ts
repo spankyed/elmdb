@@ -1,14 +1,14 @@
 // openLmdbStore: the engine reads and writes the store, so what a unit commits is on disk however the process ends,
-// a store opened again on the same path reads it back, and syncs follow commits in groups
+// a store opened again on the same path reads it back, and a sync follows once writes pause
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { open as openRaw } from 'lmdb';
 import { createEarsEngine, type EARS, type EarsEngine } from '../../src/index.ts';
-import { LMDB_FORMAT_VERSION, openLmdbStore, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
+import { LMDB_FORMAT_VERSION, openLmdbStore, SYNC_IDLE_MS, SYNC_INTERVAL_MS, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
 let dbPath: string;
@@ -94,23 +94,46 @@ describe('openLmdbStore', () => {
 });
 
 describe('durability', () => {
-  it('syncs commits in groups: many units, one sync, within the window', async () => {
-    const { store, engine } = openStore({ syncIntervalMs: 50 });
-    for (let i = 0; i < 100; i++) engine.create('Note', { title: `note ${i}` });
+  // The store's timers are faked, so when a sync starts is the spec's to say; the sync itself is LMDB's own
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it('syncs once writes pause: a burst of units, one sync, SYNC_IDLE_MS after the last', () => {
+    fakeTimers();
+    const { store, engine } = openStore();
+    // Five commits, each before the last one's pause is up, all inside the cap
+    for (let i = 0; i < 5; i++) {
+      engine.create('Note', { title: `note ${i}` });
+      vi.advanceTimersByTime(SYNC_IDLE_MS / 2);
+    }
+    expect(store.syncs, 'each commit pushes the sync back').toBe(0);
+    vi.advanceTimersByTime(SYNC_IDLE_MS / 2);
+    expect(store.syncs).toBe(1);
+    vi.advanceTimersByTime(SYNC_INTERVAL_MS);
+    expect(store.syncs, 'nothing is owed after it').toBe(1);
+  });
+
+  it('syncs a steady stream of writes SYNC_INTERVAL_MS after its first unsynced commit', () => {
+    fakeTimers();
+    const { store, engine } = openStore();
+    const step = SYNC_IDLE_MS / 2;
+    for (let elapsed = 0; elapsed < SYNC_INTERVAL_MS - step; elapsed += step) {
+      engine.create('Note', { title: `at ${elapsed}` });
+      vi.advanceTimersByTime(step);
+    }
     expect(store.syncs).toBe(0);
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    engine.create('Note', { title: 'the last before the cap' });
+    vi.advanceTimersByTime(step);
     expect(store.syncs).toBe(1);
   });
 
-  it('syncs at once when asked, and not when nothing is owed', async () => {
-    const { store, engine } = openStore({ syncIntervalMs: 60_000 });
+  it('syncs at once for durable(), and not when nothing is owed', async () => {
+    const { store, engine } = openStore();
     await store.durable();
     expect(store.syncs).toBe(0);
-    engine.create('Note', { title: 'a user\'s action' });
-    store.requestSync();
+    engine.create('Note', { title: 'must be on disk' });
     await store.durable();
     expect(store.syncs).toBe(1);
-    store.requestSync();
     await store.durable();
     expect(store.syncs).toBe(1);
   });

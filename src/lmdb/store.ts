@@ -13,8 +13,11 @@ import { checkStamp } from './stamp.ts';
  */
 export const LMDB_FORMAT_VERSION = 4;
 
-/** How long a commit waits, at most, for the sync that makes it durable: group commit's window */
-export const SYNC_INTERVAL_MS = 200;
+/** How long writes must pause before a sync runs: a burst of commits is made durable by one sync after it */
+export const SYNC_IDLE_MS = 100;
+
+/** How long a commit waits, at most, for the sync that makes it durable, however steadily writes go on */
+export const SYNC_INTERVAL_MS = 1000;
 
 /** The databases an older format kept: holding a row, an environment that records no format is format 1 */
 const OLDER_DATABASES = ['entities', 'attrs', 'relations'];
@@ -66,7 +69,7 @@ export interface LmdbStore {
   /** The database directory */
   readonly path: string;
   readonly readOnly: boolean;
-  /** How many syncs have run: each made every commit before it durable */
+  /** How many syncs have started: each makes every commit before it durable */
   readonly syncs: number;
   /**
    * How many of the environment's reader slots are taken: open read snapshots, which this process's reads share. A
@@ -75,12 +78,11 @@ export interface LmdbStore {
   readers(): number;
   /**
    * Resolves once every unit committed before the call is on disk. A unit is visible, and survives the process
-   * crashing, as soon as it commits; a sync is what survives the machine failing. Group commit syncs within
-   * `SYNC_INTERVAL_MS` of a commit on its own; this is for a caller that must not go on before then
+   * crashing, as soon as it commits; a sync is what survives the machine failing. Group commit syncs once writes
+   * pause for `SYNC_IDLE_MS`, and within `SYNC_INTERVAL_MS` of the first unsynced commit at the latest; this is for a
+   * caller that must not go on before then
    */
   durable(): Promise<void>;
-  /** Asks for a sync now when anything is waiting for one, without waiting for it: a user's action committed */
-  requestSync(): void;
   /**
    * Writes a consistent copy of the database into `targetDir` (as `data.mdb`): one read transaction's worth, so a
    * copy made while the app writes is one moment of the database
@@ -99,15 +101,18 @@ export interface LmdbStoreOptions {
   path: string;
   /** Opens existing files without writing to them: a write throws */
   readOnly?: boolean;
+  /** How long writes must pause before a sync runs; `SYNC_IDLE_MS` by default */
+  syncIdleMs?: number;
   /** How long a commit waits, at most, for its sync; `SYNC_INTERVAL_MS` by default */
   syncIntervalMs?: number;
 }
 
 /**
- * Opens the LMDB store at `path`. A unit commits without a sync and is visible at once; syncs follow within
- * `syncIntervalMs`, run off the main thread, each making every commit before it durable (group commit).
+ * Opens the LMDB store at `path`. A unit commits without a sync and is visible at once; a sync follows once writes
+ * pause for `syncIdleMs`, or `syncIntervalMs` after the first unsynced commit while they don't, run off the main
+ * thread, each making every commit before it durable (group commit).
  */
-export function openLmdbStore({ path: dir, readOnly = false, syncIntervalMs = SYNC_INTERVAL_MS }: LmdbStoreOptions): LmdbStore {
+export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_IDLE_MS, syncIntervalMs = SYNC_INTERVAL_MS }: LmdbStoreOptions): LmdbStore {
   const { root, db } = openEnvironment(dir, { readOnly });
   let closed = false;
   let syncs = 0;
@@ -116,16 +121,23 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIntervalMs = SY
   /** The sync running, and the one asked for while it runs */
   let running: Promise<void> | undefined;
   let queued: Promise<void> | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  /** The sync due once writes pause, which each commit pushes back, and the one due however steadily they go on */
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let capTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearTimers = () => {
+    clearTimeout(idleTimer);
+    clearTimeout(capTimer);
+    idleTimer = capTimer = undefined;
+  };
 
   /** Runs a sync off the main thread; the commits made before it began are on disk when it resolves */
   const runSync = (): Promise<void> => {
     owed = false;
-    if (timer) { clearTimeout(timer); timer = undefined; }
+    clearTimers();
+    syncs++;
     const done = new Promise<void>((resolve, reject) => {
       // `sync` is lmdb-js's (its environment's mdb_env_sync, run off the main thread), missing from its types
       (root as unknown as { sync(done: (error?: Error) => void): void }).sync((error?: Error) => {
-        syncs++;
         if (error) reject(error);
         else resolve();
       });
@@ -148,13 +160,20 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIntervalMs = SY
   const backend = createLmdbKVBackend(root, db, {
     committed() {
       owed = true;
-      if (!timer && !closed) {
-        timer = setTimeout(() => { timer = undefined; void sync(); }, syncIntervalMs);
-        // The timer keeps no process alive: closing syncs what is owed
-        timer.unref?.();
+      if (closed) return;
+      // Neither timer keeps a process alive: closing syncs what is owed
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => void sync(), syncIdleMs);
+      idleTimer.unref?.();
+      if (!capTimer) {
+        capTimer = setTimeout(() => void sync(), syncIntervalMs);
+        capTimer.unref?.();
       }
     },
-    synced() { owed = false; },
+    synced() {
+      owed = false;
+      clearTimers();
+    },
     durable: sync,
   });
   const refuseReadOnly = (what: string) => {
@@ -177,7 +196,6 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIntervalMs = SY
     // One line per slot, under a header
     readers: () => root.readerList().trim().split('\n').slice(1).length,
     durable: sync,
-    requestSync() { void sync(); },
     async copyTo(targetDir) {
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });
@@ -207,7 +225,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIntervalMs = SY
     close() {
       if (closed) return;
       closed = true;
-      if (timer) clearTimeout(timer);
+      clearTimers();
       // What is owed is synced before the files close: closing doesn't sync on its own
       if (owed && !readOnly) kv.write((w) => w.put(SYNCED, Date.now()), { durable: true });
       root.close();

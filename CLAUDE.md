@@ -112,18 +112,18 @@ Held by the types and the engine specs, which say more than a rule over names co
   strings, numbers, booleans and `null` in the seam's own codec, values in `msgpackr` (`mapsAsObjects: false`, so a
   field named `__proto__` is a field). Its operations are `read` (a snapshot, or the unit open) and `write` (a unit,
   savepoints inside one). Two backends implement it: `createMemoryKV` (tests and tooling) and the LMDB one.
-- `openLmdbStore({ path, readOnly?, syncIntervalMs? })` (`@apackdev/ears/lmdb`) opens the environment at `path` and
+- `openLmdbStore({ path, readOnly?, syncIdleMs?, syncIntervalMs? })` (`@apackdev/ears/lmdb`) opens the environment at `path` and
   returns the store: `kv` (which an engine is created on), `path`, `readOnly`, `syncs`, `readers()`, `durable()`,
-  `requestSync()`, `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, which is
+  `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, which is
   what a backup takes), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
   staying open), `reset()` (every entry removed, in one durable unit) and `close()`. Nothing opens on import.
   `readOnly` opens existing files without writing: a write, `reset()` and `replaceWith()` throw naming why.
 - **A unit is visible as it commits, and durable within the window.** Each unit commits without a sync, which is what
   makes a write cost microseconds, and survives the process crashing once it returns (`tests/lmdb/store.spec.ts`
   kills a writer with `SIGKILL` the moment its write returns). What survives the machine failing is a sync: group
-  commit syncs within `syncIntervalMs` (`SYNC_INTERVAL_MS`, 200ms) of a commit, off the main thread, each sync
-  making every commit before it durable. `requestSync()` syncs now when a commit is owed (the API asks after each
-  client message, so a user's action is not left to the window); `durable()` resolves once every unit committed
+  commit syncs once writes pause for `syncIdleMs` (`SYNC_IDLE_MS`, 100ms), and `syncIntervalMs` (`SYNC_INTERVAL_MS`, 1s) after
+  the first unsynced commit at the latest, so a steady stream of writes can't hold it off; each sync runs off the main
+  thread and makes every commit before it durable. `durable()` resolves once every unit committed
   before it is on disk; `transact(fn, { durable: true })` commits with the sync. `close()` syncs what is owed.
   Content an apply writes rides group commit: a lost apply is applied again on the next boot.
 - **Storage format.** `LMDB_FORMAT_VERSION` (`store.ts`) is how this version lays out an environment: format 4, one
@@ -157,7 +157,7 @@ Held by the types and the engine specs, which say more than a rule over names co
 - `engine/`: black-box specs of the public API: `writes` (`create`, `upsert` and `write`, each entry point's refusals, the builder's attribute writes, the reserved names, the ids and fields returned), `relations` (link, unlink, `out`/`in`, `linkedTo`/`linkedFrom`/`linkedWith`, the hierarchy walks, cycle detection, roles), `queries` (the entry points and their refusals, filters, terminals and ordering), `transact` (every write undone by a unit that throws, one commit per unit, nesting) and `bulk-load` (the admin face's loads). They reach the engine only through `engine-under-test.ts` (`freshEngine`), and run twice: the `ears` project on the memory store and `ears-on-lmdb` on an LMDB store per engine (`EARS_KV=lmdb`, `vitest.config.ts`). A few specs pin existing quirks; they say so.
 - `vocabulary.spec.ts`: the rules in Vocabulary, over every member of the engine, `admin`, a query builder and a write builder — off the types for `is*`, `find*`, flags and chaining, off a real engine for pairs and absence — each with a case showing it names a member that breaks it.
 - `engines.spec.ts`: a typed facade acts on whichever engine its getter returns; two engines in one process share nothing. The bound engine's operations are the SDK's, and its spec is `apack-sdk/tests/ears/bound-ears.spec.ts`.
-- `lmdb/`: `ordered-kv` (the seam's contract, run against both backends), `convert` (format 1 to 2 to 3 to 4, and the refusal of another kind's files), `store` (`openLmdbStore`: what a unit commits is on disk however the process ends, read-only refusals, reset and replace, the copy, group commit, `requestSync`, durable units, reader slots), `format-stamp` (the kind and format each environment records and is refused by) and `record-store` (`openRecordStore` and the memory store, the cases both share run against both).
+- `lmdb/`: `ordered-kv` (the seam's contract, run against both backends), `convert` (format 1 to 2 to 3 to 4, and the refusal of another kind's files), `store` (`openLmdbStore`: what a unit commits is on disk however the process ends, read-only refusals, reset and replace, the copy, group commit's pause and cap, `durable()`, durable units, reader slots), `format-stamp` (the kind and format each environment records and is refused by) and `record-store` (`openRecordStore` and the memory store, the cases both share run against both).
 - Test files run in parallel (`fileParallelism: true`): each creates its own engines.
 
 ## Benchmark

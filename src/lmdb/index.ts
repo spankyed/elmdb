@@ -6,7 +6,7 @@
  */
 
 export {
-  openLmdbStore, openEnvironment, LMDB_FORMAT_VERSION, SYNC_INTERVAL_MS,
+  openLmdbStore, openEnvironment, LMDB_FORMAT_VERSION, SYNC_IDLE_MS, SYNC_INTERVAL_MS,
   type LmdbStore, type LmdbStoreOptions, type LmdbEnvironment,
 } from './store.ts';
 export { createLmdbKVBackend, type LmdbKVHooks } from './kv-backend.ts';
