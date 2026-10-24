@@ -2,7 +2,7 @@
 // model. After every write the engine holds what the model holds and refuses what it refuses, a refused unit
 // included; and a unit that rolls back leaves each type in its insertion order. On its own memory store, whose
 // backend refuses a commit on demand, so it runs in the `ears` project only. The files' half is
-// tests/lmdb/reopen.integration.spec.ts and crash.integration.spec.ts
+// tests/lmdb/crash.integration.spec.ts
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { createMemoryKVBackend, createOrderedKV } from '../../src/kv.ts';

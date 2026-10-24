@@ -1,16 +1,14 @@
 // The correctness harness, crash injection (tests/_harness/): a child runs a seeded workload against an LMDB store,
 // acknowledging each write once it has returned, and is killed (SIGKILL) at a random moment. Reopened, the files hold exactly what the
 // model holds after the writes acknowledged — or after one more, the write in flight when the kill landed.
-//
-// @slow: each run starts a child process through tsx and kills it
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import fc from 'fast-check';
 import { afterAll, expect, it } from 'vitest';
-import { createEarsEngine, type EarsEngine } from '../../src/index.ts';
 import { openLmdbStore } from '../../src/lmdb/index.ts';
+import { newEngine } from '../_harness/engines.ts';
 import { Model, stateOf, type State } from '../_harness/model.ts';
 import { crashWorkload } from '../_harness/workload.ts';
 
@@ -37,7 +35,9 @@ function runAndKill(dir: string, seed: number, killAt: number): Promise<number> 
         if (acked >= killAt) child.kill('SIGKILL');
       }
     });
-    child.on('exit', (code, signal) => {
+    // `close`, not `exit`: the child's stdout may still be draining at `exit`, and an acknowledgement read late would
+    // be counted as never made
+    child.on('close', (code, signal) => {
       if (signal === 'SIGKILL') resolve(acked);
       else reject(new Error(`the child exited ${code} before it was killed: ${errors}`));
     });
@@ -60,8 +60,7 @@ it('reopens a killed process to exactly the writes that returned, and at most th
     }
 
     const store = openLmdbStore({ path: dir });
-    const engine: EarsEngine = createEarsEngine({ kv: store.kv, isEntityType: (name) => name === 'Task' || name === 'Note', isRelationKind: () => true, isRole: () => true });
-    const stored = stateOf(engine);
+    const stored = stateOf(newEngine(store.kv));
     store.close();
     const candidates = [after[acked], after[Math.min(acked + 1, ops.length)]];
     expect(candidates, `seed ${seed}, killed after ${acked} acknowledged writes`).toContainEqual(stored);

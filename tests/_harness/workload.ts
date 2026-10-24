@@ -14,8 +14,7 @@ const value: fc.Arbitrary<Value> = fc.oneof(
   { weight: 4, arbitrary: fc.string({ maxLength: 8 }) },
   { weight: 4, arbitrary: fc.integer({ min: -100, max: 100 }) },
   { weight: 4, arbitrary: fc.array(fc.integer({ min: 0, max: 9 }), { maxLength: 3 }) },
-  // Large enough to be kept out of memory once committed (OUT_OF_LINE_BYTES): a long string, and a long list an
-  // append then grows
+  // Large values: a long string, and a long list an append then grows
   { weight: 1, arbitrary: fc.integer({ min: 0, max: 9 }).map((n) => `${n}`.repeat(2100)) },
   { weight: 1, arbitrary: fc.integer({ min: 0, max: 9 }).map((n) => Array.from({ length: 1100 }, () => n)) },
 );
@@ -40,6 +39,6 @@ export const op: fc.Arbitrary<Op> = fc.oneof(
 
 export const workload = (maxLength = 40) => fc.array(op, { minLength: 1, maxLength });
 
-/** A workload for a process that will be killed: no store refusals, which only a test's sink can inject */
+/** A workload for a process that will be killed: no store refusals, which only a refusing backend can inject */
 export const crashWorkload = (length: number) =>
   fc.array(op.filter((each) => each.op !== 'refuseNext'), { minLength: length, maxLength: length });

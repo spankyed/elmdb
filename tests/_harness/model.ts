@@ -1,5 +1,6 @@
-// The correctness harness's reference model (tests/engine/model-based.spec.ts, tests/lmdb/crash.integration.spec.ts): what the engine's data should be after a sequence of writes, kept as
-// plainly as a model can be, so the engine and its files are each compared against something with no cleverness in it
+// The correctness harness's reference model (tests/engine/model-based.spec.ts, tests/lmdb/crash.integration.spec.ts):
+// what the engine's data should be after a sequence of writes, kept as plainly as a model can be, so the engine and its
+// files are each compared against something with no cleverness in it
 import type { EarsEngine } from '../../src/index.ts';
 
 export type Value = string | number | number[];
@@ -146,7 +147,7 @@ export class Model {
 /** The engine's data in the model's terms: its own times left out, its relations as edges */
 export function stateOf(engine: EarsEngine): State {
   const entities: State['entities'] = {};
-  for (const id of [...engine.admin.getAllEntities()].filter((id) => !id.startsWith('Sequence-')).sort()) {
+  for (const id of [...engine.admin.getAllEntities()].sort()) {
     const { id: _id, entityType, createdAt: _c, updatedAt: _u, ...fields } = engine.getRow(id)!;
     entities[id] = { type: entityType, fields: Object.fromEntries(Object.entries(fields).sort(([a], [b]) => a.localeCompare(b))) };
   }
@@ -154,7 +155,7 @@ export function stateOf(engine: EarsEngine): State {
   return { entities, edges };
 }
 
-/** Applies one op to an engine; whether it was refused (it threw), the store's refusals made through `refuse` */
+/** Applies one op to an engine; whether it was refused (it threw), the store's refusals made through `refuseNext` */
 export function applyTo(engine: EarsEngine, op: Op, refuseNext: () => void): boolean {
   const write = (inner: Op): void => {
     switch (inner.op) {
