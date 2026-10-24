@@ -437,10 +437,7 @@ export interface RelationMatch {
 }
 
 // @public
-export interface RelationRow extends EARS.RelationDetail {
-    // (undocumented)
-    id: EARS.EntityId;
-}
+export type RelationRow = RelationEdge;
 
 // @public
 export interface RelationStats {

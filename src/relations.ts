@@ -2,6 +2,7 @@ import { EARS } from './entities.ts';
 import type { EdgeStore } from './edge-store.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { NameChecks } from './names.ts';
+import type { RelationEdge } from './runtime.ts';
 
 /** Which relations to match: any combination of kind, source and target */
 export interface RelationMatch {
@@ -10,10 +11,11 @@ export interface RelationMatch {
   target?: EARS.EntityId;
 }
 
-/** A relation row: its id (`write(id).destroy()` removes that one relation) and its details, including its info */
-export interface RelationRow extends EARS.RelationDetail {
-  id: EARS.EntityId;
-}
+/**
+ * A relation row: its id (`write(id).destroy()` removes that one relation), kind, ends and info. The row
+ * `RelationEdge` types, with its kind and ends untyped
+ */
+export type RelationRow = RelationEdge;
 
 export function createRelationReads({ edgeStore, storage, names }: { edgeStore: EdgeStore; storage: AttributeStorage; names: NameChecks }) {
   function findRelations(match: RelationMatch = {}): RelationRow[] {
