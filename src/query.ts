@@ -87,6 +87,31 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
   const indexable = (kind: EARS.AttrKind, v: unknown) =>
     kind !== ENTITY_TYPE && (v === null || ['string', 'number', 'boolean'].includes(typeof v)) && !Number.isNaN(v);
 
+  const collator = new Intl.Collator();
+  /**
+   * Where a value sorts among the others in `orderBy`: booleans, numbers, dates, strings, then anything else by its
+   * text, and last `null`, which `getAttr` gives for a missing value as for a stored one, and which
+   * `orderBy(field, 'desc')` therefore puts first
+   */
+  const rankOf = (v: unknown): number =>
+    v === null ? 5
+      : typeof v === 'boolean' ? 0
+      : typeof v === 'number' ? 1
+      : v instanceof Date ? 2
+      : typeof v === 'string' ? 3
+      : 4;
+  /** Two values of one rank, compared */
+  const compareWithin = (rank: number, a: unknown, b: unknown): number => {
+    switch (rank) {
+      case 0: return Number(a) - Number(b);
+      case 1: return (a as number) - (b as number);
+      case 2: return (a as Date).getTime() - (b as Date).getTime();
+      case 3: return collator.compare(a as string, b as string);
+      case 4: return collator.compare(JSON.stringify(a), JSON.stringify(b));
+      default: return 0;
+    }
+  };
+
   /**
    * The builder over the entities `alive` admits: every step after the start, a link's far end included, reaches
    * only those. A start from types stays unwalked until a step needs its ids, so `where(k, v)` and `withRole` on it
@@ -265,18 +290,16 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
           dir: "asc" | "desc" = "asc",
         ) => {
           const kind = EARS.AttrKind.Custom(field);
-          const cmp = (a: unknown, b: unknown) => {
-            if (a === b) return 0;
-            if (a === undefined) return 1;
-            if (b === undefined) return -1;
-            if (typeof a === "number" && typeof b === "number") return a - b;
-            return String(a).localeCompare(String(b));
-          };
-          const next = [...cur()].sort((aId, bId) => {
-            const res = cmp(getAttr(aId, kind), getAttr(bId, kind));
+          // Each value read once, then sorted by its type's rank and within it by value; a sort is stable, so ties
+          // keep the query's order
+          const ids = cur();
+          const values = ids.map((id) => getAttr(id, kind));
+          const ranks = values.map(rankOf);
+          const order = ids.map((_, i) => i).sort((i, j) => {
+            const res = ranks[i] - ranks[j] || compareWithin(ranks[i], values[i], values[j]);
             return dir === "asc" ? res : -res;
           });
-          return setIds(next);
+          return setIds(order.map((i) => ids[i]));
         },
 
         reverse: () => setIds([...cur()].reverse()),

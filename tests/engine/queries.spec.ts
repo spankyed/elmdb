@@ -126,6 +126,26 @@ describe('ordering', () => {
     expect(e.query('Task').limit(2).ids()).toEqual([t.a, t.b]);
   });
 
+  it('orderBy sorts by type, then value: a list or object after strings, a missing value or null last, a date by its time', () => {
+    const at = (fields: Record<string, unknown>) => e.create('Person').setMany(fields).id();
+    const v = {
+      text: at({ value: 'pear' }),
+      none: at({}),
+      nil: at({ value: null }),
+      ten: at({ value: 10 }),
+      later: at({ value: new Date('2026-02-01') }),
+      two: at({ value: 2 }),
+      earlier: at({ value: new Date('2026-01-01') }),
+      flag: at({ value: true }),
+      word: at({ value: 'apple' }),
+      list: at({ value: ['x'] }),
+    };
+    expect(e.query('Person').orderBy('value').ids())
+      .toEqual([v.flag, v.two, v.ten, v.earlier, v.later, v.word, v.text, v.list, v.none, v.nil]);
+    expect(e.query('Person').orderBy('value', 'desc').ids())
+      .toEqual([v.none, v.nil, v.list, v.text, v.word, v.later, v.earlier, v.ten, v.two, v.flag]);
+  });
+
   it('distinct and groupBy', () => {
     expect(e.query.ids([t.a, t.a, t.b]).distinct().ids()).toEqual([t.a, t.b]);
     expect(e.query('Task').distinct('title').ids()).toEqual([t.a, t.b, t.c]);
