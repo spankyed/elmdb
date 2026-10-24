@@ -56,7 +56,10 @@ describe('starts', () => {
 
   it('a builder kept across writes drops, at its next step, the ids destroyed since', () => {
     const tasks = e.query('Task');
+    const named = e.query.ids([t.a, t.b]);
     e.write(t.b).destroy();
+    expect(named.limit(10).ids()).toEqual([t.a]);
+    expect(named.has('title').count()).toBe(1);
     expect(tasks.limit(10).ids()).toEqual([t.a, t.c, t.d]);
     expect(tasks.ofType('Task').count()).toBe(3);
     expect(tasks.orderBy('title').ids()).toEqual([t.d, t.a, t.c]);
@@ -170,6 +173,32 @@ describe('terminals', () => {
     const ids = q.ids();
     ids.pop();
     expect(q.count()).toBe(3);
+  });
+
+  it('first, exists, pickOne and limit read only as far as their answer', () => {
+    let read = 0;
+    const counted = () => e.query('Task').where('title', () => (read++, true));
+    const reads = (run: () => unknown) => {
+      read = 0;
+      run();
+      return read;
+    };
+    expect(reads(() => counted().first())).toBe(1);
+    expect(reads(() => counted().exists())).toBe(1);
+    expect(reads(() => counted().pickOne(['title']))).toBe(1);
+    expect(reads(() => counted().limit(2).ids())).toBe(2);
+    e.write(t.a).link('contains', t.c);
+    expect(reads(() => counted().out('contains').first())).toBe(1);
+    expect(reads(() => counted().count())).toBe(4);
+  });
+
+  it("a predicate that creates an entity of the type it walks doesn't reach it", () => {
+    const made: Id[] = [];
+    // Capped, so a walk that did reach what it made would end rather than run forever
+    const make = () => made.length < 10 && made.push(e.create('Task').set('title', 'new').id());
+    const ids = e.query('Task').where('title', () => (make(), true)).ids();
+    expect(ids).toEqual([t.a, t.b, t.c, t.d]);
+    expect(made).toHaveLength(4);
   });
 
   it('pick, pickOne and pickAll', () => {

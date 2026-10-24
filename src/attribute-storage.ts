@@ -387,6 +387,19 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
 
   const getEntitiesOfType = (t: EARS.Entity) =>
     [...(entityIndex.get(t)?.keys() ?? [])];
+  /**
+   * Visits the type's entities in order, read as they are walked rather than copied first, until `visit` answers
+   * false; whether it went to the end. A walk reaches only those in the type when it began: an entity entering while
+   * it runs (a `where` predicate's write) takes a later place, where the walk stops.
+   */
+  const entitiesOfType = (t: EARS.Entity, visit: (id: EARS.EntityId) => boolean): boolean => {
+    const bound = nextOrder;
+    for (const [id, order] of entityIndex.get(t) ?? []) {
+      if (order >= bound) return true;
+      if (!visit(id)) return false;
+    }
+    return true;
+  };
 
   /** Whether the entity is in the engine, from its type's index rather than a scan of every entity */
   const hasEntity = (id: EARS.EntityId) =>
@@ -502,7 +515,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById: removeRelation,
-    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
+    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf, removals: () => removals,
     findEntitiesInRelationTo, findEntitiesByRelationTo, relationsOf,
     destroyEntity, getSchemaStats,
   };
