@@ -13,9 +13,6 @@ export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, type EntityRow, type SchemaStats } from './attribute-storage.ts';
 export { getTimestamp } from './numbering.ts';
 export type { RelationMatch, RelationRow, RelationStats } from './relations.ts';
-// Types that appear in the signatures above, so pack authors can name them.
-export type { PersistenceSink, PersistenceErrorStats } from './runtime.ts';
-export { noopSink } from './runtime.ts';
 // Record stores: whole records by id, found through declared indexes (the run history's store); one on disk is
 // `@apackdev/ears/lmdb`'s `openRecordStore`
 export {
@@ -26,7 +23,7 @@ export {
 // and on disk through `@apackdev/ears/lmdb`
 export {
   createMemoryKV, createMemoryKVBackend, createOrderedKV,
-  type OrderedKV, type KvReader, type KvWriter, type Key, type KeyPart, type RangeOptions, type Visit,
+  type OrderedKV, type OrderedKVOptions, type UnitOptions, type KvReader, type KvWriter, type Key, type KeyPart, type RangeOptions, type Visit,
   type KvBackend, type ByteReader, type ByteWriter,
 } from './kv.ts';
 export { EARS } from './entities.ts';

@@ -1,11 +1,13 @@
 // The conversions: a format 1 environment keeps one record of each fact afterwards (format 2), a format 2 one keeps
-// one row per attribute (format 3), and neither loses anything else
+// one row per attribute (format 3), a format 3 one is the engine's keys in one database (format 4), and none loses
+// anything else
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION, openRecordStore, REMOVE_ATTRIBUTE, rewriteAttributes } from '../../src/lmdb/index.ts';
+import { convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
+import { createEarsEngine, type EARS } from '../../src/index.ts';
 
 const SEP = '\x1F';
 const dirs: string[] = [];
@@ -121,9 +123,41 @@ it('joins each attribute\'s rows into one, a single row its value and several ro
 
 it('converts to the current format a step at a time, and leaves a current one alone', () => {
   const dir = format1();
-  expect(convertToCurrentFormat(dir).map(({ to }) => to)).toEqual([2, 3]);
-  expect(read(dir)).toMatchObject({ attrKeys: [`createdAt${SEP}Note-1`, `createdAt${SEP}Note-2`, `title${SEP}Note-1`], format: LMDB_FORMAT_VERSION });
+  expect(convertToCurrentFormat(dir).map(({ to }) => to)).toEqual([2, 3, 4]);
+  expect(read(dir)).toMatchObject({ attrKeys: [], relations: [], format: LMDB_FORMAT_VERSION });
   expect(convertToCurrentFormat(dir)).toEqual([]);
+});
+
+it('loads format 3 into the engine\'s keys: entities in the order they were created, relations under their ids, sequences as sequences', () => {
+  const dir = format1();
+  convertToFormat2(dir);
+  convertToFormat3(dir);
+  // A numbering row, as format 3's engine kept one: the next short code of Note under N is N-5
+  const root = open({ path: dir, maxDbs: 8, compression: true });
+  root.openDB({ name: 'entities', encoding: 'json' }).putSync('Sequence-Note:N', { type: 'Sequence' });
+  root.openDB({ name: 'attrs', encoding: 'json' }).putSync(`next${SEP}Sequence-Note:N`, { t: 'number', v: 5 });
+  root.close();
+  expect(convertToFormat4(dir)).toEqual({ entities: 2, attributes: 3, relations: 1, orphanedAttributes: 0, invalidRelations: 0, sequences: 1 });
+  expect(() => convertToFormat4(dir)).toThrow('records storage format 4; this step converts format 3');
+  const store = openLmdbStore({ path: dir, readOnly: true });
+  try {
+    const engine = createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    expect(engine.query('Note').ids()).toEqual(['Note-1', 'Note-2']);
+    expect(engine.getRow('Note-1' as EARS.EntityId)).toEqual({ id: 'Note-1', entityType: 'Note', createdAt: 1, title: 'kept' });
+    // A relation keeps its id, its far end missing as it was
+    expect(engine.findRelations({ source: 'Note-1' as EARS.EntityId })).toEqual([{ id: 'Relation-1', kind: 'refs', source: 'Note-1', target: 'Flow-1', info: undefined }]);
+    expect(engine.query.all().ids()).not.toContain('Sequence-Note:N');
+  } finally {
+    store.close();
+  }
+  // The sequence numbers on from where format 3 left it
+  const writable = openLmdbStore({ path: dir });
+  try {
+    const engine = createEarsEngine({ kv: writable.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], shortCode: 'N' }) });
+    expect(engine.create('Note').row().shortCode).toBe('N-5');
+  } finally {
+    writable.close();
+  }
 });
 
 it('refuses a record store, whose format is its own, and leaves it as it was', () => {
@@ -136,26 +170,4 @@ it('refuses a record store, whose format is its own, and leaves it as it was', (
   const reopened = openRecordStore({ path: dir, indexes: {} });
   expect(reopened.get('R-1')).toEqual({ id: 'R-1' });
   reopened.close();
-});
-
-it('rewrites, removes and leaves each attribute as its rewrite answers, and removes the named entities whole', () => {
-  const dir = format1();
-  convertToCurrentFormat(dir);
-  const seen: string[] = [];
-  const result = rewriteAttributes(dir, (kind, id, value) => {
-    seen.push(`${kind} ${id}`);
-    if (kind === 'title') return `${value as string}, renamed`;
-    if (kind === 'createdAt' && id === 'Note-2') return REMOVE_ATTRIBUTE;
-    return undefined;
-  }, { removeEntities: ['Note-1'] });
-  // Note-1's own rows go with it and are never offered to the rewrite
-  expect(seen).toEqual([`createdAt Note-2`]);
-  expect(result).toEqual({ rewritten: 0, removed: 3, removedEntities: 1 });
-  expect(read(dir)).toMatchObject({ entities: { 'Note-2': { type: 'Note' } }, attrKeys: [] });
-  expect(read(dir).entities).not.toHaveProperty('Note-1');
-
-  const other = format1();
-  convertToCurrentFormat(other);
-  expect(rewriteAttributes(other, (kind, _id, value) => (kind === 'title' ? `${value as string}, renamed` : undefined))).toEqual({ rewritten: 1, removed: 0, removedEntities: 0 });
-  expect(Object.values(read(other).attrs).map(({ v }) => v)).toContain('kept, renamed');
 });

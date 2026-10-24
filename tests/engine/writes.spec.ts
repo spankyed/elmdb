@@ -1,7 +1,7 @@
 // The engine's contract: create, upsert and write create, change and delete entities, each held to the claim it
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engine, isEntityType, isRelationKind, isRole, recordingSink, type Id } from './helpers.ts';
+import { engine, isEntityType, isRelationKind, isRole, type Id } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 import type { WriteBuilder } from '../../src/index.ts';
 
@@ -335,13 +335,12 @@ describe('updatedAt', () => {
     expect(e.getRow(id)?.updatedAt).toBe(NOW);
   });
 
-  it('is written once for a builder and only by the engine', () => {
-    const { sink, calls } = recordingSink();
-    const engineWithSink = engine(sink);
-    const id = engineWithSink.create('Task').id();
-    calls.length = 0;
-    engineWithSink.write(id).set('a', 1).set('b', 2).append('c', 3);
-    expect(calls.filter(([, kind]) => kind === 'updatedAt')).toHaveLength(1);
+  it('is written once for a builder, at its first write, and only by the engine', () => {
+    const id = e.create('Task').id();
+    const builder = e.write(id).set('a', 1);
+    later();
+    builder.set('b', 2).append('c', 3);
+    expect(e.getRow(id)?.updatedAt).toBe(NOW);
     expect(() => e.write(e.create('Task').id()).set('updatedAt', 1)).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
   });
 });

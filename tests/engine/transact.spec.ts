@@ -1,11 +1,12 @@
-// transact: a unit that throws leaves the engine and its sink as they were; one that returns sends the sink its
-// writes together, between onUnitStart and onUnitEnd
+// transact: a unit that throws leaves the engine as it was and commits nothing; one that returns commits its writes
+// together, once
 import { beforeEach, describe, expect, it } from 'vitest';
-import { engine, recordingSink, type Id, type RelId, type SinkCall } from './helpers.ts';
+import { committing, engine, type Id, type RelId } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
-let calls: SinkCall[];
+/** The units the store committed since the spec's own setup */
+let committed: () => number;
 
 /**
  * Everything a write can change: each entity's attributes, the type index, and the relation index as every read
@@ -27,15 +28,15 @@ function state() {
 let task: Id, other: Id, project: Id, rel: RelId;
 
 beforeEach(() => {
-  const recording = recordingSink();
-  e = engine(recording.sink);
+  const store = committing();
+  e = engine(store.kv);
   task = e.create('Task').set('title', 'a').append('tags', 'x').set('meta', { n: 1 }).grant('owner').id();
   other = e.create('Task').set('title', 'b').id();
   project = e.create('Project').set('name', 'p').id();
   e.write(project).link('contains', task, { info: { pos: 1 } });
   rel = e.findRelations({ source: project, kind: 'contains' })[0].id;
-  calls = recording.calls;
-  calls.length = 0;
+  const mark = store.commits();
+  committed = () => store.commits() - mark;
 });
 
 /** Each write the engine has, made inside a unit that then throws */
@@ -67,11 +68,11 @@ const writes: Record<string, () => void> = {
 };
 
 describe('a unit that throws', () => {
-  it.each(Object.keys(writes))('undoes %s and sends the sink nothing', (name) => {
+  it.each(Object.keys(writes))('undoes %s and commits nothing', (name) => {
     const before = state();
     expect(() => e.transact(() => { writes[name](); throw new Error('stop'); })).toThrow('stop');
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('undoes every write it made, in any order, and rethrows', () => {
@@ -84,13 +85,13 @@ describe('a unit that throws', () => {
       throw error;
     })).toThrow(error);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('leaves a query kept from before it finding what it found', () => {
     const kept = e.query('Task');
     expect(() => e.transact(() => { e.write(task).destroy(); throw new Error('stop'); })).toThrow();
-    // An undone destroy puts the entity back last in its type's order
+    // An undone destroy leaves the entity where it was
     expect(kept.ids().sort()).toEqual([task, other].sort());
     expect(e.query('Task').ids().sort()).toEqual([task, other].sort());
   });
@@ -106,28 +107,28 @@ describe('a unit that returns', () => {
     expect(e.query.ids(made).pickOne()).toMatchObject({ title: 'inside' });
   });
 
-  it('sends the sink its writes after it returns, between onUnitStart and onUnitEnd', () => {
+  it('commits its writes together, once, when it returns', () => {
     e.transact(() => {
       e.write(task).set('title', 'one');
       e.write(other).set('title', 'two');
-      expect(calls).toEqual([]);
+      expect(committed()).toBe(0);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
+    expect(committed()).toBe(1);
   });
 
-  it('sends nothing, not even the bracket, when it wrote nothing', () => {
+  it('commits nothing when it wrote nothing', () => {
     e.transact(() => e.query.ids(task).pickOne());
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 });
 
 describe('a unit inside another', () => {
-  it('commits into the outer one: nothing reaches the sink until the outer returns', () => {
+  it('commits into the outer one: nothing commits until the outer returns', () => {
     e.transact(() => {
       e.transact(() => e.write(task).set('title', 'inner'));
-      expect(calls).toEqual([]);
+      expect(committed()).toBe(0);
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
+    expect(committed()).toBe(1);
   });
 
   it('that throws undoes only its own writes, and the outer keeps going', () => {
@@ -137,18 +138,16 @@ describe('a unit inside another', () => {
       expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
       expect(e.query.ids(other).pickOne()).toMatchObject({ title: 'b' });
     });
-    expect(calls.map(([method]) => method)).toEqual(['onUnitStart', 'onPutAttr', 'onPutAttr', 'onUnitEnd']);
+    expect(committed()).toBe(1);
     expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
   });
 
-  it('that throws after growing a list the outer wrote sends the outer\'s list, not the grown one', () => {
+  it('that throws after growing a list the outer wrote leaves the outer\'s list, not the grown one', () => {
     e.transact(() => {
       e.write(task).append('tags', 'a');
       expect(() => e.transact(() => { e.write(task).append('tags', 'b'); throw new Error('stop'); })).toThrow();
     });
     expect(e.getRow(task)?.tags).toEqual(['x', 'a']);
-    const sent = calls.filter(([method, kind]) => method === 'onPutAttr' && kind === 'tags');
-    expect(sent.at(-1)?.[3]).toEqual(['x', 'a']);
   });
 
   it('that commits is undone with the outer when the outer throws', () => {
@@ -159,7 +158,7 @@ describe('a unit inside another', () => {
       throw new Error('stop');
     })).toThrow();
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 });
 
@@ -168,7 +167,7 @@ describe('a link\'s target', () => {
     const before = state();
     expect(() => e.write(task).link('refers', 'Task-ghost' as Id)).toThrow(/link\(refers, "Task-ghost"\): no entity has this id/);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('may be created later in the same unit: a forward reference', () => {
@@ -187,7 +186,7 @@ describe('a link\'s target', () => {
       e.transact(() => { e.write(other).link('refers', 'Task-never' as Id); });
     })).toThrow(/link\(refers, "Task-never"\): no entity has this id/);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('missing at commit is checked on this link\'s own edge, not on another entity\'s', () => {
@@ -216,7 +215,7 @@ describe('a moved relation\'s ends', () => {
     const before = state();
     expect(() => e.updateRelation(rel, { target: 'Task-ghost' as Id })).toThrow(/no entity has the id "Task-ghost"/);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('may be one created later in the same unit', () => {
@@ -235,7 +234,7 @@ describe('a moved relation\'s ends', () => {
       e.updateRelation(rel, { target: 'Task-never' as Id });
     })).toThrow(/no entity has the id "Task-never"/);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 });
 
@@ -244,7 +243,7 @@ describe('what transact refuses', () => {
     const before = state();
     expect(() => e.transact(async () => { e.write(task).set('title', 'sync part'); })).toThrow(/synchronous/);
     expect(state()).toEqual(before);
-    expect(calls).toEqual([]);
+    expect(committed()).toBe(0);
   });
 
   it('an async function, without leaving its rejection unhandled', async () => {

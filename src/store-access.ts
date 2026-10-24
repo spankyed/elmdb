@@ -1,4 +1,4 @@
-import type { KvReader, KvWriter, OrderedKV } from './kv.ts';
+import type { KvReader, KvWriter, OrderedKV, UnitOptions } from './kv.ts';
 
 /**
  * How an engine's modules reach its store: `read` runs in the read snapshot or write unit already open, or opens a
@@ -14,7 +14,7 @@ export interface StoreAccess {
   /** Runs `fn` in the write unit already open, or in a unit of its own */
   write<T>(fn: (writer: KvWriter) => T): T;
   /** Runs `fn` as a unit: in one of its own, or as a savepoint inside the one open, which a throw undoes alone */
-  unit<T>(fn: (writer: KvWriter) => T): T;
+  unit<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
   /** The next number of the store's one sequence: what orders entities and links as they were made */
   nextSeq(writer: KvWriter): number;
   /** The last number the sequence handed out, or 0 */
@@ -36,14 +36,14 @@ export function createStoreAccess(kv: OrderedKV): StoreAccess {
       open.pop();
     }
   };
-  const unit: StoreAccess['unit'] = (fn) => kv.write((writer) => {
+  const unit: StoreAccess['unit'] = (fn, options) => kv.write((writer) => {
     writers.push(writer);
     try {
       return within(writer, fn);
     } finally {
       writers.pop();
     }
-  });
+  }, options);
   return {
     read(fn) {
       const current = open[open.length - 1];

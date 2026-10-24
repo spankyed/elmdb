@@ -2,7 +2,7 @@
 // creator's privileges beside them in `admin`. A program is handed the engine typed as `Ears`, which has no `admin`:
 // the faces define the contract, not a security boundary (packs run in-process).
 import { EARS } from './entities.ts';
-import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
+import type { EARSRuntimeDeps } from './runtime.ts';
 import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
 import { createQuery, type Query } from './query.ts';
 import { createHierarchy } from './hierarchy.ts';
@@ -10,7 +10,7 @@ import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createEntityCounters } from './numbering.ts';
 import { createRelations, type RelationMatch, type RelationRow } from './relations.ts';
 import { createJournal } from './journal.ts';
-import { createMemoryKV } from './kv.ts';
+import { createMemoryKV, type UnitOptions } from './kv.ts';
 import { createStoreAccess } from './store-access.ts';
 import { createNameChecks } from './names.ts';
 
@@ -25,11 +25,11 @@ export interface Ears {
   /** Writes to the entity with an id, which must exist */
   write: Write;
   /**
-   * Runs `fn` as one unit: if it throws, every write it made is undone and none reaches persistence; if it
-   * returns, persistence receives them together. Reads inside see its own writes. `fn` must be synchronous,
-   * and a unit inside another commits into it.
+   * Runs `fn` as one unit: if it throws, every write it made is undone; if it returns, its writes commit together.
+   * Reads inside see its own writes. `fn` must be synchronous, and a unit inside another commits into it. A
+   * `durable` unit is on disk when it returns, rather than with the store's next sync.
    */
-  transact<T>(fn: () => T): T;
+  transact<T>(fn: () => T, options?: UnitOptions): T;
   /** Whether `name` is an entity type the engine's creator registered */
   isEntityType(name: string): boolean;
   /** Whether `name` is a relation kind the engine's creator registered */
@@ -65,7 +65,9 @@ export interface EarsAdmin {
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, the engine's own types and those in the trash included: a raw listing */
   getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
-  /** Loads a stored attribute value, without telling persistence */
+  /** How many entities each type holds, the trash included, without reading their attributes */
+  countEntities(): Record<string, number>;
+  /** Loads a stored attribute value as it was: unchecked, with no `updatedAt` stamp */
   bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
   /** Writes an attribute's value, any kind the engine owns included */
   putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
@@ -75,7 +77,7 @@ export interface EarsAdmin {
   addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
   /** `updateRelation` without its checks: any relation, to any ends */
   updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
-  /** Loads a stored relation, without telling persistence */
+  /** Loads a stored relation under its own id, unchecked */
   bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
   /** Runs `fn`, a load of stored rows, as one write unit */
   bulkLoad<T>(fn: () => T): T;
@@ -89,15 +91,15 @@ export interface EarsEngine extends Ears {
 /**
  * A new, empty engine. `isEntityType` says which names are entity types `create` and `query` accept, and
  * `isRelationKind` which are relation kinds a link, and a read or walk over links, may name, and `isRole` which are roles
- * a role write or a query by role may name; `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
+ * a role write or a query by role may name; `kv` is the store it reads and writes (one in memory by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ kv = createMemoryKV(), persistence = noopSink, isEntityType, isRelationKind, isRole, rowRules = () => undefined, warn }: EARSRuntimeDeps): EarsEngine {
+export function createEarsEngine({ kv = createMemoryKV(), isEntityType, isRelationKind, isRole, rowRules = () => undefined, warn }: EARSRuntimeDeps): EarsEngine {
   const names = createNameChecks({ isRelationKind, isRole });
   const access = createStoreAccess(kv);
-  const { journal, unitSink, transact } = createJournal(persistence, access);
-  const storage = createAttributeStorage({ access, persistence: unitSink, inUnit: () => journal.open });
-  const relations = createRelations({ access, persistence: unitSink });
+  const { journal, transact } = createJournal(access);
+  const storage = createAttributeStorage({ access, inUnit: () => journal.open });
+  const relations = createRelations({ access });
   // The engine's own fields are indexed on every type; any other, where the type's row rules declare it
   const SHORT_CODE = EARS.AttrKind.Custom('shortCode');
   const indexed = (type: EARS.Entity, kind: EARS.AttrKind) =>
@@ -129,6 +131,7 @@ export function createEarsEngine({ kv = createMemoryKV(), persistence = noopSink
     clear: storage.clear,
     getAllEntities: storage.getAllEntities,
     getEntitiesOfType: storage.getEntitiesOfType,
+    countEntities: storage.countEntities,
     bulkLoadAttr: storage.bulkLoadAttr,
     putAttr: storage.putAttr,
     deleteAttr: storage.deleteAttr,

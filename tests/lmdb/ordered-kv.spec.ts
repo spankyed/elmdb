@@ -3,25 +3,26 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { open, type RootDatabase } from 'lmdb';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createMemoryKV, createOrderedKV, type Key, type OrderedKV, type RangeOptions } from '../../src/kv.ts';
-import { createLmdbKVBackend } from '../../src/lmdb/kv-backend.ts';
+import { createMemoryKV, type Key, type OrderedKV, type RangeOptions } from '../../src/kv.ts';
+import { openLmdbStore, type LmdbStore } from '../../src/lmdb/index.ts';
 
-const opened: Array<{ root: RootDatabase; dir: string }> = [];
+const opened: Array<{ store: LmdbStore; dir: string }> = [];
 afterEach(() => {
-  for (const { root, dir } of opened.splice(0)) {
-    root.close();
+  for (const { store, dir } of opened.splice(0)) {
+    store.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-function lmdbKV(): OrderedKV {
+/** An LMDB store in a directory of its own */
+function lmdbStore(): LmdbStore {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ordered-kv-'));
-  const root = open({ path: dir, overlappingSync: false });
-  opened.push({ root, dir });
-  return createOrderedKV(createLmdbKVBackend(root, root.openDB({ name: 'kv', keyEncoding: 'binary', encoding: 'binary' })));
+  const store = openLmdbStore({ path: path.join(dir, 'ears-db') });
+  opened.push({ store, dir });
+  return store;
 }
+const lmdbKV = (): OrderedKV => lmdbStore().kv;
 
 /** The keys a range visits, in one snapshot */
 const keysOf = (kv: OrderedKV, options: RangeOptions) =>
@@ -189,17 +190,13 @@ describe.each([
 
 describe('an ordered KV on LMDB', () => {
   it('releases every snapshot: reads and writes interleaved leave one reader at most, the shared one', () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ordered-kv-'));
-    const root = open({ path: dir, overlappingSync: false });
-    opened.push({ root, dir });
-    const kv = createOrderedKV(createLmdbKVBackend(root, root.openDB({ name: 'kv', keyEncoding: 'binary', encoding: 'binary' })));
+    const store = lmdbStore();
+    const { kv } = store;
     for (let i = 0; i < 50; i++) {
       kv.write((w) => w.put(['n', i], i));
       kv.read((r) => r.range({ prefix: ['n'] }, () => false));
       expect(() => kv.read((r) => r.range({ prefix: ['n'] }, () => { throw new Error('visit'); }))).toThrow('visit');
     }
-    // One line per reader slot this process holds, under a header
-    const readers = root.readerList().trim().split('\n').slice(1);
-    expect(readers.length).toBeLessThanOrEqual(1);
+    expect(store.readers()).toBeLessThanOrEqual(1);
   });
 });

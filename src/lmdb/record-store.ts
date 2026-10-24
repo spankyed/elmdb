@@ -29,6 +29,24 @@ type IndexKey = [string, IndexValue, string];
 
 type Dbs = { root: RootDatabase; records: Database<StoredRecord, string>; index: Database<1, IndexKey> };
 
+/** A record store's environment at `dir`, checked to be one in this version's format */
+function openDbs(dir: string, readOnly: boolean): Dbs {
+  if (readOnly && !fs.existsSync(path.join(dir, 'data.mdb'))) throw new Error(`No record store at ${dir}`);
+  if (!readOnly) fs.mkdirSync(path.dirname(dir), { recursive: true });
+  const root = open({ path: dir, maxDbs: 4, noSync: true, readOnly });
+  try {
+    checkStamp(root, dir, readOnly, { kind: RECORD_STORE_KIND, format: RECORD_STORE_FORMAT_VERSION, noun: 'record store' });
+    return {
+      root,
+      records: root.openDB({ name: 'records', encoding: 'json' }),
+      index: root.openDB({ name: 'index', encoding: 'json' }) as unknown as Database<1, IndexKey>,
+    };
+  } catch (error) {
+    root.close();
+    throw error;
+  }
+}
+
 /**
  * Opens (creating it, unless read-only) the record store at `path`, whole records by id in their own LMDB environment
  * with an index per declared name; refuses files of another kind or format. Each write is one transaction (so a read
@@ -43,23 +61,6 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
    */
   let openFailure: Error | null = null;
   const newId = _idClock();
-
-  function openDbs(): Dbs {
-    if (readOnly && !fs.existsSync(path.join(dir, 'data.mdb'))) throw new Error(`No record store at ${dir}`);
-    if (!readOnly) fs.mkdirSync(path.dirname(dir), { recursive: true });
-    const root = open({ path: dir, maxDbs: 4, noSync: true, readOnly });
-    try {
-      checkStamp(root, dir, readOnly, { kind: RECORD_STORE_KIND, format: RECORD_STORE_FORMAT_VERSION, noun: 'record store' });
-      return {
-        root,
-        records: root.openDB({ name: 'records', encoding: 'json' }),
-        index: root.openDB({ name: 'index', encoding: 'json' }) as unknown as Database<1, IndexKey>,
-      };
-    } catch (error) {
-      root.close();
-      throw error;
-    }
-  }
 
   function current(): Dbs {
     if (!dbs) throw new Error(`The record store at ${dir} is closed`);
@@ -85,7 +86,7 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
   /** Opens the files again, remembering a failure for the writes that follow */
   function reopenDbs(): void {
     try {
-      dbs = openDbs();
+      dbs = openDbs(dir, readOnly);
       openFailure = null;
     } catch (error) {
       openFailure = error instanceof Error ? error : new Error(String(error));
@@ -102,7 +103,7 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     dbs = null;
   }
 
-  dbs = openDbs();
+  dbs = openDbs(dir, readOnly);
 
   return {
     path: dir,
@@ -166,6 +167,26 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     async copyTo(targetDir) {
       fs.mkdirSync(targetDir, { recursive: true });
       await current().root.backup(targetDir, false);
+    },
+    replaceWith(source) {
+      const open = writable();
+      if (!open) throw new Error(`The record store at ${dir} is closed`);
+      const from = openDbs(source, true);
+      const { root, records, index } = open;
+      try {
+        // One unit: the records the source holds, filed in this store's indexes, in place of every record here
+        root.transactionSync(() => {
+          // Collected first, since the body removes the keys a live cursor would walk
+          for (const key of Array.from(records.getKeys())) records.removeSync(key);
+          for (const key of Array.from(index.getKeys())) index.removeSync(key);
+          for (const { value: record } of from.records.getRange()) {
+            records.putSync(record.id, record);
+            for (const key of entries(record)) index.putSync(key, 1);
+          }
+        });
+      } finally {
+        from.root.close();
+      }
     },
   };
 }

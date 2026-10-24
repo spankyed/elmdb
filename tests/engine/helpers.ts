@@ -1,4 +1,4 @@
-import type { EARS, PersistenceSink } from '../../src/index.ts';
+import { createMemoryKVBackend, createOrderedKV, type EARS, type KvBackend, type OrderedKV } from '../../src/index.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
 export const TYPES = new Set(['Task', 'Project', 'Person']);
@@ -16,40 +16,28 @@ export const isRole = (name: string) => ROLES.has(name);
 export type Id = EARS.EntityId;
 export type RelId = EARS.RelationId;
 
-/** An engine with the contract specs' entity types, relation kinds and roles, and no persistence unless given */
-export function engine(persistence?: PersistenceSink): EngineUnderTest {
-  return freshEngine({ isEntityType, isRelationKind, isRole, persistence });
+/** An engine with the contract specs' entity types, relation kinds and roles, over a store in memory unless given one */
+export function engine(kv?: OrderedKV): EngineUnderTest {
+  return freshEngine({ isEntityType, isRelationKind, isRole, ...(kv && { kv }) });
 }
 
-export type SinkCall = [method: string, ...args: unknown[]];
-
-/**
- * A sink recording each call with a copy of its arguments (the engine passes its live attribute
- * lists), and the ids in them replaced by `#1`, `#2`… in the order they first appear.
- */
-export function recordingSink(): { sink: PersistenceSink; calls: SinkCall[] } {
-  const calls: SinkCall[] = [];
-  const names = new Map<string, string>();
-  const rename = (value: unknown): unknown => {
-    if (typeof value === 'string' && /^[A-Z][A-Za-z]*-[a-z0-9]{10,}$/.test(value)) {
-      if (!names.has(value)) names.set(value, `#${names.size + 1}`);
-      return names.get(value);
-    }
-    if (Array.isArray(value)) return value.map(rename);
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, rename(v)]));
-    return value;
+/** A store in memory counting the units it committed: those that wrote, and returned */
+export function committing(): { kv: OrderedKV; commits: () => number } {
+  const backend = createMemoryKVBackend();
+  let commits = 0;
+  const counted: KvBackend = {
+    read: (fn) => backend.read(fn),
+    durable: () => backend.durable(),
+    write(fn, options) {
+      let wrote = false;
+      const result = backend.write((w) => fn({
+        ...w,
+        put: (key, value) => { wrote = true; w.put(key, value); },
+        del: (key) => { wrote = true; w.del(key); },
+      }), options);
+      if (wrote) commits++;
+      return result;
+    },
   };
-  const record = (method: string) => (...args: unknown[]) => { calls.push([method, ...args.map((a) => rename(structuredClone(a)))]); };
-  const sink: PersistenceSink = {
-    onCreateEntity: record('onCreateEntity'),
-    onDestroyEntity: record('onDestroyEntity'),
-    onDropAttr: record('onDropAttr'),
-    onPutAttr: record('onPutAttr'),
-    onAddRelation: record('onAddRelation'),
-    onUpdateRelation: record('onUpdateRelation'),
-    onRemoveRelation: record('onRemoveRelation'),
-    onUnitStart: record('onUnitStart'),
-    onUnitEnd: record('onUnitEnd'),
-  };
-  return { sink, calls };
+  return { kv: createOrderedKV(counted), commits: () => commits };
 }

@@ -8,22 +8,6 @@ import { Database } from 'lmdb';
 import { RootDatabase } from 'lmdb';
 
 // @public
-export interface AttributeRewrite {
-    removed: number;
-    removedEntities: number;
-    rewritten: number;
-}
-
-// @public (undocumented)
-export type AttrRecord = {
-    t: 'null' | 'string' | 'number' | 'boolean' | 'object' | 'array' | 'date' | 'blob';
-    v: any;
-};
-
-// @public
-export function closeEnv(dbs: LmdbDbs): void;
-
-// @public
 export function convertToCurrentFormat(basePath: string): FormatSteps;
 
 // @public
@@ -33,28 +17,29 @@ export function convertToFormat2(basePath: string): FormatConversion;
 export function convertToFormat3(basePath: string): Format3Conversion;
 
 // @public
-export function decodeAttr(rec?: AttrRecord | null): unknown;
+export function convertToFormat4(basePath: string): Format4Conversion;
 
-// @public (undocumented)
-export type EntityMeta = {
-    type: string;
-    createdAt: number;
-};
-
-// @public (undocumented)
-export type FindByAttrOpts = {
-    entityType?: string;
-    limit?: number;
-    equals?: unknown;
-    deepEquals?: boolean;
-    predicate?: (value: unknown, entityId: string) => boolean;
-};
+// @public
+export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array, Uint8Array>, hooks: LmdbKVHooks): KvBackend;
 
 // @public
 export interface Format3Conversion {
     joinedLists: number;
     singleValues: number;
     trashed: number;
+}
+
+// @public (undocumented)
+export interface Format4Conversion {
+    // (undocumented)
+    attributes: number;
+    // (undocumented)
+    entities: number;
+    invalidRelations: number;
+    orphanedAttributes: number;
+    // (undocumented)
+    relations: number;
+    sequences: number;
 }
 
 // @public
@@ -74,101 +59,56 @@ export type FormatSteps = Array<{
 } | {
     to: 3;
     result: Format3Conversion;
+} | {
+    to: 4;
+    result: Format4Conversion;
 }>;
 
 // @public
-export function hydrate(params: {
-    engine: EarsAdmin;
-    env: LmdbDbs;
-    log?: (message: string) => void;
-}): Promise<void>;
+export const LMDB_FORMAT_VERSION = 4;
 
 // @public
-export const LMDB_FORMAT_VERSION = 3;
-
-// @public
-export type LmdbDbs = {
-    entities: Database<any>;
-    attrs: Database<any>;
-    relations: Database<any>;
+export interface LmdbEnvironment {
+    // (undocumented)
+    db: Database<Uint8Array, Uint8Array>;
+    // (undocumented)
     root: RootDatabase;
-};
+}
 
-// @public (undocumented)
-export class LmdbReader {
-    constructor(dbs: LmdbDbs);
-    bfs(startId: string, opts?: {
-        maxDepth?: number;
-        kind?: string;
-        direction?: 'out' | 'in' | 'both';
-    }): Map<string, number>;
-    entitiesHavingAttr(kind: string, limit?: number): Iterable<string>;
-    entitiesOfType(type: string): Iterable<string>;
-    findEntitiesByAttr(kind: string, opts?: FindByAttrOpts): string[];
-    findEntitiesByAttrIter(kind: string, opts?: FindByAttrOpts): Iterable<string>;
-    getAttr(entityId: string, kind: string): unknown;
-    getEntityMeta(entityId: string): EntityMeta | null;
-    neighbors(id: string, opts?: {
-        kind?: string;
-        direction?: 'out' | 'in' | 'both';
-    }): string[];
-    neighborsWithEdges(id: string, opts?: {
-        kind?: string;
-        direction?: 'out' | 'in' | 'both';
-    }): Array<{
-        from: string;
-        to: string;
-        kind: string;
-        info?: any;
-    }>;
-    relations(filter?: {
-        kind?: string;
-        src?: string;
-        tgt?: string;
-        limit?: number;
-    }): Iterable<{
-        relId: string;
-        rel: RelationRecord;
-    }>;
-    scan(dbName: keyof LmdbDbs, opts: {
-        start: string;
-        end: string;
-        limit?: number;
-        reverse?: boolean;
-    }): any;
+// @public
+export interface LmdbKVHooks {
+    committed(): void;
+    durable(): Promise<void>;
+    synced(): void;
 }
 
 // @public
 export interface LmdbStore {
-    close(): PersistenceErrorStats;
+    close(): void;
     copyTo(targetDir: string): Promise<void>;
-    readonly env: LmdbDbs;
-    hydrate(): Promise<void>;
-    isOpen(): boolean;
+    durable(): Promise<void>;
+    readonly kv: OrderedKV;
     readonly path: string;
-    read(): LmdbReader;
+    readers(): number;
+    // (undocumented)
     readonly readOnly: boolean;
-    reopen(): void;
-    reset(): Promise<void>;
-    readonly sink: Required<PersistenceSink>;
-}
-
-// @public
-export interface LmdbStoreOptions {
-    engine: () => EarsAdmin;
-    log?: (message: string) => void;
-    onWriteFailure?: (failure: WriteFailure) => void;
-    path: string;
-    readOnly?: boolean;
+    replaceWith(dir: string): void;
+    requestSync(): void;
+    reset(): void;
+    readonly syncs: number;
 }
 
 // @public (undocumented)
-export function makeLmdbAdapter(dbs: LmdbDbs, onWriteFailure?: (failure: WriteFailure) => void): Required<PersistenceSink>;
+export interface LmdbStoreOptions {
+    path: string;
+    readOnly?: boolean;
+    syncIntervalMs?: number;
+}
 
 // @public
-export function openEnvAt(basePath: string, input?: {
+export function openEnvironment(dir: string, input?: {
     readOnly?: boolean;
-}): LmdbDbs;
+}): LmdbEnvironment;
 
 // @public
 export function openLmdbStore(input: LmdbStoreOptions): LmdbStore;
@@ -194,29 +134,7 @@ export interface RecordStoreOptions<R extends {
     readOnly?: boolean;
 }
 
-// @public (undocumented)
-export type RelationRecord = {
-    kind: string;
-    src: string;
-    tgt: string;
-    info?: any;
-    createdAt: number;
-};
-
 // @public
-export const REMOVE_ATTRIBUTE: unique symbol;
-
-// @public
-export function rewriteAttributes(basePath: string, rewrite: (kind: string, id: string, value: unknown) => unknown, input?: {
-    removeEntities?: readonly string[];
-}): AttributeRewrite;
-
-// @public
-export interface WriteFailure {
-    // (undocumented)
-    error: unknown;
-    key: string;
-    op: string;
-}
+export const SYNC_INTERVAL_MS = 200;
 
 ```

@@ -395,6 +395,7 @@ describe('reads', () => {
       get writing() { return kv.writing; },
       read: (fn) => kv.read((r) => fn(counting(r))),
       write: (fn) => kv.write((w) => fn(counting(w))),
+      durable: () => kv.durable(),
     };
     return { store, reads: (run: () => unknown) => { reads = 0; run(); return reads; } };
   }

@@ -1,6 +1,5 @@
 import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject } from './utils.ts';
-import type { PersistenceSink } from './runtime.ts';
 import type { RelationStats } from './relations.ts';
 import type { Key, KvReader, KvWriter } from './kv.ts';
 import type { StoreAccess } from './store-access.ts';
@@ -59,11 +58,10 @@ export type TypeScope = 'live' | 'trashed' | 'all';
  *   `['xb', type, kind]` records it built (on its first read, from the type's rows)
  * - `['s', key]` → the next number of a numbering sequence
  *
- * Every write runs in a unit (`access.write`), nested in the open one, and tells `persistence` what changed.
+ * Every write runs in a unit (`access.write`): the one open, or one of its own.
  */
-export function createAttributeStorage({ access, persistence, inUnit }: {
+export function createAttributeStorage({ access, inUnit }: {
   access: StoreAccess;
-  persistence: PersistenceSink;
   /** Whether a unit (`transact`) is open, which a clear refuses */
   inUnit: () => boolean;
 }) {
@@ -161,7 +159,7 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
 
   // ─── Attribute writes ──────────────────────────────────────────────────
 
-  /** Every write of an attribute: in its unit, refiled in a built index, and told to persistence */
+  /** Every write of an attribute: in its unit, and refiled in a built index */
   const assign = (id: EARS.EntityId, kind: EARS.AttrKind, next: unknown) => write((w) => {
     const key = ['v', id, kind];
     const before = w.get(key);
@@ -170,14 +168,12 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
       reindex(w, id, kind, before, undefined);
       w.del(key);
       if (kind === TRASHED_AT) setTrashed(w, id, false);
-      persistence.onDropAttr(kind, id);
       return;
     }
     ensureEntity(w, id);
     reindex(w, id, kind, before, next);
     w.put(key, next);
     if (kind === TRASHED_AT) setTrashed(w, id, true);
-    persistence.onPutAttr(kind, id, next);
   });
 
   /** The attribute's list, refusing a value that isn't one */
@@ -223,7 +219,7 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
   /** Removes the attribute */
   const deleteAttr = (id: EARS.EntityId, kind: EARS.AttrKind) => assign(id, kind, undefined);
 
-  /** A stored value, loaded without telling persistence */
+  /** A stored value, loaded as it was: no check, and no `updatedAt` stamp */
   const bulkLoadAttr = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => write((w) => {
     ensureEntity(w, id);
     reindex(w, id, kind, w.get(['v', id, kind]), val);
@@ -260,11 +256,7 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
       if (!record.trashed) count(w, entityTypeOf(id), -1);
       w.del(['i', id]);
     }
-    persistence.onDestroyEntity(id);
   });
-
-  /** Tells the sink an entity was created */
-  const entityCreated = (id: EARS.EntityId, entityType: EARS.Entity) => persistence.onCreateEntity(id, entityType);
 
   /** Empties the store */
   function clear() {
@@ -344,6 +336,15 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
     return all.sort((a, b) => a[0] - b[0]).map(([, id]) => id);
   });
 
+  /** How many entities each type holds, the trash included: a walk of the types' keys, decoding no value */
+  const countEntities = (): Record<string, number> => read((r) => {
+    const counts = new Map<string, number>();
+    for (const range of ['e', 'd']) {
+      r.range({ prefix: [range], values: false }, (key) => { counts.set(key[1] as string, (counts.get(key[1] as string) ?? 0) + 1); });
+    }
+    return Object.fromEntries(counts);
+  });
+
   /** How many live entities the type holds */
   const countOfType = (t: EARS.Entity): number => read((r) => (r.get(['c', t]) as number | undefined) ?? 0);
 
@@ -369,10 +370,6 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
    */
   const entityStats = (): Omit<SchemaStats, 'relations'> => read((r) => {
     // Maps while counting, since a field may be named for an Object.prototype member (`__proto__`, `constructor`)
-    const entities = new Map<string, number>();
-    for (const range of ['e', 'd']) {
-      r.range({ prefix: [range], values: false }, (key) => { entities.set(key[1] as string, (entities.get(key[1] as string) ?? 0) + 1); });
-    }
     const roles = new Map<string, number>();
     const attributes = new Map<string, { entityCount: number; totalValues: number }>();
     r.range({ prefix: ['v'] }, (key, value) => {
@@ -383,14 +380,14 @@ export function createAttributeStorage({ access, persistence, inUnit }: {
       stats.totalValues += Array.isArray(value) ? value.length : 1;
       if (kind === EARS.AttrKind.Role) for (const role of new Set(value as string[])) roles.set(role, (roles.get(role) ?? 0) + 1);
     });
-    return { entities: Object.fromEntries(entities), attributes: Object.fromEntries(attributes), roles: Object.fromEntries(roles) };
+    return { entities: countEntities(), attributes: Object.fromEntries(attributes), roles: Object.fromEntries(roles) };
   });
 
   return {
     clear, bulkLoadAttr,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
-    entityCreated, grantRole, revokeRole,
-    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, countOfType, hasEntity, isTrashed,
+    grantRole, revokeRole,
+    getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, countOfType, countEntities, hasEntity, isTrashed,
     isLive, holders, orderOf, getSequence, setSequence,
     destroyEntity, entityStats,
   };

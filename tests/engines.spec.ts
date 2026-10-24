@@ -1,11 +1,10 @@
 // An engine is an instance its holder acts on: two share nothing, and a typed facade acts on whichever engine its
 // getter returns when called. Nothing in this package acts on an engine it wasn't given.
 import { describe, expect, it } from 'vitest';
-import { createEarsEngine, defineEars, type EARS, type Ears, type PersistenceSink, type UntypedSchema } from '../src/index.ts';
-import { recordingSink } from './engine/helpers.ts';
+import { createEarsEngine, defineEars, type EARS, type Ears, type UntypedSchema } from '../src/index.ts';
 
 const types = new Set(['Note']);
-const newEngine = (persistence?: PersistenceSink) => createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence });
+const newEngine = () => createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true });
 
 describe('defineEars', () => {
   it('acts on the engine its getter returns at each call', () => {
@@ -32,11 +31,9 @@ describe('defineEars', () => {
 });
 
 describe('two engines in one process', () => {
-  it('share no data, relation index, repositories or persistence', () => {
-    const a = recordingSink();
-    const b = recordingSink();
-    const one = newEngine(a.sink);
-    const two = newEngine(b.sink);
+  it('share no data, relation index, repositories or store', () => {
+    const one = newEngine();
+    const two = newEngine();
 
     const x = one.create('Note').set('title', 'one').id();
     const y = one.create('Note').id();
@@ -49,9 +46,7 @@ describe('two engines in one process', () => {
     expect(one.findRelations()).toHaveLength(1);
     expect(two.findRelations()).toEqual([]);
     expect(Object.keys(two.getSchemaStats().relations)).toEqual([]);
-    expect(b.calls.every(([, , id]) => id !== x)).toBe(true);
-    expect(a.calls.filter(([method]) => method === 'onAddRelation')).toHaveLength(1);
-    expect(b.calls.filter(([method]) => method === 'onAddRelation')).toHaveLength(0);
+    expect(two.getRow(x)).toBeUndefined();
 
     one.admin.clear();
     expect(one.admin.getAllEntities()).toEqual([]);

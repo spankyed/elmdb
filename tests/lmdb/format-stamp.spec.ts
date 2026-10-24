@@ -30,17 +30,17 @@ vi.mock('lmdb', async (importOriginal) => {
   return { ...lmdb, open };
 });
 
-const { openEnvAt, LMDB_FORMAT_VERSION } = await import('../../src/lmdb/envs.ts');
+const { openEnvironment, LMDB_FORMAT_VERSION } = await import('../../src/lmdb/store.ts');
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-format-stamp-'));
 afterAll(() => fs.rmSync(dir, { recursive: true, force: true }));
 
 it('refuses new, empty files it could not stamp, and stamps them once it can', () => {
   const basePath = path.join(dir, 'ears-db');
-  expect(() => openEnvAt(basePath)).toThrow(/Couldn't record the storage format of .*No space left on device/);
+  expect(() => openEnvironment(basePath)).toThrow(/Couldn't record the storage format of .*No space left on device/);
 
   failStamp = false;
-  const env = openEnvAt(basePath);
+  const env = openEnvironment(basePath);
   try {
     expect(env.root.openDB({ name: 'meta', encoding: 'json' }).get('format')).toBe(LMDB_FORMAT_VERSION);
   } finally {

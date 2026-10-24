@@ -1,5 +1,5 @@
 import { EARS } from './entities.ts';
-import type { PersistenceSink, RelationEdge } from './runtime.ts';
+import type { RelationEdge } from './runtime.ts';
 import type { KvReader, KvWriter } from './kv.ts';
 import type { StoreAccess } from './store-access.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
@@ -51,9 +51,9 @@ const BETWEEN = 'b';
  *   and an unlink the ones it removes, without reading every edge of a hub
  *
  * A relation is not an entity: it holds no attributes and no type's range lists it. Each write runs in a unit
- * (`access.write`) and tells `persistence`.
+ * (`access.write`).
  */
-export function createRelations({ access, persistence }: { access: StoreAccess; persistence: PersistenceSink }) {
+export function createRelations({ access }: { access: StoreAccess }) {
   const { read, write } = access;
 
   const rowOf = (relId: EARS.RelationId, stored: StoredRelation): RelationRow =>
@@ -176,9 +176,7 @@ export function createRelations({ access, persistence }: { access: StoreAccess; 
       if (info === undefined || sameValue(storedOf(w, relId)?.info, info)) return ((existing = relId), false);
     });
     if (existing) return existing;
-    const relId = store(w, undefined, kind, source, target, info);
-    persistence.onAddRelation(relId, kind, source, target, info);
-    return relId;
+    return store(w, undefined, kind, source, target, info);
   });
 
   /** Removes the relation; an id no relation has is ignored */
@@ -187,7 +185,6 @@ export function createRelations({ access, persistence }: { access: StoreAccess; 
     if (!stored) return;
     unfileEdges(w, stored);
     w.del(['r', relId]);
-    persistence.onRemoveRelation(relId);
   });
 
   /** Removes the matching relations */
@@ -221,11 +218,6 @@ export function createRelations({ access, persistence }: { access: StoreAccess; 
       fileEdges(w, relId, next);
     }
     w.put(['r', relId], next);
-    const patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown } = {};
-    if (source) patch.source = source;
-    if (target) patch.target = target;
-    if (info !== undefined) patch.info = info;
-    persistence.onUpdateRelation(relId, patch);
   });
 
   /** Removes every relation to or from `id`: an entity being destroyed */
@@ -235,7 +227,7 @@ export function createRelations({ access, persistence }: { access: StoreAccess; 
     for (const relId of relIds) remove(relId);
   });
 
-  /** A stored relation, loaded under its own id without telling persistence */
+  /** A stored relation, loaded under its own id, unchecked */
   const bulkLoad = (relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void =>
     write((w) => { store(w, relId, kind, source, target, info); });
 

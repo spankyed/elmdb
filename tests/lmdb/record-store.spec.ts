@@ -4,7 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { openEnvAt, closeEnv, openRecordStore } from '../../src/lmdb/index.ts';
+import { openEnvironment, openRecordStore } from '../../src/lmdb/index.ts';
 import { createMemoryRecordStore, type RecordIndexes, type RecordStore, type StoredRecord } from '../../src/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-record-store-'));
@@ -142,7 +142,7 @@ describe('openRecordStore', () => {
     s.close();
     // Its files replaced by ones it refuses to open
     fs.rmSync(dir, { recursive: true, force: true });
-    closeEnv(openEnvAt(dir));
+    openEnvironment(dir).root.close();
     expect(() => s.reopen()).toThrow('are an EARS database, not a record store');
     expect(() => s.put({ id: 'R-1' })).toThrow('opening it again failed');
     expect(s.findBy('status', 'active')).toEqual([]);
@@ -150,10 +150,10 @@ describe('openRecordStore', () => {
 
   it('refuses an EARS database, and an EARS environment refuses it', () => {
     const ears = path.join(path.dirname(dir), 'ears');
-    closeEnv(openEnvAt(ears));
+    openEnvironment(ears).root.close();
     expect(() => store({ at: ears })).toThrow('are an EARS database, not a record store');
 
     store().close();
-    expect(() => openEnvAt(dir)).toThrow('are a "records" store, not an EARS database');
+    expect(() => openEnvironment(dir)).toThrow('are a "records" store, not an EARS database');
   });
 });

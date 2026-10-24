@@ -4,9 +4,20 @@ import type { ByteReader, ByteWriter, KvBackend } from '../kv.ts';
 /**
  * How a unit commits: synchronously and abortably, without waiting for the disk (`NO_SYNC_FLUSH`). The commit is
  * visible at once and survives the process crashing; what makes it durable against the machine failing is a sync,
- * which is the store's to schedule.
+ * which is the store's to schedule. A durable unit commits with the sync (`COMMIT_DURABLE`).
  */
 const COMMIT = 1 /* ABORTABLE */ | 2 /* SYNCHRONOUS_COMMIT */ | 0x10000 /* NO_SYNC_FLUSH */;
+const COMMIT_DURABLE = 1 /* ABORTABLE */ | 2 /* SYNCHRONOUS_COMMIT */;
+
+/** What the backend tells its store, and asks of it */
+export interface LmdbKVHooks {
+  /** A unit committed without a sync: one is owed */
+  committed(): void;
+  /** A unit committed with a sync: every commit before it is on disk too */
+  synced(): void;
+  /** Resolves once every unit committed before the call is on disk */
+  durable(): Promise<void>;
+}
 
 /** The bytes of one database, read inside `transaction` (none: the open write unit, or the latest committed) */
 function bytes(db: Database<Uint8Array, Uint8Array>, transaction?: Transaction): ByteReader {
@@ -45,7 +56,7 @@ function bytes(db: Database<Uint8Array, Uint8Array>, transaction?: Transaction):
  * transactions are taken on. A read is one read transaction, released however `fn` ends; a write is one
  * `transactionSync` (`COMMIT`), whose reads see its writes.
  */
-export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array, Uint8Array>): KvBackend {
+export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array, Uint8Array>, hooks: LmdbKVHooks): KvBackend {
   return {
     read(fn) {
       const transaction = root.useReadTransaction();
@@ -55,18 +66,22 @@ export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array,
         transaction.done();
       }
     },
-    write(fn) {
+    write(fn, options) {
       let result!: ReturnType<typeof fn>;
+      let wrote = false;
       // A block body: a callback returning a promise would make the transaction asynchronous
       root.transactionSync(() => {
         const writer: ByteWriter = {
           ...bytes(db),
-          put: (key, value) => { db.putSync(key as Buffer, value as Buffer); },
-          del: (key) => { db.removeSync(key as Buffer); },
+          put: (key, value) => { wrote = true; db.putSync(key as Buffer, value as Buffer); },
+          del: (key) => { wrote = true; db.removeSync(key as Buffer); },
         };
         result = fn(writer);
-      }, COMMIT);
+      }, options?.durable ? COMMIT_DURABLE : COMMIT);
+      if (options?.durable) hooks.synced();
+      else if (wrote) hooks.committed();
       return result;
     },
+    durable: () => hooks.durable(),
   };
 }

@@ -1,11 +1,10 @@
 // What makes `transact` a unit: its writes run in one write unit of the store, which keeps nothing of them when it
-// throws (`kv.ts`), and the persistence calls they make are held until the outermost unit commits.
-import type { PersistenceSink } from './runtime.ts';
+// throws (`kv.ts`), and the checks it defers run as the outermost unit commits.
+import type { UnitOptions } from './kv.ts';
 import type { StoreAccess } from './store-access.ts';
 
-/** One open unit: where its sink calls start, and its checks */
+/** One open unit: its checks */
 interface Level {
-  sinkMark: number;
   checks: Array<() => void>;
 }
 
@@ -14,17 +13,16 @@ export interface Journal {
   /** Whether a unit is open */
   readonly open: boolean;
   /**
-   * Runs `check` when the outermost unit commits, before anything reaches the sink — at once outside a unit, where
+   * Runs `check` when the outermost unit commits, before it does — at once outside a unit, where
    * a write is its own unit. A check that throws rolls the whole unit back. This is a deferred constraint: what a
    * unit leaves inconsistent part way is allowed, what it commits is not.
    */
   atCommit(check: () => void): void;
 }
 
-/** A journal over the store, and the sink that holds an open unit's calls back from `sink` */
-export function createJournal(sink: PersistenceSink, access: StoreAccess) {
+/** A journal over the store */
+export function createJournal(access: StoreAccess) {
   const levels: Level[] = [];
-  const held: Array<() => void> = [];
 
   const journal: Journal = {
     get open() { return levels.length > 0; },
@@ -35,31 +33,9 @@ export function createJournal(sink: PersistenceSink, access: StoreAccess) {
     },
   };
 
-  // A held call copies an array it carries: the caller who wrote it may still change it before the unit commits
-  const hold = <A extends unknown[]>(write: (...args: A) => void) => (...args: A): void => {
-    if (levels.length === 0) return write(...args);
-    const copied = args.map((arg) => (Array.isArray(arg) ? [...arg] : arg)) as A;
-    held.push(() => write(...copied));
-  };
-
-  /** `sink`, except that its writes wait for the outermost unit to commit */
-  const unitSink: PersistenceSink = {
-    onCreateEntity: hold((...args) => sink.onCreateEntity(...args)),
-    onDestroyEntity: hold((...args) => sink.onDestroyEntity(...args)),
-    onDropAttr: hold((...args) => sink.onDropAttr(...args)),
-    onPutAttr: hold((...args) => sink.onPutAttr(...args)),
-    onAddRelation: hold((...args) => sink.onAddRelation(...args)),
-    onUpdateRelation: hold((...args) => sink.onUpdateRelation(...args)),
-    onRemoveRelation: hold((...args) => sink.onRemoveRelation(...args)),
-    onUnitStart: () => sink.onUnitStart(),
-    onUnitEnd: () => sink.onUnitEnd(),
-    close: sink.close && (() => sink.close?.()),
-    getErrorStats: sink.getErrorStats && (() => sink.getErrorStats!()),
-  };
-
   /** Runs `fn` as one unit; a unit inside another commits into it and rolls back only its own writes */
-  function transact<T>(fn: () => T): T {
-    const level: Level = { sinkMark: held.length, checks: [] };
+  function transact<T>(fn: () => T, options?: UnitOptions): T {
+    const level: Level = { checks: [] };
     levels.push(level);
     let result: T;
     try {
@@ -74,10 +50,9 @@ export function createJournal(sink: PersistenceSink, access: StoreAccess) {
         // The outermost unit is what commits, so it is where the unit's checks run; an inner one hands them up
         if (levels.length === 1) for (const check of level.checks) check();
         return value;
-      });
+      }, options);
     } catch (error) {
       levels.pop();
-      held.length = level.sinkMark;
       throw error;
     }
     levels.pop();
@@ -86,17 +61,8 @@ export function createJournal(sink: PersistenceSink, access: StoreAccess) {
       parent.checks.push(...level.checks);
       return result;
     }
-    const calls = held.splice(0);
-    if (calls.length) {
-      sink.onUnitStart();
-      try {
-        for (const call of calls) call();
-      } finally {
-        sink.onUnitEnd();
-      }
-    }
     return result;
   }
 
-  return { journal, unitSink, transact };
+  return { journal, transact };
 }

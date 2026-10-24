@@ -57,7 +57,7 @@ E
 } : Record<string, unknown>;
 
 // @public
-export function createMemoryKV(): OrderedKV;
+export function createMemoryKV(options?: OrderedKVOptions): OrderedKV;
 
 // @public
 export function createMemoryKVBackend(): KvBackend;
@@ -70,7 +70,7 @@ export function createMemoryRecordStore<R extends {
 }): RecordStore<R>;
 
 // @public
-export function createOrderedKV(backend: KvBackend): OrderedKV;
+export function createOrderedKV(backend: KvBackend, input?: OrderedKVOptions): OrderedKV;
 
 // @public
 export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
@@ -141,7 +141,7 @@ export interface Ears {
     nextLabel(type: EARS.Entity, base: string): string;
     query: Query;
     removeRelation(relId: EARS.RelationId): void;
-    transact<T>(fn: () => T): T;
+    transact<T>(fn: () => T, options?: UnitOptions): T;
     updateRelation(relId: EARS.RelationId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
@@ -159,6 +159,7 @@ export interface EarsAdmin {
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
     clear(): void;
+    countEntities(): Record<string, number>;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
@@ -223,7 +224,6 @@ export interface EARSRuntimeDeps {
     isRelationKind: (v: string) => boolean;
     isRole: (v: string) => boolean;
     kv?: OrderedKV;
-    persistence?: PersistenceSink;
     rowRules?: (type: string) => RowRules | undefined;
     warn?: (message: string) => void;
 }
@@ -295,10 +295,11 @@ export type KeyPart = string | number | boolean | null;
 
 // @public
 export interface KvBackend {
+    durable(): Promise<void>;
     // (undocumented)
     read<T>(fn: (reader: ByteReader) => T): T;
     // (undocumented)
-    write<T>(fn: (writer: ByteWriter) => T): T;
+    write<T>(fn: (writer: ByteWriter) => T, options?: UnitOptions): T;
 }
 
 // @public
@@ -325,9 +326,6 @@ export interface LinkOptions<R extends string = string> {
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
 // @public
-export const noopSink: PersistenceSink;
-
-// @public
 export type OptionalField<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? Extract<{
@@ -336,42 +334,15 @@ E
 
 // @public
 export interface OrderedKV {
+    durable(): Promise<void>;
     read<T>(fn: (reader: KvReader) => T): T;
-    write<T>(fn: (writer: KvWriter) => T): T;
+    write<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
     readonly writing: boolean;
 }
 
 // @public
-export interface PersistenceErrorStats {
-    // (undocumented)
-    errorCount: number;
-    // (undocumented)
-    lastError: unknown;
-}
-
-// @public (undocumented)
-export interface PersistenceSink {
-    // (undocumented)
-    close?(): void;
-    // (undocumented)
-    getErrorStats?(): PersistenceErrorStats;
-    // (undocumented)
-    onAddRelation(relId: string, kind: string, source: string, target: string, info: unknown): void;
-    onCreateEntity(entityId: string, entityType: string): void;
-    // (undocumented)
-    onDestroyEntity(entityId: string): void;
-    onDropAttr(kind: string, entityId: string): void;
-    onPutAttr(kind: string, entityId: string, value: unknown): void;
-    onRemoveRelation(relId: string): void;
-    // (undocumented)
-    onUnitEnd(): void;
-    onUnitStart(): void;
-    // (undocumented)
-    onUpdateRelation(relId: string, patch: {
-        source?: string;
-        target?: string;
-        info?: unknown;
-    }): void;
+export interface OrderedKVOptions {
+    freeze?: boolean;
 }
 
 // @public
@@ -477,6 +448,7 @@ export interface RecordStore<R extends {
     readonly readOnly: boolean;
     // (undocumented)
     reopen(): void;
+    replaceWith(dir: string): void;
     reset(): Promise<void>;
 }
 
@@ -637,6 +609,11 @@ export interface TypedWrite<D extends EarsSchema> {
 
 // @public
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
+
+// @public
+export interface UnitOptions {
+    durable?: boolean;
+}
 
 // @public
 export interface UntypedSchema extends EarsSchema {

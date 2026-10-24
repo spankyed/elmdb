@@ -59,11 +59,23 @@ export interface OrderedKV {
   read<T>(fn: (reader: KvReader) => T): T;
   /**
    * Runs `fn` as one write unit: committed whole when it returns, nothing kept when it throws. A unit inside another
-   * commits into it and, throwing, undoes only its own writes.
+   * commits into it and, throwing, undoes only its own writes. A `durable` unit is on disk when it returns (inside
+   * another, once the outermost unit commits and a sync follows).
    */
-  write<T>(fn: (writer: KvWriter) => T): T;
+  write<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
   /** Whether a write unit is open */
   readonly writing: boolean;
+  /**
+   * Resolves once every unit committed before the call is on disk. A committed unit is visible, and survives the
+   * process crashing, when it returns; this is what survives the machine failing
+   */
+  durable(): Promise<void>;
+}
+
+/** How a write unit commits */
+export interface UnitOptions {
+  /** On disk when the unit returns, rather than with the next sync */
+  durable?: boolean;
 }
 
 /** A backend's bytes, read: a key's value, and a range of keys in byte order */
@@ -85,7 +97,9 @@ export interface ByteWriter extends ByteReader {
 /** What a backend supplies: a read snapshot, and a write unit that commits on return and aborts on a throw */
 export interface KvBackend {
   read<T>(fn: (reader: ByteReader) => T): T;
-  write<T>(fn: (writer: ByteWriter) => T): T;
+  write<T>(fn: (writer: ByteWriter) => T, options?: UnitOptions): T;
+  /** Resolves once every unit committed before the call is on disk */
+  durable(): Promise<void>;
 }
 
 // ─── Encoding ─────────────────────────────────────────────────────────────
@@ -194,18 +208,39 @@ type Savepoint = Map<string, Uint8Array | undefined>;
 /** Bytes as a string of the same length, one character a byte, so string order is byte order */
 const byteString = (bytes: Uint8Array) => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1');
 
+/** How the seam is set up over its backend */
+export interface OrderedKVOptions {
+  /**
+   * Freezes every value a read gives back, deeply: for tests, where code that changes a value it read — and so
+   * expects the store to have changed — throws instead of silently not persisting
+   */
+  freeze?: boolean;
+}
+
+/** `value`, and every object and list in it, frozen */
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const field of Object.values(value as object)) deepFreeze(field);
+  return Object.freeze(value);
+}
+
 /**
  * The seam over a backend: keys and values encoded, prefix ranges resolved, a unit's reads going through it, and a
  * nested unit's writes undone when it throws.
  */
-export function createOrderedKV(backend: KvBackend): OrderedKV {
+export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedKVOptions = {}): OrderedKV {
   const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: false });
   const encodeKey = keyEncoder();
   const encodeValue = (value: unknown): Uint8Array => packr.pack(value);
-  const decodeValue = (bytes: Uint8Array): unknown => objectsOf(packr.unpack(bytes));
+  const decodeValue = freeze
+    ? (bytes: Uint8Array): unknown => deepFreeze(objectsOf(packr.unpack(bytes)))
+    : (bytes: Uint8Array): unknown => objectsOf(packr.unpack(bytes));
 
-  /** The open unit's writer and its savepoints, innermost last; none while no unit is open */
-  let unit: { writer: ByteWriter; savepoints: Savepoint[] } | undefined;
+  /**
+   * The open unit's writer, its savepoints (innermost last), and whether a unit inside it asked to be durable; none
+   * while no unit is open
+   */
+  let unit: { writer: ByteWriter; savepoints: Savepoint[]; durable: boolean } | undefined;
 
   const bounds = ({ prefix, start, end }: RangeOptions): [Uint8Array, Uint8Array | undefined] => {
     if (prefix && prefix.length > 0) {
@@ -261,9 +296,10 @@ export function createOrderedKV(backend: KvBackend): OrderedKV {
       if (unit) return fn(reader(unit.writer));
       return backend.read((bytes) => fn(reader(bytes)));
     },
-    write(fn) {
+    write(fn, options) {
       const open = unit;
       if (open) {
+        if (options?.durable) open.durable = true;
         // A unit inside another: its writes go to the outer unit, and a throw puts back what it changed
         const savepoint: Savepoint = new Map();
         open.savepoints.push(savepoint);
@@ -284,15 +320,22 @@ export function createOrderedKV(backend: KvBackend): OrderedKV {
           throw error;
         }
       }
-      return backend.write((bytes) => {
-        unit = { writer: bytes, savepoints: [] };
+      let durableInside = false;
+      const result = backend.write((bytes) => {
+        unit = { writer: bytes, savepoints: [], durable: false };
         try {
-          return fn(writer(bytes, unit.savepoints));
+          const value = fn(writer(bytes, unit.savepoints));
+          durableInside = unit.durable;
+          return value;
         } finally {
           unit = undefined;
         }
-      });
+      }, options);
+      // A nested unit asked for the disk: the outer one decided how it commits, so a sync follows the commit
+      if (durableInside && !options?.durable) void backend.durable();
+      return result;
     },
+    durable: () => backend.durable(),
   };
 }
 
@@ -478,6 +521,8 @@ export function createMemoryKVBackend(): KvBackend {
         prune();
       }
     },
+    // Memory has no disk: a unit is as durable as it will be when it commits
+    durable: () => Promise.resolve(),
     write(fn) {
       if (writing) throw new Error('A memory KV takes one write unit at a time');
       writing = true;
@@ -521,6 +566,6 @@ export function createMemoryKVBackend(): KvBackend {
 }
 
 /** An ordered key-value store in memory: for tests and tooling, never the app */
-export function createMemoryKV(): OrderedKV {
-  return createOrderedKV(createMemoryKVBackend());
+export function createMemoryKV(options?: OrderedKVOptions): OrderedKV {
+  return createOrderedKV(createMemoryKVBackend(), options);
 }

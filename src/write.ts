@@ -59,7 +59,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
 }) {
   const requiredFields = (type: string) => rowRules(type)?.required ?? [];
   const {
-    destroyEntity, entityCreated, hasEntity, isTrashed,
+    destroyEntity, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
     grantRole, revokeRole, getRoles, getRow, getAttr, holders,
   } = storage;
@@ -278,7 +278,6 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     } else {
       id = newId(type);
     }
-    entityCreated(id, type);
     if (shortCode) putAttr(id, SHORT_CODE, shortCode());
     const at = createdAt ?? Date.now();
     putAttr(id, attr('createdAt'), at);
