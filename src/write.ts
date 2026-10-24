@@ -7,7 +7,7 @@ import type { EdgeStore } from './edge-store.ts';
 import type { createHierarchy } from './hierarchy.ts';
 import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
-import { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
+import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
 import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions } from './runtime.ts';
 
@@ -48,8 +48,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   counters: Pick<ReturnType<typeof createEntityCounters>, 'generateShortCode'>;
   names: NameChecks;
 }) {
-  // The engine's own fields are its to write, so a type's rules never require a row to bring one
-  const requiredFields = (type: string) => (rowRules(type)?.required ?? []).filter((field) => !(RESERVED_ATTRIBUTES as readonly string[]).includes(field));
+  const requiredFields = (type: string) => rowRules(type)?.required ?? [];
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
