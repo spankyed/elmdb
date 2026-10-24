@@ -13,8 +13,8 @@ export interface EdgeStore {
   find(w: Partial<EARS.RelationDetail>): EARS.RelationDetail[];
   /** Removes the matching relations */
   unlink(w: Partial<EARS.RelationDetail>): void;
-  /** Replaces the relations between `src` and `tgt` of `kind` with one; returns its id */
-  linkOne(src: EARS.EntityId, kind: EARS.RelKind, tgt: EARS.EntityId, info?: unknown): EARS.EntityId;
+  /** Replaces the relations between `source` and `target` of `kind` with one; returns its id */
+  linkOne(source: EARS.EntityId, kind: EARS.RelKind, target: EARS.EntityId, info?: unknown): EARS.EntityId;
   /** Moves the first matching relation; whether one matched */
   patchOne(w: Partial<EARS.RelationDetail>, u: { newSource?: EARS.EntityId; newTarget?: EARS.EntityId; newInfo?: unknown }): boolean;
 }
@@ -66,13 +66,13 @@ export function createEdgeStore({ relations, storage }: { relations: RelationInd
     unlink: (w) =>
       matchIds(w).forEach(storage.removeRelationById),
 
-    linkOne: (src, kind, tgt, info) => {
+    linkOne: (source, kind, target, info) => {
       edgeStore.unlink({
-        source: src,
+        source,
         kind,
-        target: tgt,
+        target,
       });
-      return storage.addRelation(src, kind, tgt, info);
+      return storage.addRelation(source, kind, target, info);
     },
 
     patchOne: (w, u) => {

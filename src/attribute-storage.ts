@@ -266,15 +266,15 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   };
 
   function addRelation(
-    src: EARS.EntityId,
+    source: EARS.EntityId,
     kind: string,
-    tgt: EARS.EntityId,
+    target: EARS.EntityId,
     info?: unknown,
   ) {
     const entry = relationIndex[kind];
-    if (entry?.bySource?.[src] && entry?.byTarget?.[tgt]) {
-      const fromSource = new Set(entry.bySource[src]);
-      const fromTarget = new Set(entry.byTarget[tgt]);
+    if (entry?.bySource?.[source] && entry?.byTarget?.[target]) {
+      const fromSource = new Set(entry.bySource[source]);
+      const fromTarget = new Set(entry.byTarget[target]);
       for (const existingRelId of fromSource) {
         if (fromTarget.has(existingRelId)) {
           const existingRel = getAttr(existingRelId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail;
@@ -285,13 +285,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     }
     const relId = newId(EARS.Entity.Relation);
     put(relId, EARS.AttrKind.RelationDetails, {
-      source: src,
-      target: tgt,
+      source,
+      target,
       kind,
       info,
     } as EARS.RelationDetail);
-    relations.addToIndex(kind, src, tgt, relId);
-    persistence.onAddRelation(relId, kind, src, tgt, info);
+    relations.addToIndex(kind, source, target, relId);
+    persistence.onAddRelation(relId, kind, source, target, info);
     return relId;
   }
 
