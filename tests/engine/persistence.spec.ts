@@ -103,12 +103,11 @@ describe('hydration', () => {
     e.admin.bulkLoadAttr(b, 'title', 'B');
     e.admin.bulkLoadAttr(p, 'title', 'P');
     e.admin.bulkLoadAttr(p, EARS.AttrKind.Role, ['current']);
-    e.admin.bulkLoadAttr(rel, EARS.AttrKind.RelationDetails, { source: p, target: a, kind: 'contains', info: { order: 1 } });
-    e.admin.addToIndex(rel, 'contains', p, a);
-    e.admin.addToIndex(rel, 'contains', p, a);
+    e.admin.bulkLoadRelation(rel, 'contains', p, a, { order: 1 });
+    e.admin.bulkLoadRelation(rel, 'contains', p, a, { order: 1 });
 
     expect(calls).toEqual([]);
-    expect(e.admin.getAllEntities()).toEqual([a, b, p, rel]);
+    expect(e.admin.getAllEntities()).toEqual([a, b, p]);
     expect(e.query.ids(a).pickOne()).toEqual({ id: a, entityType: 'Task', title: 'A', tag: ['first', 'second'], meta: { x: 1, y: 2 } });
     expect(e.query('Task').orderBy('title', 'desc').pick(['title'])).toEqual([{ id: b, title: 'B' }, { id: a, title: 'A' }]);
     expect(e.query.all().withRole('current').ids()).toEqual([p]);

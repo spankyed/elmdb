@@ -60,7 +60,7 @@ export function createEdgeStore({ relations, storage }: { relations: RelationInd
 
     find: (w) =>
       matchIds(w).map(
-        id => storage.getAttr(id, EARS.AttrKind.RelationDetails) as EARS.RelationDetail,
+        (id) => storage.relationOf(id)!,
       ),
 
     unlink: (w) =>

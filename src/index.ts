@@ -5,7 +5,7 @@ export {
   createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,
 } from './engine.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
-export { EarsError, RESERVED_ATTRIBUTES, type EarsErrorCode } from './errors.ts';
+export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';
 export type {
   EARSRuntimeDeps, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, RelationEdge, LinkOptions, RowIdentity, WriteOptions, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, NumberedField, CreateFields, WhereValue, RowRules, ShortCode,
 } from './runtime.ts';

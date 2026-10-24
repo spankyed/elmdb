@@ -3,7 +3,7 @@ import { EARS } from './entities.ts';
 import { idSuffix, isPlainObject, sameValue } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
-import { EarsError } from './errors.ts';
+import { EarsError, RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /**
  * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this
@@ -15,6 +15,9 @@ export const newId = <E extends EARS.Entity>(t: E): EARS.EntityId =>
   `${t}-${idSuffix()}` as EARS.EntityId;
 
 const ENTITY_TYPE = 'entityType' as EARS.AttrKind;
+
+/** What a relation's id starts with: a relation is no entity, but its id has an entity id's form, `<prefix>-<suffix>` */
+const RELATION_ID = RESERVED_ENTITY_TYPES.relation as EARS.Entity;
 
 /** When an entity was put in the trash: an entity holding it is trashed, and reads by type, id or link skip it */
 export const TRASHED_AT = 'trashedAt' as EARS.AttrKind;
@@ -74,13 +77,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   // What `holders` answers for a value nobody holds; never written to, since only `indexValue` adds and it adds to its own
   const none: ReadonlySet<EARS.EntityId> = new Set();
   const relationIndex = relations.index;
-  // A relation's details are its row in the relations table (`onAddRelation`, `onUpdateRelation`), which is
-  // what hydration rebuilds the attribute from; storing the attribute too would be a second record of it
-  const persisted = (kind: EARS.AttrKind) => kind !== EARS.AttrKind.RelationDetails;
+  // Each relation's row, by id: a relation is not an entity, so it holds no attributes and no type's index lists it
+  const relationRows = new Map<EARS.EntityId, EARS.RelationDetail>();
 
   function clear() {
     if (journal.open) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
     rows.clear();
+    relationRows.clear();
     entityIndex.clear();
     trashed.clear();
     valueIndex.clear();
@@ -202,7 +205,6 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     touchValue(id, kind);
     place(id, kind, next);
     if (next !== ABSENT) indexEntity(id);
-    if (!persisted(kind)) return;
     if (next === ABSENT) persistence.onDropAttr(kind, id);
     else persistence.onPutAttr(kind, id, next);
   };
@@ -275,6 +277,27 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     assign(id, EARS.AttrKind.Role, rest.length ? rest as unknown as EARS.AttributeValue : ABSENT);
   };
 
+  /** A relation's row, or undefined when no relation has the id */
+  const relationOf = (relId: EARS.EntityId): EARS.RelationDetail | undefined => relationRows.get(relId);
+  const hasRelation = (relId: EARS.EntityId) => relationRows.has(relId);
+
+  /** Records how to put back the relation's row */
+  const touchRelation = (relId: EARS.EntityId) =>
+    journal.open && journal.touch(`rel\x1F${relId}`, () => {
+      const before = relationRows.get(relId);
+      return () => {
+        if (before) relationRows.set(relId, before);
+        else relationRows.delete(relId);
+      };
+    });
+
+  /** Puts the relation's row, recording how to put back the one before */
+  const placeRelation = (relId: EARS.EntityId, row: EARS.RelationDetail | undefined) => {
+    touchRelation(relId);
+    if (row) relationRows.set(relId, row);
+    else relationRows.delete(relId);
+  };
+
   function addRelation(
     source: EARS.EntityId,
     kind: string,
@@ -283,26 +306,24 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   ) {
     const entry = relationIndex[kind];
     if (entry?.bySource?.[source] && entry?.byTarget?.[target]) {
-      const fromSource = new Set(entry.bySource[source]);
       const fromTarget = new Set(entry.byTarget[target]);
-      for (const existingRelId of fromSource) {
-        if (fromTarget.has(existingRelId)) {
-          const existingRel = getAttr(existingRelId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail;
-          // The same edge: linking it again is a no-op, which keeps its id and its place among its siblings
-          if (info === undefined || sameValue(existingRel.info, info)) return existingRelId;
-        }
+      for (const existingRelId of entry.bySource[source]) {
+        if (!fromTarget.has(existingRelId)) continue;
+        // The same edge: linking it again is a no-op, which keeps its id and its place among its siblings
+        if (info === undefined || sameValue(relationOf(existingRelId)?.info, info)) return existingRelId;
       }
     }
-    const relId = newId(EARS.Entity.Relation);
-    put(relId, EARS.AttrKind.RelationDetails, {
-      source,
-      target,
-      kind,
-      info,
-    } as EARS.RelationDetail);
+    const relId = newId(RELATION_ID);
+    placeRelation(relId, { source, target, kind, info } as EARS.RelationDetail);
     relations.addToIndex(kind, source, target, relId);
     persistence.onAddRelation(relId, kind, source, target, info);
     return relId;
+  }
+
+  /** A stored relation, loaded without telling persistence */
+  function bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown) {
+    relationRows.set(relId, { source, target, kind, info } as EARS.RelationDetail);
+    relations.addToIndex(kind, source, target, relId);
   }
 
   function updateRelation(
@@ -311,10 +332,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     newT?: EARS.EntityId,
     info?: unknown,
   ) {
-    const d = getAttr(
-      relId,
-      EARS.AttrKind.RelationDetails,
-    ) as EARS.RelationDetail | null;
+    const d = relationOf(relId);
     if (!d) return;
     const { source: oS, target: oT, kind: k } = d;
     const next: EARS.RelationDetail = {
@@ -323,27 +341,22 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
       ...(newT && { target: newT }),
       ...(info !== undefined && { info }),
     };
-    put(relId, EARS.AttrKind.RelationDetails, next);
+    placeRelation(relId, next);
     if (newS || newT)
       relations.updateIndex(k, relId, oS, oT, next.source, next.target);
-    const patch: any = {};
+    const patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown } = {};
     if (newS) patch.source = newS;
     if (newT) patch.target = newT;
     if (info !== undefined) patch.info = info;
     persistence.onUpdateRelation(relId, patch);
   }
 
-  /** Removes a relation from memory and tells the sink */
+  /** Removes a relation from memory and tells the sink; an id no relation has is ignored */
   const removeRelation = (relId: EARS.EntityId) => {
-    const d = getAttr(
-      relId,
-      EARS.AttrKind.RelationDetails,
-    ) as EARS.RelationDetail | null;
-    if (d)
-      relations.removeFromIndex(d.kind, d.source, d.target, relId);
-    deleteAttr(relId, EARS.AttrKind.RelationDetails);
-    // A relation is its details: with them gone, so is the relation's entity
-    unindexEntity(relId);
+    const d = relationOf(relId);
+    if (!d) return;
+    relations.removeFromIndex(d.kind, d.source, d.target, relId);
+    placeRelation(relId, undefined);
     persistence.onRemoveRelation(relId);
   };
 
@@ -407,20 +420,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     const out = new Set<EARS.EntityId>();
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
-      bySource[id]?.forEach(relId => {
-        const { target } = getAttr(
-          relId,
-          EARS.AttrKind.RelationDetails,
-        ) as EARS.RelationDetail;
-        out.add(target);
-      });
-      byTarget[id]?.forEach(relId => {
-        const { source } = getAttr(
-          relId,
-          EARS.AttrKind.RelationDetails,
-        ) as EARS.RelationDetail;
-        out.add(source);
-      });
+      bySource[id]?.forEach((relId) => out.add(relationRows.get(relId)!.target));
+      byTarget[id]?.forEach((relId) => out.add(relationRows.get(relId)!.source));
     }
     return [...out];
   };
@@ -434,11 +435,8 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     if (!dir) return [];
     const relIds = asSource ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [];
     return relIds
-      .map(rel => {
-        const d = getAttr(
-          rel,
-          EARS.AttrKind.RelationDetails,
-        ) as EARS.RelationDetail;
+      .map((rel) => {
+        const d = relationRows.get(rel)!;
         return asSource ? d.target : d.source;
       })
       .filter(Boolean);
@@ -449,13 +447,13 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
     const dir = relationIndex[relKind];
     if (!dir) return [];
     return (outward ? dir.bySource[id] ?? [] : dir.byTarget[id] ?? [])
-      .map((rel) => ({ ...(getAttr(rel, EARS.AttrKind.RelationDetails) as EARS.RelationDetail), id: rel }));
+      .map((rel) => ({ ...relationRows.get(rel)!, id: rel }));
   };
 
   /** Deletes the entity and every edge to or from it, from memory and the sink */
   function destroyEntity(id: EARS.EntityId) {
-    // A relation is its details, so destroying one is removing it, as an unlink of that one edge would
-    if (entityTypeOf(id) === EARS.Entity.Relation) return removeRelation(id);
+    // Destroying a relation by its id removes it, as an unlink of that one edge would
+    if (relationRows.has(id)) return removeRelation(id);
     for (const k of Object.keys(relationIndex)) {
       const { bySource, byTarget } = relationIndex[k];
       const relIds = [...(bySource[id] ?? []), ...(byTarget[id] ?? [])];
@@ -506,7 +504,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
   }
 
   return {
-    clear, bulkLoadAttr,
+    clear, bulkLoadAttr, bulkLoadRelation, relationOf, hasRelation,
     putAttr: put, appendAttr: append, mergeAttr: merge, removeAt, removeValue, deleteAttr,
     entityCreated, grantRole, revokeRole, addRelation, updateRelation, removeRelationById: removeRelation,
     getAttr, hasAttr, getRoles, getRow, getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isTrashed, isLive, holders, orderOf,

@@ -23,14 +23,14 @@ beforeEach(() => {
 });
 
 describe('starts', () => {
-  it('a type, types, ids, and every entity but the relations', () => {
+  it('a type, types, ids, and every entity', () => {
     expect(e.query('Task').ids()).toEqual([t.a, t.b, t.c, t.d]);
     expect(e.query(['Project', 'Task']).ids()).toEqual([p, t.a, t.b, t.c, t.d]);
     expect(e.query.ids(t.b).ids()).toEqual([t.b]);
     expect(e.query.ids([t.c, 'Task-none' as Id, t.a]).ids()).toEqual([t.c, t.a]);
     expect(e.query.ids('Task-none' as Id).ids()).toEqual([]);
     expect(e.query.all().ids()).toEqual([t.a, t.b, t.c, t.d, p]);
-    expect(e.admin.getEntitiesOfType('Relation')).toHaveLength(3);
+    expect(e.findRelations()).toHaveLength(3);
   });
 
   it('a builder kept across writes answers as one made after them, whatever its steps', () => {
@@ -122,8 +122,7 @@ describe('filters', () => {
     expect(e.query.ids(p).outEdges('contains', 'Project')).toEqual([]);
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
     // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
-    e.admin.bulkLoadAttr('Relation-ghost' as Id, EARS.AttrKind.RelationDetails, { source: p, target: 'Task-ghost', kind: 'refers' });
-    e.admin.addToIndex('Relation-ghost' as Id, 'refers', p, 'Task-ghost' as Id);
+    e.admin.bulkLoadRelation('Relation-ghost' as Id, 'refers', p, 'Task-ghost' as Id);
     e.write(p).link('refers', t.d);
     expect(e.query.ids(p).outEdges('refers')).toEqual([edge('refers', p, t.d)]);
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);

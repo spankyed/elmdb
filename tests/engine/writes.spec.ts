@@ -37,7 +37,7 @@ describe('create', () => {
   });
 
   it("refuses a row naming the engine's other fields, before the entity exists", () => {
-    for (const field of ['entityType', 'role', 'trashedAt', 'relationDetails']) {
+    for (const field of ['entityType', 'role', 'trashedAt']) {
       expect(() => e.create('Task', { title: 'x', [field]: 1 }), field).toThrow(expect.objectContaining({ code: 'RESERVED_ATTRIBUTE' }));
     }
     expect(e.admin.getAllEntities()).toEqual([]);
@@ -247,7 +247,7 @@ describe('attribute writes', () => {
     expect(read).toEqual(['a']);
   });
 
-  it.each(['id', 'entityType', 'createdAt', 'role', 'relationDetails'])('refuses %s, which only the engine writes', (name) => {
+  it.each(['id', 'entityType', 'createdAt', 'role'])('refuses %s, which only the engine writes', (name) => {
     const id = e.create('Task').id();
     const before = e.getRow(id);
     const w = () => e.write(id);
@@ -455,13 +455,13 @@ describe('rows', () => {
     expect(e.getRow(p)?.entityType).toBe('Project');
     expect(e.query.all().where('entityType', 'Task').ids()).toEqual([a]);
     expect(e.getRow('Task-gone' as Id)?.entityType).toBeUndefined();
-    expect(Object.keys(e.getSchemaStats().attributes)).toEqual(['createdAt', 'updatedAt', 'title', 'tag', 'relationDetails']);
+    expect(Object.keys(e.getSchemaStats().attributes)).toEqual(['createdAt', 'updatedAt', 'title', 'tag']);
     expect(e.getSchemaStats()).toEqual({
-      entities: { Task: 1, Project: 1, Relation: 1 },
+      entities: { Task: 1, Project: 1 },
       attributes: {
         createdAt: { entityCount: 2, totalValues: 2 }, updatedAt: { entityCount: 2, totalValues: 2 },
         title: { entityCount: 1, totalValues: 1 },
-        tag: { entityCount: 1, totalValues: 2 }, relationDetails: { entityCount: 1, totalValues: 1 },
+        tag: { entityCount: 1, totalValues: 2 },
       },
       relations: { contains: { total: 1, uniqueSources: 1, uniqueTargets: 1 } },
       roles: {},

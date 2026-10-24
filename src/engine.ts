@@ -56,7 +56,7 @@ export interface Ears {
 export interface EarsAdmin {
   /** Empties the engine's attributes, entity index and relation index */
   clear(): void;
-  /** Every entity's id, the engine's own (relations, sequences) and those in the trash included: a raw listing */
+  /** Every entity's id, the engine's numbering sequences and those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, the engine's own types and those in the trash included: a raw listing */
   getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
@@ -70,8 +70,8 @@ export interface EarsAdmin {
   addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId;
   /** `updateRelation` without its checks: any relation, to any ends */
   updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
-  /** Indexes a stored relation, without telling persistence */
-  addToIndex(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId): void;
+  /** Loads a stored relation, without telling persistence */
+  bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -118,7 +118,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     deleteAttr: storage.deleteAttr,
     addRelation: storage.addRelation,
     updateRelation: (relId, { source, target, info }) => storage.updateRelation(relId, source, target, info),
-    addToIndex: (relId, kind, source, target) => relations.addToIndex(kind, source, target, relId),
+    bulkLoadRelation: storage.bulkLoadRelation,
   };
 
   return { ...operations, admin };

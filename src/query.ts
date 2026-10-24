@@ -44,7 +44,7 @@ export const b64Decode = (s: string) => {
 /**
  * The query entry points over the entities they reach. `(type)` starts from every entity of a registered type, and
  * refuses a name that isn't one rather than finding nothing; `ids` starts from the ids given that exist; `all` from
- * every entity but the engine's own: the relations, which `findRelations` serves, and the numbering sequences.
+ * every entity but the engine's own numbering sequences. A relation is not an entity: `findRelations` reads them.
  */
 export interface QueryEntries {
   <E extends string>(type: TypeName<E>): QueryBuilder<E>;
@@ -435,7 +435,8 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
     return qxImpl;
   };
 
-  const engineOwn = [hasPrefix(EARS.Entity.Relation), hasPrefix(SEQUENCE_TYPE)];
+  // The engine's own rows: the numbering sequences
+  const isSequence = hasPrefix(SEQUENCE_TYPE);
   /** The entry points over the entities `alive` admits */
   const entriesOver = (alive: (id: EARS.EntityId) => boolean, start: (id: EARS.EntityId) => boolean = alive): QueryEntries => {
     const qx = builderOver(alive);
@@ -454,7 +455,7 @@ export function createQuery({ storage, isEntityType, names }: { storage: Attribu
       const named = Array.isArray(ids) ? [...ids] : [ids as EARS.EntityId];
       return reading(() => named, start);
     }) as Query['ids'];
-    entries.all = (() => reading(getAllEntities, (id) => start(id) && !engineOwn.some((own) => own(id)))) as Query['all'];
+    entries.all = (() => reading(getAllEntities, (id) => start(id) && !isSequence(id))) as Query['all'];
     return entries;
   };
 

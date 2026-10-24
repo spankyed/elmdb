@@ -6,8 +6,8 @@
  * packs compose with concrete values.
  *
  * Entity and RelKind are open by design:
- *   Entity  — the engine owns Relation; the SDK adds its entities
- *             (@apackdev/sdk's EARS) and packs declare theirs.
+ *   Entity  — the engine owns no entity type (a relation is not an entity);
+ *             the SDK adds its entities (@apackdev/sdk's EARS) and packs declare theirs.
  *   RelKind — the engine provides the Custom() helper and open type; the SDK
  *             and packs add their relation kinds.
  *
@@ -18,13 +18,8 @@
 
 export namespace EARS {
   // ─── Entity ────────────────────────────────────────────────────────────
-  // The engine's own entity; the SDK and packs add theirs
-  export const Entity = {
-    /** Every link between two entities */
-    Relation: 'Relation',
-  } as const;
-
-  export type Entity = typeof Entity[keyof typeof Entity] | (string & {});
+  // An entity type's name. The engine declares none: the SDK and packs declare theirs, each as an `Entity` constant
+  export type Entity = string & {};
   /**
    * An entity id, tagged with its entity type when that's known (`EntityId<'Note'>`). A plain id
    * (`EntityId`) carries no tag, so it's accepted wherever a tagged one is expected; only an id tagged
@@ -64,7 +59,6 @@ export namespace EARS {
   // ─── AttrKind ──────────────────────────────────────────────────────────
   export const AttrKindValues = {
     Role            : 'role',
-    RelationDetails : 'relationDetails',
   } as const;
 
   const _attrCustom = <T extends string>(k: T) => k as T & AttrKind;
@@ -79,7 +73,6 @@ export namespace EARS {
   // ─── Attribute payloads ────────────────────────────────────────────────
   export interface AttributePayloads {
     [AttrKindValues.Role]            : RoleKind;
-    [AttrKindValues.RelationDetails] : RelationDetail;
     [key: string]                    : unknown;
   }
 

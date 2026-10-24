@@ -1,5 +1,6 @@
 import { EARS } from './entities.ts';
 import { entityTypeOf, type AttributeStorage } from './attribute-storage.ts';
+import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 export function getTimestamp(): number {
   return Date.now();
@@ -9,7 +10,7 @@ export function getTimestamp(): number {
  * The engine's own entity type for numbering: one row per sequence, `Sequence-<key>`, holding the next number.
  * No pack declares it and no query by type reaches it; `query.all()` leaves it out, as it does relations.
  */
-export const SEQUENCE_TYPE = 'Sequence' as EARS.Entity;
+export const SEQUENCE_TYPE = RESERVED_ENTITY_TYPES.sequence as EARS.Entity;
 
 const NEXT = EARS.AttrKind.Custom('next');
 

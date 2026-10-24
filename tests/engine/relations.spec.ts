@@ -1,6 +1,5 @@
 // The engine's contract: relations (links, their index and graph walks) and roles
 import { beforeEach, describe, expect, it } from 'vitest';
-import { EARS } from '../../src/index.ts';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
@@ -13,13 +12,21 @@ beforeEach(() => {
 });
 
 describe('links', () => {
-  it('link stores a Relation row with its details and indexes both ends', () => {
+  it('link stores a relation row, which is no entity, and indexes both ends', () => {
     const [a, b] = [task('A'), task('B')];
     e.write(a).link('blocks', b, { info: { weight: 2 } });
     const [rel] = e.findRelations();
     expect(rel).toEqual({ id: expect.stringMatching(/^Relation-/), source: a, target: b, kind: 'blocks', info: { weight: 2 } });
-    expect(e.getRow(rel.id)?.relationDetails).toEqual({ source: a, target: b, kind: 'blocks', info: { weight: 2 } });
-    expect(e.admin.getEntitiesOfType('Relation')).toEqual([rel.id]);
+    // A relation is read through findRelations: no entity has its id, so no read of entities reaches it
+    expect(e.getRow(rel.id)).toBeUndefined();
+    expect(e.query.ids(rel.id).ids()).toEqual([]);
+    expect(e.query.all().ids()).toEqual([a, b]);
+    expect(e.admin.getAllEntities()).toEqual([a, b]);
+    expect(e.getSchemaStats().entities).toEqual({ Task: 2 });
+    // Written by its id, a relation can only be destroyed: it holds no fields
+    expect(() => e.write(rel.id).set('weight', 3)).toThrow(expect.objectContaining({ code: 'NOT_AN_ENTITY' }));
+    expect(() => e.write(rel.id).link('blocks', a)).toThrow(expect.objectContaining({ code: 'NOT_AN_ENTITY' }));
+    expect(e.write(rel.id).id()).toBe(rel.id);
     expect(e.query.ids(a).out('blocks').ids()).toEqual([b]);
     expect(e.query.ids(b).in('blocks').ids()).toEqual([a]);
     expect(e.findRelations({ source: a }).map((r) => r.id)).toEqual([rel.id]);
@@ -96,8 +103,6 @@ describe('links', () => {
     e.write(a).unlink('blocks', c).unlink('refs', c);
     expect(edges()).toEqual([]);
     expect(Object.keys(e.getSchemaStats().relations)).toEqual([]);
-    // A relation is its details: a removed one leaves no entity behind
-    expect(e.admin.getEntitiesOfType('Relation')).toEqual([]);
 
     e.write(a).link('blocks', b).link('blocks', c).link('refs', c);
     e.write(a).unlink('blocks');
@@ -188,8 +193,7 @@ describe('relation kinds', () => {
 
   it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
     const [a, b] = [task('A'), task('B')];
-    e.admin.bulkLoadAttr('Relation-r1' as Id, EARS.AttrKind.RelationDetails, { source: a, target: b, kind: 'retired' });
-    e.admin.addToIndex('Relation-r1' as Id, 'retired', a, b);
+    e.admin.bulkLoadRelation('Relation-r1' as Id, 'retired', a, b);
     expect(e.findRelations().map((r) => r.kind)).toEqual(['retired']);
   });
 });

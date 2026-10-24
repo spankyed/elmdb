@@ -53,16 +53,10 @@ export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<
 
 // @public (undocumented)
 export namespace EARS {
-    const // (undocumented)
-    Entity: {
-        readonly Relation: "Relation";
-    };
     // (undocumented)
     export interface AttributePayloads {
         // (undocumented)
         [key: string]: unknown;
-        // (undocumented)
-        [AttrKindValues.RelationDetails]: RelationDetail;
         // (undocumented)
         [AttrKindValues.Role]: RoleKind;
     }
@@ -85,18 +79,16 @@ export namespace EARS {
     const // (undocumented)
     AttrKindValues: {
         readonly Role: "role";
-        readonly RelationDetails: "relationDetails";
     };
     const // (undocumented)
     AttrKind: {
         readonly Custom: <T extends string>(k: T) => T & AttrKind;
         readonly Role: "role";
-        readonly RelationDetails: "relationDetails";
     };
     // (undocumented)
     export type AttrKind = typeof AttrKindValues[keyof typeof AttrKindValues] | (string & {});
     // (undocumented)
-    export type Entity = typeof Entity[keyof typeof Entity] | (string & {});
+    export type Entity = string & {};
     export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
         readonly __entity?: E;
     };
@@ -145,8 +137,8 @@ export interface Ears {
 // @public
 export interface EarsAdmin {
     addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId;
-    addToIndex(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId): void;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
@@ -178,6 +170,8 @@ export type EarsErrorCode =
 'UNKNOWN_ENTITY_TYPE'
 /** `write` was given an id no entity in the engine has */
 | 'NO_SUCH_ENTITY'
+/** A write to a relation's id other than `destroy()`: a relation holds no fields */
+| 'NOT_AN_ENTITY'
 /** `create` was given an id an entity already has */
 | 'ID_IN_USE'
 /** `upsert` or `create` named a type the id's entity doesn't have */
@@ -459,7 +453,13 @@ E
 ] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
 
 // @public
-export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "updatedAt", "role", "relationDetails", "trashedAt"];
+export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "createdAt", "updatedAt", "role", "trashedAt"];
+
+// @public
+export const RESERVED_ENTITY_TYPES: {
+    readonly relation: "Relation";
+    readonly sequence: "Sequence";
+};
 
 // @public
 export interface RowIdentity {

@@ -15,7 +15,7 @@ const PEOPLE = 5_000;
 const BLOCKS = 15_000;
 
 type Id = EarsTypes.EntityId;
-const types = new Set(['Task', 'Project', 'Person', 'Note', 'Relation']);
+const types = new Set(['Task', 'Project', 'Person', 'Note']);
 // A sink that does nothing, as the LMDB store's does between flushes
 const sink: PersistenceSink = {
   onCreateEntity() {}, onDestroyEntity() {}, onDropAttr() {}, onPutAttr() {},
@@ -49,8 +49,7 @@ function hydrate(): void {
   let rel = 0;
   const relate = (src: Id, kind: string, tgt: Id) => {
     const relId = `Relation-${rel++}` as Id;
-    admin.bulkLoadAttr(relId, EARS.AttrKind.RelationDetails, { source: src, target: tgt, kind, info: undefined });
-    admin.addToIndex(relId, kind, src, tgt);
+    admin.bulkLoadRelation(relId, kind, src, tgt);
   };
   for (let i = 0; i < TASKS; i++) relate(project(i % PROJECTS), 'contains', task(i));
   for (let i = 0; i < TASKS; i++) relate(task(i), 'assigned', person(i % PEOPLE));

@@ -5,11 +5,11 @@ import type { EARS as EarsTypes } from '../src/index.ts';
 type Id = EarsTypes.EntityId;
 // A specifier held in a variable, so the typecheck (which runs before any build) reads the types from source
 const DIST = '../dist/index.js';
-const { createEarsEngine, EARS } = await import(DIST) as typeof import('../src/index.ts');
+const { createEarsEngine } = await import(DIST) as typeof import('../src/index.ts');
 const gc = (globalThis as { gc?: () => void }).gc;
 if (!gc) throw new Error('Run with node --expose-gc');
 
-const types = new Set(['Task', 'Project', 'Person', 'Relation']);
+const types = new Set(['Task', 'Project', 'Person']);
 const STATUSES = ['open', 'done', 'blocked'];
 gc();
 const before = process.memoryUsage().heapUsed;
@@ -28,8 +28,7 @@ ids.forEach((id, i) => {
 let rel = 0;
 const relate = (source: string, kind: string, target: string) => {
   const relId = `Relation-${rel++}` as Id;
-  admin.bulkLoadAttr(relId, EARS.AttrKind.RelationDetails, { source, target, kind, info: undefined });
-  admin.addToIndex(relId, kind, source as Id, target as Id);
+  admin.bulkLoadRelation(relId, kind, source as Id, target as Id);
 };
 for (let i = 0; i < 40_000; i++) relate(`Project-${i % 5_000}`, 'contains', `Task-${i}`);
 for (let i = 0; i < 40_000; i++) relate(`Task-${i}`, 'assigned', `Person-${i % 5_000}`);

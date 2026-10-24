@@ -52,7 +52,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   const {
     destroyEntity, entityCreated, hasEntity, isTrashed,
     putAttr, appendAttr, mergeAttr, removeAt, removeValue, deleteAttr,
-    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getAttr, getRow,
+    grantRole, revokeRole, getRoles, addRelation, findEntitiesByRelationTo, getRow,
   } = storage;
 
   /**
@@ -211,6 +211,21 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
     return self;
   }
 
+  /**
+   * The writes to a relation by its id: `destroy()` removes it, as an unlink of that one edge would. A relation holds
+   * no fields, so every other write is refused; `updateRelation` changes its ends or info.
+   */
+  function relationBuilder(relId: EARS.EntityId): WriteBuilder {
+    const refuse = (via: string) => () => {
+      throw new EarsError('NOT_AN_ENTITY', `write(${JSON.stringify(relId)}).${via}(): a relation holds no fields. updateRelation changes it, destroy() removes it`);
+    };
+    const self = Object.fromEntries(Object.keys(builder(relId, false)).map((member) => [member, refuse(member)])) as unknown as WriteBuilder;
+    return Object.assign(self, {
+      destroy: () => storage.removeRelationById(relId),
+      id: () => relId,
+    });
+  }
+
   const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => {
     requireType(type, 'create');
     // The row's id and times are the engine's to write; its other reserved names are refused before the entity
@@ -246,6 +261,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
   }) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
+    if (storage.hasRelation(id)) return relationBuilder(id);
     if (!hasEntity(id)) {
       throw new EarsError('NO_SUCH_ENTITY', `write(${JSON.stringify(id)}): no entity has this id. create(type) makes one; upsert(type, id) makes it when missing`);
     }
@@ -274,7 +290,7 @@ export function createWrites({ storage, edgeStore, hierarchy, isEntityType, rowR
       for (const end of [source, target]) if (end !== undefined && !hasEntity(end)) throw missing(end);
     } else {
       journal.atCommit(() => {
-        const details = getAttr(relId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail | null;
+        const details = storage.relationOf(relId);
         if (!details) return;
         for (const end of [details.source, details.target]) if (!hasEntity(end)) throw missing(end);
       });

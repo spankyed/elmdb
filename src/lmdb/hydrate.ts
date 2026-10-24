@@ -56,17 +56,7 @@ export async function hydrate(params: {
       continue;
     }
 
-    engine.bulkLoadAttr(
-      relIdStr as EARS.EntityId,
-      EARS.AttrKind.RelationDetails,
-      {
-        source: r.src,
-        target: r.tgt,
-        kind: r.kind,
-        info: r.info ?? undefined,
-      } satisfies EARS.RelationDetail
-    );
-    engine.addToIndex(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt);
+    engine.bulkLoadRelation(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt, r.info ?? undefined);
     relCount++;
   }
 

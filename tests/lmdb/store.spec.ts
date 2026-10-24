@@ -74,10 +74,10 @@ describe('openLmdbStore', () => {
 
     // A new engine: nothing in memory
     const second = openStore();
-    expect(engine.admin.getEntitiesOfType('Relation')).toEqual([]);
+    expect(engine.findRelations()).toEqual([]);
     await second.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
-    expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
+    expect(engine.findRelations()).toHaveLength(1);
   });
 
   it('hydrates only the entities its entity table holds, whatever attribute rows were left without one', async () => {
@@ -213,7 +213,7 @@ describe('openLmdbStore', () => {
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
     expect(engine.getRow(id('Note-2'))).toBeUndefined();
     expect(engine.admin.getEntitiesOfType('Note')).toEqual(['Note-1']);
-    expect(engine.admin.getEntitiesOfType('Relation')).toEqual([]);
+    expect(engine.findRelations()).toEqual([]);
   });
 
   it('opens existing files read-only: it hydrates them, and refuses writes and a reset', async () => {
@@ -229,7 +229,7 @@ describe('openLmdbStore', () => {
     expect(readOnly.path).toBe(dbPath);
     await readOnly.hydrate();
     expect(getAttr(id('Note-1'), 'title')).toBe('kept');
-    expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
+    expect(engine.findRelations()).toHaveLength(1);
     expect(lines).toContainEqual(expect.stringMatching(/^\[LMDB\] Hydrated \d+ attributes, 1 relations$/));
     expect(() => engine.write(id('Note-1')).set('title', 'changed')).toThrow('is open read-only');
     await expect(readOnly.reset()).rejects.toThrow('is open read-only');
