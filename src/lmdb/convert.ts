@@ -153,6 +153,8 @@ export interface Format4Conversion {
   invalidRelations: number;
   /** Numbering rows (`Sequence-<key>`), which format 4 keeps as sequences rather than entities */
   sequences: number;
+  /** Attribute rows holding no value (`{ t: 'undefined' }`), which format 3's hydration read as absent and format 4 doesn't keep */
+  emptyAttributes: number;
 }
 
 /**
@@ -166,7 +168,7 @@ export function convertToFormat4(basePath: string): Format4Conversion {
     const entityRows = root.openDB({ name: 'entities', encoding: 'json' }) as Database<{ type?: string }>;
     const attrRows = root.openDB({ name: 'attrs', encoding: 'json' }) as Database<AttrRecord>;
     const relationRows = root.openDB({ name: 'relations', encoding: 'json' }) as Database<RelationRecord>;
-    const result: Format4Conversion = { entities: 0, attributes: 0, relations: 0, orphanedAttributes: 0, invalidRelations: 0, sequences: 0 };
+    const result: Format4Conversion = { entities: 0, attributes: 0, relations: 0, orphanedAttributes: 0, invalidRelations: 0, sequences: 0, emptyAttributes: 0 };
 
     const fields = new Map<string, Array<[string, unknown]>>();
     for (const key of entityRows.getKeys()) fields.set(String(key), []);
@@ -174,7 +176,9 @@ export function convertToFormat4(basePath: string): Format4Conversion {
       const sep = key.indexOf(SEP);
       const row = fields.get(key.slice(sep + 1));
       if (!row) { result.orphanedAttributes++; continue; }
-      row.push([key.slice(0, sep), decodeAttr(value)]);
+      const decoded = decodeAttr(value);
+      if (decoded === undefined) { result.emptyAttributes++; continue; }
+      row.push([key.slice(0, sep), decoded]);
     }
     const createdAt = (row: Array<[string, unknown]>) => {
       const at = row.find(([kind]) => kind === 'createdAt')?.[1];

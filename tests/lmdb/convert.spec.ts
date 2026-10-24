@@ -136,8 +136,10 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
   const root = open({ path: dir, maxDbs: 8, compression: true });
   root.openDB({ name: 'entities', encoding: 'json' }).putSync('Sequence-Note:N', { type: 'Sequence' });
   root.openDB({ name: 'attrs', encoding: 'json' }).putSync(`next${SEP}Sequence-Note:N`, { t: 'number', v: 5 });
+  // A field format 3's adapter stored with no value, which its hydration read as absent
+  root.openDB({ name: 'attrs', encoding: 'json' }).putSync(`description${SEP}Note-1`, { t: 'undefined' });
   root.close();
-  expect(convertToFormat4(dir)).toEqual({ entities: 2, attributes: 3, relations: 1, orphanedAttributes: 0, invalidRelations: 0, sequences: 1 });
+  expect(convertToFormat4(dir)).toEqual({ entities: 2, attributes: 3, relations: 1, orphanedAttributes: 0, invalidRelations: 0, sequences: 1, emptyAttributes: 1 });
   expect(() => convertToFormat4(dir)).toThrow('records storage format 4; this step converts format 3');
   const store = openLmdbStore({ path: dir, readOnly: true });
   try {
