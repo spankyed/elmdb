@@ -27,6 +27,7 @@ EARS, the entity-attribute-relation graph store behind apack's data: the engine,
 | `entities.ts`, `runtime.ts`, `typed.ts` | The typed contract (change-controlled, see below): the core `EARS` namespace (`Entity = { Relation }`, `RelKind = { Custom }` and `RoleKind = { Custom }`, the engine's own for tooling and never in a pack's facade), `BaseEntity`/`EntityShapes`/`ShapeOf`/`EntityNameArg`; `PersistenceSink`, `noopSink`, `EARSRuntimeDeps`, `QueryBuilder`/`WriteBuilder`, `isEntityType`; `defineEars` and the `Typed*` facade types |
 | `records.ts` | Record stores, which are not the engine: `RecordStore` (whole records by id, found through declared indexes in id order), `RecordIndexes` (each index a function deriving the value a record is filed under, so a computed one needs no stored field), and `createMemoryRecordStore`, the one in memory, which encodes through JSON as LMDB does; `openRecordStore` (`/lmdb`) is the same interface on disk |
 | `lmdb/` | `@apackdev/ears/lmdb`: `store.ts` (`openLmdbStore`), `envs.ts` (environments), `stamp.ts` (`checkStamp`: the kind and format stamp both kinds of environment are opened through, so each refuses the other's files and an older or newer format the same way), `adapter.ts` (`makeLmdbAdapter`, the LMDB sink), `hydrate.ts` (`hydrate`), `reader.ts` (`LmdbReader`, direct reads without hydrating), `record-store.ts` (`openRecordStore`: a `RecordStore` in an LMDB environment of its own — what the app keeps run history in — stamped with the `records` kind and its own format) |
+| `utils.ts` | Private helpers (`isPlainObject`, the id suffix) |
 
 **A range is a live cursor, and an environment has 126 reader slots.** `getRange`/`getKeys` hold a read
 transaction until the iterator is closed, and the language closes it for you — `for…of` (break or return
@@ -44,8 +45,7 @@ because of it, and had no caller to notice.
 pending writes as separate steps and runs them in one transaction; if that throws it retries them one at a
 time, so a single bad row no longer aborts and discards every unrelated write buffered in the same microtask.
 Each dropped row is reported through `onWriteFailure` (`openLmdbStore`'s port) with the key it was for, and
-`errorCount` counts rows, not batches. The app binds the port; the engine has no opinion about what to do.
-| `utils.ts` | Private helpers (`isPlainObject`, the id suffix) |
+`errorCount` counts rows, not batches. The app binds the port; the engine has no opinion about what to do. Since a flush can keep an entity's attributes and drop its `{ type }` row, hydration loads attributes only for the entities the entity table holds, and logs how many rows it skipped.
 
 ## Naming: a name carries the operation, structure carries the rest
 
@@ -139,7 +139,7 @@ Held by the types and the engine specs, which say more than a rule over names co
 - `engine/`: black-box specs of the public API: `writes` (`create`, `upsert` and `write`, each entry point's refusals, the builder's attribute writes, the reserved names, the ids and fields returned), `relations` (link, unlink, `out`/`in`, `linkedTo`/`linkedFrom`/`linkedWith`, the hierarchy walks, cycle detection, roles), `queries` (the entry points and their refusals, filters, terminals and ordering), `transact` (every write undone by a unit that throws, the sink's bracket, nesting) and `persistence` (the exact order and payload of sink calls, hydration through bulk load). They reach the engine only through `engine-under-test.ts` (`freshEngine`); `helpers.ts` has `recordingSink()`. A few specs pin existing quirks; they say so.
 - `vocabulary.spec.ts`: the rules in Vocabulary, over every member of the engine, `admin`, a query builder and a write builder — off the types for `is*`, `find*`, flags and chaining, off a real engine for pairs and absence — each with a case showing it names a member that breaks it.
 - `engines.spec.ts`: a typed facade acts on whichever engine its getter returns; two engines in one process share nothing. The bound engine's operations are the SDK's, and its spec is `apack-sdk/tests/ears/bound-ears.spec.ts`.
-- `lmdb/`: `persistence` (the LMDB adapter and its units, `LmdbReader`), `convert` (format 1 to 2 to 3) and `store` (`openLmdbStore`: writes reach LMDB through `store.sink`, and a store opened again hydrates them).
+- `lmdb/`: `persistence` (the LMDB adapter and its units, `LmdbReader`), `convert` (format 1 to 2 to 3, and the refusal of another kind's files), `store` (`openLmdbStore`: writes reach LMDB through `store.sink`, and a store opened again hydrates them), `format-stamp` (the kind and format each environment records and is refused by) and `record-store` (`openRecordStore` and the memory store, the cases both share run against both).
 - Test files run in parallel (`fileParallelism: true`): each creates its own engines.
 
 ## Benchmark
