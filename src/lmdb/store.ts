@@ -118,7 +118,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
   let syncs = 0;
   /** Commits made since the last sync began */
   let owed = false;
-  /** The sync running, and the one asked for while it runs */
+  /** The sync running, which rejects as it fails, and the one asked for while it runs */
   let running: Promise<void> | undefined;
   let queued: Promise<void> | undefined;
   /** The sync due once writes pause, which each commit pushes back, and the one due however steadily they go on */
@@ -138,12 +138,14 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     const done = new Promise<void>((resolve, reject) => {
       // `sync` is lmdb-js's (its environment's mdb_env_sync, run off the main thread), missing from its types
       (root as unknown as { sync(done: (error?: Error) => void): void }).sync((error?: Error) => {
-        if (error) reject(error);
-        else resolve();
+        // A sync that failed made nothing durable: its commits are owed still, and the next sync takes them
+        if (error) { owed = true; reject(error); } else resolve();
       });
     });
-    // What the next caller waits on: settled either way, the error being this caller's to see
-    running = done.then(() => {}, () => {}).finally(() => { running = undefined; });
+    // Every caller sharing it hears how it ended; a sync nobody waits on (a timer's) is caught where it is started
+    running = done;
+    const ended = () => { if (running === done) running = undefined; };
+    done.then(ended, ended);
     return done;
   };
 
@@ -152,10 +154,16 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     if (closed) return Promise.resolve();
     if (!owed) return running ?? Promise.resolve();
     if (!running) return runSync();
-    // A sync is running and began before the latest commits: one more follows it
-    queued ??= running.then(() => { queued = undefined; return owed ? runSync() : undefined; });
+    // A sync is running and began before the latest commits: one more follows it, however that one ends
+    queued ??= running.then(() => {}, () => {}).then(() => { queued = undefined; return owed ? runSync() : undefined; });
     return queued;
   };
+
+  /**
+   * A sync a timer starts, which nobody waits on: a failure is not thrown at the process, and its commits stay owed
+   * for the next commit, `durable()` or `close()` to sync
+   */
+  const syncInBackground = () => { sync().catch(() => {}); };
 
   const backend = createLmdbKVBackend(root, db, {
     committed() {
@@ -163,10 +171,10 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
       if (closed) return;
       // Neither timer keeps a process alive: closing syncs what is owed
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => void sync(), syncIdleMs);
+      idleTimer = setTimeout(syncInBackground, syncIdleMs);
       idleTimer.unref?.();
       if (!capTimer) {
-        capTimer = setTimeout(() => void sync(), syncIntervalMs);
+        capTimer = setTimeout(syncInBackground, syncIntervalMs);
         capTimer.unref?.();
       }
     },
