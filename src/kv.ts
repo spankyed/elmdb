@@ -2,17 +2,16 @@
  * The ordered key-value seam the engine is written on: keys are arrays, ordered as LMDB orders them, and values are
  * any structured value, decoded fresh on every read. Two backends sit under it — LMDB (`@apackdev/ears/lmdb`) for the
  * app and `createMemoryKV` for tests and tooling — and both store bytes this module encodes: keys with
- * `ordered-binary` and values with `msgpackr`, the encodings LMDB itself uses. So a key sorts, and a value round-trips,
+ * the codec below and values with `msgpackr`, the value encoding LMDB itself uses. So a key sorts, and a value round-trips,
  * the same on either, and a test on memory is a test of what the app stores.
  *
  * Everything that is the same on both lives here, over the bytes: prefix ranges, nested units (savepoints), and a unit
  * reading its own writes. A backend supplies a read snapshot, a write unit that commits or aborts whole, and the
  * bytes.
  */
-import { writeKey, readKey } from 'ordered-binary';
 import { Packr } from 'msgpackr';
 
-/** One element of a key: what `ordered-binary` orders (null, then booleans, then numbers, then strings) */
+/** One element of a key, ordered null, then booleans, then numbers, then strings */
 export type KeyPart = string | number | boolean | null;
 /** A key: its elements, compared element by element */
 export type Key = readonly KeyPart[];
@@ -92,29 +91,100 @@ export interface KvBackend {
 // ─── Encoding ─────────────────────────────────────────────────────────────
 
 /**
- * An encoder for keys, reusing one buffer and copying out what a key took. With `then`, a byte is appended: a key's
- * elements are separated by 0, so a prefix and 0 is the lowest of the keys under it and a prefix and 1 is past them.
+ * The key codec. Each element is a tag byte and its bytes, so byte order is the order of the elements, element by
+ * element: `null`, `false`, `true`, a number (eight bytes of its float64, sign flipped, negatives inverted, so their
+ * order is the numbers'), a string (its UTF-8 and a 0 that ends it, so `['a']` sorts before `['a', …]` and before
+ * `['ab']`, and is no byte prefix of the latter). A string holding a NUL is refused, having no end to mark.
+ *
+ * A key's elements follow its prefix's bytes with a tag, so the keys under a prefix lie between the prefix and the
+ * lowest tag (`TAG_LOW`) and the prefix and one past the highest (`TAG_HIGH`): the prefix's own key is outside them.
  */
+const TAG = { null: 1, false: 2, true: 3, number: 4, string: 5 } as const;
+const TAG_LOW = 1;
+const TAG_HIGH = 6;
+
+/** An encoder for keys, reusing one buffer and copying out what a key took, optionally followed by a byte */
 function keyEncoder() {
-  let buffer = new Uint8Array(1024);
-  return (key: Key, then?: 0 | 1): Uint8Array => {
-    for (;;) {
-      try {
-        let end = key.length === 0 ? 0 : writeKey(key as KeyPart[], buffer, 0);
-        if (then !== undefined) buffer[end++] = then;
-        return buffer.slice(0, end);
-      } catch (error) {
-        if (!(error instanceof RangeError) || buffer.length > 1 << 20) throw error;
-        buffer = new Uint8Array(buffer.length * 4);
+  let buffer = Buffer.allocUnsafe(1024);
+  const view = () => new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  let data = view();
+  const room = (needed: number, at: number) => {
+    if (at + needed <= buffer.length) return;
+    const grown = Buffer.allocUnsafe(Math.max(buffer.length * 2, at + needed));
+    buffer.copy(grown, 0, 0, at);
+    buffer = grown;
+    data = view();
+  };
+  return (key: Key, then?: number): Uint8Array => {
+    let at = 0;
+    for (const part of key) {
+      if (part === null) { room(1, at); buffer[at++] = TAG.null; }
+      else if (part === false) { room(1, at); buffer[at++] = TAG.false; }
+      else if (part === true) { room(1, at); buffer[at++] = TAG.true; }
+      else if (typeof part === 'number') {
+        if (Number.isNaN(part)) throw new Error('A key holds no NaN: it has no place in an order');
+        room(9, at);
+        buffer[at++] = TAG.number;
+        data.setFloat64(at, part === 0 ? 0 : part);
+        if (part < 0) for (let i = 0; i < 8; i++) buffer[at + i] = ~buffer[at + i]! & 0xff;
+        else buffer[at] = buffer[at]! | 0x80;
+        at += 8;
+      } else {
+        if (part.includes('\u0000')) throw new Error(`A key's string holds no NUL: ${JSON.stringify(part)}`);
+        const length = Buffer.byteLength(part, 'utf8');
+        room(length + 2, at);
+        buffer[at++] = TAG.string;
+        at += buffer.write(part, at, 'utf8');
+        buffer[at++] = 0;
       }
     }
+    if (then !== undefined) { room(1, at); buffer[at++] = then; }
+    // A copy: a Buffer's own slice is a view, which the next key would overwrite
+    return Buffer.from(buffer.subarray(0, at));
   };
 }
 
+/** A key from its bytes */
 const decodeKey = (bytes: Uint8Array): Key => {
-  const key = readKey(bytes as Buffer, 0, bytes.length);
-  return (Array.isArray(key) ? key : [key]) as Key;
+  const buffer = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const parts: KeyPart[] = [];
+  let at = 0;
+  while (at < buffer.length) {
+    const tag = buffer[at++];
+    if (tag === TAG.string) {
+      const end = buffer.indexOf(0, at);
+      parts.push(buffer.toString('utf8', at, end));
+      at = end + 1;
+    } else if (tag === TAG.number) {
+      const bits = Buffer.from(buffer.subarray(at, at + 8));
+      if (bits[0]! & 0x80) bits[0] = bits[0]! & 0x7f;
+      else for (let i = 0; i < 8; i++) bits[i] = ~bits[i]! & 0xff;
+      parts.push(bits.readDoubleBE(0));
+      at += 8;
+    } else {
+      parts.push(tag === TAG.null ? null : tag === TAG.true);
+    }
+  }
+  return parts;
 };
+
+/**
+ * A decoded value with each msgpack map an object again. Maps are decoded as `Map`s, since decoding straight to an object
+ * renames a `__proto__` key (`msgpackr` would set the prototype otherwise); here it is defined as an own property, so a
+ * value comes back as it was stored
+ */
+function objectsOf(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(objectsOf);
+  if (!(value instanceof Map)) return value;
+  const object: Record<string, unknown> = {};
+  for (const [key, field] of value) {
+    const name = String(key);
+    if (name === '__proto__') Object.defineProperty(object, name, { value: objectsOf(field), writable: true, enumerable: true, configurable: true });
+    else object[name] = objectsOf(field);
+  }
+  return object;
+}
+
 
 // ─── The seam over a backend ──────────────────────────────────────────────
 
@@ -129,17 +199,17 @@ const byteString = (bytes: Uint8Array) => Buffer.from(bytes.buffer, bytes.byteOf
  * nested unit's writes undone when it throws.
  */
 export function createOrderedKV(backend: KvBackend): OrderedKV {
-  const packr = new Packr({ useRecords: false, moreTypes: true });
+  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: false });
   const encodeKey = keyEncoder();
   const encodeValue = (value: unknown): Uint8Array => packr.pack(value);
-  const decodeValue = (bytes: Uint8Array): unknown => packr.unpack(bytes);
+  const decodeValue = (bytes: Uint8Array): unknown => objectsOf(packr.unpack(bytes));
 
   /** The open unit's writer and its savepoints, innermost last; none while no unit is open */
   let unit: { writer: ByteWriter; savepoints: Savepoint[] } | undefined;
 
   const bounds = ({ prefix, start, end }: RangeOptions): [Uint8Array, Uint8Array | undefined] => {
     if (prefix && prefix.length > 0) {
-      return [start ? encodeKey([...prefix, ...start]) : encodeKey(prefix, 0), end ? encodeKey([...prefix, ...end]) : encodeKey(prefix, 1)];
+      return [start ? encodeKey([...prefix, ...start]) : encodeKey(prefix, TAG_LOW), end ? encodeKey([...prefix, ...end]) : encodeKey(prefix, TAG_HIGH)];
     }
     return [start ? encodeKey(start) : new Uint8Array(0), end ? encodeKey(end) : undefined];
   };
@@ -231,16 +301,92 @@ export function createOrderedKV(backend: KvBackend): OrderedKV {
 /** One committed value of a key: the version it was written at, and the bytes (undefined: removed) */
 interface Version { at: number; bytes: Uint8Array | undefined }
 
-/** The first index whose key is not below `key`, in `keys` sorted as byte strings */
-function lowerBound(keys: readonly string[], key: string): number {
+/** The first index of `list` whose string is not below `key` */
+function lowerBound(list: readonly string[], key: string): number {
   let low = 0;
-  let high = keys.length;
+  let high = list.length;
   while (low < high) {
     const mid = (low + high) >>> 1;
-    if (keys[mid]! < key) low = mid + 1;
+    if (list[mid]! < key) low = mid + 1;
     else high = mid;
   }
   return low;
+}
+
+/** How many strings a chunk holds before it splits: an insert moves at most this many */
+const CHUNK = 1024;
+
+/**
+ * Strings kept sorted in chunks, so an insert or a removal moves one chunk's worth rather than the whole list, and a
+ * range is found by two binary searches: over the chunks' last strings, then within one
+ */
+class SortedStrings {
+  private chunks: string[][] = [];
+
+  /** The chunk that holds `key`'s place: the first whose last string is not below it, or the last chunk */
+  private chunkOf(key: string): number {
+    let low = 0;
+    let high = this.chunks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (this.chunks[mid]!.at(-1)! < key) low = mid + 1;
+      else high = mid;
+    }
+    return Math.min(low, this.chunks.length - 1);
+  }
+
+  insert(key: string): void {
+    if (this.chunks.length === 0) { this.chunks.push([key]); return; }
+    const index = this.chunkOf(key);
+    const chunk = this.chunks[index]!;
+    const at = lowerBound(chunk, key);
+    if (chunk[at] === key) return;
+    chunk.splice(at, 0, key);
+    if (chunk.length > CHUNK) this.chunks.splice(index + 1, 0, chunk.splice(CHUNK / 2));
+  }
+
+  remove(key: string): void {
+    if (this.chunks.length === 0) return;
+    const index = this.chunkOf(key);
+    const chunk = this.chunks[index]!;
+    const at = lowerBound(chunk, key);
+    if (chunk[at] !== key) return;
+    chunk.splice(at, 1);
+    if (chunk.length === 0) this.chunks.splice(index, 1);
+  }
+
+  /**
+   * The strings in [low, high), one at a time, highest first with `reverse`: a function answering the next, or
+   * undefined past the end
+   */
+  walk(low: string, high: string | undefined, reverse: boolean): () => string | undefined {
+    const chunks = this.chunks;
+    // A position: a chunk and an index in it
+    let c: number;
+    let i: number;
+    if (!reverse) {
+      c = chunks.length === 0 ? 0 : this.chunkOf(low);
+      i = chunks.length === 0 ? 0 : lowerBound(chunks[c]!, low);
+    } else if (high === undefined) {
+      c = chunks.length - 1;
+      i = c < 0 ? -1 : chunks[c]!.length - 1;
+    } else {
+      c = chunks.length === 0 ? -1 : this.chunkOf(high);
+      i = c < 0 ? -1 : lowerBound(chunks[c]!, high) - 1;
+    }
+    return () => {
+      for (;;) {
+        if (c < 0 || c >= chunks.length) return undefined;
+        const chunk = chunks[c]!;
+        if (!reverse && i >= chunk.length) { c++; i = 0; continue; }
+        if (reverse && i < 0) { c--; i = c >= 0 ? chunks[c]!.length - 1 : -1; continue; }
+        const key = chunk[i]!;
+        i += reverse ? -1 : 1;
+        if (!reverse ? high !== undefined && key >= high : key < low) return (c = -1), undefined;
+        return key;
+      }
+    };
+  }
 }
 
 /**
@@ -251,7 +397,7 @@ function lowerBound(keys: readonly string[], key: string): number {
  */
 export function createMemoryKVBackend(): KvBackend {
   /** Every key with a version, as a byte string (latin1, so string order is byte order), sorted */
-  const keys: string[] = [];
+  const keys = new SortedStrings();
   const versions = new Map<string, Version[]>();
   let version = 0;
   /** How many snapshots are open at each version */
@@ -260,7 +406,7 @@ export function createMemoryKVBackend(): KvBackend {
   const touched = new Set<string>();
 
   const toName = (bytes: Uint8Array) => byteString(bytes);
-  const toBytes = (name: string) => Uint8Array.from(Buffer.from(name, 'latin1'));
+  const toBytes = (name: string) => Buffer.from(name, 'latin1');
 
   const at = (name: string, snapshot: number): Uint8Array | undefined => {
     const list = versions.get(name);
@@ -278,7 +424,7 @@ export function createMemoryKVBackend(): KvBackend {
       const latest = list[list.length - 1]!;
       if (latest.bytes === undefined) {
         versions.delete(name);
-        keys.splice(lowerBound(keys, name), 1);
+        keys.remove(name);
       } else if (list.length > 1) {
         versions.set(name, [latest]);
       }
@@ -287,7 +433,7 @@ export function createMemoryKVBackend(): KvBackend {
   };
 
   /** A unit's own writes: each key's bytes (undefined: removed), and the keys sorted, for its ranges */
-  interface Pending { bytes: Map<string, Uint8Array | undefined>; names: string[] }
+  interface Pending { bytes: Map<string, Uint8Array | undefined>; names: SortedStrings }
 
   /**
    * Visits the committed keys in [low, high) as of a version, with a unit's own writes over them: two sorted runs
@@ -297,24 +443,20 @@ export function createMemoryKVBackend(): KvBackend {
     (low: Uint8Array, high: Uint8Array | undefined, reverse: boolean, _values: boolean, visit: (key: Uint8Array, value: Uint8Array | undefined) => boolean) => {
       const lowName = toName(low);
       const highName = high && toName(high);
-      const from = (list: readonly string[]) => lowerBound(list, lowName);
-      const to = (list: readonly string[]) => (highName === undefined ? list.length : lowerBound(list, highName));
-      const own = pending?.names ?? [];
-      let [i, iEnd, j, jEnd] = [from(keys), to(keys), from(own), to(own)];
-      const step = reverse ? -1 : 1;
-      if (reverse) [i, iEnd, j, jEnd] = [iEnd - 1, i - 1, jEnd - 1, j - 1];
+      const committed = keys.walk(lowName, highName, reverse);
+      const written = pending ? pending.names.walk(lowName, highName, reverse) : () => undefined;
       const before = (a: string, b: string) => (reverse ? a > b : a < b);
-      while (i !== iEnd || j !== jEnd) {
-        const committed = i !== iEnd ? keys[i]! : undefined;
-        const written = j !== jEnd ? own[j]! : undefined;
+      let nextCommitted = committed();
+      let nextWritten = written();
+      while (nextCommitted !== undefined || nextWritten !== undefined) {
         let name: string;
-        if (written === undefined || (committed !== undefined && before(committed, written))) {
-          name = committed!;
-          i += step;
+        if (nextWritten === undefined || (nextCommitted !== undefined && before(nextCommitted, nextWritten))) {
+          name = nextCommitted!;
+          nextCommitted = committed();
         } else {
-          name = written;
-          if (committed === written) i += step;
-          j += step;
+          name = nextWritten;
+          if (nextCommitted === nextWritten) nextCommitted = committed();
+          nextWritten = written();
         }
         const bytes = pending?.bytes.has(name) ? pending.bytes.get(name) : at(name, snapshot);
         if (bytes === undefined) continue;
@@ -339,9 +481,9 @@ export function createMemoryKVBackend(): KvBackend {
     write(fn) {
       if (writing) throw new Error('A memory KV takes one write unit at a time');
       writing = true;
-      const pending: Pending = { bytes: new Map(), names: [] };
+      const pending: Pending = { bytes: new Map(), names: new SortedStrings() };
       const hold = (name: string, bytes: Uint8Array | undefined) => {
-        if (!pending.bytes.has(name)) pending.names.splice(lowerBound(pending.names, name), 0, name);
+        if (!pending.bytes.has(name)) pending.names.insert(name);
         pending.bytes.set(name, bytes);
       };
       const base = version;
@@ -363,7 +505,7 @@ export function createMemoryKVBackend(): KvBackend {
             if (!list) {
               if (bytes === undefined) continue;
               versions.set(name, list = []);
-              keys.splice(lowerBound(keys, name), 0, name);
+              keys.insert(name);
             }
             list.push({ at: version, bytes });
             touched.add(name);

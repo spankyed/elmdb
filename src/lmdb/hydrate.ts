@@ -18,7 +18,11 @@ export async function hydrate(params: {
   log?: (message: string) => void;
 }) {
   const { engine, env, log = console.log } = params;
+  // One unit for the whole load: a commit per row is what a store pays for each, and a load is one act
+  engine.bulkLoad(() => load(engine, env, log));
+}
 
+function load(engine: EarsAdmin, env: LmdbDbs, log: (message: string) => void) {
   // The entity table is the record of which entities exist: an attribute row is loaded only for one of them, since
   // a flush that fell back to row by row can have stored an entity's attributes and lost its row
   const entities = new Set<string>();

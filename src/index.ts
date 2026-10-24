@@ -22,6 +22,13 @@ export {
   createMemoryRecordStore, _indexEntries, _idClock,
   type RecordStore, type RecordIndexes, type StoredRecord, type IndexValue, type FindByOptions,
 } from './records.ts';
+// The ordered key-value seam the engine is written on (`createEarsEngine({ kv })`): in memory for tests and tooling,
+// and on disk through `@apackdev/ears/lmdb`
+export {
+  createMemoryKV, createMemoryKVBackend, createOrderedKV,
+  type OrderedKV, type KvReader, type KvWriter, type Key, type KeyPart, type RangeOptions, type Visit,
+  type KvBackend, type ByteReader, type ByteWriter,
+} from './kv.ts';
 export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {

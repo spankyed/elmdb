@@ -1,25 +1,18 @@
-// What makes `transact` a transaction: while a unit is open, every write first records how to undo itself, and
-// the sink calls it makes are held rather than sent. A unit that returns sends them; one that throws runs the
-// undos in reverse and sends nothing.
+// What makes `transact` a unit: its writes run in one write unit of the store, which keeps nothing of them when it
+// throws (`kv.ts`), and the persistence calls they make are held until the outermost unit commits.
 import type { PersistenceSink } from './runtime.ts';
+import type { StoreAccess } from './store-access.ts';
 
-/** One open unit: the keys it has recorded an undo for, the undos, where its sink calls start, and its checks */
+/** One open unit: where its sink calls start, and its checks */
 interface Level {
-  seen: Set<string>;
-  undos: Array<() => void>;
   sinkMark: number;
   checks: Array<() => void>;
 }
 
-/** An engine's unit of work, shared by the stores that write */
+/** An engine's unit of work, as the writes see it */
 export interface Journal {
-  /** Whether a unit is open: a writer checks it before building a key, so writes outside a unit cost nothing */
+  /** Whether a unit is open */
   readonly open: boolean;
-  /**
-   * Records how to undo a change about to be made to `key`. `capture` runs only inside a unit and only on the
-   * first change to that key in the innermost unit, before the change, and returns the undo.
-   */
-  touch(key: string, capture: () => () => void): void;
   /**
    * Runs `check` when the outermost unit commits, before anything reaches the sink — at once outside a unit, where
    * a write is its own unit. A check that throws rolls the whole unit back. This is a deferred constraint: what a
@@ -28,19 +21,13 @@ export interface Journal {
   atCommit(check: () => void): void;
 }
 
-/** A journal, and the sink that holds an open unit's calls back from `sink` */
-export function createJournal(sink: PersistenceSink) {
+/** A journal over the store, and the sink that holds an open unit's calls back from `sink` */
+export function createJournal(sink: PersistenceSink, access: StoreAccess) {
   const levels: Level[] = [];
   const held: Array<() => void> = [];
 
   const journal: Journal = {
     get open() { return levels.length > 0; },
-    touch(key, capture) {
-      const level = levels[levels.length - 1];
-      if (!level || level.seen.has(key)) return;
-      level.seen.add(key);
-      level.undos.push(capture());
-    },
     atCommit(check) {
       const level = levels[levels.length - 1];
       if (level) level.checks.push(check);
@@ -72,33 +59,31 @@ export function createJournal(sink: PersistenceSink) {
 
   /** Runs `fn` as one unit; a unit inside another commits into it and rolls back only its own writes */
   function transact<T>(fn: () => T): T {
-    const level: Level = { seen: new Set(), undos: [], sinkMark: held.length, checks: [] };
+    const level: Level = { sinkMark: held.length, checks: [] };
     levels.push(level);
     let result: T;
     try {
-      result = fn();
-      if (result !== null && typeof result === 'object' && typeof (result as { then?: unknown }).then === 'function') {
-        // The body has already started and cannot be stopped; what it does after its first await lands outside
-        // any unit. Its own rejection is handled here so it isn't an unhandled one: the refusal is the report
-        (result as unknown as PromiseLike<unknown>).then(undefined, () => {});
-        throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
-      }
-      // The outermost unit is what commits, so it is where the unit's checks run; an inner one hands them up
-      if (levels.length === 1) for (const check of level.checks) check();
+      result = access.unit(() => {
+        const value = fn();
+        if (value !== null && typeof value === 'object' && typeof (value as { then?: unknown }).then === 'function') {
+          // The body has already started and cannot be stopped; what it does after its first await lands outside
+          // any unit. Its own rejection is handled here so it isn't an unhandled one: the refusal is the report
+          (value as unknown as PromiseLike<unknown>).then(undefined, () => {});
+          throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
+        }
+        // The outermost unit is what commits, so it is where the unit's checks run; an inner one hands them up
+        if (levels.length === 1) for (const check of level.checks) check();
+        return value;
+      });
     } catch (error) {
       levels.pop();
-      for (let i = level.undos.length - 1; i >= 0; i--) level.undos[i]();
       held.length = level.sinkMark;
       throw error;
     }
     levels.pop();
     const parent = levels[levels.length - 1];
     if (parent) {
-      // The parent can still roll back, to before this unit and before its own earlier writes: this unit's
-      // undos restore what it found, and run before the parent's earlier ones
-      parent.undos.push(...level.undos);
       parent.checks.push(...level.checks);
-      for (const key of level.seen) parent.seen.add(key);
       return result;
     }
     const calls = held.splice(0);

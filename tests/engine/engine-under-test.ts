@@ -9,6 +9,7 @@ export interface EngineUnderTestOptions {
   rowRules?: EARSRuntimeDeps['rowRules'];
   persistence?: PersistenceSink;
   warn?: EARSRuntimeDeps['warn'];
+  kv?: EARSRuntimeDeps['kv'];
 }
 
 export function freshEngine(options: EngineUnderTestOptions): EarsEngine {

@@ -42,6 +42,22 @@ describe.each([
     expect(keysOf(kv, {})).toEqual([['a', null], ['a', true], ['a', 1], ['a', 2], ['a', 10], ['a', 'x'], ['a', 'x', 1], ['ab'], ['b']]);
   });
 
+  it('orders numbers by value, negatives and fractions included, and strings by their UTF-8; refuses NaN and NUL', () => {
+    const kv = make();
+    const numbers = [3, -0.5, 1e9, -5, 0, 0.5, -1e9, 2 ** 53];
+    const strings = ['é', 'z', 'Z', 'a', 'ab', '日本', ''];
+    kv.write((w) => {
+      for (const n of numbers) w.put(['n', n], n);
+      for (const t of strings) w.put(['s', t], t);
+      w.put(['n', -0], 'negative zero');
+    });
+    expect(keysOf(kv, { prefix: ['n'] }).map((key) => key[1])).toEqual([-1e9, -5, -0.5, 0, 0.5, 3, 1e9, 2 ** 53]);
+    expect(kv.read((r) => r.get(['n', 0]))).toBe('negative zero');
+    expect(keysOf(kv, { prefix: ['s'] }).map((key) => key[1])).toEqual(['', 'Z', 'a', 'ab', 'z', 'é', '日本']);
+    expect(() => kv.write((w) => w.put(['n', Number.NaN], 1))).toThrow('NaN');
+    expect(() => kv.write((w) => w.put(['s', 'a\u0000b'], 1))).toThrow('NUL');
+  });
+
   it('ranges by prefix, bounds, direction and limit, and reads keys alone', () => {
     const kv = make();
     kv.write((w) => {
@@ -69,6 +85,18 @@ describe.each([
     (read.list as unknown[]).push('changed');
     expect(kv.read((r) => r.get(['v', 'a']))).toEqual(value);
     expect(kv.read((r) => r.get(['v', 'missing']))).toBeUndefined();
+  });
+
+  it('gives back a field named __proto__ as a field, beside one named __proto_', () => {
+    const kv = make();
+    const value = JSON.parse('{"__proto__": {"polluted": "yes"}, "__proto_": 1, "nested": [{"__proto__": 2}]}');
+    kv.write((w) => w.put(['v', 'p'], value));
+    const read = kv.read((r) => r.get(['v', 'p'])) as Record<string, unknown>;
+    expect(Object.getPrototypeOf(read)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(read, '__proto__')?.value).toEqual({ polluted: 'yes' });
+    expect(read.__proto_).toBe(1);
+    expect(Object.getOwnPropertyDescriptor((read.nested as object[])[0], '__proto__')?.value).toBe(2);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it("isolates a snapshot: a commit made while it is open isn't in it", () => {
@@ -118,6 +146,33 @@ describe.each([
     // An outer unit that throws undoes a nested one that committed into it
     expect(() => kv.write(() => { kv.write((inner) => inner.put(['nested'], 1)); throw new Error('outer'); })).toThrow('outer');
     expect(kv.read((r) => r.get(['nested']))).toBeUndefined();
+  });
+
+  it('keeps thousands of keys written out of order sorted, through removals, ranged both ways', () => {
+    const kv = make();
+    // A fixed shuffle: each number in 0..4999 once, in no order
+    const numbers = Array.from({ length: 5_000 }, (_, i) => (i * 7_919) % 5_000);
+    kv.write((w) => { for (const n of numbers) w.put(['k', `n${String(n).padStart(4, '0')}`], n); });
+    kv.write((w) => { for (const n of numbers) if (n % 3 === 0) w.del(['k', `n${String(n).padStart(4, '0')}`]); });
+    const kept = Array.from({ length: 5_000 }, (_, n) => n).filter((n) => n % 3 !== 0);
+    const values = (options: RangeOptions) => kv.read((r) => {
+      const seen: unknown[] = [];
+      r.range(options, (_key, value) => { seen.push(value); });
+      return seen;
+    });
+    expect(values({ prefix: ['k'] })).toEqual(kept);
+    expect(values({ prefix: ['k'], reverse: true })).toEqual([...kept].reverse());
+    const within = kept.filter((n) => n >= 1_234 && n < 3_456);
+    expect(values({ prefix: ['k'], start: ['n1234'], end: ['n3456'] })).toEqual(within);
+    expect(values({ prefix: ['k'], start: ['n1234'], end: ['n3456'], reverse: true })).toEqual([...within].reverse());
+    // A unit's own writes merged with the committed keys, across chunks
+    kv.write((w) => {
+      w.put(['k', 'n0000'], 0);
+      w.del(['k', 'n0001']);
+      const seen: unknown[] = [];
+      w.range({ prefix: ['k'], limit: 3 }, (_key, value) => { seen.push(value); });
+      expect(seen).toEqual([0, 2, 4]);
+    });
   });
 
   it('closes a range however its visit ends, so a thousand that stop early or throw leave it working', () => {

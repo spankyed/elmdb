@@ -30,9 +30,13 @@ const project = (i: number) => `Project-${i}` as Id;
 const person = (i: number) => `Person-${i}` as Id;
 const STATUSES = ['open', 'done', 'blocked'];
 
-/** 50k entities with 4 attributes each (200k), and 100k relations */
+/** 50k entities with 4 attributes each (200k), and 100k relations, loaded as hydration loads them: one unit */
 function hydrate(): void {
   admin.clear();
+  admin.bulkLoad(load);
+}
+
+function load(): void {
   const entities: Id[] = [];
   for (let i = 0; i < TASKS; i++) entities.push(task(i));
   for (let i = 0; i < PROJECTS; i++) entities.push(project(i));

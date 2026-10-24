@@ -52,10 +52,10 @@ export class EarsError extends Error {
 export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'shortCode', 'createdAt', 'updatedAt', 'role', 'trashedAt'] as const;
 
 /**
- * Entity types no pack declares: the engine's own ids are written with them — a relation's `Relation-<suffix>` and a
- * numbering sequence's `Sequence-<key>` — and neither is an entity a query reaches
+ * Entity types no pack declares: the engine's own ids are written with them — a relation's `Relation-<suffix>` — and
+ * a relation is no entity a query reaches
  */
-export const RESERVED_ENTITY_TYPES = { relation: 'Relation', sequence: 'Sequence' } as const;
+export const RESERVED_ENTITY_TYPES = { relation: 'Relation' } as const;
 
 /** Throws `RESERVED_ATTRIBUTE` for a name only the engine writes */
 export function refuseReserved(name: string, via: string): void {

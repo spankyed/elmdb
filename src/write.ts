@@ -9,12 +9,19 @@ import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
 import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
+import type { StoreAccess } from './store-access.ts';
 import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
 
 /** When the entity last changed: stamped by the engine, never written by a caller */
 const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
 
 const LINK_OPTIONS: readonly string[] = ['info', 'replace', 'acyclicIn'] satisfies Array<keyof LinkOptions>;
+
+/** The write builder's members that write, each run as one unit */
+const UNIT_WRITES = [
+  'set', 'setMany', 'append', 'merge', 'delete', 'removeAt', 'removeValue', 'link', 'unlink', 'unlinkAll',
+  'grant', 'revoke', 'grantExclusive', 'trash', 'restore', 'destroy',
+] as const satisfies ReadonlyArray<keyof WriteBuilder>;
 
 /** A string that is not shaped like an id: where a type is meant, an id fails to compile */
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
@@ -38,8 +45,10 @@ export interface Write {
 }
 
 /** An engine's writes, over its attribute storage, its relations and its cycle check */
-export function createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal }: {
+export function createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal, access }: {
   storage: AttributeStorage;
+  /** The store, which each write runs in a unit of: a write that fails part way keeps nothing */
+  access: Pick<StoreAccess, 'write'>;
   journal: Pick<Journal, 'atCommit' | 'open'>;
   relations: Relations;
   hierarchy: Pick<ReturnType<typeof createHierarchy>, 'wouldCreateCycle'>;
@@ -71,7 +80,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     if (typeof brought !== 'string' || !new RegExp(`^${prefix}-[1-9][0-9]*$`).test(brought)) {
       throw new EarsError('INVALID_SHORT_CODE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): a ${type}'s short code is ${prefix}-<n>`);
     }
-    if (holders(type as EARS.Entity, SHORT_CODE, brought).size > 0) {
+    if (holders(type as EARS.Entity, SHORT_CODE, brought).length > 0) {
       throw new EarsError('SHORT_CODE_IN_USE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): another entity holds this short code`);
     }
     return () => brought;
@@ -236,10 +245,15 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
       // The builder's entity exists — write refuses an id no entity has, and destroy ends the chain
       row: () => getRow(id) as ReturnType<WriteBuilder['row']>,
     };
+    // Each write is one unit: one that writes several keys, or several attributes, keeps none of them when it fails
+    for (const name of UNIT_WRITES) {
+      const method = self[name] as (...args: unknown[]) => unknown;
+      (self as unknown as Record<string, unknown>)[name] = (...args: unknown[]) => access.write(() => method(...args));
+    }
     return self;
   }
 
-  const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => {
+  const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => access.write(() => {
     requireType(type, 'create');
     // The row's id, short code and times are the engine's to write; its other reserved names are refused before the
     // entity exists, so a create that fails leaves nothing behind
@@ -271,7 +285,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     putAttr(id, UPDATED_AT, updatedAt ?? at);
     // The creation is the entity's first change: its fields, and what the builder writes now, are part of it
     return builder(id, false).setMany(fields);
-  }) as Create;
+  })) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
     if (!hasEntity(id)) {
@@ -284,7 +298,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
   }) as Write;
 
   // An entity that exists keeps its times: setMany refuses a createdAt or updatedAt in the row, as any write of them
-  const upsert = ((type: string, { id, shortCode, ...fields }: Record<string, unknown> & { id: EARS.EntityId }) => {
+  const upsert = ((type: string, { id, shortCode, ...fields }: Record<string, unknown> & { id: EARS.EntityId }) => access.write(() => {
     requireType(type, 'upsert');
     if (!hasEntity(id)) return create(type, { ...fields, ...(shortCode !== undefined && { shortCode }), id });
     if (entityTypeOf(id) !== type) {
@@ -295,7 +309,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
       throw new EarsError('INVALID_SHORT_CODE', `upsert(${JSON.stringify(type)}, { id: ${JSON.stringify(id)}, shortCode: ${JSON.stringify(shortCode)} }): the entity's short code is ${JSON.stringify(getAttr(id, SHORT_CODE))}, and nothing changes it`);
     }
     return builder(id, true).setMany(fields);
-  }) as Upsert;
+  })) as Upsert;
 
   /**
    * Moves a relation's ends or changes its info, refusing an id no relation has (`NO_SUCH_RELATION`), as

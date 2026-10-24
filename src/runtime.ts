@@ -8,6 +8,7 @@
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
+import type { OrderedKV } from './kv.ts';
 
 /**
  * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
@@ -69,6 +70,8 @@ export const noopSink: PersistenceSink = {
 
 /** What an engine is created with (`createEarsEngine`) */
 export interface EARSRuntimeDeps {
+  /** The store the engine reads and writes: a new one in memory by default (`createMemoryKV`) */
+  kv?: OrderedKV;
   /** Receives every write; nothing by default */
   persistence?: PersistenceSink;
   /** Whether a name is an entity type (`create('Note')` makes one) rather than an id */

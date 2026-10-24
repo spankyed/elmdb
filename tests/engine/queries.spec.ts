@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { EARS } from '../../src/index.ts';
 import { engine, isEntityType, isRelationKind, isRole, type Id, type RelId } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
+import { createMemoryKV, type Key, type KvReader, type OrderedKV, type RangeOptions, type Visit } from '../../src/kv.ts';
 
 let e: EngineUnderTest;
 let t: Record<'a' | 'b' | 'c' | 'd', Id>;
@@ -275,8 +276,8 @@ describe('the value index', () => {
     for (const [k, v] of [['status', 'open'], ['status', 'done'], ['tags', 'x'], ['tags', 'y']] as const) {
       expect(e.query('Task').where(k, v).ids(), `${k} = ${v}`).toEqual(walked(['Task'], k, v));
     }
-    // t.d came back from an undone destroy, so it is last in its type's order now
-    expect(e.query('Task').where('status', 'open').ids()).toEqual([late, t.d]);
+    // t.d came back from an undone destroy, in its place: a unit that throws leaves the store as it found it
+    expect(e.query('Task').where('status', 'open').ids()).toEqual([t.d, late]);
     expect(e.query('Task').withRole('focus').ids()).toEqual([t.c, late]);
     // A step after the start reads the index too, and keeps what the step before it narrowed to
     expect(e.query('Task').where('tags', 'x').withRole('focus').ids()).toEqual([late]);
@@ -377,5 +378,42 @@ describe('declared indexes', () => {
     engine.write(b).set('status', Infinity);
     expect(engine.query('Task').where('status', long).ids()).toEqual([a]);
     expect(engine.query('Task').where('status', Infinity).ids()).toEqual([b]);
+  });
+});
+
+describe('reads', () => {
+  /** A store in memory counting the entries its reads reach: each get, and each entry a range visits */
+  function counted() {
+    const kv = createMemoryKV();
+    let reads = 0;
+    const counting = <R extends KvReader>(r: R): R => ({
+      ...r,
+      get: (key: Key) => (reads++, r.get(key)),
+      range: (options: RangeOptions, visit: Visit) => r.range(options, (key, value) => (reads++, visit(key, value))),
+    });
+    const store: OrderedKV = {
+      get writing() { return kv.writing; },
+      read: (fn) => kv.read((r) => fn(counting(r))),
+      write: (fn) => kv.write((w) => fn(counting(w))),
+    };
+    return { store, reads: (run: () => unknown) => { reads = 0; run(); return reads; } };
+  }
+
+  it('first, exists, limit and count of a type stop early, and a live query reads no trashed entity', () => {
+    const { store, reads } = counted();
+    const engine = freshEngine({ isEntityType, isRelationKind, isRole, kv: store });
+    engine.transact(() => {
+      for (let i = 0; i < 1_000; i++) engine.create('Task', { title: `live ${i}` });
+      for (let i = 0; i < 1_000; i++) engine.create('Task', { title: `trashed ${i}` }).trash();
+    });
+    expect(reads(() => engine.query('Task').first())).toBeLessThan(5);
+    expect(reads(() => engine.query('Task').exists())).toBeLessThan(5);
+    expect(reads(() => engine.query('Task').limit(3).ids())).toBeLessThan(10);
+    expect(reads(() => engine.query('Task').count())).toBeLessThan(5);
+    expect(engine.query('Task').count()).toBe(1_000);
+    // The live range alone: a thousand entries and the sequence, none of the thousand in the trash
+    expect(reads(() => engine.query('Task').ids())).toBeLessThan(1_010);
+    expect(engine.query.trashed('Task').count()).toBe(1_000);
+    expect(engine.query.withTrashed('Task').count()).toBe(2_000);
   });
 });

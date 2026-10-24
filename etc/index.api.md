@@ -24,6 +24,21 @@ export interface BaseEntity {
 }
 
 // @public
+export interface ByteReader {
+    // (undocumented)
+    get(key: Uint8Array): Uint8Array | undefined;
+    scan(low: Uint8Array, high: Uint8Array | undefined, reverse: boolean, values: boolean, visit: (key: Uint8Array, value: Uint8Array | undefined) => boolean): void;
+}
+
+// @public
+export interface ByteWriter extends ByteReader {
+    // (undocumented)
+    del(key: Uint8Array): void;
+    // (undocumented)
+    put(key: Uint8Array, value: Uint8Array): void;
+}
+
+// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -42,11 +57,20 @@ E
 } : Record<string, unknown>;
 
 // @public
+export function createMemoryKV(): OrderedKV;
+
+// @public
+export function createMemoryKVBackend(): KvBackend;
+
+// @public
 export function createMemoryRecordStore<R extends {
     id: string;
 } = StoredRecord>(input: {
     indexes: RecordIndexes<R>;
 }): RecordStore<R>;
+
+// @public
+export function createOrderedKV(backend: KvBackend): OrderedKV;
 
 // @public
 export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
@@ -131,6 +155,7 @@ export interface Ears {
 // @public
 export interface EarsAdmin {
     addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
+    bulkLoad<T>(fn: () => T): T;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
     clear(): void;
@@ -197,6 +222,7 @@ export interface EARSRuntimeDeps {
     isEntityType: (v: string) => boolean;
     isRelationKind: (v: string) => boolean;
     isRole: (v: string) => boolean;
+    kv?: OrderedKV;
     persistence?: PersistenceSink;
     rowRules?: (type: string) => RowRules | undefined;
     warn?: (message: string) => void;
@@ -262,6 +288,33 @@ export function _indexEntries<R extends {
 export type IndexValue = string | number | boolean;
 
 // @public
+export type Key = readonly KeyPart[];
+
+// @public
+export type KeyPart = string | number | boolean | null;
+
+// @public
+export interface KvBackend {
+    // (undocumented)
+    read<T>(fn: (reader: ByteReader) => T): T;
+    // (undocumented)
+    write<T>(fn: (writer: ByteWriter) => T): T;
+}
+
+// @public
+export interface KvReader {
+    get(key: Key): unknown;
+    range(options: RangeOptions, visit: Visit): void;
+}
+
+// @public
+export interface KvWriter extends KvReader {
+    del(key: Key): void;
+    // (undocumented)
+    put(key: Key, value: unknown): void;
+}
+
+// @public
 export interface LinkOptions<R extends string = string> {
     acyclicIn?: readonly R[];
     info?: unknown;
@@ -280,6 +333,13 @@ E
 ] extends [keyof S] ? Extract<{
     [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
 }[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
+
+// @public
+export interface OrderedKV {
+    read<T>(fn: (reader: KvReader) => T): T;
+    write<T>(fn: (writer: KvWriter) => T): T;
+    readonly writing: boolean;
+}
 
 // @public
 export interface PersistenceErrorStats {
@@ -387,6 +447,16 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
 }
 
 // @public
+export interface RangeOptions {
+    end?: Key;
+    limit?: number;
+    prefix?: Key;
+    reverse?: boolean;
+    start?: Key;
+    values?: boolean;
+}
+
+// @public
 export type RecordIndexes<R extends {
     id: string;
 } = StoredRecord> = Readonly<Record<string, (record: R) => unknown>>;
@@ -455,7 +525,6 @@ export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "shortCode", "cr
 // @public
 export const RESERVED_ENTITY_TYPES: {
     readonly relation: "Relation";
-    readonly sequence: "Sequence";
 };
 
 // @public
@@ -588,6 +657,9 @@ export interface Upsert {
         id: EARS.EntityId;
     }): WriteBuilder<E>;
 }
+
+// @public
+export type Visit = (key: Key, value: unknown) => boolean | void;
 
 // @public
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);
