@@ -80,6 +80,24 @@ describe('openLmdbStore', () => {
     expect(engine.admin.getEntitiesOfType('Relation')).toHaveLength(1);
   });
 
+  it('hydrates only the entities its entity table holds, whatever attribute rows were left without one', async () => {
+    const first = openStore();
+    engine.create('Note', { id: id('Note-kept') }).set('title', 'kept');
+    engine.create('Note', { id: id('Note-lost') }).set('title', 'its row was lost');
+    await flushed();
+    first.close();
+    // What a flush that fell back to row by row can leave: the attributes stored, the entity's row not
+    const root = openEnv({ path: dbPath, maxDbs: 8, compression: true });
+    root.openDB({ name: 'entities', encoding: 'json' }).removeSync('Note-lost');
+    root.close();
+
+    const lines: string[] = [];
+    await openStore({ log: (line) => lines.push(line) }).hydrate();
+    expect(engine.query('Note').ids()).toEqual([id('Note-kept')]);
+    expect(getAttr(id('Note-lost'), 'title')).toBeUndefined();
+    expect(lines).toContainEqual(expect.stringMatching(/^\[Hydrate\] Skipped \d+ attribute rows of entities with no entity row$/));
+  });
+
   it('reads back every value as it was written, a one-element list, a grown list and roles included', async () => {
     const first = openStore();
     const note = engine.create('Note', { id: id('Note-1') })

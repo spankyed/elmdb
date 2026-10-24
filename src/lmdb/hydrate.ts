@@ -19,15 +19,24 @@ export async function hydrate(params: {
 }) {
   const { engine, env, log = console.log } = params;
 
+  // The entity table is the record of which entities exist: an attribute row is loaded only for one of them, since
+  // a flush that fell back to row by row can have stored an entity's attributes and lost its row
+  const entities = new Set<string>();
+  for (const key of env.entities.getKeys()) entities.add(String(key));
+
   // Hydrate attributes
   let attrCount = 0;
+  let orphaned = 0;
   for (const { key, value } of env.attrs.getRange()) {
     // kind␟entityId: one row per attribute
     const keyStr = String(key);
     const sep = keyStr.indexOf(SEP);
-    engine.bulkLoadAttr(keyStr.substring(sep + 1) as EARS.EntityId, keyStr.substring(0, sep) as EARS.AttrKind, dec(value));
+    const id = keyStr.substring(sep + 1);
+    if (!entities.has(id)) { orphaned++; continue; }
+    engine.bulkLoadAttr(id as EARS.EntityId, keyStr.substring(0, sep) as EARS.AttrKind, dec(value));
     attrCount++;
   }
+  if (orphaned) log(`[Hydrate] Skipped ${orphaned} attribute rows of entities with no entity row`);
 
   // Hydrate relations
   let relCount = 0;
