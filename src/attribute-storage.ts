@@ -112,13 +112,16 @@ export function createAttributeStorage({ access, inUnit }: {
 
   const isBuilt = (r: KvReader, type: EARS.Entity, kind: EARS.AttrKind) => r.get(['xb', type, kind]) !== undefined;
 
-  /** Refiles the entity's value of a kind in the type's index, where the index is built */
-  const reindex = (w: KvWriter, id: EARS.EntityId, kind: EARS.AttrKind, before: unknown, after: unknown) => {
+  /**
+   * Refiles the entity's value of a kind in the type's index, where the index is built. `before` is read only then:
+   * most kinds have no index, and the value a write replaces is a read it would otherwise cost them
+   */
+  const reindex = (w: KvWriter, id: EARS.EntityId, kind: EARS.AttrKind, before: () => unknown, after: unknown) => {
     const type = entityTypeOf(id);
     if (!isBuilt(w, type, kind)) return;
     const seq = recordOf(w, id)?.seq;
     if (seq === undefined) return;
-    const was = indexKeysOf(before);
+    const was = indexKeysOf(before());
     const now = indexKeysOf(after);
     for (const key of was) if (!now.includes(key)) w.del(['x', type, kind, key, seq]);
     for (const key of now) if (!was.includes(key)) w.put(['x', type, kind, key, seq], id);
@@ -162,16 +165,16 @@ export function createAttributeStorage({ access, inUnit }: {
   /** Every write of an attribute: in its unit, and refiled in a built index */
   const assign = (id: EARS.EntityId, kind: EARS.AttrKind, next: unknown) => write((w) => {
     const key = ['v', id, kind];
-    const before = w.get(key);
     if (next === undefined) {
+      const before = w.get(key);
       if (before === undefined) return;
-      reindex(w, id, kind, before, undefined);
+      reindex(w, id, kind, () => before, undefined);
       w.del(key);
       if (kind === TRASHED_AT) setTrashed(w, id, false);
       return;
     }
     ensureEntity(w, id);
-    reindex(w, id, kind, before, next);
+    reindex(w, id, kind, () => w.get(key), next);
     w.put(key, next);
     if (kind === TRASHED_AT) setTrashed(w, id, true);
   });
@@ -222,7 +225,7 @@ export function createAttributeStorage({ access, inUnit }: {
   /** A stored value, loaded as it was: no check, and no `updatedAt` stamp */
   const bulkLoadAttr = (id: EARS.EntityId, kind: EARS.AttrKind, val: unknown) => write((w) => {
     ensureEntity(w, id);
-    reindex(w, id, kind, w.get(['v', id, kind]), val);
+    reindex(w, id, kind, () => w.get(['v', id, kind]), val);
     w.put(['v', id, kind], val);
     if (kind === TRASHED_AT) setTrashed(w, id, true);
   });
@@ -247,7 +250,7 @@ export function createAttributeStorage({ access, inUnit }: {
     const fields: Array<[EARS.AttrKind, unknown]> = [];
     w.range({ prefix: ['v', id] }, (key, value) => { fields.push([key[2] as EARS.AttrKind, value]); });
     for (const [kind, value] of fields) {
-      reindex(w, id, kind, value, undefined);
+      reindex(w, id, kind, () => value, undefined);
       w.del(['v', id, kind]);
     }
     const record = recordOf(w, id);
