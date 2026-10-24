@@ -49,7 +49,7 @@ export function createMemoryRecordStore<R extends {
 }): RecordStore<R>;
 
 // @public
-export function defineEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string>(engine: () => Ears): TypedEars<S, N, R, O>;
+export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
 
 // @public (undocumented)
 export namespace EARS {
@@ -205,6 +205,14 @@ export interface EARSRuntimeDeps {
 }
 
 // @public
+export interface EarsSchema {
+    names: string;
+    relKinds: string;
+    roles: string;
+    shapes: EntityShapes;
+}
+
+// @public
 export type EntityNameArg<N extends string, E extends string> = string extends E ? E : [E] extends [N] ? E : N;
 
 // @public
@@ -324,67 +332,67 @@ export interface Query extends QueryEntries {
 }
 
 // @public
-export interface QueryBuilder<E extends string = string, S extends EntityShapes = {}, N extends string = string, R extends string = string, O extends string = string> {
-    ancestors<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+    ancestors<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
-    ancestors(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+    ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
     // (undocumented)
     count(): number;
-    descendants<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+    descendants<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
-    descendants(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+    descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
     // (undocumented)
-    distinct(field?: keyof ShapeOf<S, E> & string): QueryBuilder<E, S, N, R, O>;
+    distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
     // (undocumented)
     exists(): boolean;
     first(): EARS.EntityId<E> | undefined;
     // (undocumented)
-    forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, S, N, R, O>;
-    groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, EARS.EntityId<E>[]>;
-    has<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
+    forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, D>;
+    groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
+    has<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
     // (undocumented)
     ids(): EARS.EntityId<E>[];
-    in<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+    in<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
-    in(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
-    inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
-    lacks<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
+    in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+    lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
     last(): EARS.EntityId<E> | undefined;
     // (undocumented)
-    limit(n: number): QueryBuilder<E, S, N, R, O>;
-    linkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-    linkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-    linkedWith(other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+    limit(n: number): QueryBuilder<E, D>;
+    linkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+    linkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+    linkedWith(other: EARS.EntityId): QueryBuilder<E, D>;
     // (undocumented)
     map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
     // (undocumented)
-    ofType<T extends string>(t: EntityNameArg<N, T>): QueryBuilder<T, S, N, R, O>;
+    ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
     // (undocumented)
-    orderBy(field: keyof ShapeOf<S, E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, S, N, R, O>;
-    out<T extends string>(kinds: R | readonly R[], type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined): QueryBuilder<T, S, N, R, O>;
+    orderBy(field: keyof ShapeOf<D['shapes'], E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, D>;
+    out<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
-    out(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
-    outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+    out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
     // (undocumented)
-    pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(fields: A): ({
+    pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(fields: A): ({
         id: EARS.EntityId<E>;
-    } & Pick<ShapeOf<S, E>, A[number]>)[];
+    } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
     // (undocumented)
-    pickAll(): ShapeOf<S, E>[];
-    pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(f: A): ({
+    pickAll(): ShapeOf<D['shapes'], E>[];
+    pickOne<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(f: A): ({
         id: EARS.EntityId<E>;
-    } & Pick<ShapeOf<S, E>, A[number]>) | undefined;
-    pickOne(): ShapeOf<S, E> | undefined;
+    } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
+    pickOne(): ShapeOf<D['shapes'], E> | undefined;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
-    reverse(): QueryBuilder<E, S, N, R, O>;
-    unlinkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-    unlinkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
-    where<K extends keyof ShapeOf<S, E> & string>(k: K, v: WhereValue<S, E, K>): QueryBuilder<E, S, N, R, O>;
-    within(ids: readonly EARS.EntityId[]): QueryBuilder<E, S, N, R, O>;
+    reverse(): QueryBuilder<E, D>;
+    unlinkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+    unlinkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+    where<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K, v: WhereValue<D['shapes'], E, K>): QueryBuilder<E, D>;
+    within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
     // (undocumented)
-    withRole(r: O): QueryBuilder<E, S, N, R, O>;
+    withRole(r: D['roles']): QueryBuilder<E, D>;
 }
 
 // @public
@@ -493,64 +501,76 @@ export type StoredRecord = {
 } & Record<string, unknown>;
 
 // @public
-export interface TypedCreate<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
+export interface TypedCreate<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, ...row: RowArg<S, E, CreateFields<S, E> & RowIdentity>): WriteBuilder<E, S, R, O>;
+    <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity>): WriteBuilder<E, D>;
 }
 
 // @public (undocumented)
-export interface TypedEars<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
+export interface TypedEars<D extends EarsSchema> {
     // (undocumented)
-    create: TypedCreate<S, N, R, O>;
+    create: TypedCreate<D>;
     // (undocumented)
-    getAttr: TypedGetAttr<S>;
+    getAttr: TypedGetAttr<D>;
     // (undocumented)
-    newId: TypedNewId<S, N>;
+    newId: TypedNewId<D>;
     // (undocumented)
-    query: TypedQuery<S, N, R, O>;
+    query: TypedQuery<D>;
     // (undocumented)
     transact: Ears['transact'];
     // (undocumented)
-    upsert: TypedUpsert<S, N, R, O>;
+    upsert: TypedUpsert<D>;
     // (undocumented)
-    write: TypedWrite<S, R, O>;
+    write: TypedWrite<D>;
 }
 
 // @public
-export interface TypedGetAttr<S extends EntityShapes> {
+export interface TypedGetAttr<D extends EarsSchema> {
     // (undocumented)
-    <E extends string, K extends keyof ShapeOf<S, E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<S, E>[K] | undefined;
+    <E extends string, K extends keyof ShapeOf<D['shapes'], E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<D['shapes'], E>[K] | undefined;
     // (undocumented)
     (id: EARS.EntityId, field: string): unknown;
 }
 
 // @public
-export type TypedNewId<S extends EntityShapes, N extends string = string> = <E extends string>(t: Name<N, E>) => EARS.EntityId<E extends keyof S ? E : string>;
+export type TypedNewId<D extends EarsSchema> = <E extends string>(t: Name<D['names'], E>) => EARS.EntityId<E extends keyof D['shapes'] ? E : string>;
 
 // @public
-export interface TypedQuery<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> extends TypedQueryEntries<S, N, R, O> {
+export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
     // (undocumented)
-    trashed: TypedQueryEntries<S, N, R, O>;
+    trashed: TypedQueryEntries<D>;
     // (undocumented)
-    withTrashed: TypedQueryEntries<S, N, R, O>;
+    withTrashed: TypedQueryEntries<D>;
 }
 
 // @public
-export interface TypedUpsert<S extends EntityShapes, N extends string = string, R extends string = string, O extends string = string> {
+export interface TypedUpsert<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<N, E>, row: CreateFields<S, E> & RowIdentity & {
+    <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & {
         id: EARS.EntityId;
-    }): WriteBuilder<E, S, R, O>;
+    }): WriteBuilder<E, D>;
 }
 
 // @public
-export interface TypedWrite<S extends EntityShapes, R extends string = string, O extends string = string> {
+export interface TypedWrite<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, S, R, O>;
+    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, D>;
 }
 
 // @public
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
+
+// @public
+export interface UntypedSchema extends EarsSchema {
+    // (undocumented)
+    names: string;
+    // (undocumented)
+    relKinds: string;
+    // (undocumented)
+    roles: string;
+    // (undocumented)
+    shapes: {};
+}
 
 // @public
 export interface Upsert {
@@ -575,28 +595,28 @@ export interface Write {
 }
 
 // @public
-export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
-    append<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
-    delete(k: OptionalField<S, E>): WriteBuilder<E, S, R, O>;
+export interface WriteBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+    append<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+    delete(k: OptionalField<D['shapes'], E>): WriteBuilder<E, D>;
     destroy(): void;
     // (undocumented)
-    grant(role: O): WriteBuilder<E, S, R, O>;
-    grantExclusive(role: O, among: readonly EARS.EntityId[]): WriteBuilder<E, S, R, O>;
+    grant(role: D['roles']): WriteBuilder<E, D>;
+    grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
     // (undocumented)
     id(): EARS.EntityId<E>;
-    link(kind: R, target: EARS.EntityId, options?: LinkOptions<R>): WriteBuilder<E, S, R, O>;
-    merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
-    removeAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
-    removeValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
-    restore(): WriteBuilder<E, S, R, O>;
+    link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions<D['relKinds']>): WriteBuilder<E, D>;
+    merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+    removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
+    removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+    restore(): WriteBuilder<E, D>;
     // (undocumented)
-    revoke(role: O): WriteBuilder<E, S, R, O>;
-    row(): ShapeOf<S, E>;
-    set<K extends WritableField<S, E>>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S, R, O>;
-    setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S, R, O>;
-    trash(at?: number): WriteBuilder<E, S, R, O>;
-    unlink(kind: R, target?: EARS.EntityId): WriteBuilder<E, S, R, O>;
-    unlinkAll(): WriteBuilder<E, S, R, O>;
+    revoke(role: D['roles']): WriteBuilder<E, D>;
+    row(): ShapeOf<D['shapes'], E>;
+    set<K extends WritableField<D['shapes'], E>>(k: K, v: FieldValue<D['shapes'], E, K>): WriteBuilder<E, D>;
+    setMany(attrs: FieldValues<D['shapes'], E>): WriteBuilder<E, D>;
+    trash(at?: number): WriteBuilder<E, D>;
+    unlink(kind: D['relKinds'], target?: EARS.EntityId): WriteBuilder<E, D>;
+    unlinkAll(): WriteBuilder<E, D>;
 }
 
 // @public

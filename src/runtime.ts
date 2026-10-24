@@ -102,101 +102,122 @@ export type ShortCode<P extends string> = `${P}-${number}`;
 type NoInferType<T> = [T][T extends unknown ? 0 : never];
 
 /**
- * `S` is the entity shape map reads are typed against, `N` the entity names accepted as arguments, `R` the
- * relation kinds and `O` the roles: `{}` and `string` (unchecked) from `@apackdev/ears`, the pack's `PackShapes`,
- * `EntityName`, `EARS.RelKind` and `EARS.RoleKind` from its `#generated/ears`.
+ * What a typed builder is checked against, as one parameter: a pack's `#generated/ears` declares its own
+ * (`PackSchema`), so an error or a hover names the schema rather than spelling out four types
+ */
+export interface EarsSchema {
+  /** The entity shapes reads and writes are typed against */
+  shapes: EntityShapes;
+  /** The entity names accepted as arguments */
+  names: string;
+  /** The relation kinds links, walks and edge reads take */
+  relKinds: string;
+  /** The roles grants and `withRole` take */
+  roles: string;
+}
+
+/** No shapes and any name, kind or role: the untyped operations (`@apackdev/ears`'s own, and the SDK's `untyped*`) */
+export interface UntypedSchema extends EarsSchema {
+  shapes: {};
+  names: string;
+  relKinds: string;
+  roles: string;
+}
+
+/**
+ * The query builder, typed by `D` (`UntypedSchema` unchecked, a pack's `PackSchema` from its `#generated/ears`).
  *
- * Field parameters stay `keyof ShapeOf<S, E> & string` and picked rows `Pick<ShapeOf<S, E>, K>`:
+ * Field parameters stay `keyof ShapeOf<D['shapes'], E> & string` and picked rows `Pick<ShapeOf<D['shapes'], E>, K>`:
  * that form is what gives editors field completions and lists the valid fields in a typo's error.
  * Wrapping them in conditional or mapped types keeps everything compiling and passing type tests
  * while breaking completions (TYPED-EARS.md, Incidents). For a union shape (Node rows) only shared
  * fields are accepted; a query over member-specific or runtime fields uses the untyped host `query`.
  */
-export interface QueryBuilder<E extends string = string, S extends EntityShapes = {}, N extends string = string, R extends string = string, O extends string = string> {
-  ofType<T extends string>(t: EntityNameArg<N, T>): QueryBuilder<T, S, N, R, O>;
+export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+  ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
   /** The entities among `ids` */
-  within(ids: readonly EARS.EntityId[]): QueryBuilder<E, S, N, R, O>;
+  within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
   /**
    * The entities whose `k` is `v` (`===`) or a list holding it, or for which `v`, a function, answers true given the
    * whole value. A primitive `v` is answered by the value index. `v` is required: `has` and `lacks` ask about presence.
    */
-  where<K extends keyof ShapeOf<S, E> & string>(k: K, v: WhereValue<S, E, K>): QueryBuilder<E, S, N, R, O>;
+  where<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K, v: WhereValue<D['shapes'], E, K>): QueryBuilder<E, D>;
   /** The entities with a value of `k` */
-  has<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
+  has<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
   /** The entities with no value of `k` */
-  lacks<K extends keyof ShapeOf<S, E> & string>(k: K): QueryBuilder<E, S, N, R, O>;
-  withRole(r: O): QueryBuilder<E, S, N, R, O>;
+  lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
+  withRole(r: D['roles']): QueryBuilder<E, D>;
   /**
    * The entities with a `kind` edge to `other` — or, without it, to any entity this query could reach (a filter: the
    * set stays these entities)
    */
-  linkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  linkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
   /** The entities `other` has a `kind` edge to — or, without it, that any entity this query could reach has one to */
-  linkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  linkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
   /** The entities `linkedTo(kind, other?)` leaves out */
-  unlinkedTo(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  unlinkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
   /** The entities `linkedFrom(kind, other?)` leaves out: a tree's roots are `unlinkedFrom(parentKind)` */
-  unlinkedFrom(kind: R, other?: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  unlinkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
   /** The entities with an edge of any kind, either way, to `other` (a filter) */
-  linkedWith(other: EARS.EntityId): QueryBuilder<E, S, N, R, O>;
+  linkedWith(other: EARS.EntityId): QueryBuilder<E, D>;
   /**
    * Walks the entities' outgoing edges of the kinds to the entities at their other end — unlike `linkedTo`, which
    * filters. The result holds `type` entities, not `E`; with `type` omitted the target is unknown.
    */
   out<T extends string>(
-    kinds: R | readonly R[],
-    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
-  ): QueryBuilder<T, S, N, R, O>;
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
   // Target absent — the resulting entity type is unknown. A target known only at runtime
   // (typed string) takes the overload above and yields QueryBuilder<string>.
-  out(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+  out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
   /** Walks the entities' incoming edges of the kinds to the entities at their other end */
   in<T extends string>(
-    kinds: R | readonly R[],
-    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
-  ): QueryBuilder<T, S, N, R, O>;
-  in(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
   /**
    * Every entity the set reaches through outgoing edges of the kinds, any number deep: a subtree, nearest first,
    * each once, never an entity of the set itself. `type` keeps the reached entities of the types.
    */
   descendants<T extends string>(
-    kinds: R | readonly R[],
-    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
-  ): QueryBuilder<T, S, N, R, O>;
-  descendants(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
   /**
    * Every entity that reaches the set through edges of the kinds, any number deep: in a tree, the parent first
    * and the root last, each once, never an entity of the set itself. `type` keeps the reached entities of the types.
    */
   ancestors<T extends string>(
-    kinds: R | readonly R[],
-    type: EntityNameArg<N, T> | readonly EntityNameArg<N, T>[] | undefined,
-  ): QueryBuilder<T, S, N, R, O>;
-  ancestors(kinds: R | readonly R[], type?: undefined): QueryBuilder<string, S, N, R, O>;
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
   /**
    * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
    * `findRelations`' shape, one per edge
    */
-  outEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+  outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
   /** Each incoming edge of the kinds whose source this query could reach: its relation row */
-  inEdges<K extends R, T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<N, T> | EntityNameArg<N, T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
-  pick<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
+  inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+  pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
     fields: A,
-  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>)[];
+  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
   /** The first entity's fields picked (a field it lacks left out), or undefined when the query reaches none */
-  pickOne<A extends readonly (keyof ShapeOf<S, E> & string)[]>(
+  pickOne<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
     f: A,
-  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<S, E>, A[number]>) | undefined;
+  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
   /** The first entity's whole row (`pickAll`'s, `getRow`'s), or undefined when the query reaches none: `query.ids(id).pickOne()` is the live row with an id */
-  pickOne(): ShapeOf<S, E> | undefined;
-  pickAll(): ShapeOf<S, E>[];
-  orderBy(field: keyof ShapeOf<S, E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, S, N, R, O>;
-  reverse(): QueryBuilder<E, S, N, R, O>;
-  limit(n: number): QueryBuilder<E, S, N, R, O>;
-  distinct(field?: keyof ShapeOf<S, E> & string): QueryBuilder<E, S, N, R, O>;
+  pickOne(): ShapeOf<D['shapes'], E> | undefined;
+  pickAll(): ShapeOf<D['shapes'], E>[];
+  orderBy(field: keyof ShapeOf<D['shapes'], E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, D>;
+  reverse(): QueryBuilder<E, D>;
+  limit(n: number): QueryBuilder<E, D>;
+  distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
   /** The ids reached, by their value of `field`, each group in query order; `query.ids(ids)` queries a group on */
-  groupBy(field: keyof ShapeOf<S, E> & string): Map<unknown, EARS.EntityId<E>[]>;
+  groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
   ids(): EARS.EntityId<E>[];
   count(): number;
   /** The first entity's id, or undefined when the query reaches none */
@@ -205,7 +226,7 @@ export interface QueryBuilder<E extends string = string, S extends EntityShapes 
   last(): EARS.EntityId<E> | undefined;
   exists(): boolean;
   map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
-  forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, S, N, R, O>;
+  forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, D>;
   reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
 }
 
@@ -303,7 +324,7 @@ export type FieldValues<S extends EntityShapes, E extends string> =
     : Record<string, unknown>;
 
 /**
- * The writes to one entity, from `create`, `upsert` or `write`. `E` and `S` type them: started from a
+ * The writes to one entity, from `create`, `upsert` or `write`. `E` and `D` type them: started from a
  * declared entity type or an id tagged with one, a write names only the shape's declared fields and stores
  * their declared types; from a plain id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
  * `entityType`, `createdAt`, `updatedAt`, `role`, `relationDetails`, `trashedAt`) are refused by every attribute write, and
@@ -312,45 +333,45 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * A relation's id (from `findRelations`, `outEdges` or `inEdges`) takes `destroy()` only: a
  * relation is its kind, ends and info, which `updateRelation(id, { source?, target?, info? })` changes.
  */
-export interface WriteBuilder<E extends string = string, S extends EntityShapes = {}, R extends string = string, O extends string = string> {
+export interface WriteBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
   /**
    * Replaces the attribute's value with `v` (a list is one array value). `null` is a value; `undefined` is refused,
    * since `delete(k)` is what removes an attribute
    */
-  set<K extends WritableField<S, E>>(k: K, v: FieldValue<S, E, K>): WriteBuilder<E, S, R, O>;
+  set<K extends WritableField<D['shapes'], E>>(k: K, v: FieldValue<D['shapes'], E, K>): WriteBuilder<E, D>;
   /** `set` for each field, leaving one whose value is `undefined` as it is; refuses them all, writing none, when one is the engine's */
-  setMany(attrs: FieldValues<S, E>): WriteBuilder<E, S, R, O>;
+  setMany(attrs: FieldValues<D['shapes'], E>): WriteBuilder<E, D>;
   /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
-  append<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+  append<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
   /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
-  merge<K extends WritableField<S, E>>(k: K, v: Partial<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+  merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
   /** Removes the field; a declared shape's required fields can't be removed, only replaced with `set` */
-  delete(k: OptionalField<S, E>): WriteBuilder<E, S, R, O>;
+  delete(k: OptionalField<D['shapes'], E>): WriteBuilder<E, D>;
   /** Removes the list's element at `index`; refuses a value that isn't a list */
-  removeAt(k: WritableField<S, E>, index: number): WriteBuilder<E, S, R, O>;
+  removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
   /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
-  removeValue<K extends WritableField<S, E>>(k: K, v: ListElement<FieldValue<S, E, K>>): WriteBuilder<E, S, R, O>;
+  removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
   /**
    * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
    * none is given) is the same edge, and linking it again changes nothing.
    */
-  link(kind: R, target: EARS.EntityId, options?: LinkOptions<R>): WriteBuilder<E, S, R, O>;
+  link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions<D['relKinds']>): WriteBuilder<E, D>;
   /** Removes this entity's edges of the kind, to `target` only when given */
-  unlink(kind: R, target?: EARS.EntityId): WriteBuilder<E, S, R, O>;
+  unlink(kind: D['relKinds'], target?: EARS.EntityId): WriteBuilder<E, D>;
   /** Removes every edge from this entity */
-  unlinkAll(): WriteBuilder<E, S, R, O>;
-  grant(role: O): WriteBuilder<E, S, R, O>;
-  revoke(role: O): WriteBuilder<E, S, R, O>;
+  unlinkAll(): WriteBuilder<E, D>;
+  grant(role: D['roles']): WriteBuilder<E, D>;
+  revoke(role: D['roles']): WriteBuilder<E, D>;
   /** Grants the role here and revokes it from every other entity in `among` */
-  grantExclusive(role: O, among: readonly EARS.EntityId[]): WriteBuilder<E, S, R, O>;
+  grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
   /**
    * Puts the entity in the trash at `at` (now by default), marking it `trashedAt`: it stays stored, with its
    * edges, and queries reach it only through `query.withTrashed` and `query.trashed`. Trashing it again keeps
    * the first time.
    */
-  trash(at?: number): WriteBuilder<E, S, R, O>;
+  trash(at?: number): WriteBuilder<E, D>;
   /** Takes the entity out of the trash */
-  restore(): WriteBuilder<E, S, R, O>;
+  restore(): WriteBuilder<E, D>;
   /**
    * Deletes the entity and every edge to or from it. A relation's id (from `findRelations`) removes that one
    * relation, which is how one edge of several between the same ends goes.
@@ -358,5 +379,5 @@ export interface WriteBuilder<E extends string = string, S extends EntityShapes 
   destroy(): void;
   id(): EARS.EntityId<E>;
   /** The entity's whole row as the builder's writes left it (`getRow`'s): what a `create` reads back */
-  row(): ShapeOf<S, E>;
+  row(): ShapeOf<D['shapes'], E>;
 }

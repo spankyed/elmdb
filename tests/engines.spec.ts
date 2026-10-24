@@ -1,7 +1,7 @@
 // An engine is an instance its holder acts on: two share nothing, and a typed facade acts on whichever engine its
 // getter returns when called. Nothing in this package acts on an engine it wasn't given.
 import { describe, expect, it } from 'vitest';
-import { createEarsEngine, defineEars, type EARS, type Ears, type PersistenceSink } from '../src/index.ts';
+import { createEarsEngine, defineEars, type EARS, type Ears, type PersistenceSink, type UntypedSchema } from '../src/index.ts';
 import { recordingSink } from './engine/helpers.ts';
 
 const types = new Set(['Note']);
@@ -12,7 +12,7 @@ describe('defineEars', () => {
     const first = newEngine();
     const second = newEngine();
     let current = first;
-    const typed = defineEars<{ Note: { title: string } }, 'Note'>(() => current);
+    const typed = defineEars<UntypedSchema & { shapes: { Note: { title: string } }; names: 'Note' }>(() => current);
 
     const id = typed.create('Note', { title: 'first' }).id();
     expect(first.query.ids(id).pickOne()).toMatchObject({ title: 'first' });
