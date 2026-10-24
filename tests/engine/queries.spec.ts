@@ -1,8 +1,8 @@
 // The engine's contract: query builder starts, filters, ordering and terminals
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EARS } from '../../src/index.ts';
-import { engine, type Id, type RelId } from './helpers.ts';
-import type { EngineUnderTest } from './engine-under-test.ts';
+import { engine, isEntityType, isRelationKind, isRole, type Id, type RelId } from './helpers.ts';
+import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
 let t: Record<'a' | 'b' | 'c' | 'd', Id>;
@@ -309,5 +309,73 @@ describe('the value index', () => {
     expect(e.query('Task').where('meta', { k: 1 }).ids()).toEqual([]);
     expect(e.query('Task').where('score', Number.NaN).ids()).toEqual([]);
     expect(e.query.all().where('entityType', 'Project').ids()).toEqual([p]);
+  });
+});
+
+describe('declared indexes', () => {
+  /** An engine whose Tasks declare an index on `status`, with enough Tasks that a walk of them is reported */
+  function indexedTasks() {
+    const warnings: string[] = [];
+    const engine = freshEngine({
+      isEntityType, isRelationKind, isRole,
+      rowRules: (type) => (type === 'Task' ? { required: [], indexes: ['status'] } : undefined),
+      warn: (message) => warnings.push(message),
+    });
+    engine.transact(() => {
+      for (let i = 0; i < 2_500; i++) engine.create('Task', { status: i % 2 ? 'open' : 'done', title: `Task ${i}`, tags: [`t${i % 3}`] });
+    });
+    return { engine, warnings };
+  }
+
+  it('a where on a declared field reads its index; on any other, it filters the rows and finds the same matches', () => {
+    const { engine, warnings } = indexedTasks();
+    const open = engine.query('Task').where('status', 'open').ids();
+    expect(open).toHaveLength(1_250);
+    expect(warnings).toEqual([]);
+    // In the order a walk of the type gives, as the filtered walk finds them
+    expect(open).toEqual(engine.query('Task').where('status', (s) => s === 'open').ids());
+    expect(engine.query('Task').where('title', 'Task 7').ids()).toEqual([engine.query('Task').ids()[7]]);
+    expect(engine.query('Task').where('tags', 't1').count()).toBe(833);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toMatch(/^where\('title'\) filtered 2500 Task rows without an index \(.*queries\.spec\.ts.*\)\. Declare it in the Task entry of apack\.json: "indexes": \["title"\]$/);
+  });
+
+  it('warns once per call site, and not for a type small enough to walk', () => {
+    const { engine, warnings } = indexedTasks();
+    // A first() that finds its row early walks too little to report
+    engine.query('Task').where('title', 'Task 0').first();
+    expect(warnings).toEqual([]);
+    for (let i = 0; i < 3; i++) engine.query('Task').where('title', 'Task 2499').first();
+    expect(warnings).toHaveLength(1);
+    engine.create('Project', { title: 'P' });
+    engine.query('Project').where('title', 'P').ids();
+    expect(warnings).toHaveLength(1);
+  });
+
+  it('keeps a declared index through writes, trash and a unit that throws', () => {
+    const { engine } = indexedTasks();
+    const [first] = engine.query('Task').where('status', 'done').ids();
+    engine.write(first).set('status', 'open');
+    expect(engine.query('Task').where('status', 'done').ids()).not.toContain(first);
+    expect(engine.query('Task').where('status', 'open').ids()).toContain(first);
+    engine.write(first).trash();
+    expect(engine.query('Task').where('status', 'open').ids()).not.toContain(first);
+    expect(engine.query.withTrashed('Task').where('status', 'open').ids()).toContain(first);
+    expect(() => engine.transact(() => {
+      engine.write(first).set('status', 'gone');
+      throw new Error('stop');
+    })).toThrow('stop');
+    expect(engine.query.withTrashed('Task').where('status', 'gone').ids()).toEqual([]);
+    expect(engine.query.withTrashed('Task').where('status', 'open').ids()).toContain(first);
+  });
+
+  it('finds a value no index holds, a long string or an infinite number, by filtering the rows', () => {
+    const { engine } = indexedTasks();
+    const long = 'x'.repeat(300);
+    const [a, b] = engine.query('Task').limit(2).ids();
+    engine.write(a).set('status', long);
+    engine.write(b).set('status', Infinity);
+    expect(engine.query('Task').where('status', long).ids()).toEqual([a]);
+    expect(engine.query('Task').where('status', Infinity).ids()).toEqual([b]);
   });
 });

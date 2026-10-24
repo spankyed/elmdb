@@ -1,5 +1,5 @@
 import { EARS } from './entities.ts';
-import { entityTypeOf, type AttributeStorage } from './attribute-storage.ts';
+import type { AttributeStorage } from './attribute-storage.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 export function getTimestamp(): number {
@@ -48,7 +48,7 @@ export function createEntityCounters(storage: AttributeStorage) {
       entityCreated(id, SEQUENCE_TYPE);
     }
     // A number a row took for itself is skipped, which the value index answers without a walk
-    const taken = (n: number) => [...holders(kind, `${head}${n}`)].some((holder) => entityTypeOf(holder) === entityType);
+    const taken = (n: number) => holders(entityType, kind, `${head}${n}`).size > 0;
     while (taken(next)) next++;
     putAttr(id, NEXT, next + 1);
     return `${head}${next}`;

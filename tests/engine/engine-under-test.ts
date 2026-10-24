@@ -8,6 +8,7 @@ export interface EngineUnderTestOptions {
   isRole: (name: string) => boolean;
   rowRules?: EARSRuntimeDeps['rowRules'];
   persistence?: PersistenceSink;
+  warn?: EARSRuntimeDeps['warn'];
 }
 
 export function freshEngine(options: EngineUnderTestOptions): EarsEngine {

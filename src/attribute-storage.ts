@@ -64,13 +64,14 @@ export function createAttributeStorage({ persistence, journal }: { persistence: 
   // The entities holding `trashedAt`, kept by `place`, so what undo and hydration write keeps it too
   const trashed = new Set<EARS.EntityId>();
   /**
-   * The value index, per attribute kind: a value → the entities holding it, or holding a list with it as an element
-   * (multikey). Built for a kind on its first read (`holders`), then kept by `place`, the one write every change —
-   * a unit's undo, hydration, a destroy — goes through. An object value isn't indexed.
+   * The value indexes, per entity type and attribute kind: a value → the type's entities holding it, or holding a
+   * list with it as an element (multikey). One is built from its type's rows on its first read (`holders`), which only
+   * a declared index gets, then kept by `place`, the one write every change — a unit's undo, hydration, a destroy —
+   * goes through. An object value isn't indexed.
    */
   // A value one entity holds keeps that id rather than a set of one: most values of a unique field (a title, a short
   // code) are held once, and a set per value is what a write would otherwise allocate
-  const valueIndex = new Map<EARS.AttrKind, Map<unknown, EARS.EntityId | Set<EARS.EntityId>>>();
+  const valueIndex = new Map<EARS.Entity, Map<EARS.AttrKind, Map<unknown, EARS.EntityId | Set<EARS.EntityId>>>>();
   // What `holders` answers for a value nobody holds; never written to, since only `indexValue` adds and it adds to its own
   const none: ReadonlySet<EARS.EntityId> = new Set();
   function clear() {
@@ -82,8 +83,7 @@ export function createAttributeStorage({ persistence, journal }: { persistence: 
   }
 
   const indexKey = (index: Map<unknown, EARS.EntityId | Set<EARS.EntityId>>, id: EARS.EntityId, key: unknown, add: boolean) => {
-    // An object is never a key, whether the value or a list's element
-    if (key !== null && typeof key === 'object') return;
+    if (!isIndexKey(key)) return;
     const held = index.get(key);
     if (add) {
       if (held === undefined) index.set(key, id);
@@ -102,12 +102,17 @@ export function createAttributeStorage({ persistence, journal }: { persistence: 
     else indexKey(index, id, value, add);
   };
 
-  /** The entities holding `value` under `kind`, or a list with it (a primitive: an object is never indexed) */
-  const holders = (kind: EARS.AttrKind, value: unknown): ReadonlySet<EARS.EntityId> => {
-    let index = valueIndex.get(kind);
+  /** The type's entities holding `value` under `kind`, or a list with it (a primitive: an object is never indexed) */
+  const holders = (type: EARS.Entity, kind: EARS.AttrKind, value: unknown): ReadonlySet<EARS.EntityId> => {
+    let byKind = valueIndex.get(type);
+    if (!byKind) valueIndex.set(type, byKind = new Map());
+    let index = byKind.get(kind);
     if (!index) {
-      valueIndex.set(kind, index = new Map());
-      for (const [id, row] of rows) if (owns(row, kind)) indexValue(index, id, row[kind], true);
+      byKind.set(kind, index = new Map());
+      for (const id of entityIndex.get(type)?.keys() ?? []) {
+        const row = rows.get(id);
+        if (row && owns(row, kind)) indexValue(index, id, row[kind], true);
+      }
     }
     const held = index.get(value);
     return held === undefined ? none : typeof held === 'string' ? new Set([held]) : held;
@@ -120,7 +125,7 @@ export function createAttributeStorage({ persistence, journal }: { persistence: 
   const place = (id: EARS.EntityId, kind: EARS.AttrKind, next: EARS.AttributeValue | typeof ABSENT) => {
     let row = rows.get(id);
     if (valueIndex.size > 0) {
-      const index = valueIndex.get(kind);
+      const index = valueIndex.get(entityTypeOf(id))?.get(kind);
       if (index) {
         if (row && owns(row, kind)) indexValue(index, id, row[kind], false);
         if (next !== ABSENT) indexValue(index, id, next, true);
@@ -391,6 +396,14 @@ export interface SchemaStats {
   /** Per role, the entities holding it */
   roles: Record<string, number>;
 }
+
+/**
+ * Whether a value is one an index holds, a list's element or a whole value: `null`, a boolean, a finite number, or a
+ * string up to 256 characters. Anything else — an object, a longer string — is found by filtering a type's rows
+ */
+export const isIndexKey = (value: unknown): boolean =>
+  value === null || typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))
+  || (typeof value === 'string' && value.length <= 256);
 
 /** Whether a stored value is `v`, or a list containing it: what `where(k, v)` matches */
 export const holds = (value: unknown, v: unknown) =>

@@ -199,6 +199,7 @@ export interface EARSRuntimeDeps {
     isRole: (v: string) => boolean;
     persistence?: PersistenceSink;
     rowRules?: (type: string) => RowRules | undefined;
+    warn?: (message: string) => void;
 }
 
 // @public
@@ -466,6 +467,7 @@ export interface RowIdentity {
 
 // @public
 export interface RowRules {
+    indexes?: readonly string[];
     required: readonly string[];
     shortCode?: string;
 }

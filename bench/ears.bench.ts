@@ -22,7 +22,7 @@ const sink: PersistenceSink = {
   onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
 // Task rows are numbered T-<n>, as an app's shapes number theirs
-const engine = createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T' } : undefined) });
+const engine = createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T', indexes: ['status', 'title'] } : undefined) });
 const { admin } = engine;
 
 const task = (i: number) => `Task-${i}` as Id;
@@ -71,6 +71,11 @@ describe('queries', () => {
   // A lookup by a value one entity holds, as a note's links and a document's short code are resolved
   bench('1,000 where lookups by a unique value', () => {
     for (let i = 0; i < 1000; i++) engine.query('Task').where('title', `Row ${i * 37}`).first();
+  }, { iterations: 10, time: 0 });
+
+  // A lookup on a field the type declares no index for, matching nothing: a filtered walk of the whole type
+  bench('10 where lookups on an unindexed field', () => {
+    for (let i = 0; i < 10; i++) engine.query('Task').where('rank', -1).first();
   }, { iterations: 10, time: 0 });
 
   bench('100 withRole lookups', () => {

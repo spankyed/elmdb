@@ -79,6 +79,11 @@ export interface EARSRuntimeDeps {
   isRole: (v: string) => boolean;
   /** What a created row of a type is held to; nothing by default — an engine given no shapes knows of no rule */
   rowRules?: (type: string) => RowRules | undefined;
+  /**
+   * Told when a query does something its data will make slow — a `where` filtering thousands of a type's rows for
+   * want of an index — once per call site. Nothing by default; the app passes one in development
+   */
+  warn?: (message: string) => void;
 }
 
 /**
@@ -94,6 +99,11 @@ export interface RowRules {
    * for a type and prefix, and a type with none holds no short code
    */
   shortCode?: string;
+  /**
+   * The fields a `where(field, value)` on the type reads an index for. The engine indexes `role` and `shortCode` on
+   * every type; a `where` on any other field filters the type's rows, finding the same matches
+   */
+  indexes?: readonly string[];
 }
 
 /**

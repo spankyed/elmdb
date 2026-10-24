@@ -3,7 +3,7 @@ import { EARS } from './entities.ts';
 import type { QueryBuilder, RelationEdge } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import { SEQUENCE_TYPE } from './numbering.ts';
-import { entityTypeOf, holds, setField } from './attribute-storage.ts';
+import { holds, isIndexKey, setField } from './attribute-storage.ts';
 
 /** A query started from types and not yet walked */
 interface TypeStart {
@@ -65,7 +65,19 @@ export interface Query extends QueryEntries {
 }
 
 /** An engine's untyped query entry points, over its attribute storage and its relations */
-export function createQuery({ storage, relations, isEntityType, names }: { storage: AttributeStorage; relations: Relations; isEntityType: (name: string) => boolean; names: NameChecks }): Query {
+/** How many rows an unindexed `where` filters before the engine's creator is told (`warn`) the field wants an index */
+export const UNINDEXED_WALK_WARNING = 2_000;
+
+export function createQuery({ storage, relations, isEntityType, names, indexed, warn }: {
+  storage: AttributeStorage;
+  relations: Relations;
+  isEntityType: (name: string) => boolean;
+  names: NameChecks;
+  /** Whether a `where` on the type's `kind` reads an index */
+  indexed: (type: EARS.Entity, kind: EARS.AttrKind) => boolean;
+  /** Told once per call site that a `where` filtered `UNINDEXED_WALK_WARNING` rows or more of a type without an index */
+  warn?: (message: string) => void;
+}): Query {
   const {
     getAllEntities, getEntitiesOfType, entitiesOfType, hasEntity, isLive, isTrashed, holders, orderOf, getAttr, hasAttr, getRow,
   } = storage;
@@ -95,9 +107,27 @@ export function createQuery({ storage, relations, isEntityType, names }: { stora
     return [...new Set(types as EARS.Entity[])];
   };
 
-  // A value the value index answers for: a primitive, compared as `===` does (so not NaN), under a stored kind
-  const indexable = (kind: EARS.AttrKind, v: unknown) =>
-    kind !== ENTITY_TYPE && (v === null || ['string', 'number', 'boolean'].includes(typeof v)) && !Number.isNaN(v);
+  /**
+   * Tells the engine's creator, once per call site, that a `where` filtered a type's rows for want of an index: the
+   * site is the first frame outside this module's directory (`src/` or `dist/`, or the bundle it was built into), so
+   * the message names the caller's code. The directory is read off this frame rather than `import.meta`, which a
+   * CommonJS bundle leaves empty
+   */
+  const warnedSites = new Set<string>();
+  const ownDir = /\(?((?:file:\/\/)?[^()\s]*?)[\\/][^\\/]+:\d+:\d+\)?$/.exec(new Error().stack?.split('\n')[1]?.trim() ?? '')?.[1];
+  const own = (frame: string) => ownDir !== undefined && frame.includes(ownDir);
+  const unindexed = (type: EARS.Entity, field: string, walked: number) => {
+    if (!warn) return;
+    const site = new Error().stack?.split('\n').slice(1).find((frame) => !own(frame))?.trim() ?? 'unknown';
+    const key = `${type}\x1F${field}\x1F${site}`;
+    if (warnedSites.has(key)) return;
+    warnedSites.add(key);
+    warn(`where('${field}') filtered ${walked} ${type} rows without an index (${site}). `
+      + `Declare it in the ${type} entry of apack.json: "indexes": ["${field}"]`);
+  };
+
+  // A value an index holds (`isIndexKey`), under a stored kind: `entityType` is read from the id
+  const indexable = (kind: EARS.AttrKind, v: unknown) => kind !== ENTITY_TYPE && isIndexKey(v);
 
   const collator = new Intl.Collator();
   /**
@@ -171,17 +201,26 @@ export function createQuery({ storage, relations, isEntityType, names }: { stora
       });
 
       /**
-       * The start's entities holding `v` under `kind`, as `holds` would find them: from the index, in the order a walk
-       * of the types gives
+       * The start's entities holding `v` under `kind`, as `test` finds them, in the order a walk of the types gives:
+       * from a type's index where it declares one, and by filtering its rows where it doesn't
        */
-      const holding = (kind: EARS.AttrKind, v: unknown, start: TypeStart) => qxImpl({
+      const holding = (field: string, kind: EARS.AttrKind, v: unknown, start: TypeStart, test: (id: EARS.EntityId) => boolean) => qxImpl({
         run(visit) {
-          const rank = new Map(start.types.map((t, i) => [t, i]));
-          const typeRank = (id: EARS.EntityId) => rank.get(entityTypeOf(id)) ?? -1;
-          const found = [...holders(kind, v)]
-            .filter((id) => typeRank(id) !== -1 && alive(id))
-            .sort((a, b) => typeRank(a) - typeRank(b) || orderOf(a) - orderOf(b));
-          for (const id of found) if (!visit(id)) return;
+          for (const type of start.types) {
+            if (indexed(type, kind)) {
+              const found = [...holders(type, kind, v)].filter(alive).sort((a, b) => orderOf(a) - orderOf(b));
+              for (const id of found) if (!visit(id)) return;
+              continue;
+            }
+            let walked = 0;
+            const ended = entitiesOfType(type, (id) => {
+              if (!alive(id)) return true;
+              walked++;
+              return !test(id) || visit(id);
+            });
+            if (walked >= UNINDEXED_WALK_WARNING) unindexed(type, field, walked);
+            if (!ended) return;
+          }
         },
       });
 
@@ -292,17 +331,11 @@ export function createQuery({ storage, relations, isEntityType, names }: { stora
             throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
           }
           const kind = EARS.AttrKind.Custom(k);
-          if (indexable(kind, v)) {
-            if (start) return holding(kind, v, start);
-            return keepIds(() => {
-              const found = holders(kind, v);
-              return (i) => found.has(i);
-            });
-          }
           // A value matches itself or a list holding it; a predicate is given the whole value
           const test = typeof v === 'function'
             ? (i: EARS.EntityId) => hasAttr(i, kind) && (v as (value: unknown) => boolean)(getAttr(i, kind))
             : (i: EARS.EntityId) => holds(getAttr(i, kind), v);
+          if (start && indexable(kind, v)) return holding(k, kind, v, start, test);
           return keepIds(() => test);
         },
 
@@ -318,11 +351,9 @@ export function createQuery({ storage, relations, isEntityType, names }: { stora
 
         withRole: (r: string) => {
           names.role(r, 'withRole');
-          if (start) return holding(EARS.AttrKind.Role, r, start);
-          return keepIds(() => {
-            const found = holders(EARS.AttrKind.Role, r);
-            return (i) => found.has(i);
-          });
+          const test = (i: EARS.EntityId) => holds(getAttr(i, EARS.AttrKind.Role), r);
+          if (start) return holding(EARS.AttrKind.Role, EARS.AttrKind.Role, r, start, test);
+          return keepIds(() => test);
         },
 
         linkedWith: (other: EARS.EntityId) => keepIds(() => {

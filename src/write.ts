@@ -71,7 +71,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     if (typeof brought !== 'string' || !new RegExp(`^${prefix}-[1-9][0-9]*$`).test(brought)) {
       throw new EarsError('INVALID_SHORT_CODE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): a ${type}'s short code is ${prefix}-<n>`);
     }
-    if (holders(SHORT_CODE, brought).size > 0) {
+    if (holders(type as EARS.Entity, SHORT_CODE, brought).size > 0) {
       throw new EarsError('SHORT_CODE_IN_USE', `create(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(brought)} }): another entity holds this short code`);
     }
     return () => brought;

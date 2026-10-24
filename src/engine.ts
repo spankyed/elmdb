@@ -1,7 +1,7 @@
 // An EARS engine: its stores, indexes and caches, and the operations over them as the engine's own members, with the
 // creator's privileges beside them in `admin`. A program is handed the engine typed as `Ears`, which has no `admin`:
 // the faces define the contract, not a security boundary (packs run in-process).
-import type { EARS } from './entities.ts';
+import { EARS } from './entities.ts';
 import { noopSink, type EARSRuntimeDeps } from './runtime.ts';
 import { createAttributeStorage, type EntityRow, type SchemaStats } from './attribute-storage.ts';
 import { createQuery, type Query } from './query.ts';
@@ -88,12 +88,16 @@ export interface EarsEngine extends Ears {
  * a role write or a query by role may name; `persistence` receives every write (nothing by default). Whoever holds the engine calls its operations on it;
  * the app's is the SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, rowRules = () => undefined }: EARSRuntimeDeps): EarsEngine {
+export function createEarsEngine({ persistence = noopSink, isEntityType, isRelationKind, isRole, rowRules = () => undefined, warn }: EARSRuntimeDeps): EarsEngine {
   const names = createNameChecks({ isRelationKind, isRole });
   const { journal, unitSink, transact } = createJournal(persistence);
   const storage = createAttributeStorage({ persistence: unitSink, journal });
   const relations = createRelations({ persistence: unitSink, journal });
-  const query = createQuery({ storage, relations, isEntityType, names });
+  // The engine's own fields are indexed on every type; any other, where the type's row rules declare it
+  const SHORT_CODE = EARS.AttrKind.Custom('shortCode');
+  const indexed = (type: EARS.Entity, kind: EARS.AttrKind) =>
+    kind === EARS.AttrKind.Role || kind === SHORT_CODE || (rowRules(type)?.indexes?.includes(kind) ?? false);
+  const query = createQuery({ storage, relations, isEntityType, names, indexed, warn });
   const hierarchy = createHierarchy({ query, names });
   const counters = createEntityCounters(storage);
   const { create, upsert, write, updateRelation, removeRelation } = createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal });
