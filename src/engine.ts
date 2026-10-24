@@ -56,8 +56,6 @@ export interface Ears {
 export interface EarsAdmin {
   /** Empties the engine's attributes, entity index and relation index */
   clear(): void;
-  /** An attribute's value as stored, or undefined when the entity holds none (the store reads relation details through it) */
-  getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | undefined;
   /** Every entity's id, the engine's own (relations, sequences) and those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, the engine's own types and those in the trash included: a raw listing */
@@ -113,7 +111,6 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
 
   const admin: EarsAdmin = {
     clear: storage.clear,
-    getAttr: (id, kind) => (storage.hasAttr(id, kind) ? storage.getAttr(id, kind) : undefined),
     getAllEntities: storage.getAllEntities,
     getEntitiesOfType: storage.getEntitiesOfType,
     bulkLoadAttr: storage.bulkLoadAttr,

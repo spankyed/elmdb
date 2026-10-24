@@ -150,7 +150,6 @@ export interface EarsAdmin {
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
-    getAttr(id: EARS.EntityId, kind: EARS.AttrKind): EARS.AttributeValue | undefined;
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     updateRelation(relId: EARS.EntityId, patch: {
