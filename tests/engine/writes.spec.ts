@@ -401,6 +401,16 @@ describe('rows', () => {
     expect(e.getRow(id)).toEqual({ ...row, trashedAt: 7 });
     expect(e.query.ids(id).pickOne()).toBeUndefined();
   });
+
+  it('a field named __proto__ is a field like any other', () => {
+    const id = e.create('Task').set('__proto__', { x: 1 }).id();
+    expect(e.getAttr(id, '__proto__')).toEqual({ x: 1 });
+    const row = e.getRow(id)!;
+    expect(Object.getOwnPropertyDescriptor(row, '__proto__')?.value).toEqual({ x: 1 });
+    expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
+    e.write(id).delete('__proto__');
+    expect(e.getAttr(id, '__proto__')).toBeUndefined();
+  });
 });
 
 describe('rows', () => {

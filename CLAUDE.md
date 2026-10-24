@@ -15,7 +15,7 @@ EARS, the entity-attribute-relation graph store behind apack's data: the engine,
 |---|---|
 | `index.ts` | The root entry: `createEarsEngine`, its types, the pure helpers, the persistence port, `EARS`, `defineEars` and the typed facade types. Nothing it exports acts on an engine it wasn't given |
 | `engine.ts` | `createEarsEngine({ persistence?, isEntityType, isRelationKind, isRole, rowRules? })` and the faces' types (`EarsEngine`, `Ears`, `EarsAdmin`). It composes the factories below |
-| `attribute-storage.ts` | `createAttributeStorage`: attributes, the entity index, roles, and every write's call to the persistence sink; `entityTypeOf`, the one reader of an id's type |
+| `attribute-storage.ts` | `createAttributeStorage`: attributes (a row per entity, a plain object of its fields), the entity index, roles, and every write's call to the persistence sink; `entityTypeOf`, the one reader of an id's type |
 | `relation-index.ts`, `edge-store.ts`, `relations.ts` | The relation index by kind, relation writes over it (`createEdgeStore`), and relation reads (`findRelations`) |
 | `query.ts` | `createQuery`: the query entry points (`query(type)`, `query.ids`, `query.all`; exported untyped as `untypedQuery`) and the builder, `b64Encode`/`b64Decode` |
 | `write.ts` | `createWrites`: `create`, `upsert`, `write` and the write builder |
