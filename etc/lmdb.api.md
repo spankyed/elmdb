@@ -204,6 +204,9 @@ export type RelationRecord = {
 };
 
 // @public
+export const REMOVE_ATTRIBUTE: unique symbol;
+
+// @public
 export function rewriteAttributes(basePath: string, rewrite: (kind: string, id: string, value: unknown) => unknown, input?: {
     removeEntities?: readonly string[];
 }): AttributeRewrite;

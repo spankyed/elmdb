@@ -171,17 +171,20 @@ function withEnv<T>(basePath: string, from: number | undefined, fn: (env: { root
 export interface AttributeRewrite {
   /** Attribute rows given a new value */
   rewritten: number;
-  /** Attribute rows removed with their entity */
+  /** Attribute rows removed: with their entity, or by the rewrite answering `REMOVE_ATTRIBUTE` */
   removed: number;
   /** Entity rows removed (`removeEntities`) */
   removedEntities: number;
 }
 
+/** What a `rewriteAttributes` rewrite answers to remove the attribute row it was given */
+export const REMOVE_ATTRIBUTE: unique symbol = Symbol('REMOVE_ATTRIBUTE');
+
 /**
  * Rewrites the attribute rows of a copy of a database in this version's format, in place and in one transaction: a
  * data change made explicitly, on a copy, as a format conversion is — never at boot. `rewrite` is given each
- * attribute's kind, entity id and value, as a read gives it back, and answers its new value, or undefined to leave
- * it; `removeEntities` names entities to remove, their rows and every attribute of theirs.
+ * attribute's kind, entity id and value, as a read gives it back, and answers its new value, undefined to leave
+ * it, or `REMOVE_ATTRIBUTE` to remove it; `removeEntities` names entities to remove, their rows and every attribute of theirs.
  * Refuses a database in another format.
  */
 export function rewriteAttributes(
@@ -203,6 +206,7 @@ export function rewriteAttributes(
         if (removing.has(id)) { attrs.remove(key); result.removed++; continue; }
         const next = rewrite(kind, id, decodeAttr(value));
         if (next === undefined) continue;
+        if (next === REMOVE_ATTRIBUTE) { attrs.remove(key); result.removed++; continue; }
         attrs.put(key, encode(next));
         result.rewritten++;
       }

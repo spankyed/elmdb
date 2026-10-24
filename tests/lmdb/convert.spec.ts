@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION, openRecordStore } from '../../src/lmdb/index.ts';
+import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION, openRecordStore, REMOVE_ATTRIBUTE, rewriteAttributes } from '../../src/lmdb/index.ts';
 
 const SEP = '\x1F';
 const dirs: string[] = [];
@@ -136,4 +136,26 @@ it('refuses a record store, whose format is its own, and leaves it as it was', (
   const reopened = openRecordStore({ path: dir, indexes: {} });
   expect(reopened.get('R-1')).toEqual({ id: 'R-1' });
   reopened.close();
+});
+
+it('rewrites, removes and leaves each attribute as its rewrite answers, and removes the named entities whole', () => {
+  const dir = format1();
+  convertToCurrentFormat(dir);
+  const seen: string[] = [];
+  const result = rewriteAttributes(dir, (kind, id, value) => {
+    seen.push(`${kind} ${id}`);
+    if (kind === 'title') return `${value as string}, renamed`;
+    if (kind === 'createdAt' && id === 'Note-2') return REMOVE_ATTRIBUTE;
+    return undefined;
+  }, { removeEntities: ['Note-1'] });
+  // Note-1's own rows go with it and are never offered to the rewrite
+  expect(seen).toEqual([`createdAt Note-2`]);
+  expect(result).toEqual({ rewritten: 0, removed: 3, removedEntities: 1 });
+  expect(read(dir)).toMatchObject({ entities: { 'Note-2': { type: 'Note' } }, attrKeys: [] });
+  expect(read(dir).entities).not.toHaveProperty('Note-1');
+
+  const other = format1();
+  convertToCurrentFormat(other);
+  expect(rewriteAttributes(other, (kind, _id, value) => (kind === 'title' ? `${value as string}, renamed` : undefined))).toEqual({ rewritten: 1, removed: 0, removedEntities: 0 });
+  expect(Object.values(read(other).attrs).map(({ v }) => v)).toContain('kept, renamed');
 });
