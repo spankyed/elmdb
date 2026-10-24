@@ -33,6 +33,7 @@ export interface Format3Conversion {
 export interface Format4Conversion {
     // (undocumented)
     attributes: number;
+    emptyAttributes: number;
     // (undocumented)
     entities: number;
     invalidRelations: number;
