@@ -1,6 +1,6 @@
 import type { RelationIndexStore } from './relation-index.ts';
 import { EARS } from './entities.ts';
-import { idSuffix, isPlainObject } from './utils.ts';
+import { idSuffix, isPlainObject, sameValue } from './utils.ts';
 import type { Journal } from './journal.ts';
 import type { PersistenceSink } from './runtime.ts';
 import { EarsError } from './errors.ts';
@@ -279,7 +279,7 @@ export function createAttributeStorage({ relations, persistence, journal }: { re
         if (fromTarget.has(existingRelId)) {
           const existingRel = getAttr(existingRelId, EARS.AttrKind.RelationDetails) as EARS.RelationDetail;
           // The same edge: linking it again is a no-op, which keeps its id and its place among its siblings
-          if (info === undefined || JSON.stringify(existingRel.info) === JSON.stringify(info)) return existingRelId;
+          if (info === undefined || sameValue(existingRel.info, info)) return existingRelId;
         }
       }
     }

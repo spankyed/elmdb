@@ -62,6 +62,16 @@ describe('links', () => {
     expect(e.findRelations({ source: a, target: b })).toHaveLength(2);
   });
 
+  it('an info with the same fields in another order is the same edge', () => {
+    const [a, b] = [task('A'), task('B')];
+    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [1, 2], z: 'z' } } });
+    e.write(a).link('blocks', b, { info: { at: { z: 'z', y: [1, 2] }, x: 1 } });
+    expect(e.findRelations()).toHaveLength(1);
+    // A list's order is its value
+    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [2, 1], z: 'z' } } });
+    expect(e.findRelations()).toHaveLength(2);
+  });
+
   it('refuses options it does not know, which is info passed where the options go', () => {
     const [a, b] = [task('A'), task('B')];
     const info: any = { weight: 2 };
