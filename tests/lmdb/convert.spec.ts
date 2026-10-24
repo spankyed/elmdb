@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION } from '../../src/lmdb/index.ts';
+import { convertToCurrentFormat, convertToFormat2, convertToFormat3, LMDB_FORMAT_VERSION, openRecordStore } from '../../src/lmdb/index.ts';
 
 const SEP = '\x1F';
 const dirs: string[] = [];
@@ -124,4 +124,16 @@ it('converts to the current format a step at a time, and leaves a current one al
   expect(convertToCurrentFormat(dir).map(({ to }) => to)).toEqual([2, 3]);
   expect(read(dir)).toMatchObject({ attrKeys: [`createdAt${SEP}Note-1`, `createdAt${SEP}Note-2`, `title${SEP}Note-1`], format: LMDB_FORMAT_VERSION });
   expect(convertToCurrentFormat(dir)).toEqual([]);
+});
+
+it('refuses a record store, whose format is its own, and leaves it as it was', () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-records-')), 'records');
+  dirs.push(path.dirname(dir));
+  const records = openRecordStore({ path: dir, indexes: {} });
+  records.put({ id: 'R-1' });
+  records.close();
+  expect(() => convertToCurrentFormat(dir)).toThrow('are a "records" store, not an EARS database');
+  const reopened = openRecordStore({ path: dir, indexes: {} });
+  expect(reopened.get('R-1')).toEqual({ id: 'R-1' });
+  reopened.close();
 });

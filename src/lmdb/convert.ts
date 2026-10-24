@@ -145,12 +145,18 @@ function recordedFormat(basePath: string): unknown {
   return withEnv(basePath, undefined, ({ meta }) => meta.get('format') ?? 1);
 }
 
-/** Opens the environment, refusing one that records a format other than `from` (when given), and closes it after */
+/**
+ * Opens the environment, refusing another kind's or one that records a format other than `from` (when given), and
+ * closes it after
+ */
 function withEnv<T>(basePath: string, from: number | undefined, fn: (env: { root: RootDatabase; meta: Database<unknown> }) => T): T {
   if (!fs.existsSync(path.join(basePath, 'data.mdb'))) throw new Error(`No LMDB database at ${basePath}`);
   const root = open({ path: basePath, maxDbs: 8, compression: true });
   try {
     const meta = root.openDB({ name: 'meta', encoding: 'json' }) as Database<unknown>;
+    // Another kind of environment (a record store) records its own format, which no step here converts
+    const kind = meta.get('kind');
+    if (kind !== undefined) throw new Error(`The files at ${basePath} are a ${JSON.stringify(kind)} store, not an EARS database`);
     const recorded = meta.get('format') ?? 1;
     if (from !== undefined && recorded !== from) {
       throw new Error(`The database at ${basePath} records storage format ${JSON.stringify(recorded)}; this step converts format ${from}`);
