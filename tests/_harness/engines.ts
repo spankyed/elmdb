@@ -32,6 +32,7 @@ export function refusable(backend: KvBackend): { backend: KvBackend; refusing: (
             scan: (...args) => writer.scan(...args),
             put: (key, value) => { wrote = true; writer.put(key, value); },
             del: (key) => { wrote = true; writer.del(key); },
+            clear: () => { wrote = true; writer.clear(); },
           });
           if (refusing && wrote) {
             refusing = false;

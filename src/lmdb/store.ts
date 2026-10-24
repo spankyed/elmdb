@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { open, type Database, type RootDatabase } from 'lmdb';
-import { createOrderedKV, type Key, type OrderedKV } from '../kv.ts';
+import { createOrderedKV, type OrderedKV } from '../kv.ts';
 import { createLmdbKVBackend } from './kv-backend.ts';
 import { checkStamp } from './stamp.ts';
 
@@ -194,8 +194,6 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
   /** Writes the marker of a durable commit: a unit with no write wouldn't commit, nor so sync */
   const SYNCED = ['m', 'synced'] as const;
 
-  /** Every key in the database, collected, since the body removes them */
-  const everyKey = (database: Database<Uint8Array, Uint8Array>) => [...database.getKeys()] as Uint8Array[];
 
   return {
     kv,
@@ -215,7 +213,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
       const from = openEnvironment(source, { readOnly: true });
       try {
         backend.write((w) => {
-          for (const key of everyKey(db)) w.del(key);
+          w.clear();
           for (const { key, value } of from.db.getRange()) w.put(key as Uint8Array, value as Uint8Array);
         }, { durable: true });
       } finally {
@@ -225,9 +223,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     reset() {
       refuseReadOnly('be reset');
       kv.write((w) => {
-        const keys: Key[] = [];
-        w.range({ values: false }, (key) => { keys.push(key); });
-        for (const key of keys) w.del(key);
+        w.clear();
         w.put(SYNCED, Date.now());
       }, { durable: true });
     },

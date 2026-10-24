@@ -75,6 +75,8 @@ export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array,
           ...bytes(db),
           put: (key, value) => { wrote = true; db.putSync(key as Buffer, value as Buffer); },
           del: (key) => { wrote = true; db.removeSync(key as Buffer); },
+          // mdb_drop, emptying the database in this transaction: inside one, lmdb-js runs clearSync's in it
+          clear: () => { wrote = true; db.clearSync(); },
         };
         result = fn(writer);
       }, options?.durable ? COMMIT_DURABLE : COMMIT);

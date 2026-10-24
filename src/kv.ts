@@ -48,6 +48,11 @@ export interface KvWriter extends KvReader {
   put(key: Key, value: unknown): void;
   /** Removes the entry at `key`; a key with none is ignored */
   del(key: Key): void;
+  /**
+   * Removes every entry, as part of the unit: a reader sees the store as it was or as the unit leaves it. Refused in a
+   * unit inside another, whose rollback would have to put every entry back
+   */
+  clear(): void;
 }
 
 /** An ordered key-value store: read snapshots and write units over it */
@@ -92,6 +97,8 @@ export interface ByteReader {
 export interface ByteWriter extends ByteReader {
   put(key: Uint8Array, value: Uint8Array): void;
   del(key: Uint8Array): void;
+  /** Removes every entry, in the unit */
+  clear(): void;
 }
 
 /** What a backend supplies: a read snapshot, and a write unit that commits on return and aborts on a throw */
@@ -287,6 +294,10 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
         remember(encoded);
         bytes.del(encoded);
       },
+      clear() {
+        if (savepoints.length > 0) throw new Error('clear() inside a unit inside another: rolling it back would put every entry back');
+        bytes.clear();
+      },
     };
   };
 
@@ -449,6 +460,13 @@ export function createMemoryKVBackend(): KvBackend {
   const touched = new Set<string>();
 
   const toName = (bytes: Uint8Array) => byteString(bytes);
+  /** Every name in a sorted list, collected, since a clear removes the names it walks */
+  const every = (list: SortedStrings) => {
+    const next = list.walk('', undefined, false);
+    const names: string[] = [];
+    for (let name = next(); name !== undefined; name = next()) names.push(name);
+    return names;
+  };
   const toBytes = (name: string) => Buffer.from(name, 'latin1');
 
   const at = (name: string, snapshot: number): Uint8Array | undefined => {
@@ -542,6 +560,11 @@ export function createMemoryKVBackend(): KvBackend {
           // A copy: the encoder's bytes may be reused once this returns
           put: (key, value) => hold(toName(key), value.slice()),
           del: (key) => hold(toName(key), undefined),
+          // Every key the unit sees, removed in it: what it wrote, and what was committed when it began
+          clear: () => {
+            for (const name of every(pending.names)) hold(name, undefined);
+            for (const name of every(keys)) if (at(name, base) !== undefined) hold(name, undefined);
+          },
         });
         if (pending.bytes.size > 0) {
           version++;

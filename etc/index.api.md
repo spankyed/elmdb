@@ -32,6 +32,7 @@ export interface ByteReader {
 
 // @public
 export interface ByteWriter extends ByteReader {
+    clear(): void;
     // (undocumented)
     del(key: Uint8Array): void;
     // (undocumented)
@@ -310,6 +311,7 @@ export interface KvReader {
 
 // @public
 export interface KvWriter extends KvReader {
+    clear(): void;
     del(key: Key): void;
     // (undocumented)
     put(key: Key, value: unknown): void;

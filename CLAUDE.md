@@ -116,7 +116,8 @@ Held by the types and the engine specs, which say more than a rule over names co
   returns the store: `kv` (which an engine is created on), `path`, `readOnly`, `syncs`, `readers()`, `durable()`,
   `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, compacted — the pages
   deletes freed left behind — which is what a backup takes), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
-  staying open), `reset()` (every entry removed, in one durable unit) and `close()`. Nothing opens on import.
+  staying open), `reset()` (every entry removed, in one durable unit; both empty the database with the writer's
+  `clear()`, which on LMDB is `clearSync` — `mdb_drop`, run in the unit's transaction — rather than a delete per key) and `close()`. Nothing opens on import.
   `readOnly` opens existing files without writing: a write, `reset()` and `replaceWith()` throw naming why.
 - **A unit is visible as it commits, and durable within the window.** Each unit commits without a sync, which is what
   makes a write cost microseconds, and survives the process crashing once it returns (`tests/lmdb/store.spec.ts`

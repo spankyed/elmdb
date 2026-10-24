@@ -149,6 +149,29 @@ describe.each([
     expect(kv.read((r) => r.get(['nested']))).toBeUndefined();
   });
 
+  it('clears every entry in its unit: seen by the unit at once, by others as it commits, and not at all when it throws', () => {
+    const kv = make();
+    kv.write((w) => { for (let i = 0; i < 50; i++) w.put(['k', i], i); });
+    // A unit that clears and then throws leaves every entry: the clear is the unit's, not a transaction of its own
+    expect(() => kv.write((w) => { w.clear(); throw new Error('stop'); })).toThrow('stop');
+    expect(keysOf(kv, { prefix: ['k'] })).toHaveLength(50);
+
+    kv.write((w) => {
+      w.clear();
+      expect(w.get(['k', 0]), 'the unit reads its own clear').toBeUndefined();
+      expect(keysOf(kv, { prefix: ['k'] }), 'a read inside the unit is the unit').toEqual([]);
+      w.put(['after'], 1);
+    });
+    expect(keysOf(kv, {})).toEqual([['after']]);
+  });
+
+  it('refuses a clear in a unit inside another, which could not be rolled back alone', () => {
+    const kv = make();
+    kv.write((w) => w.put(['k'], 1));
+    expect(() => kv.write(() => kv.write((inner) => inner.clear()))).toThrow('inside a unit inside another');
+    expect(kv.read((r) => r.get(['k']))).toBe(1);
+  });
+
   it('keeps thousands of keys written out of order sorted, through removals, ranged both ways', () => {
     const kv = make();
     // A fixed shuffle: each number in 0..4999 once, in no order
