@@ -1,16 +1,20 @@
 // The engine's benchmark: hydrating an app-sized graph, then queries, relation walks and write batches on it.
-// Run with `npm run bench -w @apackdev/ears`; the baseline and tolerance are in docs/archive/goals/goal-package-boundaries.md
-// (Phase 6, "Value index").
+// Run with `npm run bench -w @apackdev/ears`, which builds the package first: it times the engine in `dist`, the build
+// that ships, since a dev loader compiles with its own options. The baseline is in docs/plans/ears-storage-layout.md
+// (Step 4); the tolerance is +10% median per case.
 import { bench, describe } from 'vitest';
-import { EARS, type PersistenceSink } from '../src/index.ts';
-import { freshEngine } from '../tests/engine/engine-under-test.ts';
+import type { EARS as EarsTypes, PersistenceSink } from '../src/index.ts';
+
+// A specifier held in a variable, so the typecheck (which runs before any build) reads the types from source
+const DIST = '../dist/index.js';
+const { createEarsEngine, EARS } = await import(/* @vite-ignore */ DIST) as typeof import('../src/index.ts');
 
 const TASKS = 40_000;
 const PROJECTS = 5_000;
 const PEOPLE = 5_000;
 const BLOCKS = 15_000;
 
-type Id = EARS.EntityId;
+type Id = EarsTypes.EntityId;
 const types = new Set(['Task', 'Project', 'Person', 'Note', 'Relation']);
 // A sink that does nothing, as the LMDB store's does between flushes
 const sink: PersistenceSink = {
@@ -18,7 +22,7 @@ const sink: PersistenceSink = {
   onAddRelation() {}, onUpdateRelation() {}, onRemoveRelation() {}, onUnitStart() {}, onUnitEnd() {},
 };
 // Task rows are numbered T-<n>, as an app's shapes number theirs
-const engine = freshEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T' } : undefined) });
+const engine = createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, persistence: sink, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T' } : undefined) });
 const { admin } = engine;
 
 const task = (i: number) => `Task-${i}` as Id;
@@ -85,9 +89,36 @@ describe('queries', () => {
   bench('relation traversal (a project: its tasks, then their assignees)', () => {
     engine.query.ids(project(1)).out('contains', 'Task').out('assigned').count();
   }, { iterations: 30, time: 0 });
+
+  bench('orderBy a string over 40k', () => {
+    engine.query('Task').orderBy('title').first();
+  }, { iterations: 10, time: 0 });
+
+  bench('1,000 query(type).first() over 40k', () => {
+    for (let i = 0; i < 1000; i++) engine.query('Task').first();
+  }, { iterations: 10, time: 0 });
+
+  bench('1,000 getRow', () => {
+    for (let i = 0; i < 1000; i++) engine.getRow(task(i * 37));
+  }, { iterations: 20, time: 0 });
+
+  bench('pickAll over 40k', () => {
+    engine.query('Task').pickAll();
+  }, { iterations: 10, time: 0 });
+
+  bench('100 linkedWith', () => {
+    for (let i = 0; i < 100; i++) engine.query('Project').linkedWith(person(i)).count();
+  }, { iterations: 10, time: 0 });
 });
 
 describe('writes', () => {
+  // A hub, as a collection holds its documents or a flow root its runs: linking is per edge, destroying per entity
+  bench('link 10k tasks to one project, then destroy it', () => {
+    const hub = engine.create('Project').set('title', 'Hub').id();
+    for (let i = 0; i < 10_000; i++) engine.write(hub).link('contains', task(i));
+    engine.write(hub).destroy();
+  }, { iterations: 5, time: 0 });
+
   bench('1,000 creates', () => {
     for (let i = 0; i < 1000; i++) engine.create('Note').set('title', `Note ${i}`).set('status', 'open');
   }, { iterations: 50, time: 0 });

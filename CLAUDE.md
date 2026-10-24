@@ -144,7 +144,7 @@ Held by the types and the engine specs, which say more than a rule over names co
 
 ## Benchmark
 
-`bench/ears.bench.ts` hydrates an app-sized graph (50k entities, 200k attributes, 100k relations) into an engine's admin face, then times `query` by type with a `where` and `pickAll`, lookups by a unique value and by role (the value index), a relation traversal, short codes, and 1,000 creates, alone and as one unit (`transact`). Run it with `npm run bench -w @apackdev/ears`. The baseline is recorded in `docs/archive/goals/goal-package-boundaries.md` (Phase 6, "Value index"); the tolerance is +10% median per case, and anything beyond it needs investigating before an engine change lands.
+`bench/ears.bench.ts` hydrates an app-sized graph (50k entities, 200k attributes, 100k relations) into an engine's admin face, then times `query` by type with a `where` and `pickAll`, lookups by a unique value and by role (the value index), a relation traversal, `orderBy`, `first()` over a type, `getRow`, `pickAll`, `linkedWith`, a 10k-edge hub, short codes, and 1,000 creates, alone and as one unit (`transact`). It times the engine in `dist`, the build that ships: `npm run bench -w @apackdev/ears` builds the package first. `npm run bench:heap -w @apackdev/ears` (`bench/heap.ts`) reads the heap with the same graph loaded. The baseline is recorded in `docs/plans/ears-storage-layout.md` (Step 4); the tolerance is +10% median per case, and anything beyond it needs investigating before an engine change lands.
 
 ## Scripts
 

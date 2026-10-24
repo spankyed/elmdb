@@ -20,7 +20,8 @@
     "build:package": "tsx ../../scripts/build-package.ts .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "bench": "vitest bench --run",
+    "bench": "npm run build:package && vitest bench --run",
+    "bench:heap": "npm run build:package && node --expose-gc bench/heap.ts",
     "api:build": "node -e \"require('fs').rmSync('.temp', { recursive: true, force: true })\" && tsc -p tsconfig.api-extractor.json",
     "api:check": "npm run api:build && tsx ../../scripts/api-reports.ts .",
     "api:update": "npm run api:build && tsx ../../scripts/api-reports.ts . --local"
