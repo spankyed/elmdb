@@ -4,8 +4,8 @@ export type EarsErrorCode =
   | 'UNKNOWN_ENTITY_TYPE'
   /** `write` was given an id no entity in the engine has */
   | 'NO_SUCH_ENTITY'
-  /** A write to a relation's id other than `destroy()`: a relation holds no fields */
-  | 'NOT_AN_ENTITY'
+  /** `removeRelation` was given an id no relation in the engine has */
+  | 'NO_SUCH_RELATION'
   /** `create` was given an id an entity already has */
   | 'ID_IN_USE'
   /** `upsert` or `create` named a type the id's entity doesn't have */

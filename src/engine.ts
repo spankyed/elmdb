@@ -41,9 +41,14 @@ export interface Ears {
   getRoles(id: EARS.EntityId): string[];
   /** What the engine holds, keyed by the names its data holds: entities per type, attribute, relation and role use */
   getSchemaStats(): SchemaStats;
-  /** Moves a relation to new ends, or replaces its info, keeping its id */
-  updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
+  /** The relation's row — its id, kind, ends and info — or undefined when no relation has the id */
+  getRelation(relId: EARS.RelationId): RelationRow | undefined;
+  /** The rows of the relations matching every end and kind named; with none named, every relation */
   findRelations(match?: RelationMatch): RelationRow[];
+  /** Moves a relation to new ends, or replaces its info, keeping its id */
+  updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
+  /** Removes the relation with the id, refusing an id no relation has */
+  removeRelation(relId: EARS.RelationId): void;
   /** Whether linking `source` to `target` would close a cycle through `kinds` */
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
@@ -65,11 +70,11 @@ export interface EarsAdmin {
   /** Removes an attribute */
   deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
   /** Links any kind between any ids, either end missing included: unchecked, as loaded data is */
-  addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId;
+  addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
   /** `updateRelation` without its checks: any relation, to any ends */
-  updateRelation(relId: EARS.EntityId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
+  updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
   /** Loads a stored relation, without telling persistence */
-  bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
+  bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -91,7 +96,7 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
   const query = createQuery({ storage, relations, isEntityType, names });
   const hierarchy = createHierarchy({ query, names });
   const counters = createEntityCounters(storage);
-  const { create, upsert, write, updateRelation } = createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal });
+  const { create, upsert, write, updateRelation, removeRelation } = createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal });
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
@@ -101,11 +106,13 @@ export function createEarsEngine({ persistence = noopSink, isEntityType, isRelat
     getAttr: (id, field) => (storage.hasAttr(id, field) ? storage.getAttr(id, field) : undefined),
     getRoles: storage.getRoles,
     getSchemaStats: () => ({ ...storage.entityStats(), relations: relations.stats() }),
+    getRelation: relations.get,
     findRelations: (match = {}) => {
       if (match.kind !== undefined) names.relationKinds(match.kind, 'findRelations');
       return relations.find(match);
     },
     updateRelation,
+    removeRelation,
   };
 
   const admin: EarsAdmin = {

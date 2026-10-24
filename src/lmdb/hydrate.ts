@@ -56,7 +56,7 @@ export async function hydrate(params: {
       continue;
     }
 
-    engine.bulkLoadRelation(relIdStr as EARS.EntityId, r.kind, r.src, r.tgt, r.info ?? undefined);
+    engine.bulkLoadRelation(relIdStr as EARS.RelationId, r.kind, r.src, r.tgt, r.info ?? undefined);
     relCount++;
   }
 

@@ -202,7 +202,7 @@ describe('openLmdbStore', () => {
     // In the same synchronous block as its writes, before they're flushed
     engine.write(id('Note-2')).set('title', 'ghost again');
     engine.write(id('Note-2')).destroy();
-    engine.write(rel).destroy();
+    engine.removeRelation(rel);
     await flushed();
     expect(first.read().getEntityMeta('Note-2')).toBeNull();
     expect(first.env.relations.get(rel)).toBeUndefined();

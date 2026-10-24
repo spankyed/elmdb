@@ -1,7 +1,7 @@
 // The engine's contract: query builder starts, filters, ordering and terminals
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EARS } from '../../src/index.ts';
-import { engine, type Id } from './helpers.ts';
+import { engine, type Id, type RelId } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
@@ -122,7 +122,7 @@ describe('filters', () => {
     expect(e.query.ids(p).outEdges('contains', 'Project')).toEqual([]);
     // A relation whose target isn't in the engine — as data loaded from files can hold, since link() refuses to make
     // one — is stepped around by outEdges as by out: neither reaches an entity a query couldn't start from
-    e.admin.bulkLoadRelation('Relation-ghost' as Id, 'refers', p, 'Task-ghost' as Id);
+    e.admin.bulkLoadRelation('Relation-ghost' as RelId, 'refers', p, 'Task-ghost' as Id);
     e.write(p).link('refers', t.d);
     expect(e.query.ids(p).outEdges('refers')).toEqual([edge('refers', p, t.d)]);
     expect(e.query.ids(p).out('refers').ids()).toEqual([t.d]);

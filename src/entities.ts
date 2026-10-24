@@ -27,6 +27,12 @@ export namespace EARS {
    */
   export type EntityId<E extends string = string> =
     string extends E ? `${string}-${string}` : `${string}-${string}` & { readonly __entity?: E };
+  /**
+   * A relation's id: read it with `getRelation`, change it with `updateRelation`, remove it with `removeRelation`.
+   * `write` takes an entity's id and refuses this one, a relation being no entity. The engine hands one out from every
+   * relation read (`findRelations`, `outEdges`, `inEdges`) and from `admin.addRelation`
+   */
+  export type RelationId = `${string}-${string}` & { readonly __relation: true };
 
   // ─── RelKind ───────────────────────────────────────────────────────────
   // Concrete values come from the SDK and packs; the engine provides just the type framework.

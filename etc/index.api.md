@@ -62,18 +62,20 @@ export namespace EARS {
     }
     // (undocumented)
     export type AttributeStore = Record<string, AttributeTypeMap>;
+    // (undocumented)
+    export type AttributeType = AttrKind;
     const // (undocumented)
     RelKind: {
         readonly Custom: <T extends string>(k: T) => T & RelKind;
     };
     // (undocumented)
-    export type AttributeType = AttrKind;
+    export type AttributeTypeMap = Record<EntityId, AttributeValue[]>;
     const // (undocumented)
     RoleKind: {
         readonly Custom: <T extends string>(k: T) => T & RoleKind;
     };
     // (undocumented)
-    export type AttributeTypeMap = Record<EntityId, AttributeValue[]>;
+    export type AttributeValue<K extends AttrKind = AttrKind> = K extends keyof AttributePayloads ? AttributePayloads[K] : unknown;
     const // (undocumented)
     AttrKindValues: {
         readonly Role: "role";
@@ -84,13 +86,14 @@ export namespace EARS {
         readonly Role: "role";
     };
     // (undocumented)
-    export type AttributeValue<K extends AttrKind = AttrKind> = K extends keyof AttributePayloads ? AttributePayloads[K] : unknown;
-    // (undocumented)
     export type AttrKind = typeof AttrKindValues[keyof typeof AttrKindValues] | (string & {});
     // (undocumented)
     export type Entity = string & {};
     export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
         readonly __entity?: E;
+    };
+    export type RelationId = `${string}-${string}` & {
+        readonly __relation: true;
     };
     // (undocumented)
     export type RelKind = string & {};
@@ -101,9 +104,9 @@ export namespace EARS {
 // @public
 export interface Ears {
     create: Create;
-    // (undocumented)
     findRelations(match?: RelationMatch): RelationRow[];
     getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
+    getRelation(relId: EARS.RelationId): RelationRow | undefined;
     // (undocumented)
     getRoles(id: EARS.EntityId): string[];
     getRow(id: EARS.EntityId): EntityRow | undefined;
@@ -113,8 +116,9 @@ export interface Ears {
     isRole(name: string): boolean;
     nextLabel(type: EARS.Entity, base: string): string;
     query: Query;
+    removeRelation(relId: EARS.RelationId): void;
     transact<T>(fn: () => T): T;
-    updateRelation(relId: EARS.EntityId, patch: {
+    updateRelation(relId: EARS.RelationId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
         info?: unknown;
@@ -126,15 +130,15 @@ export interface Ears {
 
 // @public
 export interface EarsAdmin {
-    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId;
+    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    bulkLoadRelation(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
+    bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
     clear(): void;
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    updateRelation(relId: EARS.EntityId, patch: {
+    updateRelation(relId: EARS.RelationId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
         info?: unknown;
@@ -160,8 +164,8 @@ export type EarsErrorCode =
 'UNKNOWN_ENTITY_TYPE'
 /** `write` was given an id no entity in the engine has */
 | 'NO_SUCH_ENTITY'
-/** A write to a relation's id other than `destroy()`: a relation holds no fields */
-| 'NOT_AN_ENTITY'
+/** `removeRelation` was given an id no relation in the engine has */
+| 'NO_SUCH_RELATION'
 /** `create` was given an id an entity already has */
 | 'ID_IN_USE'
 /** `upsert` or `create` named a type the id's entity doesn't have */
@@ -408,7 +412,7 @@ export interface RecordStore<R extends {
 // @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
     // (undocumented)
-    id: EARS.EntityId;
+    id: EARS.RelationId;
     // (undocumented)
     info?: EARS.AttributeValue;
     // (undocumented)
@@ -557,7 +561,7 @@ export interface TypedUpsert<D extends EarsSchema> {
 // @public
 export interface TypedWrite<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, D>;
+    <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E, D>;
 }
 
 // @public
@@ -594,7 +598,7 @@ E
 // @public
 export interface Write {
     // (undocumented)
-    <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
+    <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
 // @public
@@ -626,6 +630,11 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
 export interface WriteOptions {
     touch?: boolean;
 }
+
+// @public
+export type WriteTarget<E extends string = string> = EARS.EntityId<E> & {
+    readonly __relation?: never;
+};
 
 // (No @packageDocumentation comment for this package)
 

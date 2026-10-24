@@ -1,7 +1,7 @@
 // transact: a unit that throws leaves the engine and its sink as they were; one that returns sends the sink its
 // writes together, between onUnitStart and onUnitEnd
 import { beforeEach, describe, expect, it } from 'vitest';
-import { engine, recordingSink, type Id, type SinkCall } from './helpers.ts';
+import { engine, recordingSink, type Id, type RelId, type SinkCall } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
@@ -24,7 +24,7 @@ function state() {
   });
 }
 
-let task: Id, other: Id, project: Id, rel: Id;
+let task: Id, other: Id, project: Id, rel: RelId;
 
 beforeEach(() => {
   const recording = recordingSink();
@@ -57,7 +57,7 @@ const writes: Record<string, () => void> = {
   'link': () => e.write(other).link('blocks', task),
   'link with replace': () => e.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
   'updateRelation': () => e.updateRelation(rel, { target: other, info: { pos: 9 } }),
-  'destroy a relation': () => e.write(rel).destroy(),
+  'removeRelation': () => e.removeRelation(rel),
   'unlink': () => e.write(project).unlink('contains'),
   'unlinkAll': () => e.write(project).unlinkAll(),
   'set null and delete': () => e.write(task).set('title', null).delete('meta'),

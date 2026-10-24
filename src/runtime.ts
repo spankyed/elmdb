@@ -9,9 +9,15 @@
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
 
+/**
+ * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
+ * which the compiler refuses here since a relation is no entity
+ */
+export type WriteTarget<E extends string = string> = EARS.EntityId<E> & { readonly __relation?: never };
+
 /** A relation row — its id, kind, ends and info, as `findRelations` returns one — with its ends typed */
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
-  id: EARS.EntityId;
+  id: EARS.RelationId;
   kind: K;
   source: EARS.EntityId<Source>;
   target: EARS.EntityId<Target>;
@@ -332,11 +338,11 @@ export type FieldValues<S extends EntityShapes, E extends string> =
  * The writes to one entity, from `create`, `upsert` or `write`. `E` and `D` type them: started from a
  * declared entity type or an id tagged with one, a write names only the shape's declared fields and stores
  * their declared types; from a plain id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
- * `entityType`, `createdAt`, `updatedAt`, `role`, `trashedAt`) are refused by every attribute write, and
+ * `entityType`, `shortCode`, `createdAt`, `updatedAt`, `role`, `trashedAt`) are refused by every attribute write, and
  * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
  *
- * A relation's id (from `findRelations`, `outEdges` or `inEdges`) takes `destroy()` only: a
- * relation is its kind, ends and info, which `updateRelation(id, { source?, target?, info? })` changes.
+ * A relation is no entity, so a relation's id (`EARS.RelationId`) is not written through this builder:
+ * `updateRelation(id, { source?, target?, info? })` changes one and `removeRelation(id)` removes it.
  */
 export interface WriteBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
   /**
@@ -377,10 +383,7 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
   trash(at?: number): WriteBuilder<E, D>;
   /** Takes the entity out of the trash */
   restore(): WriteBuilder<E, D>;
-  /**
-   * Deletes the entity and every edge to or from it. A relation's id (from `findRelations`) removes that one
-   * relation, which is how one edge of several between the same ends goes.
-   */
+  /** Deletes the entity and every edge to or from it */
   destroy(): void;
   id(): EARS.EntityId<E>;
   /** The entity's whole row as the builder's writes left it (`getRow`'s): what a `create` reads back */

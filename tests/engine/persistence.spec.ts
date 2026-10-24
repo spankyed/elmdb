@@ -2,7 +2,7 @@
 // through bulk loading, which tells the sink nothing
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EARS } from '../../src/index.ts';
-import { engine, recordingSink, type Id } from './helpers.ts';
+import { engine, recordingSink, type Id, type RelId } from './helpers.ts';
 
 beforeEach(() => {
   vi.useFakeTimers({ now: 1000, toFake: ['Date'] });
@@ -57,7 +57,7 @@ describe('persistence sink', () => {
     const [a, b, c] = ['Task', 'Task', 'Task'].map((type) => e.create(type).id());
     const rel = e.admin.addRelation(a, 'refs', b);
     e.admin.updateRelation(rel, { target: c, info: 'why' });
-    e.admin.updateRelation('Relation-none' as Id, { source: a });
+    e.admin.updateRelation('Relation-none' as RelId, { source: a });
     e.admin.putAttr(a, 'x', 1);
     e.admin.putAttr(a, 'x', [1, 2]);
     e.admin.deleteAttr(a, 'x');
@@ -88,7 +88,7 @@ it('hears a destroyed relation as that relation removed, not as an entity destro
   const [a, b] = ['Task', 'Task'].map((type) => e.create(type).id());
   e.write(a).link('refs', b);
   const before = calls.length;
-  e.write(e.findRelations()[0].id).destroy();
+  e.removeRelation(e.findRelations()[0].id);
   expect(calls.slice(before)).toEqual([['onRemoveRelation', '#3']]);
 });
 
@@ -96,7 +96,8 @@ describe('hydration', () => {
   it('bulk loads attributes and relations without telling the sink, then answers queries', () => {
     const { sink, calls } = recordingSink();
     const e = engine(sink);
-    const [a, b, p, rel] = ['Task-a1', 'Task-b1', 'Project-p1', 'Relation-r1'] as Id[];
+    const [a, b, p] = ['Task-a1', 'Task-b1', 'Project-p1'] as Id[];
+    const rel = 'Relation-r1' as RelId;
     e.admin.bulkLoadAttr(a, 'title', 'A');
     e.admin.bulkLoadAttr(a, 'tag', ['first', 'second']);
     e.admin.bulkLoadAttr(a, 'meta', { x: 1, y: 2 });

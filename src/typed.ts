@@ -11,7 +11,7 @@
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
 import { newId } from './attribute-storage.ts';
 import type { Ears } from './engine.ts';
 
@@ -57,7 +57,7 @@ export interface TypedUpsert<D extends EarsSchema> {
 
 /** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
 export interface TypedWrite<D extends EarsSchema> {
-  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E, D>;
+  <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E, D>;
 }
 
 /** Brands the id with the entity type when the schema declares its shape; other types stay unbranded. */

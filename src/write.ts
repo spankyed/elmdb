@@ -9,7 +9,7 @@ import type { createEntityCounters } from './numbering.ts';
 import { EARS } from './entities.ts';
 import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
-import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions } from './runtime.ts';
+import type { LinkOptions, RowIdentity, RowRules, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
 
 /** When the entity last changed: stamped by the engine, never written by a caller */
 const UPDATED_AT = EARS.AttrKind.Custom('updatedAt');
@@ -32,9 +32,9 @@ export interface Upsert {
   <E extends string>(type: TypeName<E>, row: Record<string, unknown> & RowIdentity & { id: EARS.EntityId }): WriteBuilder<E>;
 }
 
-/** Writes to the entity with this id, which must exist */
+/** Writes to the entity with this id, which must exist; a relation's id is refused (`WriteTarget`) */
 export interface Write {
-  <E extends string>(id: EARS.EntityId<E>, options?: WriteOptions): WriteBuilder<E>;
+  <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E>;
 }
 
 /** An engine's writes, over its attribute storage, its relations and its cycle check */
@@ -239,21 +239,6 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     return self;
   }
 
-  /**
-   * The writes to a relation by its id: `destroy()` removes it, as an unlink of that one edge would. A relation holds
-   * no fields, so every other write is refused; `updateRelation` changes its ends or info.
-   */
-  function relationBuilder(relId: EARS.EntityId): WriteBuilder {
-    const refuse = (via: string) => () => {
-      throw new EarsError('NOT_AN_ENTITY', `write(${JSON.stringify(relId)}).${via}(): a relation holds no fields. updateRelation changes it, destroy() removes it`);
-    };
-    const self = Object.fromEntries(Object.keys(builder(relId, false)).map((member) => [member, refuse(member)])) as unknown as WriteBuilder;
-    return Object.assign(self, {
-      destroy: () => relations.remove(relId),
-      id: () => relId,
-    });
-  }
-
   const create = ((type: string, row: Record<string, unknown> & RowIdentity = {}) => {
     requireType(type, 'create');
     // The row's id, short code and times are the engine's to write; its other reserved names are refused before the
@@ -289,9 +274,11 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
   }) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
-    if (relations.has(id)) return relationBuilder(id);
     if (!hasEntity(id)) {
-      throw new EarsError('NO_SUCH_ENTITY', `write(${JSON.stringify(id)}): no entity has this id. create(type) makes one; upsert(type, id) makes it when missing`);
+      // A relation's id reaches here only untyped (the compiler refuses one), so the refusal names where it goes
+      throw new EarsError('NO_SUCH_ENTITY', relations.has(id)
+        ? `write(${JSON.stringify(id)}): that is a relation's id, and a relation is no entity. updateRelation(id, patch) changes it; removeRelation(id) removes it`
+        : `write(${JSON.stringify(id)}): no entity has this id. create(type) makes one; upsert(type, id) makes it when missing`);
     }
     return builder(id, touch);
   }) as Write;
@@ -316,7 +303,7 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
    * ends as they are then. `admin.updateRelation` stays unchecked, as `admin.addRelation` does: loading data is the
    * creator's to vouch for.
    */
-  function updateRelation(relId: EARS.EntityId, { source, target, info }: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void {
+  function updateRelation(relId: EARS.RelationId, { source, target, info }: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void {
     const missing = (end: EARS.EntityId) => new EarsError('NO_SUCH_ENTITY', `updateRelation(${JSON.stringify(relId)}): no entity has the id ${JSON.stringify(end)}`);
     if (!journal.open) {
       for (const end of [source, target]) if (end !== undefined && !hasEntity(end)) throw missing(end);
@@ -330,5 +317,13 @@ export function createWrites({ storage, relations, hierarchy, isEntityType, rowR
     relations.update(relId, source, target, info);
   }
 
-  return { create, upsert, write, updateRelation };
+  /** Removes the relation with the id: refused (`NO_SUCH_RELATION`) when no relation has it */
+  function removeRelation(relId: EARS.RelationId): void {
+    if (!relations.has(relId)) {
+      throw new EarsError('NO_SUCH_RELATION', `removeRelation(${JSON.stringify(relId)}): no relation has this id`);
+    }
+    relations.remove(relId);
+  }
+
+  return { create, upsert, write, updateRelation, removeRelation };
 }

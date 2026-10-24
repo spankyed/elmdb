@@ -48,7 +48,7 @@ function hydrate(): void {
   });
   let rel = 0;
   const relate = (src: Id, kind: string, tgt: Id) => {
-    const relId = `Relation-${rel++}` as Id;
+    const relId = `Relation-${rel++}` as EarsTypes.RelationId;
     admin.bulkLoadRelation(relId, kind, src, tgt);
   };
   for (let i = 0; i < TASKS; i++) relate(project(i % PROJECTS), 'contains', task(i));

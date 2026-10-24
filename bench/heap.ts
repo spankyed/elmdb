@@ -27,7 +27,7 @@ ids.forEach((id, i) => {
 });
 let rel = 0;
 const relate = (source: string, kind: string, target: string) => {
-  const relId = `Relation-${rel++}` as Id;
+  const relId = `Relation-${rel++}` as EarsTypes.RelationId;
   admin.bulkLoadRelation(relId, kind, source as Id, target as Id);
 };
 for (let i = 0; i < 40_000; i++) relate(`Project-${i % 5_000}`, 'contains', `Task-${i}`);

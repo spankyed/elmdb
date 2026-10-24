@@ -12,7 +12,7 @@ export interface RelationMatch {
 }
 
 /**
- * A relation row: its id (`write(id).destroy()` removes that one relation), kind, ends and info. The row
+ * A relation row: its id (`removeRelation(id)` removes that one relation), kind, ends and info. The row
  * `RelationEdge` types, with its kind and ends untyped
  */
 export type RelationRow = RelationEdge;
@@ -35,8 +35,8 @@ const RELATION_ID = RESERVED_ENTITY_TYPES.relation;
  * were added, so an entity's edges read in the order they were linked, and adds or removes one without walking the rest
  */
 interface KindIndex {
-  bySource: Map<EARS.EntityId, Set<EARS.EntityId>>;
-  byTarget: Map<EARS.EntityId, Set<EARS.EntityId>>;
+  bySource: Map<EARS.EntityId, Set<EARS.RelationId>>;
+  byTarget: Map<EARS.EntityId, Set<EARS.RelationId>>;
 }
 type Side = keyof KindIndex;
 
@@ -48,18 +48,18 @@ type Side = keyof KindIndex;
  */
 export function createRelations({ journal, persistence }: { journal: Journal; persistence: PersistenceSink }) {
   /** Each relation's row, by id. A row is frozen and replaced whole on a change, so a read hands out the stored row */
-  const rows = new Map<EARS.EntityId, RelationRow>();
+  const rows = new Map<EARS.RelationId, RelationRow>();
   const index = new Map<string, KindIndex>();
   // What a read answers for an entity with no relations of a kind; never written to
-  const none: ReadonlySet<EARS.EntityId> = new Set();
+  const none: ReadonlySet<EARS.RelationId> = new Set();
 
-  const rowOf = (id: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info: unknown): RelationRow =>
+  const rowOf = (id: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info: unknown): RelationRow =>
     Object.freeze({ id, kind, source, target, info: info as EARS.AttributeValue | undefined });
 
   // ─── Undo ──────────────────────────────────────────────────────────────
 
   /** Records how to put back the relation's row */
-  const touchRow = (relId: EARS.EntityId) =>
+  const touchRow = (relId: EARS.RelationId) =>
     journal.open && journal.touch(`rel\x1F${relId}`, () => {
       const before = rows.get(relId);
       return () => {
@@ -91,27 +91,27 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   const dropIfEmpty = (kind: string, entry: KindIndex) => {
     if (entry.bySource.size === 0 && entry.byTarget.size === 0) index.delete(kind);
   };
-  const listOf = (kind: string, side: Side, entity: EARS.EntityId): ReadonlySet<EARS.EntityId> =>
+  const listOf = (kind: string, side: Side, entity: EARS.EntityId): ReadonlySet<EARS.RelationId> =>
     index.get(kind)?.[side].get(entity) ?? none;
 
-  const addToList = (entry: KindIndex, side: Side, entity: EARS.EntityId, relId: EARS.EntityId) => {
+  const addToList = (entry: KindIndex, side: Side, entity: EARS.EntityId, relId: EARS.RelationId) => {
     const list = entry[side].get(entity);
     if (list) list.add(relId);
     else entry[side].set(entity, new Set([relId]));
   };
-  const removeFromList = (entry: KindIndex, side: Side, entity: EARS.EntityId, relId: EARS.EntityId) => {
+  const removeFromList = (entry: KindIndex, side: Side, entity: EARS.EntityId, relId: EARS.RelationId) => {
     const list = entry[side].get(entity);
     if (list?.delete(relId) && list.size === 0) entry[side].delete(entity);
   };
 
-  const indexRelation = (kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId) => {
+  const indexRelation = (kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.RelationId) => {
     touchList(kind, 'bySource', source);
     touchList(kind, 'byTarget', target);
     const entry = entryOf(kind);
     addToList(entry, 'bySource', source, relId);
     addToList(entry, 'byTarget', target, relId);
   };
-  const unindexRelation = (kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.EntityId) => {
+  const unindexRelation = (kind: string, source: EARS.EntityId, target: EARS.EntityId, relId: EARS.RelationId) => {
     const entry = index.get(kind);
     if (!entry) return;
     touchList(kind, 'bySource', source);
@@ -122,7 +122,7 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   };
 
   /** Puts the relation's row, recording how to put back the one before */
-  const placeRow = (relId: EARS.EntityId, row: RelationRow | undefined) => {
+  const placeRow = (relId: EARS.RelationId, row: RelationRow | undefined) => {
     touchRow(relId);
     if (row) rows.set(relId, row);
     else rows.delete(relId);
@@ -131,8 +131,9 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   // ─── Reads ─────────────────────────────────────────────────────────────
 
   /** The relation's row, or undefined when no relation has the id */
-  const get = (relId: EARS.EntityId): RelationRow | undefined => rows.get(relId);
-  const has = (relId: EARS.EntityId) => rows.has(relId);
+  const get = (relId: EARS.RelationId): RelationRow | undefined => rows.get(relId);
+  /** Whether a relation has the id: any string, so a refusal of an id given untyped can say it names a relation */
+  const has = (id: string) => rows.has(id as EARS.RelationId);
 
   /**
    * The relations both in an entity's set leaving it and in another's arriving at it — the edges between the two —
@@ -140,15 +141,15 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
    * Each set receives a relation's id when the relation is linked or moved, so the edges between two ends sit in the
    * same order in both, and either walk yields them in that order
    */
-  function* between(leaving: ReadonlySet<EARS.EntityId>, arriving: ReadonlySet<EARS.EntityId>): Generator<EARS.EntityId> {
+  function* between(leaving: ReadonlySet<EARS.RelationId>, arriving: ReadonlySet<EARS.RelationId>): Generator<EARS.RelationId> {
     const [walked, other] = leaving.size <= arriving.size ? [leaving, arriving] : [arriving, leaving];
     for (const id of walked) if (other.has(id)) yield id;
   }
 
   /** The ids of the relations matching every end and kind named; with none named, every relation */
-  const matchIds = ({ kind, source, target }: Omit<RelationMatch, 'kind'> & { kind?: string }): EARS.EntityId[] => {
+  const matchIds = ({ kind, source, target }: Omit<RelationMatch, 'kind'> & { kind?: string }): EARS.RelationId[] => {
     const kinds = kind !== undefined ? [kind] : [...index.keys()];
-    const out = new Set<EARS.EntityId>();
+    const out = new Set<EARS.RelationId>();
     for (const k of kinds) {
       const entry = index.get(k);
       if (!entry) continue;
@@ -207,7 +208,7 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
    * Links `source` to `target`: idempotent on the whole edge — kind, ends and `info`, with no `info` matching any edge
    * between the ends — so linking an edge again keeps its id and its place among its siblings. Returns the relation's id
    */
-  function add(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId {
+  function add(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId {
     const entry = index.get(kind);
     const leaving = entry?.bySource.get(source);
     const arriving = entry?.byTarget.get(target);
@@ -216,7 +217,7 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
         if (info === undefined || sameValue(rows.get(existing)?.info, info)) return existing;
       }
     }
-    const relId = `${RELATION_ID}-${idSuffix()}` as EARS.EntityId;
+    const relId = `${RELATION_ID}-${idSuffix()}` as EARS.RelationId;
     placeRow(relId, rowOf(relId, kind, source, target, info));
     indexRelation(kind, source, target, relId);
     persistence.onAddRelation(relId, kind, source, target, info);
@@ -224,13 +225,13 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   }
 
   /** Leaves one relation of the kind between the ends: removes those there, then links */
-  function replace(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.EntityId {
+  function replace(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId {
     unlink({ source, kind, target });
     return add(source, kind, target, info);
   }
 
   /** Moves the relation to new ends, or replaces its info, keeping its id; an id no relation has is ignored */
-  function update(relId: EARS.EntityId, source?: EARS.EntityId, target?: EARS.EntityId, info?: unknown): void {
+  function update(relId: EARS.RelationId, source?: EARS.EntityId, target?: EARS.EntityId, info?: unknown): void {
     const before = rows.get(relId);
     if (!before) return;
     const next = rowOf(relId, before.kind, source || before.source, target || before.target, info !== undefined ? info : before.info);
@@ -247,7 +248,7 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   }
 
   /** Removes the relation; an id no relation has is ignored */
-  function remove(relId: EARS.EntityId): void {
+  function remove(relId: EARS.RelationId): void {
     const row = rows.get(relId);
     if (!row) return;
     unindexRelation(row.kind, row.source, row.target, relId);
@@ -275,7 +276,7 @@ export function createRelations({ journal, persistence }: { journal: Journal; pe
   }
 
   /** A stored relation, loaded without telling persistence */
-  function bulkLoad(relId: EARS.EntityId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void {
+  function bulkLoad(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void {
     rows.set(relId, rowOf(relId, kind, source, target, info));
     indexRelation(kind, source, target, relId);
   }

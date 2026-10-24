@@ -1,6 +1,6 @@
 // The engine's contract: relations (links, their index and graph walks) and roles
 import { beforeEach, describe, expect, it } from 'vitest';
-import { engine, type Id } from './helpers.ts';
+import { engine, type RelId } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 
 let e: EngineUnderTest;
@@ -23,10 +23,11 @@ describe('links', () => {
     expect(e.query.all().ids()).toEqual([a, b]);
     expect(e.admin.getAllEntities()).toEqual([a, b]);
     expect(e.getSchemaStats().entities).toEqual({ Task: 2 });
-    // Written by its id, a relation can only be destroyed: it holds no fields
-    expect(() => e.write(rel.id).set('weight', 3)).toThrow(expect.objectContaining({ code: 'NOT_AN_ENTITY' }));
-    expect(() => e.write(rel.id).link('blocks', a)).toThrow(expect.objectContaining({ code: 'NOT_AN_ENTITY' }));
-    expect(e.write(rel.id).id()).toBe(rel.id);
+    // Nor does write: the compiler refuses a relation's id there, and given one untyped, the refusal names where it goes
+    // @ts-expect-error a relation's id is no entity's
+    expect(() => e.write(rel.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_ENTITY', message: expect.stringContaining('removeRelation(id) removes it') }));
+    expect(e.getRelation(rel.id)).toEqual(rel);
+    expect(e.getRelation('Relation-missing' as RelId)).toBeUndefined();
     expect(e.query.ids(a).out('blocks').ids()).toEqual([b]);
     expect(e.query.ids(b).in('blocks').ids()).toEqual([a]);
     expect(e.findRelations({ source: a }).map((r) => r.id)).toEqual([rel.id]);
@@ -92,11 +93,11 @@ describe('links', () => {
     expect(() => e.write(a).link('blocks', a, { replace: true })).toThrow("can't be linked to itself");
   });
 
-  it('unlink, unlinkAll and destroying a relation by its id remove relations and empty index entries', () => {
+  it('unlink, unlinkAll and removeRelation remove relations and empty index entries', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b).link('blocks', c).link('refs', b).link('refs', c);
     const blocksAB = e.findRelations({ source: a, kind: 'blocks', target: b })[0].id;
-    e.write(blocksAB).destroy();
+    e.removeRelation(blocksAB);
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', b, undefined], [a, 'refs', c, undefined]]);
     e.write(a).unlink('refs', b);
     expect(edges()).toEqual([[a, 'blocks', c, undefined], [a, 'refs', c, undefined]]);
@@ -114,19 +115,20 @@ describe('links', () => {
     e.write(c).unlinkAll();
 
     e.write(b).link('refs', c);
-    e.write(e.findRelations()[0].id).destroy();
+    e.removeRelation(e.findRelations()[0].id);
     expect(edges()).toEqual([]);
     expect(Object.keys(e.getSchemaStats().relations)).toEqual([]);
   });
 
-  it('destroying a relation removes that one edge, leaving the other edges between its ends and the ends themselves', () => {
+  it('removeRelation removes that one edge, leaving the other edges between its ends and the ends themselves, and refuses an id no relation has', () => {
     const [a, b] = [task('A'), task('B')];
     e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
     const [first] = e.findRelations();
-    e.write(first.id).destroy();
+    e.removeRelation(first.id);
     expect(edges()).toEqual([[a, 'blocks', b, { handle: 2 }]]);
     expect(e.query.ids([a, b]).ids()).toEqual([a, b]);
-    expect(e.getRow(first.id)).toBeUndefined();
+    expect(e.getRelation(first.id)).toBeUndefined();
+    expect(() => e.removeRelation(first.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
   it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id', () => {
@@ -144,7 +146,7 @@ describe('links', () => {
     expect(e.findRelations()[0].id).toBe(rel);
     expect(e.query.ids(a).out('refs').ids()).toEqual([]);
     expect(e.query.ids(b).out('refs').ids()).toEqual([c]);
-    e.updateRelation('Relation-missing' as Id, { info: 6 });
+    e.updateRelation('Relation-missing' as RelId, { info: 6 });
   });
 
   it('link refuses a cycle within acyclicIn', () => {
@@ -193,7 +195,7 @@ describe('relation kinds', () => {
 
   it("loads a stored relation of any kind through the admin face, which is how data a pack's removal left is read", () => {
     const [a, b] = [task('A'), task('B')];
-    e.admin.bulkLoadRelation('Relation-r1' as Id, 'retired', a, b);
+    e.admin.bulkLoadRelation('Relation-r1' as RelId, 'retired', a, b);
     expect(e.findRelations().map((r) => r.kind)).toEqual(['retired']);
   });
 });

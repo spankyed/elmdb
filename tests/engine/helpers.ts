@@ -14,6 +14,7 @@ export const ROLES = new Set(['current', 'focus', 'free', 'lead', 'member', 'own
 export const isRole = (name: string) => ROLES.has(name);
 
 export type Id = EARS.EntityId;
+export type RelId = EARS.RelationId;
 
 /** An engine with the contract specs' entity types, relation kinds and roles, and no persistence unless given */
 export function engine(persistence?: PersistenceSink): EngineUnderTest {
