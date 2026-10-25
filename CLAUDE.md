@@ -115,7 +115,8 @@ Held by the types and the engine specs, which say more than a rule over names co
 - `openLmdbStore({ path, readOnly?, syncIdleMs?, syncIntervalMs? })` (`@apackdev/ears/lmdb`) opens the environment at `path` and
   returns the store: `kv` (which an engine is created on), `path`, `readOnly`, `syncs`, `readers()`, `durable()`,
   `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, which is
-  what a backup takes), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
+  what a backup takes; uncompacted, since a compacted copy of data with multi-page values aborts the process when it is
+  emptied — an lmdb-js 3.5.9 bug nothing here checks for, `docs/references/evidence/lmdb-compacted-copy-crash.md`), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
   staying open), `reset()` (every entry removed, in one durable unit; both empty the database with the writer's
   `clear()`, which on LMDB is `clearSync` — `mdb_drop`, run in the unit's transaction — rather than a delete per key) and `close()`. Nothing opens on import.
   `readOnly` opens existing files without writing: a write, `reset()` and `replaceWith()` throw naming why.
