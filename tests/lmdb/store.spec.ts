@@ -83,7 +83,7 @@ describe('openLmdbStore', () => {
     expect(engine.query('Note').count()).toBe(1);
   });
 
-  // Compaction is off while lmdb aborts emptying a compacted copy (COMPACT_COPIES): this runs once it is on
+  // Runs while copies are compacted (COMPACT_COPIES)
   it.skipIf(!COMPACT_COPIES)('copies the database without the pages its deletes freed', async () => {
     const { store, engine } = openStore();
     engine.transact(() => { for (let i = 0; i < 200; i++) engine.create('Note', { id: id(`Note-${i}`), title: 'x'.repeat(10_000) }); });

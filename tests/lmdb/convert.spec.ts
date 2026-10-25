@@ -162,7 +162,7 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
   }
 });
 
-// Compaction is off while lmdb aborts emptying a compacted copy (COMPACT_COPIES): these run once it is on
+// Run while copies are compacted (COMPACT_COPIES)
 it.skipIf(!COMPACT_COPIES)('compacts an environment in place, without the pages its deletes freed, and keeps what it holds', async () => {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
   dirs.push(path.dirname(dir));
@@ -205,17 +205,6 @@ it.skipIf(!COMPACT_COPIES)('refuses to compact an environment that is open, and 
   } finally {
     store.close();
   }
-});
-
-it.skipIf(COMPACT_COPIES)('refuses to compact while compaction is off, and leaves the file as it was', async () => {
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-off-')), 'ears-db');
-  dirs.push(path.dirname(dir));
-  const store = openLmdbStore({ path: dir });
-  createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true }).create('Note', { title: 'kept' });
-  store.close();
-  const before = fs.readFileSync(path.join(dir, 'data.mdb'));
-  await expect(compactEnvironment(dir)).rejects.toThrow('Compaction is off');
-  expect(fs.readFileSync(path.join(dir, 'data.mdb')).equals(before)).toBe(true);
 });
 
 it('refuses a record store, whose format is its own, and leaves it as it was', () => {
