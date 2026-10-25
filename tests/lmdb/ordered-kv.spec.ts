@@ -88,6 +88,15 @@ describe.each([
     expect(kv.read((r) => r.get(['v', 'missing']))).toBeUndefined();
   });
 
+  it('gives back binary values that the reads after them leave as they were, in a snapshot and in a unit', () => {
+    const kv = make();
+    // A Buffer is stored as msgpack's binary, which decodes as a view of the bytes it was read from
+    kv.write((w) => { w.put(['b', 1], Buffer.from([1, 2, 3])); w.put(['b', 2], Buffer.from([9, 9, 9, 9])); });
+    const readBoth = (r: { get(key: Key): unknown }) => [r.get(['b', 1]), r.get(['b', 2])].map((value) => [...(value as Uint8Array)]);
+    expect(kv.read(readBoth)).toEqual([[1, 2, 3], [9, 9, 9, 9]]);
+    expect(kv.write(readBoth)).toEqual([[1, 2, 3], [9, 9, 9, 9]]);
+  });
+
   it('gives back a field named __proto__ as a field, beside one named __proto_', () => {
     const kv = make();
     const value = JSON.parse('{"__proto__": {"polluted": "yes"}, "__proto_": 1, "nested": [{"__proto__": 2}]}');

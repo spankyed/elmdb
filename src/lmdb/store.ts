@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { open, type Database, type RootDatabase } from 'lmdb';
 import { createOrderedKV, type OrderedKV } from '../kv.ts';
-import { createLmdbKVBackend } from './kv-backend.ts';
+import { createLmdbKVBackend, syncEnvironment } from './kv-backend.ts';
 import { checkStamp } from './stamp.ts';
 
 /**
@@ -144,8 +144,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     clearTimers();
     syncs++;
     const done = new Promise<void>((resolve, reject) => {
-      // `sync` is lmdb-js's (its environment's mdb_env_sync, run off the main thread), missing from its types
-      (root as unknown as { sync(done: (error?: Error) => void): void }).sync((error?: Error) => {
+      syncEnvironment(root, (error) => {
         // A sync that failed made nothing durable: its commits are owed still, and the next sync takes them
         if (error) { owed = true; reject(error); } else resolve();
       });

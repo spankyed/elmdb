@@ -25,7 +25,6 @@ export interface BaseEntity {
 
 // @public
 export interface ByteReader {
-    // (undocumented)
     get(key: Uint8Array): Uint8Array | undefined;
     scan(low: Uint8Array, high: Uint8Array | undefined, reverse: boolean, values: boolean, visit: (key: Uint8Array, value: Uint8Array | undefined) => boolean): void;
 }

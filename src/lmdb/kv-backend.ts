@@ -1,4 +1,4 @@
-import type { Database, RootDatabase, Transaction } from 'lmdb';
+import { TransactionFlags, type Database, type RootDatabase, type Transaction } from 'lmdb';
 import type { ByteReader, ByteWriter, KvBackend } from '../kv.ts';
 
 /**
@@ -6,8 +6,23 @@ import type { ByteReader, ByteWriter, KvBackend } from '../kv.ts';
  * visible at once and survives the process crashing; what makes it durable against the machine failing is a sync,
  * which is the store's to schedule. A durable unit commits with the sync (`COMMIT_DURABLE`).
  */
-const COMMIT = 1 /* ABORTABLE */ | 2 /* SYNCHRONOUS_COMMIT */ | 0x10000 /* NO_SYNC_FLUSH */;
-const COMMIT_DURABLE = 1 /* ABORTABLE */ | 2 /* SYNCHRONOUS_COMMIT */;
+const COMMIT = TransactionFlags.ABORTABLE | TransactionFlags.SYNCHRONOUS_COMMIT | TransactionFlags.NO_SYNC_FLUSH;
+const COMMIT_DURABLE = TransactionFlags.ABORTABLE | TransactionFlags.SYNCHRONOUS_COMMIT;
+
+/**
+ * The two lmdb-js members this backend uses that its types leave out: `sync`, its environment's `mdb_env_sync` run off
+ * the main thread, calling back once it finishes; and `getBinaryFast`'s read options, without which it reads in the
+ * thread's latest read transaction rather than the snapshot given
+ */
+interface LmdbUntyped {
+  sync(done: (error?: Error) => void): void;
+  getBinaryFast(key: Uint8Array, options?: { transaction?: Transaction }): Uint8Array | undefined;
+}
+
+/** Syncs the environment off the main thread: every commit before the call is on disk once `done` is called without an error */
+export function syncEnvironment(root: RootDatabase, done: (error?: Error) => void): void {
+  (root as unknown as LmdbUntyped).sync(done);
+}
 
 /** What the backend tells its store, and asks of it */
 export interface LmdbKVHooks {
@@ -19,11 +34,15 @@ export interface LmdbKVHooks {
   durable(): Promise<void>;
 }
 
-/** The bytes of one database, read inside `transaction` (none: the open write unit, or the latest committed) */
+/**
+ * The bytes of one database, read inside `transaction` (none: the open write unit, or the latest committed). A value
+ * `get` gives back is lmdb-js's buffer for the next read, unless the seam copies it (`ByteReader`)
+ */
 function bytes(db: Database<Uint8Array, Uint8Array>, transaction?: Transaction): ByteReader {
   const options = transaction && { transaction };
+  const fast = db as unknown as LmdbUntyped;
   return {
-    get: (key) => db.get(key as Buffer, options),
+    get: (key) => fast.getBinaryFast(key, options),
     scan(low, high, reverse, values, visit) {
       // A reverse range starts at the high bound, which LMDB includes and the seam doesn't, and ends at the low one,
       // which LMDB excludes and the seam includes: the walk below skips the one and visits the other last

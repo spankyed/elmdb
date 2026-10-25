@@ -85,6 +85,7 @@ export interface UnitOptions {
 
 /** A backend's bytes, read: a key's value, and a range of keys in byte order */
 export interface ByteReader {
+  /** The value at `key`: bytes the backend may reuse for its next read, so a caller keeping them copies them */
   get(key: Uint8Array): Uint8Array | undefined;
   /**
    * Visits the keys from `low` (inclusive) to `high` (exclusive), highest first with `reverse`, until `visit` answers
@@ -215,6 +216,12 @@ type Savepoint = Map<string, Uint8Array | undefined>;
 /** Bytes as a string of the same length, one character a byte, so string order is byte order */
 const byteString = (bytes: Uint8Array) => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1');
 
+/**
+ * Bytes a backend gave, copied to be kept: to `length`, which a backend's reused buffer sets below its size (lmdb-js's
+ * is 16 MB), where a typed array's own `slice` would copy the whole buffer
+ */
+const copyOf = (bytes: Uint8Array): Uint8Array => Uint8Array.prototype.slice.call(bytes, 0, bytes.length);
+
 /** How the seam is set up over its backend */
 export interface OrderedKVOptions {
   /**
@@ -236,7 +243,8 @@ function deepFreeze<T>(value: T): T {
  * nested unit's writes undone when it throws.
  */
 export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedKVOptions = {}): OrderedKV {
-  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: false });
+  // `copyBuffers`: a binary value is decoded as a copy, not a view of bytes the backend reuses for its next read
+  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: false, copyBuffers: true });
   const encodeKey = keyEncoder();
   const encodeValue = (value: unknown): Uint8Array => packr.pack(value);
   const decodeValue = freeze
@@ -279,7 +287,9 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
       const savepoint = savepoints[savepoints.length - 1];
       if (!savepoint) return;
       const name = byteString(key);
-      if (!savepoint.has(name)) savepoint.set(name, bytes.get(key));
+      if (savepoint.has(name)) return;
+      const before = bytes.get(key);
+      savepoint.set(name, before && copyOf(before));
     };
     return {
       ...reader(bytes),
