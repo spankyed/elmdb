@@ -16,8 +16,8 @@ EARS, the entity-attribute-relation graph store behind apack's data: the engine,
 | `index.ts` | The root entry: `createEarsEngine`, its types, the database port's types, `EngineSchema`, the pure helpers, `EARS`, `defineEars` and the typed facade types. Nothing it exports acts on an engine it wasn't given |
 | `engine.ts` | `createEarsEngine({ database, warn?, freeze? })` and the faces' types (`EarsEngine`, `Ears`, `EarsAdmin`). It composes the modules below over one connection, and reads the names it accepts off the database's schema, again after `admin.setSchema` or `admin.declare` |
 | `database.ts` | The port (`EarsDatabase`, `EarsUnit`: what the engine needs of elmdb's `Database` and `Unit`), the codec (`msgpackr`, `undefined` skipped; a read decoded with maps where a row isn't plain objects, so a field named `__proto__` is a field) and `createConnection`, the one place a read or a write crosses: to the unit `transact` holds open, or to the database outside one. A refusal elmdb names comes back as an `EarsError` with the matching code |
-| `query.ts` | `createQuery`: the query entry points (`query(type)`, `query.ids`, `query.all`, `query.withTrashed`, `query.trashed`) and the builder, a recipe each terminal compiles to one of elmdb's plans (`elmdb/docs/engine.md`, Reads: plans); `b64Encode`/`b64Decode` |
-| `write.ts` | `createWrites`: `create`, `upsert`, `write` and the write builder, each call one of elmdb's batch operations (`elmdb/docs/engine.md`, Writes: batches and units) |
+| `query.ts` | `createQuery`: the query entry points (`query(type)`, `query.ids`, `query.all`, `query.withTrashed`, `query.trashed`) and the builder, a recipe each terminal compiles to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans); `b64Encode`/`b64Decode` |
+| `write.ts` | `createWrites`: `create`, `upsert`, `write` and the write builder, each call one of elmdb's batch operations (`elmdb/docs/architecture/engine.md`, Writes: batches and units) |
 | `schema.ts` | `EngineSchema` (each type's `RowRules`, each relation kind's `RelationRules`, the roles) and `toElmdbSchema`, the elmdb schema it becomes: required and indexed fields declared, every other field allowed, each index a value index of one field; `withDeclarations`, which `admin.declare` merges with |
 | `errors.ts` | `EarsError` and its codes, `RESERVED_ATTRIBUTES`, which every attribute write refuses, and `RESERVED_ENTITY_TYPES`, the names the engine's own ids are written with (`Relation-…`, `Sequence-…`), which the SDK's manifest schema refuses as a pack's entity type |
 | `names.ts` | `createNameChecks`: the refusal of a relation kind (`UNKNOWN_RELATION_KIND`) or a role (`UNKNOWN_ROLE`) the schema doesn't declare, which links, role writes, reads and walks call |
@@ -90,7 +90,7 @@ Held by the types and the engine specs, which say more than a rule over names co
 - **Search.** A type whose row rules declare `search` (a manifest entry's, `{ fields: { field: weight }, stem? }`) has
   an elmdb text index named `search` over those fields (`schema.ts`). `search(text, options?)` is a plan step: after a
   type start it reads the index, after other steps it searches among what they reached, and it orders by relevance
-  (`elmdb/docs/search.md`, Text search as built); `after(id)` pages past a page's last id; `hits({ fields?,
+  (`elmdb/docs/architecture/search.md`, Text search as built); `after(id)` pages past a page's last id; `hits({ fields?,
   highlights? })` is its terminal, refused (`NO_SEARCH`) for a query with no search or with a `where` given a function
   after it, since a function splits the plan and the search would not be in the plan the terminal ends. A type with
   no text index refuses a search (`UNKNOWN_INDEX`).
@@ -136,7 +136,7 @@ Held by the types and the engine specs, which say more than a rule over names co
   refused, and a database this user can't write is read without LMDB's lock file. Nothing opens on import.
 - **A unit is visible as it commits, and durable within the window.** elmdb commits each unit without a sync and
   syncs on group commit, so a commit is on disk within a second; `durable()` resolves once every unit committed before
-  it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/engine.md`, Durability). `syncs:
+  it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/architecture/engine.md`, Durability). `syncs:
   false` turns syncing off, for a temporary database a crash can't matter to.
 - **A backup is elmdb's compacted copy** (`backup`), and a restore its `replaceWith`, the database staying open: both
   run through `@apackdev/host/backup`'s `databaseBackupStore`. `DATABASE_FORMAT` (`elmdb/1`) is what a backup records
@@ -148,7 +148,7 @@ Held by the types and the engine specs, which say more than a rule over names co
   `/backup`) takes each database as an argument.
 - **Data from lmdb-js** moves on a copy, never at boot: elmdb's `tools/lmdb-js-export` dumps an lmdb-js database
   (format 4) and a run history's record store, `elmdb upgrade` reads the first and `apack db import-runs` the second
-  (`elmdb/docs/format.md`, Moving apack's data).
+  (`elmdb/docs/architecture/format.md`, Moving apack's data).
 
 ## Typed contract
 
@@ -163,7 +163,7 @@ Held by the types and the engine specs, which say more than a rule over names co
 ## Tests (`tests/`)
 
 - `engine/`: black-box specs of the public API: `writes` (`create`, `upsert` and `write`, each entry point's refusals, the builder's attribute writes, the reserved names, the ids and fields returned), `relations` (link, unlink, `out`/`in`, `linkedTo`/`linkedFrom`/`linkedWith`, the hierarchy walks, a kind's rules, roles), `queries` (the entry points and their refusals, filters, terminals and ordering), `transact` (every write undone by a unit that throws, one commit per unit, nesting) and `bulk-load` (the admin face's loads). They reach the engine only through `engine-under-test.ts` (`freshEngine`), each engine on a temporary database of its own. A few specs pin existing quirks; they say so.
-- The correctness harness (`_harness/`: a reference model and random workloads from `fast-check`): `engine/model-based.spec.ts` checks the engine against the model after every op — the rows, every refusal, a unit and a savepoint rolling back, and the derived reads (a type's entities, count and trash, an indexed and an unindexed `where`, `withRole`, each kind's `out`/`in`). Each run creates every id first and mixes in an edge linked, unlinked and linked again, since a workload over an empty database refuses nearly everything; and a watch on each of those reads, every row and the whole state delivers what the read answers afresh after every op. `engine/watch.spec.ts` holds the watch contract's edges. A commit the database refuses, and a process killed mid-write, are elmdb's own harnesses' (`elmdb/docs/testing.md`).
+- The correctness harness (`_harness/`: a reference model and random workloads from `fast-check`): `engine/model-based.spec.ts` checks the engine against the model after every op — the rows, every refusal, a unit and a savepoint rolling back, and the derived reads (a type's entities, count and trash, an indexed and an unindexed `where`, `withRole`, each kind's `out`/`in`). Each run creates every id first and mixes in an edge linked, unlinked and linked again, since a workload over an empty database refuses nearly everything; and a watch on each of those reads, every row and the whole state delivers what the read answers afresh after every op. `engine/watch.spec.ts` holds the watch contract's edges. A commit the database refuses, and a process killed mid-write, are elmdb's own harnesses' (`elmdb/docs/architecture/testing.md`).
 - `vocabulary.spec.ts`: the rules in Vocabulary, over every member of the engine, `admin`, a query builder and a write builder — off the types for `is*`, `find*`, flags and chaining, off a real engine for pairs and absence — each with a case showing it names a member that breaks it.
 - `engines.spec.ts`: a typed facade acts on whichever engine its getter returns; two engines in one process share nothing. The bound engine's operations are the SDK's, and its spec is `apack-sdk/tests/ears/bound-ears.spec.ts`.
 - One half: the package has no integration config. Test files run in parallel (`fileParallelism: true`): each creates its own engines.

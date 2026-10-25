@@ -1,5 +1,5 @@
 // The schema an engine's database holds, as apack's packs declare it, and the elmdb schema it becomes
-// (`elmdb/docs/schema.md`). Whoever creates the engine builds it from what is registered — the app from its packs, a
+// (`elmdb/docs/architecture/schema.md`). Whoever creates the engine builds it from what is registered — the app from its packs, a
 // test from its own names — and changes it with `admin.setSchema` when that changes.
 import type { RowRules } from './runtime.ts';
 import { RESERVED_ATTRIBUTES } from './errors.ts';
