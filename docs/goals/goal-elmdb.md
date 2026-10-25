@@ -59,26 +59,8 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **Blocked on a reboot of the Mac (2026-10-25).** Every elmdb open fails with `No space left on device (os error 28)`
-  from `sem_open`: macOS's table of named POSIX semaphores (`kern.posix.sem.max`, 10,000) is full. elmdb's binary locks
-  with POSIX semaphores (`MDB_USE_POSIX_SEM`, D24; it links `sem_open`, not `semget`), two per database, which LMDB
-  removes as the last process closes. Vitest's tinypool stops a forked worker with SIGTERM, which Node answers by dying
-  without its `exit` handlers or native cleanup hooks, so every test file's temporary databases stayed open: 7,428
-  `ears-*` directories were left in the temp dir today, each a database whose pair was never removed. Named POSIX
-  semaphores can't be listed, so only a restart empties the table; `ipcrm` clears System V sets (lmdb-js's), not these.
-- **The fix, in two halves.** apack `cee3cd229`: a test worker stopped with SIGTERM exits through `process.exit`, so its
-  exit handlers close what `createTemporaryDatabases` opened. elmdb, on branch `close-at-exit` (checked out; `main` is
-  without it): the binding keeps, per Node environment, the databases it opened, and closes those still open at
-  `process.on('exit')` (a natural end and `process.exit`) and at the environment's cleanup hook (a worker thread's end),
-  each with `Database::close_within`, a bounded close (`crates/elmdb-node/src/exit.rs`). A cleanup hook alone was
-  proven not to run on `process.exit`: CI run 40239309627 failed the exit case. `exit.test.mjs` rebuilds each
-  database's semaphore names from its lock file's hash (`mtb_mutexid`, offset 24, base 85), checks them against an open
-  database, then checks each ending leaves neither. Branch `close-at-exit-mutant` is the same with `close_all` closing
-  nothing, and must fail. **CI:** fix run 40240131963, mutant run 40240133958 (dispatched 2026-10-25). **Next:** when the
-  fix passes and the mutant fails on macOS, merge `close-at-exit` into `main` (fast-forward), delete both branches on
-  origin, push `main` (D20), pin apack's `vendor/elmdb.rev`, record D33 and the runs in `docs/evidence/phase-15.md`.
-  A SIGKILL still leaves a pair; a reopen at the same path clears it. **The Mac must restart** before anything opens a
-  database locally; nothing here frees what is already held.
+- **The semaphore leak is fixed (D33)**: elmdb `main` has the binding's close at exit; the Mac was restarted and opens
+  work again. apack's test workers exit through `process.exit` on SIGTERM (`cee3cd229`).
 - **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`,
   committed through `b22412320` (Phase 15's packaging, the bookmark fix, the stale E2E case, the facade report). Not
   pushed. **After the binding fix:** `npm run chain -- --e2e`. The last runs before the table filled passed every step
@@ -133,6 +115,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D30 | **Watch is live-queries' contract, and the views are live-queries'.** apack's live-queries work (branch `live-queries`, plan `docs/plans/live-queries.md`) built `engine.watch` on the JavaScript engine (`517900b52`) and views over it in the SDK, host, API and renderer (its Step 2), and asked elmdb for tracked reads and a commit sequence (`78f9fb0`). So Phase 14 builds elmdb's side and `engine.watch` on it under that contract, with live-queries' specs as acceptance, and builds no watched query or adopting system of its own: views, and the features moved onto them, are live-queries' Steps 2–5. **Landing order:** `goal-elmdb-next.md` takes it up once this goal closes (its G7 and Phase 2): a branch cut from this goal's branch, with `live-queries` merged into it — `517900b52`'s JavaScript-engine internals dropped for Phase 14's `engine.watch`, its plan, views and migrated features kept — and one PR, stacked on this goal's. Neither goal edits live-queries' plan or its views beyond what a conflict makes it | the user, 2026-10-25 |
 | D31 | **The library's vector search has one model, and nothing embeds on a timer.** An elmdb vector index names one model, so the library's search indexes share `IndexedDoc`'s, declared in default-setup's manifest (`openai:text-embedding-3-small`, 1536 dims); an index's per-index model, metric and connectivity, and their controls in the dormant editor, are dropped with `fastembed`, `usearch` and the index files. The engine never calls a model: `embedPending` (`@apackdev/sdk/services`) embeds what a vector index holds pending, run by whoever wrote the text — the library after indexing — rather than by a timer or a commit hook; Phase 14 builds no adopter (D30), so no watch drives it | `docs/evidence/phase-13.md` |
 | D32 | **A tracked read adds to its token, and a change set is the commit's answer, not a listener's.** apack's watched reads are functions that make several read calls, so a read tracked under a token adds what it touches to what the token holds, and a caller re-running its reads drops the token first (`untrack`); `engine.md` had a read replace its token's ranges, which would keep only a run's last call. Change sets, their sequence and `touched` are what each write and unit commit answers, which is every commit a caller makes; no `db.changes(listener)` is built, since apack hears the commits it makes and a background index build changes no answer. Admin writes that aren't logged key by key are heard as touching everything | `docs/evidence/phase-14.md`; `docs/architecture/engine.md`, Change sets and watch |
+| D33 | **elmdb closes what a Node environment leaves open.** LMDB removes a database's lock semaphores (named POSIX semaphores on macOS, D24) as its last process closes it, and Node runs no destructor at `process.exit`, so each database a process left open there kept its pair until the machine restarted; test workers, which vitest stops with SIGTERM and so never ran their exit handlers, filled the 10,000-entry table on 2026-10-25 and every open on the Mac failed (`ENOSPC`). The binding keeps the databases each environment opened and closes those still open at `process.on('exit')` and at the environment's cleanup hook, with a bounded close; apack's test workers exit through `process.exit` on SIGTERM (`cee3cd229`). A natural end and a terminated worker thread were already released by Node's teardown; `process.exit` was not. A SIGKILL still leaves a pair, which a reopen at the same path clears. Lock-free databases were rejected (no reader table under a concurrent read pool), and so were System V sets (they leak alike, and collided with lmdb-js's) | `crates/elmdb-node/src/exit.rs`, `test/exit.test.mjs`; CI runs 40240131963 (passed) and 40240133958 (the mutant, failing the exit case); `docs/evidence/phase-15.md` |
 | D21 | apack pins the elmdb commit it builds against in a committed `vendor/elmdb.rev`. Locally the `vendor/elmdb` symlink stays live, and a check refuses when that checkout doesn't contain the pinned commit. In apack's CI, a step clones elmdb at that commit into `vendor/elmdb` and builds the binding, with the Cargo target directory cached | this goal |
 
 ## Phases
