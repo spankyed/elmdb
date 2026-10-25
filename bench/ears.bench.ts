@@ -12,7 +12,7 @@ import type { EARS as EarsTypes } from '../src/index.ts';
 // Specifiers held in variables, so the typecheck (which runs before any build) reads the types from source
 const DIST = '../dist/index.js';
 const DIST_LMDB = '../dist/lmdb/index.js';
-const { createEarsEngine, EARS } = await import(/* @vite-ignore */ DIST) as typeof import('../src/index.ts');
+const { createEarsEngine, createMemoryKV, EARS } = await import(/* @vite-ignore */ DIST) as typeof import('../src/index.ts');
 const { openLmdbStore } = await import(/* @vite-ignore */ DIST_LMDB) as typeof import('../src/lmdb/index.ts');
 
 const TASKS = 40_000;
@@ -30,7 +30,8 @@ afterAll(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 // Task rows are numbered T-<n>, as an app's shapes number theirs, and declare the indexes an app's would
-const engine = createEarsEngine({ ...(store && { kv: store.kv }), isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T', indexes: ['status', 'title'] } : undefined) });
+const kv = store ? store.kv : createMemoryKV();
+const engine = createEarsEngine({ kv, isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true, rowRules: (type) => (type === 'Task' ? { required: [], shortCode: 'T', indexes: ['status', 'title'] } : undefined) });
 const { admin } = engine;
 
 const task = (i: number) => `Task-${i}` as Id;
@@ -149,4 +150,41 @@ describe('writes', () => {
       for (let i = 0; i < 1000; i++) engine.create('Note').set('title', `Note ${i}`).set('status', 'open');
     });
   }, { iterations: 50, time: 0 });
+});
+
+// What a watch costs a write: each commit's keys looked up in the read sets of the watches open, which read other rows
+// here, so the cost is the lookup's and no read runs again. It should stay flat as the watches grow, which is what the
+// read-set index is for. Then the same creates with watches on a page of the type written, which each run again
+// (once for the burst), and a page read tracked, as a watch runs it, against the read alone
+describe('watches', () => {
+  let open: Array<{ stop(): void }> = [];
+  const watching = (count: number, read: (i: number) => () => unknown) => ({
+    async setup() {
+      for (let i = 0; i < count; i++) open.push(engine.watch(read(i), () => {}));
+      await admin.watchesSettled();
+    },
+    teardown() {
+      for (const w of open) w.stop();
+      open = [];
+    },
+  });
+  const creates = () => {
+    for (let i = 0; i < 1000; i++) engine.create('Note').set('title', `Note ${i}`).set('status', 'open');
+  };
+  for (const count of [0, 10, 100, 1000]) {
+    bench(`1,000 creates, ${count.toLocaleString('en')} watches open on other rows`, creates, {
+      iterations: 20, time: 0, ...watching(count, (i) => () => engine.getRow(project(i))),
+    });
+  }
+  bench('1,000 creates, then 100 watches on a page of the type run again', async () => {
+    creates();
+    await admin.watchesSettled();
+  }, { iterations: 20, time: 0, ...watching(100, () => () => engine.query('Note').limit(50).ids()) });
+  const page = () => engine.query('Task').limit(50).pickAll();
+  bench('1,000 page reads', () => {
+    for (let i = 0; i < 1000; i++) page();
+  }, { iterations: 10, time: 0 });
+  bench('1,000 page reads, tracked as a watch runs them', () => {
+    for (let i = 0; i < 1000; i++) kv.track(page);
+  }, { iterations: 10, time: 0 });
 });

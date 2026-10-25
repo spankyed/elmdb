@@ -39,6 +39,12 @@ export interface ByteWriter extends ByteReader {
 }
 
 // @public
+export interface Commit {
+    readonly keys: ReadonlySet<string> | 'all';
+    readonly number: number;
+}
+
+// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -138,6 +144,7 @@ export interface Ears {
     isEntityType(name: string): boolean;
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
+    lastCommit(): number;
     nextLabel(type: EARS.Entity, base: string): string;
     query: Query;
     removeRelation(relId: EARS.RelationId): void;
@@ -148,6 +155,7 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
+    watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
     wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
@@ -169,6 +177,12 @@ export interface EarsAdmin {
         target?: EARS.EntityId;
         info?: unknown;
     }): void;
+    watchesSettled(): Promise<void>;
+    watchStats(): {
+        watches: number;
+        keys: number;
+        ranges: number;
+    };
 }
 
 // @public
@@ -336,7 +350,14 @@ E
 // @public
 export interface OrderedKV {
     durable(): Promise<void>;
+    readonly lastCommit: number;
+    onCommit(listener: (commit: Commit) => void): () => void;
     read<T>(fn: (reader: KvReader) => T): T;
+    replaceAll(entries: Iterable<{
+        key: Uint8Array;
+        value: Uint8Array;
+    }, unknown, undefined>, options?: UnitOptions): void;
+    track<T>(fn: () => T): Tracked<T>;
     write<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
     readonly writing: boolean;
 }
@@ -426,6 +447,12 @@ export interface RangeOptions {
     reverse?: boolean;
     start?: Key;
     values?: boolean;
+}
+
+// @public
+export interface ReadSet {
+    readonly keys: ReadonlySet<string>;
+    readonly ranges: ReadonlyArray<readonly [low: string, high: string | undefined]>;
 }
 
 // @public
@@ -552,6 +579,17 @@ export type StoredRecord = {
 } & Record<string, unknown>;
 
 // @public
+export type Tracked<T> = {
+    reads: ReadSet;
+} & ({
+    ok: true;
+    value: T;
+} | {
+    ok: false;
+    error: unknown;
+});
+
+// @public
 export interface TypedCreate<D extends EarsSchema> {
     // (undocumented)
     <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
@@ -638,6 +676,17 @@ export interface Upsert {
 
 // @public
 export type Visit = (key: Key, value: unknown) => boolean | void;
+
+// @public
+export interface Watching {
+    stop(): void;
+}
+
+// @public
+export interface WatchObserver<T> {
+    error?(error: unknown, commit: number): void;
+    next(value: T, commit: number): void;
+}
 
 // @public
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);

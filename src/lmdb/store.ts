@@ -240,10 +240,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
       refuseReadOnly('be replaced');
       const from = openEnvironment(source, { readOnly: true });
       try {
-        open.write((w) => {
-          w.clear();
-          for (const { key, value } of from.db.getRange()) w.put(key as Uint8Array, value as Uint8Array);
-        }, { durable: true });
+        kv.replaceAll(from.db.getRange() as Iterable<{ key: Uint8Array; value: Uint8Array }, unknown, undefined>, { durable: true });
       } finally {
         from.root.close();
       }

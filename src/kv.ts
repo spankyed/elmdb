@@ -55,6 +55,28 @@ export interface KvWriter extends KvReader {
   clear(): void;
 }
 
+/**
+ * What a tracked read touched, in the store's encoded keys, each a byte string (one character a byte, so string order
+ * is byte order): the keys it got, present or not, and the ranges it scanned, each as far as the scan went
+ */
+export interface ReadSet {
+  /** The keys its reads got, present or not */
+  readonly keys: ReadonlySet<string>;
+  /** `[low, high)`; `high` undefined runs to the end of the store */
+  readonly ranges: ReadonlyArray<readonly [low: string, high: string | undefined]>;
+}
+
+/** A tracked read's outcome: its value, or what it threw, and what it read either way */
+export type Tracked<T> = { reads: ReadSet } & ({ ok: true; value: T } | { ok: false; error: unknown });
+
+/** A committed unit, as a commit listener hears it */
+export interface Commit {
+  /** One more than the store's last commit: a number that only increases while the store is open */
+  readonly number: number;
+  /** The keys it wrote, as `ReadSet` byte strings, or `all` when it emptied the store */
+  readonly keys: ReadonlySet<string> | 'all';
+}
+
 /** An ordered key-value store: read snapshots and write units over it */
 export interface OrderedKV {
   /**
@@ -70,6 +92,23 @@ export interface OrderedKV {
   write<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
   /** Whether a write unit is open */
   readonly writing: boolean;
+  /**
+   * Runs `fn`, recording every key its reads got and every range they scanned, a write unit's reads included: what a
+   * commit must write into for `fn` to answer differently
+   */
+  track<T>(fn: () => T): Tracked<T>;
+  /**
+   * Calls `listener` after each unit that wrote commits, outside the unit, with what it wrote. Keys are logged only
+   * while a listener is registered. Returns the unregistration
+   */
+  onCommit(listener: (commit: Commit) => void): () => void;
+  /** The number of the last commit, or 0 */
+  readonly lastCommit: number;
+  /**
+   * Replaces every entry with `entries`, already in the store's encoding (another store's bytes), as one unit; refused
+   * inside a unit. Commit listeners hear it as emptying the store
+   */
+  replaceAll(entries: Iterable<{ key: Uint8Array; value: Uint8Array }, unknown, undefined>, options?: UnitOptions): void;
   /**
    * Resolves once every unit committed before the call is on disk. A committed unit is visible, and survives the
    * process crashing, when it returns; this is what survives the machine failing
@@ -213,6 +252,13 @@ function objectsOf(value: unknown): unknown {
 /** What a nested unit undoes when it throws: each key it first wrote, and what that key held before (undefined: none) */
 type Savepoint = Map<string, Uint8Array | undefined>;
 
+/**
+ * What a unit wrote: whether anything, whether it emptied the store, and each key, as a byte string, while a commit
+ * listener is registered (undefined otherwise). A savepoint's writes stay logged when it rolls back, which can only make
+ * a listener look again, never miss a change
+ */
+interface WriteLog { wrote: boolean; emptied: boolean; written: Set<string> | undefined }
+
 /** Bytes as a string of the same length, one character a byte, so string order is byte order */
 const byteString = (bytes: Uint8Array) => Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString('latin1');
 
@@ -252,10 +298,32 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
     : (bytes: Uint8Array): unknown => objectsOf(packr.unpack(bytes));
 
   /**
-   * The open unit's writer, its savepoints (innermost last), and whether a unit inside it asked to be durable; none
-   * while no unit is open
+   * The open unit's writer, its savepoints (innermost last), whether a unit inside it asked to be durable, and what it
+   * wrote; none while no unit is open
    */
-  let unit: { writer: ByteWriter; savepoints: Savepoint[]; durable: boolean } | undefined;
+  let unit: { writer: ByteWriter; savepoints: Savepoint[]; durable: boolean; log: WriteLog } | undefined;
+
+  const listeners = new Set<(commit: Commit) => void>();
+  let lastCommit = 0;
+  /** Tracked reads in progress, innermost last: a read records into the innermost, which hands its record up */
+  const recorders: Array<{ keys: Set<string>; ranges: Array<[string, string | undefined]> }> = [];
+
+  /** Calls every commit listener with a unit's writes; a listener's throw is reported, not handed to the writer */
+  const committed = (log: WriteLog) => {
+    if (!log.wrote) return;
+    lastCommit++;
+    if (listeners.size === 0) return;
+    // A unit that began before the first listener registered logged no keys, so it is heard as writing everything
+    const commit: Commit = { number: lastCommit, keys: log.emptied || !log.written ? 'all' : log.written };
+    for (const listener of listeners) {
+      try {
+        listener(commit);
+      } catch (error) {
+        queueMicrotask(() => { throw error; });
+      }
+    }
+  };
+  const newLog = (): WriteLog => ({ wrote: false, emptied: false, written: listeners.size > 0 ? new Set() : undefined });
 
   const bounds = ({ prefix, start, end }: RangeOptions): [Uint8Array, Uint8Array | undefined] => {
     if (prefix && prefix.length > 0) {
@@ -266,22 +334,47 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
 
   const reader = (bytes: ByteReader): KvReader => ({
     get(key) {
-      const value = bytes.get(encodeKey(key));
+      const encoded = encodeKey(key);
+      recorders[recorders.length - 1]?.keys.add(byteString(encoded));
+      const value = bytes.get(encoded);
       return value === undefined ? undefined : decodeValue(value);
     },
     range(options, visit) {
       const [low, high] = bounds(options);
       const values = options.values !== false;
+      const reverse = options.reverse === true;
       let left = options.limit ?? Infinity;
       if (left <= 0) return;
-      bytes.scan(low, high, options.reverse === true, values, (key, value) => {
-        if (visit(decodeKey(key), values && value !== undefined ? decodeValue(value) : undefined) === false) return false;
-        return --left > 0;
-      });
+      const recorder = recorders[recorders.length - 1];
+      /** The last key visited and whether the scan stopped there, rather than running out: how far it read */
+      let last: string | undefined;
+      let stopped = false;
+      let finished = false;
+      try {
+        bytes.scan(low, high, reverse, values, (key, value) => {
+          if (recorder) last = byteString(key);
+          if (visit(decodeKey(key), values && value !== undefined ? decodeValue(value) : undefined) === false || --left <= 0) {
+            stopped = true;
+            return false;
+          }
+          return true;
+        });
+        finished = true;
+      } finally {
+        if (recorder) {
+          const lowName = byteString(low);
+          const highName = high && byteString(high);
+          // A scan that threw is recorded whole; one that stopped, to the key it stopped at (`\0` follows it, the
+          // least key above it)
+          if (!finished || !stopped || last === undefined) recorder.ranges.push([lowName, highName]);
+          else if (reverse) recorder.ranges.push([last, highName]);
+          else recorder.ranges.push([lowName, `${last}\u0000`]);
+        }
+      }
     },
   });
 
-  const writer = (bytes: ByteWriter, savepoints: Savepoint[]): KvWriter => {
+  const writer = (bytes: ByteWriter, savepoints: Savepoint[], log: WriteLog): KvWriter => {
     /** Records, in the innermost savepoint, what `key` held before its first write there */
     const remember = (key: Uint8Array) => {
       const savepoint = savepoints[savepoints.length - 1];
@@ -298,21 +391,59 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
         const encoded = encodeKey(key);
         remember(encoded);
         bytes.put(encoded, encodeValue(value));
+        log.wrote = true;
+        log.written?.add(byteString(encoded));
       },
       del(key) {
         const encoded = encodeKey(key);
         remember(encoded);
         bytes.del(encoded);
+        log.wrote = true;
+        log.written?.add(byteString(encoded));
       },
       clear() {
         if (savepoints.length > 0) throw new Error('clear() inside a unit inside another: rolling it back would put every entry back');
         bytes.clear();
+        log.wrote = true;
+        log.emptied = true;
       },
     };
   };
 
   return {
     get writing() { return unit !== undefined; },
+    get lastCommit() { return lastCommit; },
+    track(fn) {
+      const record = { keys: new Set<string>(), ranges: [] as Array<[string, string | undefined]> };
+      recorders.push(record);
+      let outcome: { ok: true; value: ReturnType<typeof fn> } | { ok: false; error: unknown };
+      try {
+        outcome = { ok: true, value: fn() };
+      } catch (error) {
+        outcome = { ok: false, error };
+      } finally {
+        recorders.pop();
+        // A tracked read inside another is part of what the outer one read
+        const outer = recorders[recorders.length - 1];
+        if (outer) {
+          for (const key of record.keys) outer.keys.add(key);
+          outer.ranges.push(...record.ranges);
+        }
+      }
+      return { reads: record, ...outcome };
+    },
+    onCommit(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    replaceAll(entries, options) {
+      if (unit) throw new Error('replaceAll() inside a unit: it replaces the store, which a unit is part of');
+      backend.write((bytes) => {
+        bytes.clear();
+        for (const { key, value } of entries) bytes.put(key, value);
+      }, options);
+      committed({ wrote: true, emptied: true, written: undefined });
+    },
     read(fn) {
       if (unit) return fn(reader(unit.writer));
       return backend.read((bytes) => fn(reader(bytes)));
@@ -325,7 +456,7 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
         const savepoint: Savepoint = new Map();
         open.savepoints.push(savepoint);
         try {
-          const result = fn(writer(open.writer, open.savepoints));
+          const result = fn(writer(open.writer, open.savepoints, open.log));
           open.savepoints.pop();
           // The outer unit may still throw: what this one changed is the outer's to undo, from what it found first
           const outer = open.savepoints[open.savepoints.length - 1];
@@ -342,10 +473,11 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
         }
       }
       let durableInside = false;
+      const log = newLog();
       const result = backend.write((bytes) => {
-        unit = { writer: bytes, savepoints: [], durable: false };
+        unit = { writer: bytes, savepoints: [], durable: false, log };
         try {
-          const value = fn(writer(bytes, unit.savepoints));
+          const value = fn(writer(bytes, unit.savepoints, log));
           durableInside = unit.durable;
           return value;
         } finally {
@@ -354,6 +486,7 @@ export function createOrderedKV(backend: KvBackend, { freeze = false }: OrderedK
       }, options);
       // A nested unit asked for the disk: the outer one decided how it commits, so a sync follows the commit
       if (durableInside && !options?.durable) void backend.durable();
+      committed(log);
       return result;
     },
     durable: () => backend.durable(),
