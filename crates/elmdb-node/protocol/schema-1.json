@@ -1,0 +1,682 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Schema",
+  "description": "What a database holds and the rules it keeps",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "The schema language's URL, `SCHEMA_LANGUAGE`",
+      "type": "string"
+    },
+    "collation": {
+      "description": "How strings sort: `root` (ICU's root collation) or a locale such as `en`",
+      "type": "string",
+      "default": "root"
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RoleDef"
+      },
+      "default": {}
+    },
+    "relations": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RelationDef"
+      },
+      "default": {}
+    },
+    "types": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/TypeDef"
+      },
+      "default": {}
+    }
+  },
+  "required": [
+    "$schema"
+  ],
+  "$defs": {
+    "RoleDef": {
+      "description": "A role an entity may be granted",
+      "type": "object",
+      "properties": {
+        "declaredBy": {
+          "description": "Who declared it, named in every error about it",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      }
+    },
+    "RelationDef": {
+      "description": "A relation kind",
+      "type": "object",
+      "properties": {
+        "declaredBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "cardinality": {
+          "$ref": "#/$defs/Cardinality"
+        },
+        "acyclic": {
+          "description": "A link that would close a cycle through this kind is refused",
+          "type": "boolean",
+          "default": false
+        },
+        "unique": {
+          "description": "At most one edge of this kind between two entities; linking a pair again updates the edge's info",
+          "type": "boolean",
+          "default": false
+        },
+        "endpoints": {
+          "description": "The type pairs an edge may join; `None` is any",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/Endpoint"
+          },
+          "default": null
+        },
+        "info": {
+          "description": "What an edge's info holds",
+          "$ref": "#/$defs/FieldDef",
+          "default": {
+            "type": "any",
+            "optional": true,
+            "nullable": true
+          }
+        }
+      },
+      "required": [
+        "cardinality"
+      ]
+    },
+    "Cardinality": {
+      "description": "How many edges of a kind each end may have, from the source's side",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "one-to-one",
+            "many-to-many"
+          ]
+        },
+        {
+          "description": "A target has at most one source: a child has one parent",
+          "type": "string",
+          "const": "one-to-many"
+        },
+        {
+          "description": "A source has at most one target",
+          "type": "string",
+          "const": "many-to-one"
+        }
+      ]
+    },
+    "Endpoint": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ]
+    },
+    "FieldDef": {
+      "description": "A field: its value's type, and whether it may be absent or null",
+      "type": "object",
+      "properties": {
+        "optional": {
+          "description": "The row may lack it. A field that isn't optional is required",
+          "type": "boolean",
+          "default": false
+        },
+        "nullable": {
+          "description": "It may hold `null`",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A finite double",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "number"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A whole number within ±2^53",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "One of the listed strings",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "enum"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "values"
+          ]
+        },
+        {
+          "description": "An entity's id held as a value, naming one of these types",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ref"
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list"
+            },
+            "of": {
+              "$ref": "#/$defs/ValueType"
+            }
+          },
+          "required": [
+            "type",
+            "of"
+          ]
+        },
+        {
+          "description": "A map, opaque inside",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Anything msgpack holds",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "ValueType": {
+      "description": "What a value holds",
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "string"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A finite double",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "number"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "A whole number within ±2^53",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "integer"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "boolean"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "bytes"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "One of the listed strings",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "enum"
+            },
+            "values": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "values"
+          ]
+        },
+        {
+          "description": "An entity's id held as a value, naming one of these types",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "ref"
+            },
+            "to": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "to"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "list"
+            },
+            "of": {
+              "$ref": "#/$defs/ValueType"
+            }
+          },
+          "required": [
+            "type",
+            "of"
+          ]
+        },
+        {
+          "description": "A map, opaque inside",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "object"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        },
+        {
+          "description": "Anything msgpack holds",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "const": "any"
+            }
+          },
+          "required": [
+            "type"
+          ]
+        }
+      ]
+    },
+    "TypeDef": {
+      "description": "An entity type",
+      "type": "object",
+      "properties": {
+        "declaredBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "shortCode": {
+          "description": "The engine numbers each created row `<prefix>-<n>`",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShortCodeDef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fields": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/FieldDef"
+          },
+          "default": {}
+        },
+        "additionalFields": {
+          "$ref": "#/$defs/AdditionalFields",
+          "default": "refuse"
+        },
+        "indexes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/IndexDef"
+          },
+          "default": {}
+        }
+      }
+    },
+    "ShortCodeDef": {
+      "type": "object",
+      "properties": {
+        "prefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "prefix"
+      ]
+    },
+    "AdditionalFields": {
+      "description": "Whether a write may set a field the type doesn't declare",
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "refuse"
+          ]
+        },
+        {
+          "description": "Stored as `any`",
+          "type": "string",
+          "const": "allow"
+        }
+      ]
+    },
+    "IndexDef": {
+      "description": "Derived data kept for a type's fields",
+      "oneOf": [
+        {
+          "description": "Equality, ranges and order over one field, or several for a compound index",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "value"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "unique": {
+              "type": "boolean",
+              "default": false
+            }
+          },
+          "required": [
+            "kind",
+            "fields"
+          ]
+        },
+        {
+          "description": "Ranked full-text search",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "text"
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "$ref": "#/$defs/TextField"
+              }
+            },
+            "analyzer": {
+              "$ref": "#/$defs/Analyzer",
+              "default": "standard"
+            },
+            "stem": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "required": [
+            "kind",
+            "fields"
+          ]
+        },
+        {
+          "description": "Nearest neighbours of embeddings computed from text fields",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "vector"
+            },
+            "from": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "chunk": {
+              "$ref": "#/$defs/Chunk",
+              "default": "whole"
+            },
+            "dims": {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            "metric": {
+              "$ref": "#/$defs/Metric",
+              "default": "cosine"
+            },
+            "precision": {
+              "$ref": "#/$defs/Precision",
+              "default": "f32"
+            },
+            "model": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "from",
+            "dims",
+            "model"
+          ]
+        }
+      ]
+    },
+    "TextField": {
+      "type": "object",
+      "properties": {
+        "weight": {
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      }
+    },
+    "Analyzer": {
+      "oneOf": [
+        {
+          "description": "Words, identifiers split on case and punctuation, case and accents folded",
+          "type": "string",
+          "const": "standard"
+        },
+        {
+          "description": "Whole values, case folded",
+          "type": "string",
+          "const": "exact"
+        }
+      ]
+    },
+    "Chunk": {
+      "oneOf": [
+        {
+          "type": "string",
+          "enum": [
+            "whole",
+            "paragraph"
+          ]
+        },
+        {
+          "description": "Markdown sections",
+          "type": "string",
+          "const": "heading"
+        }
+      ]
+    },
+    "Metric": {
+      "type": "string",
+      "enum": [
+        "cosine",
+        "dot",
+        "l2"
+      ]
+    },
+    "Precision": {
+      "type": "string",
+      "enum": [
+        "f32",
+        "f16",
+        "i8"
+      ]
+    }
+  }
+}

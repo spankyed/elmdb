@@ -33,6 +33,7 @@ jobs:
         run: |
           npm ci
           npm run build
+          npm run typecheck
           npm test
       - name: the generated loader and declarations are committed
         run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts

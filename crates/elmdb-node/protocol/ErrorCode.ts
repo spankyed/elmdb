@@ -3,4 +3,4 @@
 /**
  * What went wrong, as a stable code the binding hands JavaScript as `error.code`
  */
-export type ErrorCode = "IO" | "LMDB" | "MAP_FULL" | "READERS_FULL" | "CORRUPTED" | "ALREADY_OPEN" | "CLOSED" | "READ_ONLY" | "NO_DATABASE";
+export type ErrorCode = "IO" | "LMDB" | "MAP_FULL" | "READERS_FULL" | "CORRUPTED" | "ALREADY_OPEN" | "CLOSED" | "READ_ONLY" | "NO_DATABASE" | "SCHEMA_INVALID" | "SCHEMA_CHANGE_REFUSED";

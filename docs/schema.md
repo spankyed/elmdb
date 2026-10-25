@@ -115,7 +115,7 @@ The engine's own names can't be declared: the fields `id`, `entityType`, `shortC
 ```
 
 - `declaredBy` is an opaque string the engine puts in every error about the type, so an error names who declared what
-  it refused. apack sets it to the pack's id.
+  it refused. apack sets it to the pack's id. Relation kinds and roles take one too.
 - `shortCode`: the engine numbers each created row `<prefix>-<n>` and never hands a number out twice.
 - `additionalFields`: `refuse` (the default) refuses a write to a field the type doesn't declare; `allow` stores it as
   `any`.
@@ -237,7 +237,9 @@ have the same hash and an unchanged schema costs one comparison at open.
 
 ## Errors
 
-`SCHEMA_INVALID` lists every problem with its path and, where `declaredBy` is set, who declared it:
+`SCHEMA_INVALID` lists every problem with its path and, where `declaredBy` is set, who declared it. Problems of form
+(an unknown key, a missing or mistyped value) are all listed first; the names, references and index rules need the whole
+document to read, so they're checked, and every one of their problems listed, once nothing of form is wrong:
 
 ```
 types.Message.indexes.text.fields.body: no such field on Message (declared by default-setup)

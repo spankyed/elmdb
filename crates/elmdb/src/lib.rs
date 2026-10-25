@@ -2,6 +2,7 @@
 
 mod database;
 mod error;
+pub mod schema;
 
 pub use database::{Database, OpenOptions};
 pub use error::{Error, ErrorCode, Result};

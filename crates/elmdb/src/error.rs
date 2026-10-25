@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// What went wrong, as a stable code the binding hands JavaScript as `error.code`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
     /// A file operation failed: creating the directory, or LMDB reading or writing its files
@@ -26,6 +26,10 @@ pub enum ErrorCode {
     ReadOnly,
     /// A read-only open of a directory that holds no database
     NoDatabase,
+    /// The schema has problems, every one listed in the message by its path
+    SchemaInvalid,
+    /// The given schema changes the stored one in a way opening refuses, such as a short code prefix
+    SchemaChangeRefused,
 }
 
 impl ErrorCode {
@@ -41,6 +45,8 @@ impl ErrorCode {
             Self::Closed => "CLOSED",
             Self::ReadOnly => "READ_ONLY",
             Self::NoDatabase => "NO_DATABASE",
+            Self::SchemaInvalid => "SCHEMA_INVALID",
+            Self::SchemaChangeRefused => "SCHEMA_CHANGE_REFUSED",
         }
     }
 }
@@ -97,6 +103,8 @@ mod tests {
             ErrorCode::Closed,
             ErrorCode::ReadOnly,
             ErrorCode::NoDatabase,
+            ErrorCode::SchemaInvalid,
+            ErrorCode::SchemaChangeRefused,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

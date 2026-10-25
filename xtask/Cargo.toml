@@ -8,7 +8,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
-elmdb = { workspace = true, features = ["ts"] }
+elmdb = { workspace = true, features = ["codegen"] }
+schemars.workspace = true
+serde_json.workspace = true
 ts-rs.workspace = true
 tempfile.workspace = true
 

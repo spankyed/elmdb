@@ -23,7 +23,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
-(cd crates/elmdb-node && npm run build && npm test)
+(cd crates/elmdb-node && npm run build && npm run typecheck && npm test)
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.

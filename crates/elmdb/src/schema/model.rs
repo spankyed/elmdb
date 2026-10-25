@@ -1,0 +1,313 @@
+//! The schema's types: what a database declares (`docs/schema.md`). These are the definition; the TypeScript and the
+//! JSON Schema are generated from them. Every default is a written value, so the canonical form (`Schema::canonical`)
+//! writes every key.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+/// The schema language this version reads, which a schema names as its `$schema`
+pub const SCHEMA_LANGUAGE: &str = "https://elmdb.dev/schema/1.json";
+
+/// What a database holds and the rules it keeps
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct Schema {
+    /// The schema language's URL, `SCHEMA_LANGUAGE`
+    #[serde(rename = "$schema")]
+    pub language: String,
+    /// How strings sort: `root` (ICU's root collation) or a locale such as `en`
+    #[serde(default = "root_collation")]
+    pub collation: String,
+    #[serde(default)]
+    pub roles: BTreeMap<String, RoleDef>,
+    #[serde(default)]
+    pub relations: BTreeMap<String, RelationDef>,
+    #[serde(default)]
+    pub types: BTreeMap<String, TypeDef>,
+}
+
+fn root_collation() -> String {
+    "root".to_owned()
+}
+
+/// A role an entity may be granted
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RoleDef {
+    /// Who declared it, named in every error about it
+    #[serde(default)]
+    pub declared_by: Option<String>,
+}
+
+/// A relation kind
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RelationDef {
+    #[serde(default)]
+    pub declared_by: Option<String>,
+    pub cardinality: Cardinality,
+    /// A link that would close a cycle through this kind is refused
+    #[serde(default)]
+    pub acyclic: bool,
+    /// At most one edge of this kind between two entities; linking a pair again updates the edge's info
+    #[serde(default)]
+    pub unique: bool,
+    /// The type pairs an edge may join; `None` is any
+    #[serde(default)]
+    pub endpoints: Option<Vec<Endpoint>>,
+    /// What an edge's info holds
+    #[serde(default = "any_info")]
+    pub info: FieldDef,
+}
+
+/// An edge's info when its kind declares none: anything, or nothing
+pub(super) fn any_info() -> FieldDef {
+    FieldDef { value: ValueType::Any, optional: true, nullable: true }
+}
+
+/// How many edges of a kind each end may have, from the source's side
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum Cardinality {
+    OneToOne,
+    /// A target has at most one source: a child has one parent
+    OneToMany,
+    /// A source has at most one target
+    ManyToOne,
+    ManyToMany,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+pub struct Endpoint {
+    pub source: String,
+    pub target: String,
+}
+
+/// An entity type
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct TypeDef {
+    #[serde(default)]
+    pub declared_by: Option<String>,
+    /// The engine numbers each created row `<prefix>-<n>`
+    #[serde(default)]
+    pub short_code: Option<ShortCodeDef>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, FieldDef>,
+    #[serde(default)]
+    pub additional_fields: AdditionalFields,
+    #[serde(default)]
+    pub indexes: BTreeMap<String, IndexDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+pub struct ShortCodeDef {
+    pub prefix: String,
+}
+
+/// Whether a write may set a field the type doesn't declare
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum AdditionalFields {
+    #[default]
+    Refuse,
+    /// Stored as `any`
+    Allow,
+}
+
+/// A field: its value's type, and whether it may be absent or null
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+pub struct FieldDef {
+    #[serde(flatten)]
+    pub value: ValueType,
+    /// The row may lack it. A field that isn't optional is required
+    #[serde(default)]
+    pub optional: bool,
+    /// It may hold `null`
+    #[serde(default)]
+    pub nullable: bool,
+}
+
+/// What a value holds
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ValueType {
+    String,
+    /// A finite double
+    Number,
+    /// A whole number within ±2^53
+    Integer,
+    Boolean,
+    Bytes,
+    /// One of the listed strings
+    Enum {
+        values: Vec<String>,
+    },
+    /// An entity's id held as a value, naming one of these types
+    Ref {
+        to: Vec<String>,
+    },
+    List {
+        of: Box<ValueType>,
+    },
+    /// A map, opaque inside
+    Object,
+    /// Anything msgpack holds
+    Any,
+}
+
+impl ValueType {
+    /// The name `type` takes for it
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::Number => "number",
+            Self::Integer => "integer",
+            Self::Boolean => "boolean",
+            Self::Bytes => "bytes",
+            Self::Enum { .. } => "enum",
+            Self::Ref { .. } => "ref",
+            Self::List { .. } => "list",
+            Self::Object => "object",
+            Self::Any => "any",
+        }
+    }
+
+    /// Whether a value index can hold it: a scalar the key codec orders, or a list of those
+    pub fn is_value_indexable(&self) -> bool {
+        match self {
+            Self::String | Self::Number | Self::Integer | Self::Boolean | Self::Enum { .. } | Self::Ref { .. } => true,
+            Self::List { of } => of.is_value_indexable() && !matches!(**of, Self::List { .. }),
+            Self::Bytes | Self::Object | Self::Any => false,
+        }
+    }
+
+    /// Whether a text index can read it: a string, or a list of strings
+    pub fn is_text(&self) -> bool {
+        match self {
+            Self::String => true,
+            Self::List { of } => **of == Self::String,
+            _ => false,
+        }
+    }
+}
+
+/// Derived data kept for a type's fields
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum IndexDef {
+    /// Equality, ranges and order over one field, or several for a compound index
+    Value {
+        fields: Vec<String>,
+        #[serde(default)]
+        unique: bool,
+    },
+    /// Ranked full-text search
+    Text {
+        fields: BTreeMap<String, TextField>,
+        #[serde(default)]
+        analyzer: Analyzer,
+        #[serde(default)]
+        stem: Option<String>,
+    },
+    /// Nearest neighbours of embeddings computed from text fields
+    Vector {
+        from: Vec<String>,
+        #[serde(default)]
+        chunk: Chunk,
+        dims: u32,
+        #[serde(default)]
+        metric: Metric,
+        #[serde(default)]
+        precision: Precision,
+        model: String,
+    },
+}
+
+impl IndexDef {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Value { .. } => "value",
+            Self::Text { .. } => "text",
+            Self::Vector { .. } => "vector",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+pub struct TextField {
+    #[serde(default = "unit_weight")]
+    pub weight: f64,
+}
+
+fn unit_weight() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum Analyzer {
+    /// Words, identifiers split on case and punctuation, case and accents folded
+    #[default]
+    Standard,
+    /// Whole values, case folded
+    Exact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum Chunk {
+    #[default]
+    Whole,
+    Paragraph,
+    /// Markdown sections
+    Heading,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum Metric {
+    #[default]
+    Cosine,
+    Dot,
+    L2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum Precision {
+    #[default]
+    F32,
+    F16,
+    I8,
+}
+
+/// The fields the engine writes itself, which no type may declare
+pub const RESERVED_FIELDS: [&str; 7] = ["id", "entityType", "shortCode", "createdAt", "updatedAt", "trashedAt", "role"];
+
+/// The type names the engine's own ids are written with, which no schema may declare
+pub const RESERVED_TYPES: [&str; 2] = ["Relation", "Sequence"];
+
+/// The stemming languages a standard text index may name: Snowball's, by ISO 639-1 code
+pub const STEM_LANGUAGES: [&str; 18] =
+    ["ar", "da", "de", "el", "en", "es", "fi", "fr", "hu", "it", "nl", "no", "pt", "ro", "ru", "sv", "ta", "tr"];
+
+/// The most dimensions a vector index takes
+pub const MAX_DIMS: u32 = 4096;
