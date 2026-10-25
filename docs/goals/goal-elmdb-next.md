@@ -57,7 +57,7 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
   row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
-  its matches, 32 ms.
+  its matches, 32 ms (apack's `docs/plans/live-queries.md`, Step 1's readings).
 
 ## Decisions
 
@@ -65,18 +65,19 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 | # | Decision | Owner |
 |---|---|---|
-| G1 | Phase 1 comes first. Phases 3 and 4 touch what `goal-elmdb.md`'s Phases 13 and 14 change (`reads.rs`, apack's `schema.ts` and codegen), so no later phase starts before Phase 1 closes | this goal |
+| G1 | Phase 1 comes first. Phases 3 and 4 touch what `goal-elmdb.md`'s Phases 13 and 14 change — `reads.rs`, which tracked reads record through, and apack's `schema.ts` and codegen — so no later phase starts before Phase 1 closes. Phase 14 there builds only the engine's side of watch (its D30) | this goal |
 | G2 | A phase marked gated builds only when its reading says so, by the rule the phase states. The reading is recorded either way, and a phase whose gate isn't met is done when its reading is | this goal |
 | G3 | A change to stored data's layout bumps `FORMAT_VERSION` with an `elmdb upgrade` step to it, run on a copy (`docs/architecture/format.md`, Versions). Derived data only (a text or trigram index) may instead be rebuilt by that step. Stored developer data is converted on a copy, never at boot | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
 | G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's branch pushed and a PR opened for each phase's apack work. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
-| G7 | apack's work continues on a branch from wherever `goal-elmdb.md` leaves apack: its branch's tip, or `master` if it has landed, in a new worktree (`npm run session:new`) | this goal |
+| G7 | apack's work continues on a branch from wherever `goal-elmdb.md` leaves apack, in a new worktree (`npm run session:new`): `master` once its branch has landed, which `goal-elmdb.md`'s D30 puts first, or its branch's tip until then. `live-queries` rebases onto `master` after that landing (D30); this goal's branch picks it up from `master` when it has, and doesn't wait for it | this goal |
 | G8 | **Production-shaped data** is a copy made from the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/full-db/agentbuddy-backup-2026-10-17T23-06-18-232Z`, format 1), by `docs/evidence/phase-1.md`'s recipe: converted to format 4 by apack's `scripts/ears-convert.ts`, run from a detached worktree at a commit that still has it (`3e0b280ff`), dumped by `tools/lmdb-js-export` and read by `elmdb upgrade`. The copy lives in a scratch directory outside both repositories and is never committed; the backup is only read. What the upgrade refuses on the copy (its duplicate short codes) is resolved on the copy and recorded | the user's backup; `phase-1.md` |
 | G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 2 measures flow runs and records why the chat turn is missing | this goal |
 | G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
 | G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
 | G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data with `elmdb upgrade` is the user's step | this goal |
+| G13 | **Live queries are another session's.** apack's live-queries work (`docs/plans/live-queries.md`: views, `useView`, the features moved onto them) is its own branch's; this goal edits neither its plan nor its views. What this goal changes beneath them keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing (`goal-elmdb.md`'s Phase 14 brings them) | `goal-elmdb.md`'s D30 |
 
 ## Phases
 
@@ -91,7 +92,10 @@ Final unless marked open. Each cites the document that owns it; change the owner
   - A count of a user action's calls to elmdb, in development only: reads, writes outside a unit, units and their
     writes, and the time spent in each, by call site. Kept at the one place every call crosses
     (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:eval`.
-  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`.
+  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`. Where views
+    have landed (G13), a reading counts their re-runs too: a streamed message is rewritten every 80 ms, and each view
+    reading it runs again (live-queries' Risks), which is the reading its open question on a minimum re-run interval
+    waits for.
   - Each loop of one-entity reads or unit-less writes the readings show costing a measurable share of its action,
     turned into a set read (`query.ids(list)`, `pickAll`) or grouped (`transact`, `setMany`) where it is.
 - **Done when:**
@@ -110,7 +114,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
   - In apack: the query builder's `explain()` and the Database console showing it.
 - **Dependencies:** Phase 1.
 - **Done when:**
-  - The model harness passes, so answers are unchanged.
+  - The model harness passes, its watch property included, so answers and what a watch is told are unchanged.
   - Specs show each fix by its visits: an indexed `where` with a `limit` of 50 over 13,000 matches visits about 50.
   - EXPLAIN's answer is specified and shown on a plan of each kind.
   - G4's readings are recorded.
