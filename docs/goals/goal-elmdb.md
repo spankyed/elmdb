@@ -59,17 +59,23 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **Blocked on a reboot of the Mac (2026-10-25).** Every elmdb open fails with `No space left on device (os error 28)`:
-  macOS's table of named POSIX semaphores (`kern.posix.sem.max`, 10,000) is full. LMDB locks with two per database
-  (D24) and removes them as the last process closes; Node runs no destructor as it exits, so each database a test
-  process still had open at exit kept its pair, and a temporary directory's is never reclaimed. Nothing lists them,
-  and unlinking guessed names could take another process's, so only a restart empties the table.
-- **The fix, uncommitted in elmdb:** the binding closes every database still open as its Node environment tears down
-  (`napi_add_env_cleanup_hook`, `crates/elmdb-node/src/lib.rs`), over `Database::close_within`, a bounded close that
-  leaves a database a unit still holds. `crates/elmdb-node/test/exit.test.mjs` checks a child exiting with a database
-  open leaves neither of its semaphores. **After the reboot:** `npm run build && npm test` in elmdb; remove the hook and
-  see `exit.test.mjs` fail; `cargo test --workspace`, clippy, fmt; commit; push (D20); pin apack's `vendor/elmdb.rev`;
-  record D33.
+- **Blocked on a reboot of the Mac (2026-10-25).** Every elmdb open fails with `No space left on device (os error 28)`
+  from `sem_open`: macOS's table of named POSIX semaphores (`kern.posix.sem.max`, 10,000) is full. elmdb's binary locks
+  with POSIX semaphores (`MDB_USE_POSIX_SEM`, D24; it links `sem_open`, not `semget`), two per database, which LMDB
+  removes as the last process closes. Vitest's tinypool stops a forked worker with SIGTERM, which Node answers by dying
+  without its `exit` handlers or native cleanup hooks, so every test file's temporary databases stayed open: 7,428
+  `ears-*` directories were left in the temp dir today, each a database whose pair was never removed. Named POSIX
+  semaphores can't be listed, so only a restart empties the table; `ipcrm` clears System V sets (lmdb-js's), not these.
+- **The fix, in two halves.** apack `cee3cd229`: a test worker stopped with SIGTERM exits through `process.exit`, so its
+  exit handlers close what `createTemporaryDatabases` opened (`scripts/lib/vitest-exit-with-parent.ts`,
+  `@apackdev/testing`'s `vitest-worker.ts`; a probe showed neither pool ran `exit` handlers before it, and forks do
+  after). elmdb, uncommitted: the binding closes every database still open as its Node environment tears down
+  (`napi_add_env_cleanup_hook`, over `Database::close_within`, a bounded close), which covers a thread worker's
+  `terminate()` and a tool that exits without closing. `crates/elmdb-node/test/exit.test.mjs` checks a child exiting
+  with a database open leaves neither semaphore. A SIGKILL still leaves a pair (the exit-with-parent guard's orphan
+  case, a spec's deliberate kill); a reopen at the same path clears it. **After the reboot:** in elmdb `npm run build &&
+  npm test`, remove the hook and see `exit.test.mjs` fail, `cargo test --workspace`, clippy, fmt; commit; push (D20);
+  pin apack's `vendor/elmdb.rev`; record D33.
 - **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`,
   committed through `b22412320` (Phase 15's packaging, the bookmark fix, the stale E2E case, the facade report). Not
   pushed. **After the binding fix:** `npm run chain -- --e2e`. The last runs before the table filled passed every step
@@ -81,8 +87,11 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
   files, loads it, and boots to `connected` against isolated data (E2E smoke 5/5).
 - **Done:** Phases 0–14.
 - **Never edit `crates/elmdb-node` while an apack chain runs:** the pack compiler captures the linked package whole.
-- **Unresolved:** a pack disable under the full chain's load once ended the API silently; it did not recur. 905 stale
-  System V semaphore sets from elmdb's runs before `2cbcc6c` are on the user's Mac.
+- **Unresolved:** a pack disable under the full chain's load once ended the API silently; it did not recur. lmdb-js,
+  which the main checkout still runs, leaks System V sets the same way and collides on `ftok` keys (`EINVAL`,
+  "Attempting to setup locks"); the 905 two-semaphore sets elmdb left before `2cbcc6c` are gone (492 three- and
+  twenty-semaphore sets remain, 2026-10-25 17:58). The exit-with-parent guard still SIGKILLs an orphaned worker,
+  since vitest's `process.exit` throws during a test.
 
 ## Decisions
 
