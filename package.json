@@ -60,6 +60,7 @@
     "provenance": true
   },
   "dependencies": {
+    "elmdb": "file:../../vendor/elmdb/crates/elmdb-node",
     "msgpackr": "^1.11.9"
   }
 }
