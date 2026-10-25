@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { open, type Database, type RootDatabase } from 'lmdb';
-import { createOrderedKV, type OrderedKV } from '../kv.ts';
+import { createOrderedKV, type KvBackend, type OrderedKV } from '../kv.ts';
 import { createLmdbKVBackend, syncEnvironment } from './kv-backend.ts';
 import { checkStamp } from './stamp.ts';
 
@@ -100,7 +100,11 @@ export interface LmdbStore {
   replaceWith(dir: string): void;
   /** Removes every entry, in one unit */
   reset(): void;
-  /** Syncs and closes the environment; a store closed refuses reads and writes */
+  /**
+   * Syncs what is owed and closes the store, which refuses reads and writes from then on. The environment's files close
+   * once a sync or copy lmdb-js is running off the main thread has finished, since closing them under one crashes the
+   * process
+   */
   close(): void;
 }
 
@@ -129,6 +133,14 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
   /** The sync running, which rejects as it fails, and the one asked for while it runs */
   let running: Promise<void> | undefined;
   let queued: Promise<void> | undefined;
+  /** What lmdb-js is running off the main thread on the environment — syncs and copies — until each settles */
+  const offThread = new Set<Promise<unknown>>();
+  const track = <T>(work: Promise<T>): Promise<T> => {
+    offThread.add(work);
+    const settled = () => { offThread.delete(work); };
+    work.then(settled, settled);
+    return work;
+  };
   /** The sync due once writes pause, which each commit pushes back, and the one due however steadily they go on */
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let capTimer: ReturnType<typeof setTimeout> | undefined;
@@ -143,12 +155,12 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     owed = false;
     clearTimers();
     syncs++;
-    const done = new Promise<void>((resolve, reject) => {
+    const done = track(new Promise<void>((resolve, reject) => {
       syncEnvironment(root, (error) => {
         // A sync that failed made nothing durable: its commits are owed still, and the next sync takes them
         if (error) { owed = true; reject(error); } else resolve();
       });
-    });
+    }));
     // Every caller sharing it hears how it ended; a sync nobody waits on (a timer's) is caught where it is started
     running = done;
     const ended = () => { if (running === done) running = undefined; };
@@ -162,7 +174,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     if (!owed) return running ?? Promise.resolve();
     if (!running) return runSync();
     // A sync is running and began before the latest commits: one more follows it, however that one ends
-    queued ??= running.then(() => {}, () => {}).then(() => { queued = undefined; return owed ? runSync() : undefined; });
+    queued ??= running.then(() => {}, () => {}).then(() => { queued = undefined; return owed && !closed ? runSync() : undefined; });
     return queued;
   };
 
@@ -194,8 +206,17 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
   const refuseReadOnly = (what: string) => {
     if (readOnly) throw new Error(`The LMDB store at ${dir} is open read-only: it can't ${what}`);
   };
+  // The environment may outlive `close()` while lmdb-js finishes a sync or a copy, so a closed store refuses here
+  const refuseClosed = () => {
+    if (closed) throw new Error(`The LMDB store at ${dir} is closed`);
+  };
+  const open: KvBackend = {
+    read: (fn) => { refuseClosed(); return backend.read(fn); },
+    write: (fn, options) => { refuseClosed(); return backend.write(fn, options); },
+    durable: backend.durable,
+  };
   // LMDB opened read-only has no write transaction to take, so a write is refused here, naming why
-  const kv = createOrderedKV(readOnly ? { ...backend, write: () => refuseReadOnly('be written') as never } : backend);
+  const kv = createOrderedKV(readOnly ? { ...open, write: () => refuseReadOnly('be written') as never } : open);
 
   /** Writes the marker of a durable commit: a unit with no write wouldn't commit, nor so sync */
   const SYNCED = ['m', 'synced'] as const;
@@ -210,15 +231,16 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     readers: () => root.readerList().trim().split('\n').slice(1).length,
     durable: sync,
     async copyTo(targetDir) {
+      refuseClosed();
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });
-      await root.backup(targetDir, COMPACT_COPIES);
+      await track(root.backup(targetDir, COMPACT_COPIES));
     },
     replaceWith(source) {
       refuseReadOnly('be replaced');
       const from = openEnvironment(source, { readOnly: true });
       try {
-        backend.write((w) => {
+        open.write((w) => {
           w.clear();
           for (const { key, value } of from.db.getRange()) w.put(key as Uint8Array, value as Uint8Array);
         }, { durable: true });
@@ -235,11 +257,15 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     },
     close() {
       if (closed) return;
-      closed = true;
       clearTimers();
       // What is owed is synced before the files close: closing doesn't sync on its own
       if (owed && !readOnly) kv.write((w) => w.put(SYNCED, Date.now()), { durable: true });
-      root.close();
+      closed = true;
+      // A sync or copy lmdb-js runs off the main thread uses the environment until it finishes, and closing the
+      // environment under one crashes the process (SIGSEGV): the files close once the last has settled. A process
+      // exiting meanwhile loses nothing, the sync above having made every commit durable
+      if (offThread.size === 0) root.close();
+      else void Promise.allSettled(offThread).then(() => root.close());
     },
   };
 }

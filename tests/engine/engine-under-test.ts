@@ -1,5 +1,5 @@
 // The engine the contract specs run against. The specs only reach it through this file, so the same specs cover the
-// engine on each backend: in memory by default, and with `EARS_KV=lmdb` (the `ears-on-lmdb` project) on an LMDB store
+// engine on each backend: in memory by default, and with `EARS_KV=lmdb` (the integration half) on an LMDB store
 // in a directory of its own, removed when the test file ends.
 import * as fs from 'node:fs';
 import * as os from 'node:os';

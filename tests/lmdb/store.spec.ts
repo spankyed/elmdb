@@ -170,6 +170,15 @@ describe('durability', () => {
     expect(store.syncs).toBe(0);
   });
 
+  it('refuses a read, a write and a copy once closed', async () => {
+    const { store, engine } = openStore();
+    engine.create('Note', { title: 'before' });
+    store.close();
+    expect(() => engine.query('Note').ids()).toThrow('is closed');
+    expect(() => engine.create('Note', { title: 'after' })).toThrow('is closed');
+    await expect(store.copyTo(path.join(path.dirname(dbPath), 'copy'))).rejects.toThrow('is closed');
+  });
+
   it('keeps a write its process committed, though the process is killed the moment the write returns', async () => {
     const child = path.join(path.dirname(dbPath), 'writer.mts');
     const source = (file: string) => pathToFileURL(fileURLToPath(new URL(`../../src/${file}`, import.meta.url))).href;
