@@ -46,6 +46,26 @@ fn a_read_only_store_refuses_a_write_and_reads_what_is_there() {
     assert_eq!(error.code, ErrorCode::ReadOnly);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_read_only_store_reads_files_this_user_cannot_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    store.close().unwrap();
+    let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().path()).collect();
+    for file in &files {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    store.close().unwrap();
+    for file in &files {
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+}
+
 #[test]
 fn refuses_new_files_it_could_not_stamp_and_stamps_them_once_it_can() {
     let dir = tempfile::tempdir().unwrap();

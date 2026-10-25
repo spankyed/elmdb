@@ -119,16 +119,27 @@ impl Store {
         let mut registration = Registration(Some(canonical.clone()));
 
         let file_bytes = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
-        let mut builder = EnvOpenOptions::new().read_txn_without_tls();
-        builder.max_dbs(8).map_size(options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes)));
-        // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
-        // flushed by group commit's syncs, and a read-only environment is never written
-        unsafe {
-            builder.flags(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC });
+        let open = |flags: EnvFlags| {
+            let mut builder = EnvOpenOptions::new().read_txn_without_tls();
+            builder.max_dbs(8).map_size(options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes)));
+            // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
+            // flushed by group commit's syncs, and a read-only environment is never written
+            unsafe {
+                builder.flags(flags);
+            }
+            // SAFETY: `open_paths` guarantees this process holds no other handle to the environment, and its files are
+            // LMDB's, written only through LMDB
+            unsafe { builder.open(&canonical) }
+        };
+        let denied =
+            |e: &heed::Error| matches!(e, heed::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied);
+        let env = match open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }) {
+            // Files this user can't write, which no writer of theirs can be changing either: read without the lock
+            // file a reader registers in, which LMDB would otherwise have to write
+            Err(e) if options.read_only && denied(&e) => open(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK),
+            opened => opened,
         }
-        // SAFETY: `open_paths` guarantees this process holds no other handle to the environment, and its files are
-        // LMDB's, written only through LMDB
-        let env = unsafe { builder.open(&canonical) }.map_err(|e| match e {
+        .map_err(|e| match e {
             heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
                 ErrorCode::NotADatabase,
                 format!(
