@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
+import { COMPACT_COPIES, compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
 import { createEarsEngine, type EARS } from '../../src/index.ts';
 
 const SEP = '\x1F';
@@ -162,7 +162,8 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
   }
 });
 
-it('compacts an environment in place, without the pages its deletes freed, and keeps what it holds', async () => {
+// Compaction is off while lmdb aborts emptying a compacted copy (COMPACT_COPIES): these run once it is on
+it.skipIf(!COMPACT_COPIES)('compacts an environment in place, without the pages its deletes freed, and keeps what it holds', async () => {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
   dirs.push(path.dirname(dir));
   const engineOn = (store: ReturnType<typeof openLmdbStore>) =>
@@ -187,7 +188,7 @@ it('compacts an environment in place, without the pages its deletes freed, and k
   }
 });
 
-it('refuses to compact an environment that is open, and leaves its file as it was', async () => {
+it.skipIf(!COMPACT_COPIES)('refuses to compact an environment that is open, and leaves its file as it was', async () => {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
   dirs.push(path.dirname(dir));
   const store = openLmdbStore({ path: dir });
@@ -204,6 +205,17 @@ it('refuses to compact an environment that is open, and leaves its file as it wa
   } finally {
     store.close();
   }
+});
+
+it.skipIf(COMPACT_COPIES)('refuses to compact while compaction is off, and leaves the file as it was', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-off-')), 'ears-db');
+  dirs.push(path.dirname(dir));
+  const store = openLmdbStore({ path: dir });
+  createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true }).create('Note', { title: 'kept' });
+  store.close();
+  const before = fs.readFileSync(path.join(dir, 'data.mdb'));
+  await expect(compactEnvironment(dir)).rejects.toThrow('Compaction is off');
+  expect(fs.readFileSync(path.join(dir, 'data.mdb')).equals(before)).toBe(true);
 });
 
 it('refuses a record store, whose format is its own, and leaves it as it was', () => {

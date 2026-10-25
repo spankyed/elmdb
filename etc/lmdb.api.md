@@ -8,6 +8,9 @@ import { Database } from 'lmdb';
 import { RootDatabase } from 'lmdb';
 
 // @public
+export const COMPACT_COPIES = false;
+
+// @public
 export function compactEnvironment(basePath: string): Promise<Compaction>;
 
 // @public

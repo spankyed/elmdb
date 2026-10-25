@@ -9,7 +9,7 @@ import type { EARS } from '../entities.ts';
 import { createEarsEngine } from '../engine.ts';
 import { createOrderedKV } from '../kv.ts';
 import { createLmdbKVBackend } from './kv-backend.ts';
-import { LMDB_FORMAT_VERSION } from './store.ts';
+import { COMPACT_COPIES, LMDB_FORMAT_VERSION } from './store.ts';
 
 /** An attribute row of formats 1 to 3: its value, with a top-level Date as an ISO string */
 type AttrRecord = { t: 'null' | 'string' | 'number' | 'boolean' | 'object' | 'array' | 'date' | 'blob'; v: unknown };
@@ -280,6 +280,8 @@ function syncPath(target: string, directory: boolean): void {
  * that have exited.
  */
 export async function compactEnvironment(basePath: string): Promise<Compaction> {
+  // A compacted file this lmdb can't safely empty would become a live database: refused until it can (`COMPACT_COPIES`)
+  if (!COMPACT_COPIES) throw new Error(`Compaction is off (COMPACT_COPIES): this lmdb aborts emptying a compacted copy, kriszyp/lmdb-js#381`);
   const file = path.join(basePath, 'data.mdb');
   if (!fs.existsSync(file)) throw new Error(`No LMDB database at ${basePath}`);
   const before = fs.statSync(file).size;

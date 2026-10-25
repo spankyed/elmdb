@@ -16,6 +16,13 @@ export const LMDB_FORMAT_VERSION = 4;
 /** How long writes must pause before a sync runs: a burst of commits is made durable by one sync after it */
 export const SYNC_IDLE_MS = 100;
 
+/**
+ * Whether a copy (`copyTo`, a conversion's `compactEnvironment`) is compacted. Off: lmdb-js 3.5.9 aborts the process
+ * when a compacted copy of multi-page values is emptied (kriszyp/lmdb-js#381,
+ * `docs/references/evidence/lmdb-compacted-copy-crash.md`). True once `lmdb` is a release with that fix.
+ */
+export const COMPACT_COPIES = false;
+
 /** How long a commit waits, at most, for the sync that makes it durable, however steadily writes go on */
 export const SYNC_INTERVAL_MS = 1000;
 
@@ -206,7 +213,7 @@ export function openLmdbStore({ path: dir, readOnly = false, syncIdleMs = SYNC_I
     async copyTo(targetDir) {
       // LMDB writes data.mdb into a directory that already exists, and no lock.mdb: it makes one when opened
       fs.mkdirSync(targetDir, { recursive: true });
-      await root.backup(targetDir, true);
+      await root.backup(targetDir, COMPACT_COPIES);
     },
     replaceWith(source) {
       refuseReadOnly('be replaced');

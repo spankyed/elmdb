@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { _idClock, _indexEntries, type IndexValue, type RecordIndexes, type RecordStore, type StoredRecord } from '../records.ts';
 import { checkStamp } from './stamp.ts';
+import { COMPACT_COPIES } from './store.ts';
 
 /**
  * How this version encodes a record store's records and index entries, stamped in its `meta` database under `format`
@@ -166,8 +167,8 @@ export function openRecordStore<R extends { id: string } = StoredRecord>({ path:
     },
     async copyTo(targetDir) {
       fs.mkdirSync(targetDir, { recursive: true });
-      // Compacted, as the database's copy is: the pages a removed session freed stay behind
-      await current().root.backup(targetDir, true);
+      // Compacted as the database's copy is, when copies are (`COMPACT_COPIES`): the pages a removed session freed stay behind
+      await current().root.backup(targetDir, COMPACT_COPIES);
     },
     replaceWith(source) {
       const open = writable();

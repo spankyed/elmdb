@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { open as openRaw } from 'lmdb';
 import { createEarsEngine, type EARS, type EarsEngine } from '../../src/index.ts';
-import { LMDB_FORMAT_VERSION, openLmdbStore, SYNC_IDLE_MS, SYNC_INTERVAL_MS, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
+import { COMPACT_COPIES, LMDB_FORMAT_VERSION, openLmdbStore, SYNC_IDLE_MS, SYNC_INTERVAL_MS, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
 let dbPath: string;
@@ -83,7 +83,8 @@ describe('openLmdbStore', () => {
     expect(engine.query('Note').count()).toBe(1);
   });
 
-  it('copies the database without the pages its deletes freed', async () => {
+  // Compaction is off while lmdb aborts emptying a compacted copy (COMPACT_COPIES): this runs once it is on
+  it.skipIf(!COMPACT_COPIES)('copies the database without the pages its deletes freed', async () => {
     const { store, engine } = openStore();
     engine.transact(() => { for (let i = 0; i < 200; i++) engine.create('Note', { id: id(`Note-${i}`), title: 'x'.repeat(10_000) }); });
     engine.transact(() => { for (let i = 1; i < 200; i++) engine.write(id(`Note-${i}`)).destroy(); });

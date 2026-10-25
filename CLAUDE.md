@@ -114,10 +114,11 @@ Held by the types and the engine specs, which say more than a rule over names co
   savepoints inside one). Two backends implement it: `createMemoryKV` (tests and tooling) and the LMDB one.
 - `openLmdbStore({ path, readOnly?, syncIdleMs?, syncIntervalMs? })` (`@apackdev/ears/lmdb`) opens the environment at `path` and
   returns the store: `kv` (which an engine is created on), `path`, `readOnly`, `syncs`, `readers()`, `durable()`,
-  `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, compacted — the pages
-  deletes freed left behind — which is what a backup takes; on this parked branch only, since a compacted copy of data
-  with multi-page values aborts the process when it is emptied, an lmdb-js 3.5.9 bug,
-  `docs/references/evidence/lmdb-compacted-copy-crash.md`), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
+  `copyTo(targetDir)` (LMDB's own copy of one read transaction into `targetDir/data.mdb`, which is what a backup
+  takes; compacted, without the pages deletes freed, only when `COMPACT_COPIES` is on. It is off: a compacted copy of
+  multi-page values aborts the process when it is emptied, an lmdb-js 3.5.9 bug fixed by kriszyp/lmdb-js#381
+  (`docs/references/evidence/lmdb-compacted-copy-crash.md`); turning it on is that flag, once `lmdb` is a release with
+  the fix), `replaceWith(dir)` (every entry replaced by another database's, in one durable unit, the store
   staying open), `reset()` (every entry removed, in one durable unit; both empty the database with the writer's
   `clear()`, which on LMDB is `clearSync` — `mdb_drop`, run in the unit's transaction — rather than a delete per key) and `close()`. Nothing opens on import.
   `readOnly` opens existing files without writing: a write, `reset()` and `replaceWith()` throw naming why.
@@ -141,10 +142,11 @@ Held by the types and the engine specs, which say more than a rule over names co
   role always a list, a `deleted: true` mark turned into `trashedAt`), `convertToFormat4` (format 3's three tables
   loaded through an engine into the engine's keys, entities in the order they were created, relations under their
   ids, numbering rows as sequences) — each recording its own format, and only `scripts/ears-convert.ts` calls it, on
-  a copy. The script then compacts the file (`compactEnvironment`): LMDB never shrinks one, and a conversion writes
-  the new format beside the old tables before emptying them, so the file holds both until a compacting copy takes
-  its place (what it saves on the production copy: `docs/plans/ears-storage-layout.md`, Step 5). It refuses an
-  environment any process has open, read off LMDB's reader table.
+  a copy. With `COMPACT_COPIES` on the script then compacts the file (`compactEnvironment`): LMDB never shrinks one,
+  and a conversion writes the new format beside the old tables before emptying them, so the file holds both until a
+  compacting copy takes its place (what it saves on the production copy: `docs/plans/ears-storage-layout.md`, Step 5).
+  It refuses an environment any process has open, read off LMDB's reader table, and refuses outright while the flag
+  is off, so nothing can make a file this lmdb can't safely empty.
 - The api's composition (`openAppStore()`, `packages/api/src/runtime/index.ts`) is the one production caller: it
   opens the store through `openDatabaseStore` (`@apackdev/host/database`), creates the engine on `store.kv` and binds
   the app. Host code (`@apackdev/host/services`, `/backup`) takes the store as an argument.
