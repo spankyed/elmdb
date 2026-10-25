@@ -6,7 +6,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use crate::error::ErrorCode;
 use crate::schema::Schema;
@@ -36,6 +35,8 @@ struct State {
 
 pub struct Builder {
     shared: Arc<(Mutex<State>, Condvar)>,
+    /// Held to wake the thread when it waits for a unit to end and is stopped
+    store: Arc<Store>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -44,12 +45,13 @@ impl Builder {
         let shared: Arc<(Mutex<State>, Condvar)> = Arc::default();
         let thread = {
             let shared = Arc::clone(&shared);
+            let store = Arc::clone(&store);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
                 .spawn(move || run(&store, &schema, &shared))
                 .expect("the index thread starts")
         };
-        Self { shared, thread: Some(thread) }
+        Self { shared, store, thread: Some(thread) }
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = (String, String)>) {
@@ -83,6 +85,7 @@ impl Builder {
             lock.lock().expect("the builder's lock is never poisoned").stopping = true;
             changed.notify_all();
         }
+        self.store.wake_unit_waiters();
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the index thread doesn't panic");
         }
@@ -130,7 +133,9 @@ fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
                 Ok(Some(last)) => after = last,
                 Ok(None) => break,
                 // A unit held open by the app has the write transaction: try again once it ends
-                Err(e) if e.code == ErrorCode::UnitOpen => std::thread::sleep(Duration::from_millis(5)),
+                Err(e) if e.code == ErrorCode::UnitOpen => {
+                    store.wait_while_unit_open(|| lock.lock().expect("the builder's lock is never poisoned").stopping)
+                }
                 Err(e) => {
                     let mut state = lock.lock().expect("the builder's lock is never poisoned");
                     state.failures.push(IndexFailure {

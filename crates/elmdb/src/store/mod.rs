@@ -9,8 +9,7 @@ pub mod sync;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
 use heed::types::Bytes;
@@ -69,8 +68,9 @@ pub struct Store {
     db: Db,
     gate: Arc<RwLock<()>>,
     commit: Option<GroupCommit>,
-    /// Whether a unit is open, holding the environment's one write transaction
-    unit_open: AtomicBool,
+    /// Whether a unit is open, holding the environment's one write transaction, and the signal that one ended
+    unit: Mutex<bool>,
+    unit_ended: Condvar,
 }
 
 /// The environments open in this process, by canonical path. LMDB's locks are per process, so an environment opened
@@ -167,7 +167,8 @@ impl Store {
             db,
             gate: Arc::new(RwLock::new(())),
             commit,
-            unit_open: AtomicBool::new(false),
+            unit: Mutex::new(false),
+            unit_ended: Condvar::new(),
         })
     }
 
@@ -262,7 +263,7 @@ impl Store {
     /// aborted, the map grown and `f` run again, so `f` must do nothing but write through its transaction
     pub fn write<T>(&self, mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
         self.check_writable()?;
-        if self.unit_open.load(Ordering::SeqCst) {
+        if self.unit_is_open() {
             return Err(Error::new(
                 ErrorCode::UnitOpen,
                 "A unit is open, holding the database's one write transaction: write through it, or commit it first",
@@ -331,8 +332,12 @@ impl Store {
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
     pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLock, ()>)> {
         self.check_writable()?;
-        if self.unit_open.swap(true, Ordering::SeqCst) {
-            return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
+        {
+            let mut open = self.unit.lock().expect("the unit's lock is never poisoned");
+            if *open {
+                return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
+            }
+            *open = true;
         }
         let begun = (|| {
             let info = self.env.info();
@@ -351,14 +356,34 @@ impl Store {
             Ok((txn, guard))
         })();
         if begun.is_err() {
-            self.unit_open.store(false, Ordering::SeqCst);
+            self.end_unit();
         }
         begun
     }
 
-    /// The open unit ended, committed or not
+    /// The open unit ended, committed or not: whoever waits for the write transaction hears of it
     pub fn end_unit(&self) {
-        self.unit_open.store(false, Ordering::SeqCst);
+        *self.unit.lock().expect("the unit's lock is never poisoned") = false;
+        self.unit_ended.notify_all();
+    }
+
+    fn unit_is_open(&self) -> bool {
+        *self.unit.lock().expect("the unit's lock is never poisoned")
+    }
+
+    /// Blocks while a unit is open, until it ends or `stop` answers true; a caller that makes `stop` true wakes it
+    /// with `wake_unit_waiters`
+    pub fn wait_while_unit_open(&self, stop: impl Fn() -> bool) {
+        let mut open = self.unit.lock().expect("the unit's lock is never poisoned");
+        while *open && !stop() {
+            open = self.unit_ended.wait(open).expect("the unit's lock is never poisoned");
+        }
+    }
+
+    /// Wakes every `wait_while_unit_open`, to check its `stop` again
+    pub fn wake_unit_waiters(&self) {
+        let _open = self.unit.lock().expect("the unit's lock is never poisoned");
+        self.unit_ended.notify_all();
     }
 
     pub fn db(&self) -> Db {

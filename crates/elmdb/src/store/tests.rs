@@ -299,3 +299,45 @@ fn what_a_growth_costs() {
         store.map_size() >> 20
     );
 }
+
+#[test]
+fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stopped() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    // No unit open: the wait returns at once
+    store.wait_while_unit_open(|| false);
+
+    let waiter = |stop: Arc<AtomicBool>| {
+        let store = Arc::clone(&store);
+        let (sent, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            store.wait_while_unit_open(|| stop.load(Ordering::SeqCst));
+            sent.send(()).unwrap();
+        });
+        ended
+    };
+    let quiet_for = Duration::from_millis(100);
+
+    // Ended by the unit's end
+    let (txn, gate) = store.begin().unwrap();
+    let ended = waiter(Arc::new(AtomicBool::new(false)));
+    assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
+    txn.abort();
+    drop(gate);
+    store.end_unit();
+    ended.recv_timeout(Duration::from_secs(5)).expect("returned once the unit ended");
+
+    // Ended by its stop, the unit still open
+    let (txn, gate) = store.begin().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let ended = waiter(Arc::clone(&stop));
+    assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
+    stop.store(true, Ordering::SeqCst);
+    store.wake_unit_waiters();
+    ended.recv_timeout(Duration::from_secs(5)).expect("returned once stopped");
+    txn.abort();
+    drop(gate);
+    store.end_unit();
+}
