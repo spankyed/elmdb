@@ -112,12 +112,30 @@ write commits with a sync. `close()` syncs what is owed.
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
-fields and relation kinds touched.
+fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
+database exists. A batch's result carries the same sequence, so a caller can tell whether a result it was handed
+reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
+in either order.
 
 - `db.changes(listener)` hears every change set after its commit.
-- `db.watch(plan, listener)` runs the plan, records what it read (types, fields, relation kinds, ids), and runs it
-  again after each commit whose change set touches that, handing the listener the new result. This is how a view stays
-  current without the code that writes knowing who is looking.
+- **Tracked reads.** A read call may ask to be tracked under a token (`{ track: token }`). elmdb records the key ranges
+  those reads touched — each key a read got and each range it scanned, as far as the scan went — and files them under
+  the token in an interval index held in Rust, replacing what the token held before. A commit's result and its change
+  set name the tokens whose ranges it wrote into (`touched`), found through that index in O(log N + matches) a key,
+  so a commit's cost doesn't grow with the reads being tracked. `db.untrack(token)` drops one. Nothing larger than a
+  token crosses the boundary, and a view is told about exactly the commits that wrote into what it read.
+- **Delivery is after the commit**, never inside a batch or a unit: a listener runs once the call that committed has
+  returned.
+- `db.watch(plan, listener)` is a convenience over tracked reads: it runs the plan tracked, and runs it again after each
+  commit that names its token, handing the listener the new result when it differs from the last.
+
+**Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
+filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a
+view current by running the function again when a commit names its token (apack's `docs/plans/live-queries.md`). Its
+JavaScript engine already does this over lmdb-js, tracking key ranges and matching commits through the same kind of
+index (`@apackdev/ears`, `engine.watch`), so the contract is one both engines keep and the move swaps the
+implementation under it. Tracking key ranges rather than types, fields and ids is also the more precise of the two: an
+edit to one entity names no token whose reads didn't touch that entity.
 
 ## Admin
 

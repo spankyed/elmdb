@@ -79,7 +79,9 @@ Each word means one thing, in the code, the docs and the errors:
 | **batch** | a write, compiled: one unit's operations |
 | **unit**, **savepoint**, **commit** | a write transaction, a rollback point inside one, its end |
 | **change set** | what a commit changed: entities, types, fields, relations |
-| **watch** | a plan re-run when a commit changes what it read |
+| **tracked read** | a read whose key ranges are filed under a token, which each commit that writes into them names |
+| **sequence** | a commit's number, only increasing: what orders a change set against a batch's result |
+| **watch** | a plan re-run when a commit changes what it read: a tracked read and its re-run |
 | **primary**, **derived** | the truth, and what is rebuilt from it |
 
 Not used: core, layer, adapter, plugin, store (for a database), record store. "Addon" means only Node's `.node` file.
