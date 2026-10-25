@@ -97,6 +97,14 @@ test('valid batches and reads with bytes flipped throw elmdb codes or apply', (t
 });
 
 test('arguments of the wrong type to every method throw rather than crash', (t) => {
+  // A junk string is a relative path to `backup` and `replaceWith`, so they run from a directory of their own
+  const cwd = process.cwd();
+  const scratch = mkdtempSync(join(tmpdir(), 'elmdb-fuzz-cwd-'));
+  process.chdir(scratch);
+  t.after(() => {
+    process.chdir(cwd);
+    rmSync(scratch, { recursive: true, force: true });
+  });
   const db = open(t);
   const unit = db.begin();
   const targets = [
