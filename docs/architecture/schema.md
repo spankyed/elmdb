@@ -1,6 +1,6 @@
 # Schema
 
-What a database holds and the rules it keeps, declared as data. Status: designed, not built.
+What a database holds and the rules it keeps, declared as data. Built: `crates/elmdb/src/schema/`.
 
 ## Principles
 

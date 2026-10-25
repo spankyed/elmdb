@@ -22,4 +22,11 @@ first user is apack, whose EARS engine it replaces underneath an unchanged API.
 
 ## Status
 
-Not started. The first step is a spike measuring what the protocol costs against apack's engine today.
+Built and running apack: the schema, the engine and its protocol, durability, value, text and vector indexes, change
+sets with tracked reads, the admin operations and the CLI, with the model, crash and fuzz suites
+(`docs/architecture/testing.md`). The order of work, and what comes next, is `docs/roadmap.md`.
+
+```sh
+cargo test --workspace   # the Rust suites
+npm run build && npm test  # the Node binding, and its tests
+```

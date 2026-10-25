@@ -1,6 +1,6 @@
 # The engine
 
-The schema, the operations and the protocol. Status: designed, not built.
+The schema, the operations and the protocol. Built: `crates/elmdb/src/engine/`.
 
 ## Opening
 

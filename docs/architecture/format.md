@@ -1,6 +1,6 @@
 # Format
 
-How a database lays out its data, and how a layout changes. Status: designed, not built.
+How a database lays out its data, and how a layout changes. Built: `crates/elmdb/src/format/`, `crates/elmdb/src/store/`.
 
 ## Keys
 

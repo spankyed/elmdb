@@ -1,7 +1,7 @@
 # Roadmap
 
-The order of work. Each step ships something apack uses. Status: steps 1–4 built (elmdb's goal, Phases 1 and 9–12;
-`docs/evidence/`), 5 and 6 to come.
+The order of work. Each step ships something apack uses. Status: steps 1–6 built (elmdb's goal, Phases 1 and 9–14;
+`docs/evidence/`); what comes next is below them.
 
 ## 1. Spike: what the protocol costs
 
@@ -42,11 +42,17 @@ Ranked full text with filters and highlights, then fuzzy labels for a quick-open
 
 ## 5. Change sets and watch
 
-Live queries in apack's views.
+Built (`docs/evidence/phase-14.md`).
+
+A commit sequence on every change set, and tracked reads whose tokens a commit names (`engine.md`, Change sets and
+watch): apack's `engine.watch` runs on them, under the contract of its live queries, whose views are apack's.
 
 ## 6. Vector and hybrid search
 
-Replacing apack's dormant library index.
+Built (`docs/evidence/phase-13.md`).
+
+Vector indexes on hannoy, pending embeddings, `near`, `like` and `hybrid`; apack's dormant library index ported onto
+them.
 
 ## Next, in order
 
