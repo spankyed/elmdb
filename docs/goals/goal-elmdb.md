@@ -65,9 +65,13 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
   `npm run session:new -- ears-on-elmdb <base>` from the main checkout: branch `session/ears-on-elmdb` in
   `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, based on `master` once #273 has merged into it, otherwise on
   `ears-disk-engine`. The main checkout is left alone.
-- **Next:** Phase 0.
-- **Proven:** nothing yet. **Unresolved:** nothing yet. **Evidence:** `elmdb/docs/evidence/` (created with the first
-  entry).
+- **Done:** Phase 0 (`aff9050`; CI's Linux job passed), Phase 1 (readings in `docs/evidence/phase-1.md`; D4 stands;
+  the spike deleted), Phase 2 (`9300b19`).
+- **Next:** Phase 3, then 4. Phase 3 starts from the store in `crates/elmdb/src/database.rs`.
+- **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
+  (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made, so a later session
+  remakes them the same way.
+- **Unresolved:** nothing. **Evidence:** `docs/evidence/`.
 
 ## Decisions
 
@@ -95,6 +99,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D16 | Once Phase 15's local validation passes, the goal pushes `session/ears-on-elmdb`, opens a draft PR in apack, and dispatches apack's strict chain and its macOS compiler cases against it | the user, 2026-10-24 |
 | D19 | Rust comes from rustup, installed by Phase 0 for the user (`rustup-init -y --profile minimal --default-toolchain none`), and elmdb's `rust-toolchain.toml` pins one stable version with `rustfmt` and `clippy`, the latest stable when Phase 0 runs. apack's Linux image installs the same version, read from that file. The pinned version is also the minimum supported | this goal |
 | D20 | elmdb lives at `github.com/spankyed/elmdb`, public, under MIT OR Apache-2.0 (the Rust ecosystem's convention), pushed at each checkpoint. Its CI is napi-rs's standard matrix (macOS arm64 and x64, Linux x64 and arm64 with glibc and musl, Windows x64): format, clippy and tests on every push to Linux, the full matrix with the model and crash harnesses on pull requests and on dispatch, which the goal runs after Phases 8 and 15. Platform coverage is CI's, so the Windows VM isn't needed: it is unreachable unattended (its Azure CLI sign-in is blocked by security defaults and its SSH port didn't answer on 2026-10-25) | the user (public), 2026-10-25; this goal |
+| D22 | No crash record. LMDB's assertions are compiled out of heed's release builds (`NDEBUG`), so a release build never aborts on one, and heed doesn't expose the `MDB_env` pointer `mdb_env_set_assert` needs; `check()` and `CORRUPTED` are what report damage. Phase 3's crash-record deliverable has no subject and is dropped with this evidence | `docs/evidence/phase-1.md`; `engine.md`, Errors |
 | D21 | apack pins the elmdb commit it builds against in a committed `vendor/elmdb.rev`. Locally the `vendor/elmdb` symlink stays live, and a check refuses when that checkout doesn't contain the pinned commit. In apack's CI, a step clones elmdb at that commit into `vendor/elmdb` and builds the binding, with the Cargo target directory cached | this goal |
 
 ## Phases
@@ -174,8 +179,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
     - the schema stored and compared through Phase 2.
   - **Writing to LMDB:**
     - group commit, `durable()` and close per D6;
-    - map growth per D7;
-    - the crash record.
+    - map growth per D7.
   - **Concurrency:**
     - reads on reader threads (verify heed's read transactions without thread-local storage);
     - the binding refusing a second load into one process.
@@ -380,9 +384,9 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| elmdb repository with checks, generated types, one-LMDB guard (P0) | missing | | all |
-| Protocol cost measured, D4 confirmed (P1) | missing | | all |
-| Schema per `schema.md` (P2) | missing | | all |
+| elmdb repository with checks, generated types, one-LMDB guard (P0) | done, `aff9050` | `docs/evidence/phase-0.md`; CI run 40159534326 | the full matrix, after Phase 8 |
+| Protocol cost measured, D4 confirmed (P1) | done | `docs/evidence/phase-1.md` | none |
+| Schema per `schema.md` (P2) | done, `9300b19` | 22 specs; two mutations caught (`cargo test -p elmdb schema`) | none |
 | Format, storage, durability per D5–D7 (P3) | missing | | all |
 | Writes and model harness (P4) | missing | | all |
 | Reads and value indexes (P5) | missing | | all |

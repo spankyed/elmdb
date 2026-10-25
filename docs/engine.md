@@ -95,6 +95,6 @@ fields and relation kinds touched.
 ## Errors
 
 Every failure is an `ElmdbError` with a code from one enum, the same in Rust and TypeScript. LMDB's own errors map to
-codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB aborts the process on a failed assertion and nothing can turn
-that into an error, so the engine's assert callback writes a crash record (the assertion, the database, the
-transaction) beside the database before the abort, and the next open reports it.
+codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compiled out of a release build (heed's
+`lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
+detect itself is what `check()` is for (`docs/evidence/phase-1.md`).

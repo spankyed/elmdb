@@ -31,9 +31,9 @@ compares.
 A value is msgpack bytes, written by the caller and stored as given:
 
 - maps keep their keys as written, and a key named `__proto__` is a key;
-- integers, floats, strings, binary, arrays, maps, `nil` and booleans, and only the extension types apack's format 4
-  values actually hold (at least msgpack's timestamp, for `Date`), which the goal's first storage phase lists from the
-  codec (apack's `packages/apack-ears/src/kv.ts`) and a scan of every stored value;
+- `nil`, booleans, integers, floats, strings, binary, arrays and maps whose keys are strings, and of the extension
+  types only msgpack's timestamp (type −1, how a JavaScript `Date` encodes); a write holding any other extension is
+  refused (`VALUE_INVALID`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
 - the engine decodes a value only where it must: to index it, to check a required field, to filter by it, to extract
   text.
 
@@ -72,6 +72,7 @@ elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.
 | ITS#10395 | several nested read transactions inside a write transaction | reported, not merged |
 
 Its base trails upstream: on 2026-10-24 heed 0.23.0's LMDB sat on upstream's 2026-04-27 commit, without ten later
-fixes, among them ITS#10642 (`mdb_subdb_adjust` alignment) and ITS#10643 (page counts when deleting DUPSORT records;
-elmdb uses no DUPSORT database). A CI job lists the upstream commits heed's LMDB lacks, and a fix elmdb needs goes to
+fixes, among them ITS#10642 (`mdb_subdb_adjust` alignment) and ITS#10643 (page counts when deleting DUPSORT records).
+Neither reaches elmdb: `mdb_subdb_adjust` isn't in heed's LMDB at all, and both concern DUPSORT sub-databases, which
+elmdb doesn't use (`docs/evidence/phase-1.md`). A CI job lists the upstream commits heed's LMDB lacks, and a fix elmdb needs goes to
 Meilisearch's fork as a rebase request or a pull request.
