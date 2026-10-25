@@ -240,7 +240,7 @@ fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, a
             t.del(&keys::index_entry(&entity_type, &index.name, parts, seq))?;
         }
         for parts in now.iter().filter(|p| !was.contains(p)) {
-            if index.unique {
+            if index.unique && !t.state.unchecked {
                 let mut taken = None;
                 t.visit(&keys::index_range(&entity_type, &index.name, parts), |_, holder| {
                     taken = values::decode(holder).ok().and_then(|v| v.as_str().map(str::to_owned));

@@ -83,3 +83,22 @@ test('reads answer on this thread and on the pool, the same, and a unit reads it
   assert.equal(inUnit[0].n, 3);
   unit.abort();
 });
+
+test('admin: stats, check, a backup that opens on its own, reset, and a load the checks would refuse', (t) => {
+  const db = open(t);
+  write(db, [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }]);
+  assert.equal(db.stats().types.Note.live, 1);
+  assert.deepEqual(db.check(), { differences: [], violations: [] });
+  assert.ok(db.indexStatus().every((s) => s.built));
+  const target = mkdtempSync(join(tmpdir(), 'elmdb-backup-'));
+  t.after(() => rmSync(target, { recursive: true, force: true }));
+  db.backup(join(target, 'b'));
+  const copy = Database.open(join(target, 'b'), { readOnly: true });
+  assert.equal(packr.unpack(copy.readSync(packr.pack({ reads: [{ read: 'row', id: 'Note-1' }] })))[0].row.title, 'one');
+  copy.close();
+  db.bulkLoad(packr.pack([{ load: 'entity', id: 'Note-2', fields: {} }]));
+  assert.match(db.check().violations[0].message, /lacks title/);
+  assert.throws(() => db.purge({ type: 'Note' }), { code: 'SCHEMA_CHANGE_REFUSED' });
+  db.reset();
+  assert.equal(db.stats().types.Note, undefined);
+});

@@ -400,6 +400,18 @@ impl Store {
         synced
     }
 
+    /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed
+    pub fn copy_to(&self, target: &Path) -> Result<()> {
+        std::fs::create_dir_all(target)?;
+        self.env.copy_to_path(target.join("data.mdb"), heed::CompactionOption::Enabled)?;
+        Ok(())
+    }
+
+    /// Bytes the data file holds on disk
+    pub fn file_size(&self) -> u64 {
+        std::fs::metadata(self.path.join("data.mdb")).map(|m| m.len()).unwrap_or(0)
+    }
+
     /// The bytes under a meta key
     pub fn meta(&self, name: &str) -> Result<Option<Vec<u8>>> {
         self.read(|txn, db| Ok(db.get(txn, &meta_key(name))?.map(<[u8]>::to_vec)))

@@ -1,7 +1,10 @@
 import type { Schema } from './protocol/Schema.js'
 import type { SchemaChange } from './protocol/SchemaChange.js'
+import type { CheckReport } from './protocol/CheckReport.js'
+import type { IndexStatus } from './protocol/IndexStatus.js'
+import type { Stats } from './protocol/Stats.js'
 export type { ErrorCode } from './protocol/ErrorCode.js'
-export type { Schema, SchemaChange }
+export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }
 
 /**
  * Which binding artifact the generated loader actually loaded: `'native'` for
@@ -41,6 +44,29 @@ export declare class Database {
    * (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
+  /** Compares derived data with primary data and every row with the schema's rules */
+  check(): CheckReport
+  /** Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's */
+  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
+  /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
+  indexStatus(): IndexStatus[]
+  /** Blocks until every index waiting to be built is built or has failed */
+  waitForIndexBuilds(): void
+  /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
+  purge(what: PurgeTarget): void
+  renameType(from: string, to: string): void
+  renameField(entityType: string, from: string, to: string): void
+  renameRelation(from: string, to: string): void
+  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
+  backup(target: string): void
+  /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
+  replaceWith(source: string): void
+  /** Every entry removed but the database's format and schema */
+  reset(): void
+  /** What the database holds: entities per type and field, relations per kind, entries per index, its sizes */
+  stats(): Stats
+  /** Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does */
+  bulkLoad(loads: Buffer): void
   /** Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails */
   durable(): Promise<void>
   /** Syncs what is owed and releases the environment; closing a closed database does nothing */
@@ -82,4 +108,12 @@ export interface OpenOptions {
   syncIdleMs?: number
   syncIntervalMs?: number
   mapSizeBytes?: number
+}
+
+/** What `purge` deletes */
+export interface PurgeTarget {
+  type?: string
+  field?: string
+  relationKind?: string
+  role?: string
 }

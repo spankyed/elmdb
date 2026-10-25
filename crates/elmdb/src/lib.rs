@@ -6,6 +6,7 @@ mod error;
 pub mod format;
 pub mod schema;
 mod store;
+pub mod upgrade;
 
 pub use database::{Database, OpenOptions, OpenReport};
 pub use engine::Unit;

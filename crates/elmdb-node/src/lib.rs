@@ -35,6 +35,16 @@ pub struct OpenOptions {
     pub map_size_bytes: Option<f64>,
 }
 
+/// What `purge` deletes
+#[napi(object)]
+pub struct PurgeTarget {
+    #[napi(js_name = "type")]
+    pub entity_type: Option<String>,
+    pub field: Option<String>,
+    pub relation_kind: Option<String>,
+    pub role: Option<String>,
+}
+
 /// An open database: one directory holding one LMDB environment
 #[napi]
 pub struct Database {
@@ -129,6 +139,100 @@ impl Database {
     #[napi]
     pub fn begin(&self) -> Result<Unit, Code> {
         self.inner.begin().map(|inner| Unit { inner: Some(inner) }).map_err(to_js)
+    }
+
+    /// Compares derived data with primary data and every row with the schema's rules
+    #[napi(ts_return_type = "CheckReport")]
+    pub fn check(&self) -> Result<serde_json::Value, Code> {
+        let report = self.inner.check().map_err(to_js)?;
+        Ok(serde_json::to_value(report).expect("a report serializes"))
+    }
+
+    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's
+    #[napi]
+    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
+        let one = entity_type.as_deref().zip(index.as_deref());
+        self.inner.rebuild(one).map_err(to_js)
+    }
+
+    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    #[napi(ts_return_type = "IndexStatus[]")]
+    pub fn index_status(&self) -> Result<serde_json::Value, Code> {
+        let status = self.inner.index_status().map_err(to_js)?;
+        Ok(serde_json::to_value(status).expect("a status serializes"))
+    }
+
+    /// Blocks until every index waiting to be built is built or has failed
+    #[napi]
+    pub fn wait_for_index_builds(&self) {
+        self.inner.wait_for_index_builds();
+    }
+
+    /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`
+    #[napi]
+    pub fn purge(&self, what: PurgeTarget) -> Result<(), Code> {
+        use elmdb::engine::admin::Purge;
+        let target = match (what.entity_type, what.field, what.relation_kind, what.role) {
+            (Some(entity_type), Some(field), None, None) => Purge::Field { entity_type, field },
+            (Some(entity_type), None, None, None) => Purge::Type(entity_type),
+            (None, None, Some(kind), None) => Purge::RelationKind(kind),
+            (None, None, None, Some(role)) => Purge::Role(role),
+            _ => {
+                return Err(napi::Error::new(
+                    Code("BATCH_INVALID"),
+                    "purge takes { type }, { type, field }, { relationKind } or { role }".to_owned(),
+                ));
+            }
+        };
+        self.inner.purge(&target).map_err(to_js)
+    }
+
+    #[napi]
+    pub fn rename_type(&self, from: String, to: String) -> Result<(), Code> {
+        self.inner.rename_type(&from, &to).map_err(to_js)
+    }
+
+    #[napi]
+    pub fn rename_field(&self, entity_type: String, from: String, to: String) -> Result<(), Code> {
+        self.inner.rename_field(&entity_type, &from, &to).map_err(to_js)
+    }
+
+    #[napi]
+    pub fn rename_relation(&self, from: String, to: String) -> Result<(), Code> {
+        self.inner.rename_relation(&from, &to).map_err(to_js)
+    }
+
+    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
+    #[napi]
+    pub fn backup(&self, target: String) -> Result<(), Code> {
+        self.inner.backup(target).map_err(to_js)
+    }
+
+    /// Every entry replaced by another database's primary data, derived data rebuilt under this schema
+    #[napi]
+    pub fn replace_with(&self, source: String) -> Result<(), Code> {
+        self.inner.replace_with(source).map_err(to_js)
+    }
+
+    /// Every entry removed but the database's format and schema
+    #[napi]
+    pub fn reset(&self) -> Result<(), Code> {
+        self.inner.reset().map_err(to_js)
+    }
+
+    /// What the database holds: entities per type and field, relations per kind, entries per index, its sizes
+    #[napi(ts_return_type = "Stats")]
+    pub fn stats(&self) -> Result<serde_json::Value, Code> {
+        let stats = self.inner.stats().map_err(to_js)?;
+        Ok(serde_json::to_value(stats).expect("stats serialize"))
+    }
+
+    /// Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does
+    #[napi]
+    pub fn bulk_load(&self, loads: Buffer) -> Result<(), Code> {
+        let loads: Vec<elmdb::engine::maintenance::Load> = rmp_serde::from_slice(&loads)
+            .map_err(|e| napi::Error::new(Code("BATCH_INVALID"), format!("The loads don't decode: {e}")))?;
+        self.inner.bulk_load(&loads).map_err(to_js)
     }
 
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails

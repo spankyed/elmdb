@@ -14,6 +14,7 @@ pub mod derive;
 mod entities;
 mod ids;
 mod keys;
+pub mod maintenance;
 mod numbering;
 pub mod plan;
 mod reads;
@@ -35,6 +36,11 @@ use crate::store::Store;
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
 use unit::{Check, Read as _, Txn, UnitState};
+
+/// A value's msgpack bytes
+pub(crate) fn encode_value(value: &rmpv::Value) -> Vec<u8> {
+    values::encode(value)
+}
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
 fn now_ms() -> f64 {
@@ -77,6 +83,7 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch> {
 
 /// One value index's state
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatus {
     #[serde(rename = "type")]
@@ -142,7 +149,8 @@ pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(Stri
                 }
                 Ok(())
             },
-            false,
+            // Opening leaves nothing owed, as the schema's write doesn't
+            true,
         )?;
     }
     Ok(unbuilt)
@@ -199,6 +207,13 @@ impl Database {
     /// sequences
     pub fn rename_type(&self, from: &str, to: &str) -> Result<()> {
         self.admin_unit(|t| admin::rename_type(t, from, to))
+    }
+
+    pub(crate) fn admin_load(&self, loads: &[maintenance::Load]) -> Result<()> {
+        self.admin_unit(|t| {
+            t.state.unchecked = true;
+            maintenance::load(t, loads)
+        })
     }
 
     fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {

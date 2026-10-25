@@ -116,10 +116,13 @@ fields and relation kinds touched.
 
 ## Admin
 
-- `backup(dir)`: LMDB's copy of one read transaction, compacted.
-- `replaceWith(dir)`: every entry replaced by another database's, in one durable unit, the database staying open.
-- `reset()`: every entry removed, in one durable unit.
-- `stats()`: entries and bytes per type, field and index, index build progress, pending embeddings.
+- `backup(dir)`: LMDB's copy of one read transaction, compacted (`mdb_env_copy2` with `MDB_CP_COMPACT`), which opens
+  as a database of its own.
+- `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
+  this database's schema, in one durable unit, the database staying open.
+- `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
+- `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
+  index, the database's entries, file and map sizes; `indexStatus()` says which indexes are built.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
@@ -135,8 +138,10 @@ fields and relation kinds touched.
   relations, a role. It refuses a name the schema still declares.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them.
-- `bulkLoad(rows, relations)`: one unit without per-write checks, for imports and upgrades.
-- Raw writes for tests that need data the checks would refuse.
+- `bulkLoad(loads)`: entities, relations under their own ids and sequences, applied in one durable unit without a
+  write's checks (no schema, no refusals, a unique index taking duplicates), for imports, the upgrade, and specs that
+  need data the checks would refuse. The derived keys are kept as a write keeps them, and `check()` reports what the
+  rules refuse.
 
 ## Errors
 

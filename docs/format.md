@@ -58,8 +58,12 @@ version 1, and LMDB 1.0 (`mdb.master3`) version 3, so no stock LMDB opens a file
    version (1), each entry as a u32 key length, the key, a u32 value length and the value, then a u32 `0xFFFFFFFF` and
    a u64 entry count, all little-endian. It opens the source read-only and refuses anything but an EARS database in
    format 4.
-2. `elmdb upgrade` reads the dump, rewrites format 4's keys and values under the prefixes above, and rebuilds the
-   derived data.
+2. `elmdb upgrade <dump> <dir> [--schema <file>]` reads the dump into a new database: format 4's keys decode with
+   elmdb's codec (its strings hold no NUL), `v`, `i`, `r` and `s` map onto `p/v`, `p/i`, `p/r` and `p/s` (a short
+   code's sequence `<Type>:<PREFIX>` becomes `shortCode:<Type>`, and `m seq` the store's `seq`), attribute values are
+   held to the value spec, format 4's own rows are read with msgpackr's `undefined` (extension type 0) as absent, and
+   its derived keys are left behind and rebuilt. It loads unchecked, so `check()` afterwards reports what the data
+   holds that the schema's rules refuse (`docs/evidence/phase-7.md`).
 
 apack's last release on lmdb-js converts every database to its format 4 first. apack's run history moves from its
 record store into the `runs` database through `bulkLoad`.

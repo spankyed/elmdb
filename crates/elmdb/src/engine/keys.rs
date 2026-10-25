@@ -38,6 +38,11 @@ pub fn relation(id: &str) -> Vec<u8> {
     })
 }
 
+/// Every attribute of every entity
+pub fn all_values() -> Vec<u8> {
+    Prefix::Value.key().to_vec()
+}
+
 pub fn all_relations() -> Vec<u8> {
     Prefix::Relation.key().to_vec()
 }

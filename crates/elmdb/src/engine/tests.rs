@@ -2,6 +2,7 @@
 //! each translated to batches. What reads answer (queries, walks) is Phase 5's; these read the store back directly.
 
 mod derived;
+mod maintenance;
 mod model;
 mod reads;
 

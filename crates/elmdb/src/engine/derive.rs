@@ -250,6 +250,30 @@ fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             }
         }
     }
+    // A unique index whose entries name more than one entity: data loaded unchecked can hold such values. Every type
+    // with entities has the built-in ones, declared or not
+    let mut types: std::collections::BTreeSet<String> = schema.types.keys().cloned().collect();
+    for e in entities_of(r)? {
+        types.insert(ids::type_of(&e.id).to_owned());
+    }
+    for entity_type in &types {
+        for index in value_indexes(schema, entity_type).into_iter().filter(|i| i.unique) {
+            let mut holders: BTreeMap<Vec<u8>, (Vec<Part>, Vec<String>)> = BTreeMap::new();
+            for (key, id) in r.scan(&keys::index_range(entity_type, &index.name, &[]))? {
+                let mut parts = decode_key(&key)?;
+                parts.drain(..3);
+                parts.pop();
+                let holder = values::decode(&id)?.as_str().unwrap_or_default().to_owned();
+                holders.entry(crate::format::key::encode(&parts)).or_insert_with(|| (parts, Vec::new())).1.push(holder);
+            }
+            for (parts, ids) in holders.into_values().filter(|(_, ids)| ids.len() > 1) {
+                out.push(Violation {
+                    subject: ids.join(", "),
+                    message: format!("hold the same {entity_type}.{} value {parts:?}, which is unique", index.name),
+                });
+            }
+        }
+    }
     let mut targets_of: BTreeMap<(String, String), usize> = BTreeMap::new();
     let mut sources_of: BTreeMap<(String, String), usize> = BTreeMap::new();
     for (key, bytes) in r.scan(&keys::all_relations())? {
