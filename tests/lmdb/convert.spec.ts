@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
+import { compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
 import { createEarsEngine, type EARS } from '../../src/index.ts';
 
 const SEP = '\x1F';
@@ -159,6 +159,31 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
     expect(engine.create('Note').row().shortCode).toBe('N-5');
   } finally {
     writable.close();
+  }
+});
+
+it('compacts an environment in place, without the pages its deletes freed, and keeps what it holds', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
+  dirs.push(path.dirname(dir));
+  const engineOn = (store: ReturnType<typeof openLmdbStore>) =>
+    createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+  // Pages a conversion's old tables or any deletes leave: written, then destroyed, all but one row
+  const store = openLmdbStore({ path: dir });
+  const engine = engineOn(store);
+  engine.transact(() => { for (let i = 0; i < 200; i++) engine.create('Note', { id: `Note-${i}` as EARS.EntityId, text: 'x'.repeat(10_000) }); });
+  engine.transact(() => { for (let i = 1; i < 200; i++) engine.write(`Note-${i}` as EARS.EntityId).destroy(); });
+  store.close();
+
+  const { before, after } = await compactEnvironment(dir);
+  expect(after).toBeLessThan(before / 10);
+  expect(fs.statSync(path.join(dir, 'data.mdb')).size).toBe(after);
+  expect(fs.readdirSync(path.dirname(dir)), 'the copy it wrote beside the environment is gone').toEqual(['ears-db']);
+  const reopened = openLmdbStore({ path: dir, readOnly: true });
+  try {
+    expect(engineOn(reopened).query('Note').ids()).toEqual(['Note-0']);
+    expect(engineOn(reopened).getAttr('Note-0' as EARS.EntityId, 'text' as EARS.AttrKind)).toHaveLength(10_000);
+  } finally {
+    reopened.close();
   }
 });
 

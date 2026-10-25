@@ -10,5 +10,5 @@ export {
   type LmdbStore, type LmdbStoreOptions, type LmdbEnvironment,
 } from './store.ts';
 export { createLmdbKVBackend, type LmdbKVHooks } from './kv-backend.ts';
-export { convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, type FormatConversion, type Format3Conversion, type Format4Conversion, type FormatSteps } from './convert.ts';
+export { compactEnvironment, convertToCurrentFormat, convertToFormat2, type Compaction, convertToFormat3, convertToFormat4, type FormatConversion, type Format3Conversion, type Format4Conversion, type FormatSteps } from './convert.ts';
 export { openRecordStore, RECORD_STORE_FORMAT_VERSION, RECORD_STORE_KIND, type RecordStoreOptions } from './record-store.ts';
