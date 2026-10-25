@@ -16,22 +16,19 @@ pub struct Reads {
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "read", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReadOp {
+    /// A plan's answer; with `visits`, wrapped as `{ kind: "visited", answer, visited }`, `visited` counting the
+    /// entities its start and walks reached, which says whether a filter walked rows an index could have answered
     Query {
         plan: Plan,
+        #[serde(default)]
+        visits: bool,
     },
     /// The entity's row: its id, type and every field; `null` for an id no entity has. It reads through the trash
-    Row {
-        id: String,
-    },
+    Row { id: String },
     /// One field of the entity, the trash read through; `entityType` is read from the id
-    Field {
-        id: String,
-        field: String,
-    },
+    Field { id: String, field: String },
     /// The relation's row, or `null`
-    Relation {
-        id: String,
-    },
+    Relation { id: String },
     /// The rows of the matching relations: by an end, its edges in the order linked; otherwise every relation
     FindRelations {
         #[serde(default)]
@@ -42,11 +39,7 @@ pub enum ReadOp {
         target: Option<String>,
     },
     /// Whether linking `source` to `target` would close a cycle through these kinds
-    WouldCreateCycle {
-        source: String,
-        target: String,
-        kinds: Vec<String>,
-    },
+    WouldCreateCycle { source: String, target: String, kinds: Vec<String> },
 }
 
 /// A query: where it starts, the steps after, and what it answers

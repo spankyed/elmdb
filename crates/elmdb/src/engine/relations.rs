@@ -322,10 +322,11 @@ pub fn check_ends(t: &impl Read, relation: &str, via: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };
     for end in [&stored.source, &stored.target] {
         if entities::record(t, end)?.is_none() {
-            return Err(Error::new(
-                ErrorCode::NoSuchEntity,
-                format!("{via}({}, {:?}): no entity has the id {end}", stored.kind, stored.target),
-            ));
+            let message = match via {
+                "link" => format!("link({}, {:?}): no entity has this id", stored.kind, stored.target),
+                _ => format!("{via}({relation:?}): no entity has the id {end:?}"),
+            };
+            return Err(Error::new(ErrorCode::NoSuchEntity, message));
         }
     }
     Ok(())

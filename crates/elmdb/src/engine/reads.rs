@@ -42,7 +42,7 @@ pub fn run(r: &impl Read, reads: &[ReadOp]) -> Result<Vec<u8>> {
 pub fn run_counted(r: &impl Read, plan: &Plan) -> Result<(Vec<u8>, Visited)> {
     let mut out = Vec::new();
     let mut visited = Visited::default();
-    answer(r, &ReadOp::Query { plan: plan.clone() }, &mut out, &mut visited)?;
+    answer(r, &ReadOp::Query { plan: plan.clone(), visits: false }, &mut out, &mut visited)?;
     Ok((out, visited))
 }
 
@@ -85,7 +85,18 @@ fn may_hold_proto(bytes: &[u8]) -> bool {
 
 fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited) -> Result<()> {
     match read {
-        ReadOp::Query { plan } => query(r, plan, out, visited),
+        ReadOp::Query { plan, visits: false } => query(r, plan, out, visited),
+        ReadOp::Query { plan, visits: true } => {
+            let mut w = W(out);
+            w.map(3);
+            w.kind("visited");
+            w.str("answer");
+            query(r, plan, w.0, visited)?;
+            let mut w = W(out);
+            w.str("visited");
+            w.uint(visited.entities);
+            Ok(())
+        }
         ReadOp::Row { id } => {
             let mut w = W(out);
             w.map(3);

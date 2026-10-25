@@ -4,4 +4,4 @@ import type { Plan } from "./Plan.js";
 /**
  * One read
  */
-export type ReadOp = { "read": "query", plan: Plan, } | { "read": "row", id: string, } | { "read": "field", id: string, field: string, } | { "read": "relation", id: string, } | { "read": "findRelations", kind: string | null, source: string | null, target: string | null, } | { "read": "wouldCreateCycle", source: string, target: string, kinds: Array<string>, };
+export type ReadOp = { "read": "query", plan: Plan, visits: boolean, } | { "read": "row", id: string, } | { "read": "field", id: string, field: string, } | { "read": "relation", id: string, } | { "read": "findRelations", kind: string | null, source: string | null, target: string | null, } | { "read": "wouldCreateCycle", source: string, target: string, kinds: Array<string>, };

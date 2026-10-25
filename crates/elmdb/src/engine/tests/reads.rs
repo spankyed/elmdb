@@ -438,9 +438,33 @@ fn a_unit_reads_its_own_writes() {
     ]))
     .unwrap();
     let plan: Plan = serde_json::from_value(json!({ "start": types(&["Task"]), "steps": [{ "step": "where", "field": "status", "value": "open" }], "terminal": { "answer": "ids" } })).unwrap();
-    let inside = decode(&unit.read(&Reads { reads: vec![ReadOp::Query { plan: plan.clone() }] }).unwrap());
+    let inside =
+        decode(&unit.read(&Reads { reads: vec![ReadOp::Query { plan: plan.clone(), visits: false }] }).unwrap());
     assert_eq!(inside[0]["ids"], json!([A, C, D, "Task-e"]));
-    let outside = decode(&f.db.read(&Reads { reads: vec![ReadOp::Query { plan }] }).unwrap());
+    let outside = decode(&f.db.read(&Reads { reads: vec![ReadOp::Query { plan, visits: false }] }).unwrap());
     assert_eq!(outside[0]["ids"], json!([A, C, D]), "a reader sees none of an open unit");
     unit.abort();
+}
+
+#[test]
+fn a_query_asked_for_its_visits_answers_how_many_entities_its_walk_reached() {
+    let f = fixture();
+    let walk = |terminal: &str| {
+        json!({ "read": "query", "visits": true, "plan": {
+            "start": types(&["Task"]),
+            "steps": [{ "step": "where", "field": "rank", "value": 10 }],
+            "terminal": { "answer": terminal }
+        } })
+    };
+    let answers = reads(&f.db, vec![walk("first"), walk("ids")]).unwrap();
+    // `first` stops at the match, the second Task; `ids` walks every Task
+    assert_eq!(answers[0], json!({ "kind": "visited", "answer": { "kind": "id", "id": B }, "visited": 2 }));
+    assert_eq!(answers[1]["visited"], 4);
+    assert_eq!(answers[1]["answer"]["ids"], json!([B]));
+    let plain = reads(
+        &f.db,
+        vec![json!({ "read": "query", "plan": { "start": types(&["Task"]), "terminal": { "answer": "count" } } })],
+    )
+    .unwrap();
+    assert_eq!(plain[0], json!({ "kind": "count", "n": 4 }), "without visits, the answer itself");
 }

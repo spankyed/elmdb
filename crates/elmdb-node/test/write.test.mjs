@@ -41,7 +41,9 @@ test('a batch creates and links, and answers each operation and the change set',
 test('a refused batch throws its code and writes nothing', (t) => {
   const db = open(t);
   assert.throws(() => db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', fields: {} }] })), { code: 'REQUIRED_FIELD' });
-  assert.throws(() => db.write(Buffer.from([0xc1])), { code: 'BATCH_INVALID' });
+  // Bytes outside msgpack's value spec are a value elmdb doesn't store; well-formed bytes that are no batch are a batch
+  assert.throws(() => db.write(Buffer.from([0xc1])), { code: 'VALUE_INVALID' });
+  assert.throws(() => db.write(packr.pack({ ops: [{ op: 'set', id: 'Note-1', fields: { n: Number.NaN }, touch: false }] })), { code: 'VALUE_INVALID' });
   assert.throws(() => db.write(packr.pack({ ops: [{ op: 'explode' }] })), { code: 'BATCH_INVALID' });
 });
 
