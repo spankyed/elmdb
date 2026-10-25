@@ -2,7 +2,8 @@
 // model. After every write the engine holds what the model holds and refuses what it refuses, a refused unit and a
 // rolled-back savepoint included, and every derived read — a type's entities, count and trash, an index lookup, a
 // role, an edge's far ends — answers as the model does; and a unit that rolls back leaves each type in its insertion
-// order. On a memory backend and an LMDB one, each refusing a commit on demand, so it builds its own engines and runs
+// order; and a watch on every one of those reads delivers what the read answers afresh, after every op. On a memory
+// backend and an LMDB one, each refusing a commit on demand, so it builds its own engines and runs
 // in the `ears` project only. A killed writer's files are tests/lmdb/crash.integration.spec.ts
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -11,7 +12,7 @@ import fc from 'fast-check';
 import { afterAll, describe, expect, it } from 'vitest';
 import { createMemoryKVBackend, createOrderedKV, type KvBackend } from '../../src/kv.ts';
 import { createLmdbKVBackend, openEnvironment } from '../../src/lmdb/index.ts';
-import { Model, applyTo, derivedOf, stateOf, type Op } from '../_harness/model.ts';
+import { Model, applyTo, derivedOf, stateOf, watchedReads, type Op } from '../_harness/model.ts';
 import { newEngine, refusable } from '../_harness/engines.ts';
 import { workload } from '../_harness/workload.ts';
 
@@ -71,6 +72,37 @@ describe.each([
         store.close();
       }
     }), { numRuns: runs });
+  });
+
+  it('keeps every watch at what its read answers afresh, after every write, whatever wrote', async () => {
+    await fc.assert(fc.asyncProperty(workload(), async (ops) => {
+      const store = backing();
+      const stops: Array<() => void> = [];
+      try {
+        const { engine, apply } = harness(store);
+        const latest = new Map<string, unknown>();
+        for (const [name, read] of Object.entries(watchedReads(engine, ops))) {
+          const watching = engine.watch(read, {
+            next: (value) => { latest.set(name, value); },
+            error: (error) => { latest.set(name, { threw: String(error) }); },
+          });
+          stops.push(() => watching.stop());
+        }
+        const reads = watchedReads(engine, ops);
+        for (const op of ops) {
+          apply(op);
+          await engine.admin.watchesSettled();
+          for (const [name, read] of Object.entries(reads)) {
+            let fresh: unknown;
+            try { fresh = read(); } catch (error) { fresh = { threw: String(error) }; }
+            expect(latest.get(name), `${name} after ${JSON.stringify(op)}`).toEqual(fresh);
+          }
+        }
+      } finally {
+        for (const stop of stops) stop();
+        store.close();
+      }
+    }), { numRuns: Math.ceil(runs / 3) });
   });
 
   it('keeps each type in insertion order through a unit that rolls back', () => {

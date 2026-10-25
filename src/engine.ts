@@ -13,6 +13,7 @@ import { createJournal } from './journal.ts';
 import { createMemoryKV, type UnitOptions } from './kv.ts';
 import { createStoreAccess } from './store-access.ts';
 import { createNameChecks } from './names.ts';
+import { createWatches, type WatchObserver, type Watching } from './watch.ts';
 
 /** An engine's operations — its queries, writes and transactions: what a program is handed */
 export interface Ears {
@@ -55,6 +56,15 @@ export interface Ears {
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
   nextLabel(type: EARS.Entity, base: string): string;
+  /**
+   * Runs `read` and hands `observer` its result, then runs it again after every commit that wrote into what it read,
+   * handing over each result that differs from the last, with the number of the commit it reflects. Never inside a
+   * write: deliveries come once the writing code has returned, a burst of commits as one. `read` must be a pure read of
+   * the engine; what it reads anywhere else isn't tracked, and its result goes stale when that changes
+   */
+  watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
+  /** The number of the last commit the engine's store made, or 0: what a watch's delivery is compared against */
+  lastCommit(): number;
 }
 
 /** An engine's data lifecycle and direct writes: for the code that created it (the app's composition root, tests, tooling) */
@@ -81,6 +91,10 @@ export interface EarsAdmin {
   bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
   /** Runs `fn`, a load of stored rows, as one write unit */
   bulkLoad<T>(fn: () => T): T;
+  /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
+  watchesSettled(): Promise<void>;
+  /** How many watches are open, and how many keys and ranges their read sets hold */
+  watchStats(): { watches: number; keys: number; ranges: number };
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -108,6 +122,7 @@ export function createEarsEngine({ kv = createMemoryKV(), isEntityType, isRelati
   const hierarchy = createHierarchy({ query, names });
   const counters = createEntityCounters(storage, access);
   const { create, upsert, write, updateRelation, removeRelation } = createWrites({ storage, relations, hierarchy, isEntityType, rowRules, counters, names, journal, access });
+  const watches = createWatches(kv);
 
   const operations: Ears = {
     query, create, upsert, write, transact, isEntityType, isRelationKind, isRole,
@@ -124,6 +139,8 @@ export function createEarsEngine({ kv = createMemoryKV(), isEntityType, isRelati
     },
     updateRelation,
     removeRelation,
+    watch: watches.watch,
+    lastCommit: () => kv.lastCommit,
   };
 
   const admin: EarsAdmin = {
@@ -139,6 +156,8 @@ export function createEarsEngine({ kv = createMemoryKV(), isEntityType, isRelati
     updateRelation: (relId, { source, target, info }) => relations.update(relId, source, target, info),
     bulkLoadRelation: relations.bulkLoad,
     bulkLoad: (fn) => access.write(fn),
+    watchesSettled: watches.settled,
+    watchStats: watches.stats,
   };
 
   return { ...operations, admin };

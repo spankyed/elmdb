@@ -393,9 +393,13 @@ describe('reads', () => {
     });
     const store: OrderedKV = {
       get writing() { return kv.writing; },
+      get lastCommit() { return kv.lastCommit; },
       read: (fn) => kv.read((r) => fn(counting(r))),
       write: (fn) => kv.write((w) => fn(counting(w))),
       durable: () => kv.durable(),
+      track: (fn) => kv.track(fn),
+      onCommit: (listener) => kv.onCommit(listener),
+      replaceAll: (entries, options) => kv.replaceAll(entries, options),
     };
     return { store, reads: (run: () => unknown) => { reads = 0; run(); return reads; } };
   }

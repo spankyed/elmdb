@@ -24,8 +24,9 @@ export {
 export {
   createMemoryKV, createMemoryKVBackend, createOrderedKV,
   type OrderedKV, type OrderedKVOptions, type UnitOptions, type KvReader, type KvWriter, type Key, type KeyPart, type RangeOptions, type Visit,
-  type KvBackend, type ByteReader, type ByteWriter,
+  type KvBackend, type ByteReader, type ByteWriter, type ReadSet, type Tracked, type Commit,
 } from './kv.ts';
+export type { WatchObserver, Watching } from './watch.ts';
 export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {
