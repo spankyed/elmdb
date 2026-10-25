@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { TransactionFlags, type Database, type RootDatabase, type Transaction } from 'lmdb';
 import type { ByteReader, ByteWriter, KvBackend } from '../kv.ts';
 

@@ -66,13 +66,6 @@ export function createMemoryKV(options?: OrderedKVOptions): OrderedKV;
 export function createMemoryKVBackend(): KvBackend;
 
 // @public
-export function createMemoryRecordStore<R extends {
-    id: string;
-} = StoredRecord>(input: {
-    indexes: RecordIndexes<R>;
-}): RecordStore<R>;
-
-// @public
 export function createOrderedKV(backend: KvBackend, input?: OrderedKVOptions): OrderedKV;
 
 // @public
@@ -338,27 +331,8 @@ E
     [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
 
-// @public
-export interface FindByOptions {
-    cursor?: string;
-    // (undocumented)
-    limit?: number;
-    reverse?: boolean;
-}
-
 // @public (undocumented)
 export function getTimestamp(): number;
-
-// @internal
-export function _idClock(): (prefix: string) => string;
-
-// @internal
-export function _indexEntries<R extends {
-    id: string;
-}>(indexes: RecordIndexes<R>, record: R): Array<[string, IndexValue]>;
-
-// @public
-export type IndexValue = string | number | boolean;
 
 // @public
 export type Key = readonly KeyPart[];
@@ -500,31 +474,6 @@ export interface RangeOptions {
 }
 
 // @public
-export type RecordIndexes<R extends {
-    id: string;
-} = StoredRecord> = Readonly<Record<string, (record: R) => unknown>>;
-
-// @public
-export interface RecordStore<R extends {
-    id: string;
-} = StoredRecord> {
-    close(): void;
-    copyTo(targetDir: string): Promise<void>;
-    delete(id: string): void;
-    findBy(index: string, value: IndexValue, options?: FindByOptions): R[];
-    get(id: string): R | undefined;
-    newId(prefix: string): string;
-    readonly path: string;
-    put(record: R): void;
-    // (undocumented)
-    readonly readOnly: boolean;
-    // (undocumented)
-    reopen(): void;
-    replaceWith(dir: string): void;
-    reset(): Promise<void>;
-}
-
-// @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
     // (undocumented)
     id: EARS.RelationId;
@@ -632,11 +581,6 @@ E
 } : {}) : {
     shortCode?: string;
 };
-
-// @public
-export type StoredRecord = {
-    id: string;
-} & Record<string, unknown>;
 
 // @public
 export interface TypedCreate<D extends EarsSchema> {

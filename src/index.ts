@@ -15,12 +15,6 @@ export type {
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, getTimestamp } from './ids.ts';
-// Record stores: whole records by id, found through declared indexes (the run history's store); one on disk is
-// `@apackdev/ears/lmdb`'s `openRecordStore`
-export {
-  createMemoryRecordStore, _indexEntries, _idClock,
-  type RecordStore, type RecordIndexes, type StoredRecord, type IndexValue, type FindByOptions,
-} from './records.ts';
 // The ordered key-value seam the engine is written on (`createEarsEngine({ kv })`): in memory for tests and tooling,
 // and on disk through `@apackdev/ears/lmdb`
 /** @internal The JavaScript engine over an ordered key-value store: the format conversions' (`scripts/`), until they retire */

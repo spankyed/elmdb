@@ -2,7 +2,7 @@
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { engine, type Id } from './helpers.ts';
-import type { EngineUnderTest } from './engine-under-test.ts';
+import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 import type { WriteBuilder } from '../../src/index.ts';
 
 const NOW = 1_700_000_000_000;
@@ -437,6 +437,13 @@ describe('rows', () => {
     expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
     e.write(id).delete('__proto__');
     expect(e.getAttr(id, '__proto__')).toBeUndefined();
+  });
+
+  it('a schema naming a type __proto__ is refused for that name, which the database holds PascalCase', () => {
+    // A computed key, since a literal's `__proto__:` sets the prototype
+    const rules = { ['__proto__']: { required: ['title'], indexes: ['title'] } };
+    expect(() => freshEngine({ types: ['__proto__'], relationKinds: [], roles: [], rowRules: rules }))
+      .toThrow(/^The schema has 1 problem:\ntypes\.__proto__: a type's name is PascalCase, which "__proto__" isn't$/);
   });
 });
 

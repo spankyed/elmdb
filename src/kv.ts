@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * The ordered key-value seam the engine is written on: keys are arrays, ordered as LMDB orders them, and values are
  * any structured value, decoded fresh on every read. Two backends sit under it — LMDB (`@apackdev/ears/lmdb`) for the

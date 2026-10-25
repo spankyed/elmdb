@@ -6,7 +6,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
-import { COMPACT_COPIES, compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
+import { COMPACT_COPIES, compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore } from '../../src/lmdb/index.ts';
 import type { EARS } from '../../src/index.ts';
 import { createKvEngine } from '../../src/kv/engine.ts';
 
@@ -206,16 +206,4 @@ it.skipIf(!COMPACT_COPIES)('refuses to compact an environment that is open, and 
   } finally {
     store.close();
   }
-});
-
-it('refuses a record store, whose format is its own, and leaves it as it was', () => {
-  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-records-')), 'records');
-  dirs.push(path.dirname(dir));
-  const records = openRecordStore({ path: dir, indexes: {} });
-  records.put({ id: 'R-1' });
-  records.close();
-  expect(() => convertToCurrentFormat(dir)).toThrow('are a "records" store, not an EARS database');
-  const reopened = openRecordStore({ path: dir, indexes: {} });
-  expect(reopened.get('R-1')).toEqual({ id: 'R-1' });
-  reopened.close();
 });

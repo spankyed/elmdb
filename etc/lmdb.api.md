@@ -144,27 +144,6 @@ export function openEnvironment(dir: string, input?: {
 export function openLmdbStore(input: LmdbStoreOptions): LmdbStore;
 
 // @public
-export function openRecordStore<R extends {
-    id: string;
-} = StoredRecord>(input: RecordStoreOptions<R>): RecordStore<R>;
-
-// @public
-export const RECORD_STORE_FORMAT_VERSION = 1;
-
-// @public (undocumented)
-export const RECORD_STORE_KIND = "records";
-
-// @public (undocumented)
-export interface RecordStoreOptions<R extends {
-    id: string;
-} = StoredRecord> {
-    indexes: RecordIndexes<R>;
-    path: string;
-    // (undocumented)
-    readOnly?: boolean;
-}
-
-// @public
 export const SYNC_IDLE_MS = 100;
 
 // @public

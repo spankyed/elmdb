@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // Converts one environment written in an older storage format to the current one, in place, a step per format.
 // Nothing in the app calls this: an older data dir is refused at open (`checkFormat`), and the conversion is an
 // explicit, one-off operation on a copy (`scripts/ears-convert.ts`).

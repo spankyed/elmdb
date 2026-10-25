@@ -3,6 +3,7 @@
 // test from its own names — and changes it with `admin.setSchema` when that changes.
 import type { RowRules } from './runtime.ts';
 import { RESERVED_ATTRIBUTES } from './errors.ts';
+import { setField } from './ids.ts';
 
 /** What a relation kind is held to, as its declaration says */
 export interface RelationRules {
@@ -36,24 +37,25 @@ const isIndexableEngineField = (field: string) => field === 'createdAt' || field
  * are indexed by elmdb on every type. Every relation kind is many-to-many, and its edges may carry any info
  */
 export function toElmdbSchema(schema: EngineSchema): object {
+  // An entity type or field may be named `__proto__`, so every name is written with `setField`
   const types: Record<string, object> = {};
   for (const [type, rules] of Object.entries(schema.types)) {
     const fields: Record<string, object> = {};
     const indexes: Record<string, object> = {};
     for (const field of rules.indexes ?? []) {
       if (isEngineField(field) && !isIndexableEngineField(field)) continue;
-      if (!isIndexableEngineField(field)) fields[field] = { type: 'any', optional: true, nullable: true };
-      indexes[field] = { kind: 'value', fields: [field] };
+      if (!isIndexableEngineField(field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      setField(indexes, field, { kind: 'value', fields: [field] });
     }
     for (const field of rules.required) {
-      if (!isEngineField(field)) fields[field] = { type: 'any', nullable: true };
+      if (!isEngineField(field)) setField(fields, field, { type: 'any', nullable: true });
     }
-    types[type] = {
+    setField(types, type, {
       ...(rules.shortCode !== undefined && { shortCode: { prefix: rules.shortCode } }),
       fields,
       additionalFields: 'allow',
       indexes,
-    };
+    });
   }
   const relations = Object.fromEntries(Object.entries(schema.relations).map(([kind, rules]) => [kind, {
     cardinality: 'many-to-many',
