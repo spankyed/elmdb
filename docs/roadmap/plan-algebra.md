@@ -21,8 +21,17 @@ order, and a filter inside a search is a bitmap the search runs within.
 **EXPLAIN** answers the chosen plan: each stage, the index it read, the entities it visited and kept, and the time it
 took — the reading `visits` gives today, for every stage rather than the whole.
 
+## Value indexes as bitmaps
+
+The algebra needs every index to answer a set, and a value index answers a range of keys today: one key per value and
+entity (`d/x type index value seq`), visited to collect the places. Stored as a bitmap per value instead — the places of
+the entities holding it, as a text index stores a term's — a lookup is one read and one decode, a `where` anywhere in a
+chain is an intersection, and a unique index is a bitmap that holds at most one place. Its cost is the text index's
+write cost (`text-index-at-scale.md`): a common value's bitmap is rewritten by every write that adds or removes it,
+which the same segmenting answers.
+
 ## Open questions
 
-- Value indexes as bitmaps per value: their write cost against today's one key per entry.
+- A bitmap per value against one key per entry: measured on apack's writes before the format changes.
 - Places across types: a set mixing types needs the type beside each place, or a bitmap per type.
 - How a caller's function, which can't cross, splits an algebraic plan.

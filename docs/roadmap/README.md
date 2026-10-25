@@ -10,3 +10,4 @@ is planned.
 | [The JavaScript boundary](javascript-boundary.md) | Reads without a decode, and units that can span an `await` |
 | [The schema as the source of types](typed-schema.md) | One declaration, the TypeScript shapes generated from it |
 | [One plan algebra](plan-algebra.md) | Search, vectors, walks and filters as operations on one kind of set, with an EXPLAIN |
+| [The text index at scale](text-index-at-scale.md) | Segmented postings, an FST dictionary and block-max WAND, each when a reading calls for it |

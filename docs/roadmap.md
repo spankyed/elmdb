@@ -48,3 +48,5 @@ Directions past these, each a design to argue for before it is built, are in `ro
 - `elmdb-cli`.
 - LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
 - Substring and regex search.
+- `orderBy` with `limit` as a top-k heap, or an ordered index scan, rather than a sort of the whole set.
+- Fewer reads per field write, and no global sequence key rewritten by every insert.
