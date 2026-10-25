@@ -48,10 +48,20 @@ copy, a step at a time, each recording its format. Nothing upgrades on open.
 
 ## Moving apack's data
 
-apack's last release on lmdb-js converts every database to its format 4. elmdb's first format reads format 4's keys and
-values (both are plain bytes in one LMDB database, and its values are msgpack) and its upgrade rewrites them under the
-prefixes above and rebuilds the derived data. apack's run history moves from its record store into the `runs` database
-through `bulkLoad`.
+lmdb-js writes LMDB files in its own data version, 2. Stock LMDB 0.9 (`mdb.master`, the one heed runs) writes and reads
+version 1, and LMDB 1.0 (`mdb.master3`) version 3, so no stock LMDB opens a file lmdb-js wrote: heed refuses one with
+`MDB_INVALID` (`docs/evidence/phase-1.md`). The move therefore has two steps, and only the first needs lmdb-js:
+
+1. `tools/lmdb-js-export` (a Node script whose one dependency is lmdb-js, part of neither package) copies an apack
+   format 4 database's `kv` entries, byte for byte and in key order, into a dump: the 8 bytes `ELMDBF4\0`, a u32 dump
+   version (1), each entry as a u32 key length, the key, a u32 value length and the value, then a u32 `0xFFFFFFFF` and
+   a u64 entry count, all little-endian. It opens the source read-only and refuses anything but an EARS database in
+   format 4.
+2. `elmdb upgrade` reads the dump, rewrites format 4's keys and values under the prefixes above, and rebuilds the
+   derived data.
+
+apack's last release on lmdb-js converts every database to its format 4 first. apack's run history moves from its
+record store into the `runs` database through `bulkLoad`.
 
 ## LMDB
 

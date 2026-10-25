@@ -1,0 +1,8 @@
+{
+  "name": "elmdb-lmdb-js-export",
+  "private": true,
+  "description": "Exports an apack format 4 database, written by lmdb-js, into a dump elmdb upgrade reads",
+  "type": "module",
+  "bin": { "elmdb-lmdb-js-export": "export.mjs" },
+  "dependencies": { "lmdb": "3.5.9" }
+}

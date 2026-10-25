@@ -86,7 +86,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D9 | `link`'s `acyclicIn` and `replace` leave apack's write builder; relation kinds declare `acyclic` and `unique` | `schema.md`, Relations |
 | D10 | Every test opens a database in a temporary directory; there is no memory backend. Tests open with `syncs: false`, which skips group commit's syncs (a crash of the machine can't matter to a temporary directory). Phase 9 records what this costs apack's unit pools; the reading is reported, not gated | this goal (closes `design.md`'s open question) |
 | D11 | apack depends on the local elmdb checkout through a symlink: each apack checkout holds a gitignored `vendor/elmdb` pointing at `~/Develop/Projects/elmdb`, and the dependency is `"elmdb": "file:vendor/elmdb/crates/elmdb-node"`, which npm links. The path is the same in every checkout, so the lockfile doesn't change between them, and an elmdb rebuild takes effect at once. apack's Linux runner mounts the checkout `vendor/elmdb` points at, read-only, and builds the binding for Linux in its own volume. CI fetches the pinned commit (D21). A published release is deferred | this goal; apack's plan, Developing across two repositories |
-| D12 | Stored data moves by `elmdb upgrade` from apack's format 4, run on a copy. Converting the lead developer's real data is the user's operational step, never done by the goal | `format.md`, Moving apack's data; apack `CLAUDE.md`, Backward compatibility |
+| D12 | Stored data moves from apack's format 4 in two steps, run on a copy: `tools/lmdb-js-export` dumps the format 4 entries (stock LMDB can't open lmdb-js's files, which are in its own data version), and `elmdb upgrade` reads the dump. Converting the lead developer's real data is the user's operational step, never done by the goal | `format.md`, Moving apack's data; `docs/evidence/phase-1.md`; apack `CLAUDE.md`, Backward compatibility |
 | D13 | The run history is entity types in a second database, `runs` | `engine.md`, Opening |
 | D14 | Search indexes are named indexes on types; the engine never calls a model, and pending embeddings are its queue | `search.md` |
 | D15 | apack's library search index is ported onto a vector index and tested, and ships switched off (its `[SEARCH_INDEX_FF]` call sites stay commented out) | the user, 2026-10-24 |
@@ -238,7 +238,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 - **Done when:**
   - The sequence that aborted lmdb-js passes as a spec: a compacted copy of a database holding multi-page values,
     reopened and emptied in one transaction (apack's `docs/references/evidence/lmdb-compacted-copy-crash.md`).
-  - `elmdb upgrade` on a copy of the Phase 1 data gives a database that `check()` passes and whose entity, attribute
+  - `elmdb upgrade` on the dump of the Phase 1 data gives a database that `check()` passes and whose entity, attribute
     and relation counts equal apack's own reading of the original, recorded in evidence.
 
 ### Phase 8: crash, failure and fuzz suites
@@ -290,7 +290,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
     `stamp.ts`, `convert.ts`, `COMPACT_COPIES`, `scripts/ears-convert.ts` and `scripts/short-codes-convert.ts`.
   - **Guards:** `findLmdbImports` becomes a rule over `elmdb` imports.
   - **Docs:** `packages/apack-ears/CLAUDE.md` is rewritten to the new module map.
-- **Dependencies:** Phase 9.
+- **Dependencies:** Phases 9 and 11: the run history's record store is an lmdb-js file too, so it moves first.
 - **Done when:**
   - `lmdb` appears in no `package.json`, and the import guard has a firing case.
   - `npm run chain -- --no-native` passes.
@@ -302,7 +302,9 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
   - The run history becomes entity types in `runs`, its indexes value indexes.
   - `RecordStore`, `openRecordStore` and `memory-run-history.ts` are removed.
   - Backup, reset and import cover both databases.
-- **Dependencies:** Phase 10.
+  - Existing run history moves too: `tools/lmdb-js-export` gains a mode that dumps a record store's records, and apack
+    an import of that dump into `runs`, both run on a copy (D12).
+- **Dependencies:** Phase 9.
 - **Done when:**
   - apack's run-history specs pass on `runs`.
   - A backup restored into a fresh data directory holds both databases.
