@@ -1,4 +1,4 @@
-import { createMemoryKVBackend, createOrderedKV, type EARS, type KvBackend, type OrderedKV } from '../../src/index.ts';
+import type { EARS, EarsDatabase, RelationRules, RowRules } from '../../src/index.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
 export const TYPES = new Set(['Task', 'Project', 'Person']);
@@ -16,28 +16,47 @@ export const isRole = (name: string) => ROLES.has(name);
 export type Id = EARS.EntityId;
 export type RelId = EARS.RelationId;
 
-/** An engine with the contract specs' entity types, relation kinds and roles, over a store in memory unless given one */
-export function engine(kv?: OrderedKV): EngineUnderTest {
-  return freshEngine({ isEntityType, isRelationKind, isRole, ...(kv && { kv }) });
+/** The contract specs' entity types, relation kinds and roles, as `freshEngine` takes them */
+export const NAMES = { types: TYPES, relationKinds: KINDS, roles: ROLES };
+
+/** An engine with the contract specs' names, its rows and edges held to the rules given */
+export function engine(rules: { rowRules?: Record<string, RowRules>; relationRules?: Record<string, RelationRules>; wrap?: (database: EarsDatabase) => EarsDatabase } = {}): EngineUnderTest {
+  return freshEngine({ ...NAMES, ...rules });
 }
 
-/** A store in memory counting the units it committed: those that wrote, and returned */
-export function committing(): { kv: OrderedKV; commits: () => number } {
-  const backend = createMemoryKVBackend();
+/** A database wrapper counting the units committed: each write outside a unit, and each unit's commit */
+export function committing(): { wrap: (database: EarsDatabase) => EarsDatabase; commits: () => number } {
   let commits = 0;
-  const counted: KvBackend = {
-    read: (fn) => backend.read(fn),
-    durable: () => backend.durable(),
-    write(fn, options) {
-      let wrote = false;
-      const result = backend.write((w) => fn({
-        ...w,
-        put: (key, value) => { wrote = true; w.put(key, value); },
-        del: (key) => { wrote = true; w.del(key); },
-      }), options);
-      if (wrote) commits++;
-      return result;
+  const wrap = (database: EarsDatabase): EarsDatabase => new Proxy(database, {
+    get(target, key) {
+      if (key === 'write') {
+        return (batch: Uint8Array, durable?: boolean) => {
+          const answer = target.write(batch, durable);
+          commits++;
+          return answer;
+        };
+      }
+      if (key === 'begin') {
+        return () => {
+          const unit = target.begin();
+          return new Proxy(unit, {
+            get(held, member) {
+              if (member === 'commit') {
+                return (durable?: boolean) => {
+                  const changes = held.commit(durable);
+                  commits++;
+                  return changes;
+                };
+              }
+              const value = Reflect.get(held, member, held);
+              return typeof value === 'function' ? value.bind(held) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, key, target);
+      return typeof value === 'function' ? value.bind(target) : value;
     },
-  };
-  return { kv: createOrderedKV(counted), commits: () => commits };
+  });
+  return { wrap, commits: () => commits };
 }

@@ -12,10 +12,10 @@ export default defineConfig({
     hookTimeout: 30_000,
     // A worker exits when its vitest does, rather than running on orphaned
     setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts'],
-    // Test files run in parallel: each worker's tests create their own EARS engines
+    // Test files run in parallel: each worker's tests create their own EARS engines, each on a database of its own
     fileParallelism: true,
     benchmark: { include: ['bench/**/*.bench.ts'] },
-    // The harness's LMDB and process halves run in the integration pool (vitest.integration.config.ts)
+    // The harness's lmdb-js and process halves run in the integration pool (vitest.integration.config.ts)
     include: ['tests/**/*.spec.ts'],
     exclude: ['**/*.integration.spec.ts', '**/node_modules/**'],
   },

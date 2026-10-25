@@ -8,7 +8,7 @@
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
-import type { OrderedKV } from './kv.ts';
+import type { EarsDatabase } from './database.ts';
 
 /**
  * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
@@ -27,16 +27,17 @@ export interface RelationEdge<K extends string = string, Source extends string =
 
 /** What an engine is created with (`createEarsEngine`) */
 export interface EARSRuntimeDeps {
-  /** The store the engine reads and writes: a new one in memory by default (`createMemoryKV`) */
-  kv?: OrderedKV;
-  /** Whether a name is an entity type (`create('Note')` makes one) rather than an id */
-  isEntityType: (v: string) => boolean;
-  /** Whether a name is a relation kind: `link`, and every read or walk naming a kind, refuse one that isn't */
-  isRelationKind: (v: string) => boolean;
-  /** Whether a name is a role: `grant`, `revoke`, `grantExclusive` and `withRole` refuse one that isn't */
-  isRole: (v: string) => boolean;
-  /** What a created row of a type is held to; nothing by default — an engine given no shapes knows of no rule */
-  rowRules?: (type: string) => RowRules | undefined;
+  /**
+   * The elmdb database the engine reads and writes, opened by `@apackdev/ears/lmdb` (`openDatabase`). Its schema is
+   * the engine's entity types, relation kinds and roles, and the rules their rows and edges are held to; the engine's
+   * creator changes it with `admin.setSchema`
+   */
+  database: EarsDatabase;
+  /**
+   * Freezes every value a read gives back, as a test runtime does: code that changes one, expecting the database to
+   * change, throws there rather than silently not persisting in the app. Off by default
+   */
+  freeze?: boolean;
   /**
    * Told when a query does something its data will make slow — a `where` filtering thousands of a type's rows for
    * want of an index — once per call site. Nothing by default; the app passes one in development
@@ -207,14 +208,13 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
 
 // ─── WriteBuilder fluent interface ─────────────────────────────────────
 
-/** How `link` makes an edge */
-export interface LinkOptions<R extends string = string> {
+/**
+ * How `link` makes an edge. What a kind's edges are held to — no cycle through it, at most one edge between two
+ * entities — is the kind's declaration (`apack.json` `data.relations`), not a link's
+ */
+export interface LinkOptions {
   /** Stored on the edge, and part of what makes it the same edge as one already there */
   info?: unknown;
-  /** Removes this entity's edges of the kind to the target first, so the one linked is the only one */
-  replace?: boolean;
-  /** Refuses the edge when it would close a cycle through these kinds */
-  acyclicIn?: readonly R[];
 }
 
 /** What `create` is given besides the type */
@@ -332,9 +332,11 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
   removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
   /**
    * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
-   * none is given) is the same edge, and linking it again changes nothing.
+   * none is given) is the same edge, and linking it again changes nothing; of a kind declared `unique`, any edge to
+   * the target is, and linking it again with `info` replaces the edge's. A kind declared `acyclic` refuses an edge
+   * that would close a cycle through it (`CYCLE`).
    */
-  link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions<D['relKinds']>): WriteBuilder<E, D>;
+  link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, D>;
   /** Removes this entity's edges of the kind, to `target` only when given */
   unlink(kind: D['relKinds'], target?: EARS.EntityId): WriteBuilder<E, D>;
   /** Removes every edge from this entity */

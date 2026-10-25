@@ -57,6 +57,9 @@ E
 } : Record<string, unknown>;
 
 // @public
+export function _createKvEngine(input: KvEngineDeps): EarsEngine_2;
+
+// @public
 export function createMemoryKV(options?: OrderedKVOptions): OrderedKV;
 
 // @public
@@ -160,15 +163,54 @@ export interface EarsAdmin {
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
     clear(): void;
     countEntities(): Record<string, number>;
+    declare(schema: EngineSchema): SchemaChange[];
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    setSchema(schema: EngineSchema): SchemaChange[];
     updateRelation(relId: EARS.RelationId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
         info?: unknown;
     }): void;
+}
+
+// @public
+export interface EarsDatabase {
+    backup(target: string): void;
+    // (undocumented)
+    begin(): EarsUnit;
+    // (undocumented)
+    bulkLoad(loads: Uint8Array): void;
+    // (undocumented)
+    close(): void;
+    // (undocumented)
+    durable(): Promise<void>;
+    // (undocumented)
+    readonly isOpen: boolean;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    readonly readOnly: boolean;
+    // (undocumented)
+    readSync(reads: Uint8Array): Uint8Array;
+    replaceWith(source: string): void;
+    reset(): void;
+    readonly schema: unknown;
+    // (undocumented)
+    setSchema(schema: object): SchemaChange[];
+    // (undocumented)
+    stats(): {
+        types: Record<string, {
+            live: number;
+            trashed: number;
+        }>;
+        relations: Record<string, number>;
+        fileBytes: number;
+    };
+    // (undocumented)
+    write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
 }
 
 // @public
@@ -216,15 +258,18 @@ export type EarsErrorCode =
 */
 | 'INVALID_SHORT_CODE'
 /** A created row brought a short code another entity holds */
-| 'SHORT_CODE_IN_USE';
+| 'SHORT_CODE_IN_USE'
+/** `link` named the entity it links from as its target */
+| 'SELF_LINK'
+/** `link` would close a cycle through a relation kind its declaration makes acyclic */
+| 'CYCLE'
+/** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
+| 'VALUE_INVALID';
 
 // @public
 export interface EARSRuntimeDeps {
-    isEntityType: (v: string) => boolean;
-    isRelationKind: (v: string) => boolean;
-    isRole: (v: string) => boolean;
-    kv?: OrderedKV;
-    rowRules?: (type: string) => RowRules | undefined;
+    database: EarsDatabase;
+    freeze?: boolean;
     warn?: (message: string) => void;
 }
 
@@ -234,6 +279,34 @@ export interface EarsSchema {
     relKinds: string;
     roles: string;
     shapes: EntityShapes;
+}
+
+// @public
+export interface EarsUnit {
+    // (undocumented)
+    abort(): void;
+    // (undocumented)
+    commit(durable?: boolean | null): Uint8Array;
+    // (undocumented)
+    readonly isOpen: boolean;
+    // (undocumented)
+    read(reads: Uint8Array): Uint8Array;
+    // (undocumented)
+    release(depth: number): void;
+    // (undocumented)
+    rollbackTo(depth: number): void;
+    // (undocumented)
+    savepoint(): number;
+    // (undocumented)
+    write(batch: Uint8Array): Uint8Array;
+}
+
+// @public
+export interface EngineSchema {
+    relations: Readonly<Record<string, RelationRules>>;
+    // (undocumented)
+    roles: readonly string[];
+    types: Readonly<Record<string, RowRules>>;
 }
 
 // @public
@@ -317,10 +390,8 @@ export interface KvWriter extends KvReader {
 }
 
 // @public
-export interface LinkOptions<R extends string = string> {
-    acyclicIn?: readonly R[];
+export interface LinkOptions {
     info?: unknown;
-    replace?: boolean;
 }
 
 // @public
@@ -481,6 +552,12 @@ export interface RelationMatch {
 export type RelationRow = RelationEdge;
 
 // @public
+export interface RelationRules {
+    acyclic?: boolean;
+    unique?: boolean;
+}
+
+// @public
 export interface RelationStats {
     total: number;
     uniqueSources: number;
@@ -512,6 +589,16 @@ export interface RowRules {
     indexes?: readonly string[];
     required: readonly string[];
     shortCode?: string;
+}
+
+// @public
+export interface SchemaChange {
+    // (undocumented)
+    change: string;
+    // (undocumented)
+    effect: string;
+    // (undocumented)
+    path: string;
 }
 
 // @public
@@ -663,7 +750,7 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
     grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
     // (undocumented)
     id(): EARS.EntityId<E>;
-    link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions<D['relKinds']>): WriteBuilder<E, D>;
+    link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, D>;
     merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
     removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
     removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;

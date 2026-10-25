@@ -1,9 +1,8 @@
 // The engine's contract: query builder starts, filters, ordering and terminals
 import { beforeEach, describe, expect, it } from 'vitest';
 import { EARS } from '../../src/index.ts';
-import { engine, isEntityType, isRelationKind, isRole, type Id, type RelId } from './helpers.ts';
+import { NAMES, engine, type Id, type RelId } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
-import { createMemoryKV, type Key, type KvReader, type OrderedKV, type RangeOptions, type Visit } from '../../src/kv.ts';
 
 let e: EngineUnderTest;
 let t: Record<'a' | 'b' | 'c' | 'd', Id>;
@@ -305,7 +304,9 @@ describe('the value index', () => {
   });
 
   it('leaves to a walk what it cannot answer: a predicate, an object, NaN and the entity type', () => {
-    e.write(t.a).set('meta', { k: 1 }).set('score', Number.NaN);
+    e.write(t.a).set('meta', { k: 1 });
+    // A number that isn't finite is no value the database stores, so a where for one finds nothing
+    expect(() => e.write(t.a).set('score', Number.NaN)).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
     expect(e.query('Task').where('rank', (r: unknown) => typeof r === 'number' && r > 1).ids()).toEqual([t.a, t.b]);
     expect(e.query('Task').where('meta', { k: 1 }).ids()).toEqual([]);
     expect(e.query('Task').where('score', Number.NaN).ids()).toEqual([]);
@@ -318,8 +319,8 @@ describe('declared indexes', () => {
   function indexedTasks() {
     const warnings: string[] = [];
     const engine = freshEngine({
-      isEntityType, isRelationKind, isRole,
-      rowRules: (type) => (type === 'Task' ? { required: [], indexes: ['status'] } : undefined),
+      ...NAMES,
+      rowRules: { Task: { required: [], indexes: ['status'] } },
       warn: (message) => warnings.push(message),
     });
     engine.transact(() => {
@@ -370,51 +371,13 @@ describe('declared indexes', () => {
     expect(engine.query.withTrashed('Task').where('status', 'open').ids()).toContain(first);
   });
 
-  it('finds a value no index holds, a long string or an infinite number, by filtering the rows', () => {
+  it('finds a long string, which no index holds, and stores no infinite number', () => {
     const { engine } = indexedTasks();
     const long = 'x'.repeat(300);
     const [a, b] = engine.query('Task').limit(2).ids();
     engine.write(a).set('status', long);
-    engine.write(b).set('status', Infinity);
+    expect(() => engine.write(b).set('status', Infinity)).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
     expect(engine.query('Task').where('status', long).ids()).toEqual([a]);
-    expect(engine.query('Task').where('status', Infinity).ids()).toEqual([b]);
-  });
-});
-
-describe('reads', () => {
-  /** A store in memory counting the entries its reads reach: each get, and each entry a range visits */
-  function counted() {
-    const kv = createMemoryKV();
-    let reads = 0;
-    const counting = <R extends KvReader>(r: R): R => ({
-      ...r,
-      get: (key: Key) => (reads++, r.get(key)),
-      range: (options: RangeOptions, visit: Visit) => r.range(options, (key, value) => (reads++, visit(key, value))),
-    });
-    const store: OrderedKV = {
-      get writing() { return kv.writing; },
-      read: (fn) => kv.read((r) => fn(counting(r))),
-      write: (fn) => kv.write((w) => fn(counting(w))),
-      durable: () => kv.durable(),
-    };
-    return { store, reads: (run: () => unknown) => { reads = 0; run(); return reads; } };
-  }
-
-  it('first, exists, limit and count of a type stop early, and a live query reads no trashed entity', () => {
-    const { store, reads } = counted();
-    const engine = freshEngine({ isEntityType, isRelationKind, isRole, kv: store });
-    engine.transact(() => {
-      for (let i = 0; i < 1_000; i++) engine.create('Task', { title: `live ${i}` });
-      for (let i = 0; i < 1_000; i++) engine.create('Task', { title: `trashed ${i}` }).trash();
-    });
-    expect(reads(() => engine.query('Task').first())).toBeLessThan(5);
-    expect(reads(() => engine.query('Task').exists())).toBeLessThan(5);
-    expect(reads(() => engine.query('Task').limit(3).ids())).toBeLessThan(10);
-    expect(reads(() => engine.query('Task').count())).toBeLessThan(5);
-    expect(engine.query('Task').count()).toBe(1_000);
-    // The live range alone: a thousand entries and the sequence, none of the thousand in the trash
-    expect(reads(() => engine.query('Task').ids())).toBeLessThan(1_010);
-    expect(engine.query.trashed('Task').count()).toBe(1_000);
-    expect(engine.query.withTrashed('Task').count()).toBe(2_000);
+    expect(engine.query('Task').where('status', Infinity).ids()).toEqual([]);
   });
 });

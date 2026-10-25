@@ -89,8 +89,8 @@ describe('links', () => {
 
   it('refuses a self link', () => {
     const a = task('A');
-    expect(() => e.write(a).link('blocks', a)).toThrow("an entity can't be linked to itself");
-    expect(() => e.write(a).link('blocks', a, { replace: true })).toThrow("can't be linked to itself");
+    expect(() => e.write(a).link('blocks', a)).toThrow(expect.objectContaining({ code: 'SELF_LINK' }));
+    expect(e.findRelations()).toEqual([]);
   });
 
   it('unlink, unlinkAll and removeRelation remove relations and empty index entries', () => {
@@ -131,10 +131,13 @@ describe('links', () => {
     expect(() => e.removeRelation(first.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
-  it('link with replace leaves one edge between the ends; updateRelation moves one, keeping its id, and refuses an id no relation has', () => {
+  it('a kind declared unique keeps one edge between two ends, which linking again replaces the info of; updateRelation moves one, keeping its id, and refuses an id no relation has', () => {
+    e = engine({ relationRules: { refs: { unique: true } } });
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('refs', b, { info: 1 }).link('refs', b, { info: 2 });
-    e.write(a).link('refs', b, { info: 3, replace: true });
+    e.write(a).link('refs', b, { info: 3 });
+    expect(edges()).toEqual([[a, 'refs', b, 3]]);
+    e.write(a).link('refs', b);
     expect(edges()).toEqual([[a, 'refs', b, 3]]);
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { target: c, info: 4 });
@@ -149,14 +152,15 @@ describe('links', () => {
     expect(() => e.updateRelation('Relation-missing' as RelId, { info: 6 })).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
-  it('link refuses a cycle within acyclicIn', () => {
+  it('a kind declared acyclic refuses a link that would close a cycle through it', () => {
+    e = engine({ relationRules: { parent: { acyclic: true } } });
     const [a, b, c] = [task('A'), task('B'), task('C')];
-    e.write(a).link('parent', b, { acyclicIn: ['parent'] });
-    e.write(b).link('parent', c, { acyclicIn: ['parent'] });
-    expect(() => e.write(c).link('parent', a, { acyclicIn: ['parent'] }))
-      .toThrow('Cannot create a parent relation that would form a cycle');
-    expect(() => e.write(c).link('child', a, { acyclicIn: ['parent', 'child'] }))
-      .toThrow('Cannot create a child relation that would form a cycle within [parent, child]');
+    e.write(a).link('parent', b);
+    e.write(b).link('parent', c);
+    expect(() => e.write(c).link('parent', a)).toThrow(expect.objectContaining({ code: 'CYCLE' }));
+    // A kind not declared acyclic takes the same edge
+    e.write(c).link('child', a);
+    expect(e.findRelations({ kind: 'parent' as never })).toHaveLength(2);
     expect(e.wouldCreateCycle(c, a, ['parent'])).toBe(true);
     expect(e.wouldCreateCycle(a, c, ['parent'])).toBe(false);
     expect(e.wouldCreateCycle(a, a, ['parent'])).toBe(true);
@@ -169,7 +173,6 @@ describe('relation kinds', () => {
   it('refuses a kind its creator did not register, before writing anything', () => {
     const [a, b] = [task('A'), task('B')];
     expect(() => e.write(a).link('blokcs', b)).toThrow(expect.objectContaining(unknown));
-    expect(() => e.write(a).link('blocks', b, { acyclicIn: ['blokcs'] })).toThrow(expect.objectContaining(unknown));
     expect(() => e.write(a).unlink('blokcs')).toThrow(expect.objectContaining(unknown));
     expect(e.findRelations()).toEqual([]);
   });

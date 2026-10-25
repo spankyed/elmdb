@@ -1,12 +1,12 @@
 // The harness's engines: over the two types its workload writes, each indexing one field, and a backend that can
 // refuse a commit
-import { createEarsEngine } from '../../src/index.ts';
+import { createKvEngine } from '../../src/kv/engine.ts';
 import type { KvBackend, OrderedKV } from '../../src/kv.ts';
 import { INDEXED, TYPES } from './model.ts';
 
 const types = new Set<string>(TYPES);
 
-export const newEngine = (kv: OrderedKV) => createEarsEngine({
+export const newEngine = (kv: OrderedKV) => createKvEngine({
   kv, isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true,
   rowRules: () => ({ required: [], indexes: [INDEXED] }),
 });

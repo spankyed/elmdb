@@ -1,8 +1,8 @@
 // The engine's contract: create, upsert and write create, change and delete entities, each held to the claim it
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engine, isEntityType, isRelationKind, isRole, type Id } from './helpers.ts';
-import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
+import { engine, type Id } from './helpers.ts';
+import type { EngineUnderTest } from './engine-under-test.ts';
 import type { WriteBuilder } from '../../src/index.ts';
 
 const NOW = 1_700_000_000_000;
@@ -44,8 +44,8 @@ describe('create', () => {
     expect(e.admin.getAllEntities()).toEqual([]);
   });
 
-  it("refuses the engine's own types, which its ids are written with, whatever its creator registers", () => {
-    const everything = freshEngine({ isEntityType: () => true, isRelationKind, isRole });
+  it("refuses the engine's own types, which its ids are written with, which no schema may declare", () => {
+    const everything = engine();
     for (const type of ['Relation']) {
       expect(() => everything.create(type), type).toThrow(expect.objectContaining({ code: 'RESERVED_ENTITY_TYPE' }));
       expect(() => everything.upsert(type, { id: `${type}-1` as Id }), type).toThrow(expect.objectContaining({ code: 'RESERVED_ENTITY_TYPE' }));
@@ -103,10 +103,7 @@ describe('create', () => {
 });
 
 /** An engine whose Project rows are numbered `PRO-<n>` and Person rows `P-<n>`, a Person requiring its title */
-const numbered = () => freshEngine({
-  isEntityType, isRelationKind, isRole,
-  rowRules: (type) => ({ Project: { required: [], shortCode: 'PRO' }, Person: { required: ['title'], shortCode: 'P' } })[type],
-});
+const numbered = () => engine({ rowRules: { Project: { required: [], shortCode: 'PRO' }, Person: { required: ['title'], shortCode: 'P' } } });
 const code = (e: EngineUnderTest, fields: Record<string, unknown> = {}) => e.getRow(e.create('Project', fields).id())?.shortCode;
 
 describe('numbering', () => {
@@ -171,7 +168,7 @@ describe('write', () => {
 });
 
 describe('required fields', () => {
-  const strict = () => freshEngine({ isEntityType, isRelationKind, isRole, rowRules: (type) => (type === 'Task' ? { required: ['title', 'done'] } : undefined) });
+  const strict = () => engine({ rowRules: { Task: { required: ['title', 'done'] } } });
 
   it('refuses a created row without a field its type requires, before the entity exists', () => {
     const e = strict();

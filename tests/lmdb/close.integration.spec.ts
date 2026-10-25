@@ -15,11 +15,11 @@ it('closes while a sync runs off the main thread, the files closing once it has 
   const source = (file: string) => pathToFileURL(fileURLToPath(new URL(`../../src/${file}`, import.meta.url))).href;
   fs.writeFileSync(child, [
     `import * as path from 'node:path';`,
-    `import { createEarsEngine } from ${JSON.stringify(source('index.ts'))};`,
+    `import { createKvEngine } from ${JSON.stringify(source('kv/engine.ts'))};`,
     `import { openLmdbStore } from ${JSON.stringify(source('lmdb/index.ts'))};`,
     `for (let i = 0; i < 300; i++) {`,
     `  const store = openLmdbStore({ path: path.join(process.argv[2], String(i)) });`,
-    `  createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true }).create('Note', { title: 'x'.repeat(5000) });`,
+    `  createKvEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true }).create('Note', { title: 'x'.repeat(5000) });`,
     `  void store.durable();`,
     `  store.close();`,
     `}`,

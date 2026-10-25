@@ -1,4 +1,4 @@
-import { EARS } from './entities.ts';
+import { EARS } from '../entities.ts';
 import type { AttributeStorage } from './attribute-storage.ts';
 import type { StoreAccess } from './store-access.ts';
 

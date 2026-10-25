@@ -29,7 +29,7 @@ let task: Id, other: Id, project: Id, rel: RelId;
 
 beforeEach(() => {
   const store = committing();
-  e = engine(store.kv);
+  e = engine({ wrap: store.wrap });
   task = e.create('Task').set('title', 'a').append('tags', 'x').set('meta', { n: 1 }).grant('owner').id();
   other = e.create('Task').set('title', 'b').id();
   project = e.create('Project').set('name', 'p').id();
@@ -56,7 +56,7 @@ const writes: Record<string, () => void> = {
   'revoke': () => e.write(task).revoke('owner'),
   'grantExclusive': () => e.write(other).grantExclusive('owner', [task]),
   'link': () => e.write(other).link('blocks', task),
-  'link with replace': () => e.write(project).link('contains', task, { info: { pos: 2 }, replace: true }),
+  'link with other info': () => e.write(project).link('contains', task, { info: { pos: 2 } }),
   'updateRelation': () => e.updateRelation(rel, { target: other, info: { pos: 9 } }),
   'removeRelation': () => e.removeRelation(rel),
   'unlink': () => e.write(project).unlink('contains'),

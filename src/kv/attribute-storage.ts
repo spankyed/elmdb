@@ -1,9 +1,9 @@
-import { EARS } from './entities.ts';
-import { idSuffix, isPlainObject } from './utils.ts';
+import { EARS } from '../entities.ts';
+import { idSuffix, isPlainObject } from '../utils.ts';
 import type { RelationStats } from './relations.ts';
-import type { Key, KvReader, KvWriter } from './kv.ts';
+import type { Key, KvReader, KvWriter } from '../kv.ts';
 import type { StoreAccess } from './store-access.ts';
-import { EarsError } from './errors.ts';
+import { EarsError } from '../errors.ts';
 
 /**
  * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this

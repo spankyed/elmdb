@@ -63,7 +63,7 @@ describe('rules read off the types', () => {
 
 /** Each face's members, read off a real engine */
 function faces(): Record<'engine' | 'admin' | 'query' | 'builder' | 'write', Record<string, unknown>> {
-  const engine = freshEngine({ isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
+  const engine = freshEngine({ types: ['Note'], relationKinds: [], roles: [] });
   const id = engine.create('Note').id();
   const { admin, ...operations } = engine;
   const face = (members: object) => members as Record<string, unknown>;

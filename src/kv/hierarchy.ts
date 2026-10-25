@@ -1,6 +1,6 @@
 import type { Query } from './query.ts';
-import { EARS } from './entities.ts';
-import type { NameChecks } from './names.ts';
+import { EARS } from '../entities.ts';
+import type { NameChecks } from '../names.ts';
 
 /** An engine's cycle check over a hierarchy — a tree or any graph of its relation kinds — over its queries */
 export function createHierarchy({ query, names }: { query: Query; names: NameChecks }) {

@@ -10,6 +10,7 @@
  * bytes.
  */
 import { Packr } from 'msgpackr';
+import type { UnitOptions } from './database.ts';
 
 /** One element of a key, ordered null, then booleans, then numbers, then strings */
 export type KeyPart = string | number | boolean | null;
@@ -77,11 +78,6 @@ export interface OrderedKV {
   durable(): Promise<void>;
 }
 
-/** How a write unit commits */
-export interface UnitOptions {
-  /** On disk when the unit returns, rather than with the next sync */
-  durable?: boolean;
-}
 
 /** A backend's bytes, read: a key's value, and a range of keys in byte order */
 export interface ByteReader {

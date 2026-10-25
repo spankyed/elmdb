@@ -12,7 +12,7 @@
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
-import { newId } from './attribute-storage.ts';
+import { newId } from './ids.ts';
 import type { Ears } from './engine.ts';
 
 /** An entity name argument: a declared name, or a name only known at runtime (see EntityNameArg) */

@@ -6,7 +6,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createEarsEngine, type EarsEngine } from '../../src/index.ts';
+import { createKvEngine, type EarsEngine } from '../../src/kv/engine.ts';
 import { openLmdbStore, SYNC_IDLE_MS, type LmdbStore } from '../../src/lmdb/index.ts';
 
 /** The syncs the stores started and the spec has not settled, oldest first */
@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
   pending.length = 0;
   store = openLmdbStore({ path: path.join(fs.mkdtempSync(path.join(root, 'case-')), 'ears-db') });
-  engine = createEarsEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
+  engine = createKvEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
 });
 afterEach(() => {
   // Close commits its own sync, which the spec's queue would otherwise hold

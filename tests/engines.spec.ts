@@ -1,10 +1,10 @@
 // An engine is an instance its holder acts on: two share nothing, and a typed facade acts on whichever engine its
 // getter returns when called. Nothing in this package acts on an engine it wasn't given.
 import { describe, expect, it } from 'vitest';
-import { createEarsEngine, defineEars, type EARS, type Ears, type UntypedSchema } from '../src/index.ts';
+import { defineEars, type EARS, type Ears, type UntypedSchema } from '../src/index.ts';
+import { freshEngine } from './engine/engine-under-test.ts';
 
-const types = new Set(['Note']);
-const newEngine = () => createEarsEngine({ isEntityType: (name) => types.has(name), isRelationKind: () => true, isRole: () => true });
+const newEngine = () => freshEngine({ types: ['Note'], relationKinds: ['refs'], roles: [] });
 
 describe('defineEars', () => {
   it('acts on the engine its getter returns at each call', () => {

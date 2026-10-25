@@ -7,7 +7,8 @@ import * as path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { open } from 'lmdb';
 import { COMPACT_COPIES, compactEnvironment, convertToCurrentFormat, convertToFormat2, convertToFormat3, convertToFormat4, LMDB_FORMAT_VERSION, openLmdbStore, openRecordStore } from '../../src/lmdb/index.ts';
-import { createEarsEngine, type EARS } from '../../src/index.ts';
+import type { EARS } from '../../src/index.ts';
+import { createKvEngine } from '../../src/kv/engine.ts';
 
 const SEP = '\x1F';
 const dirs: string[] = [];
@@ -143,7 +144,7 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
   expect(() => convertToFormat4(dir)).toThrow('records storage format 4; this step converts format 3');
   const store = openLmdbStore({ path: dir, readOnly: true });
   try {
-    const engine = createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    const engine = createKvEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
     expect(engine.query('Note').ids()).toEqual(['Note-1', 'Note-2']);
     expect(engine.getRow('Note-1' as EARS.EntityId)).toEqual({ id: 'Note-1', entityType: 'Note', createdAt: 1, title: 'kept' });
     // A relation keeps its id, its far end missing as it was
@@ -155,7 +156,7 @@ it('loads format 3 into the engine\'s keys: entities in the order they were crea
   // The sequence numbers on from where format 3 left it
   const writable = openLmdbStore({ path: dir });
   try {
-    const engine = createEarsEngine({ kv: writable.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], shortCode: 'N' }) });
+    const engine = createKvEngine({ kv: writable.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], shortCode: 'N' }) });
     expect(engine.create('Note').row().shortCode).toBe('N-5');
   } finally {
     writable.close();
@@ -167,7 +168,7 @@ it.skipIf(!COMPACT_COPIES)('compacts an environment in place, without the pages 
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
   dirs.push(path.dirname(dir));
   const engineOn = (store: ReturnType<typeof openLmdbStore>) =>
-    createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    createKvEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
   // Pages a conversion's old tables or any deletes leave: written, then destroyed, all but one row
   const store = openLmdbStore({ path: dir });
   const engine = engineOn(store);
@@ -193,7 +194,7 @@ it.skipIf(!COMPACT_COPIES)('refuses to compact an environment that is open, and 
   dirs.push(path.dirname(dir));
   const store = openLmdbStore({ path: dir });
   try {
-    const engine = createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    const engine = createKvEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
     engine.create('Note', { id: 'Note-0' as EARS.EntityId, text: 'kept' });
     engine.query('Note').ids();
     await store.durable();

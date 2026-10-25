@@ -3,7 +3,10 @@
 // files are each compared against something with no cleverness in it. It answers the derived reads too — a type's
 // entities, its count and its trash, an index lookup, a role, an edge's far ends — since those are what the engine
 // keeps in keys of their own, which can go stale while every row still reads right
-import type { EarsEngine } from '../../src/index.ts';
+import type { Ears, EarsAdmin } from '../../src/index.ts';
+
+/** What the harness reads and writes an engine through: both the elmdb engine and the JavaScript one have it */
+export type HarnessEngine = Ears & { admin: Pick<EarsAdmin, 'getAllEntities'> };
 
 export type Value = string | number | number[];
 
@@ -237,7 +240,7 @@ export class Model {
 }
 
 /** The engine's data in the model's terms: its own times left out, the trash a flag, its relations as edges */
-export function stateOf(engine: EarsEngine): State {
+export function stateOf(engine: HarnessEngine): State {
   const entities: State['entities'] = {};
   for (const id of [...engine.admin.getAllEntities()].sort()) {
     const { id: _id, entityType, createdAt: _c, updatedAt: _u, trashedAt, role, ...fields } = engine.getRow(id)!;
@@ -253,7 +256,7 @@ export function stateOf(engine: EarsEngine): State {
 }
 
 /** The derived reads, as the engine answers them, for the entities the model says are live */
-export function derivedOf(engine: EarsEngine, model: Model): Derived {
+export function derivedOf(engine: HarnessEngine, model: Model): Derived {
   const out: Derived = {};
   for (const type of TYPES) {
     out[`${type} ids`] = engine.query(type).ids();
@@ -275,7 +278,7 @@ export function derivedOf(engine: EarsEngine, model: Model): Derived {
 }
 
 /** Applies one op to an engine; whether it was refused (it threw). A store's refusal is the backend's to arm */
-export function applyTo(engine: EarsEngine, op: Op): boolean {
+export function applyTo(engine: HarnessEngine, op: Op): boolean {
   const write = (inner: Op, nested: boolean): void => {
     switch (inner.op) {
       case 'create': engine.create(typeOf(inner.id), { id: inner.id as never, ...inner.fields }); return;

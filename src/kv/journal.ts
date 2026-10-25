@@ -1,6 +1,6 @@
 // What makes `transact` a unit: its writes run in one write unit of the store, which keeps nothing of them when it
 // throws (`kv.ts`), and the checks it defers run as the outermost unit commits.
-import type { UnitOptions } from './kv.ts';
+import type { UnitOptions } from '../database.ts';
 import type { StoreAccess } from './store-access.ts';
 
 /** One open unit: its checks */

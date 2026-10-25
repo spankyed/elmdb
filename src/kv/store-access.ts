@@ -1,4 +1,5 @@
-import type { KvReader, KvWriter, OrderedKV, UnitOptions } from './kv.ts';
+import type { KvReader, KvWriter, OrderedKV } from '../kv.ts';
+import type { UnitOptions } from '../database.ts';
 
 /**
  * How an engine's modules reach its store: `read` runs in the read snapshot or write unit already open, or opens a

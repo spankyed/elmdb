@@ -4,9 +4,9 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { open, type Database, type RootDatabase } from 'lmdb';
-import { entityTypeOf } from '../attribute-storage.ts';
+import { entityTypeOf } from '../ids.ts';
 import type { EARS } from '../entities.ts';
-import { createEarsEngine } from '../engine.ts';
+import { createKvEngine } from '../kv/engine.ts';
 import { createOrderedKV } from '../kv.ts';
 import { createLmdbKVBackend } from './kv-backend.ts';
 import { COMPACT_COPIES, LMDB_FORMAT_VERSION } from './store.ts';
@@ -201,7 +201,7 @@ export function convertToFormat4(basePath: string): Format4Conversion {
 
     const db = root.openDB({ name: 'kv', keyEncoding: 'binary', encoding: 'binary', compression: false }) as Database<Uint8Array, Uint8Array>;
     const kv = createOrderedKV(createLmdbKVBackend(root, db, { committed() {}, synced() {}, durable: () => Promise.resolve() }));
-    const { admin } = createEarsEngine({ kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    const { admin } = createKvEngine({ kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
     admin.bulkLoad(() => {
       for (const [id, row] of entities) {
         for (const [kind, value] of row) admin.bulkLoadAttr(id as EARS.EntityId, kind as EARS.AttrKind, value);

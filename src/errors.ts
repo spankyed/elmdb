@@ -30,7 +30,13 @@ export type EarsErrorCode =
    */
   | 'INVALID_SHORT_CODE'
   /** A created row brought a short code another entity holds */
-  | 'SHORT_CODE_IN_USE';
+  | 'SHORT_CODE_IN_USE'
+  /** `link` named the entity it links from as its target */
+  | 'SELF_LINK'
+  /** `link` would close a cycle through a relation kind its declaration makes acyclic */
+  | 'CYCLE'
+  /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
+  | 'VALUE_INVALID';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

@@ -35,6 +35,20 @@ export function convertToFormat4(basePath: string): Format4Conversion;
 export function createLmdbKVBackend(root: RootDatabase, db: Database<Uint8Array, Uint8Array>, hooks: LmdbKVHooks): KvBackend;
 
 // @public
+export function createTemporaryDatabases(): TemporaryDatabases;
+
+// @public
+export const DATABASE_FORMAT = "elmdb/1";
+
+// @public (undocumented)
+export interface DatabaseOptions {
+    path: string;
+    readOnly?: boolean;
+    schema?: EngineSchema;
+    syncs?: boolean;
+}
+
+// @public
 export interface Format3Conversion {
     joinedLists: number;
     singleValues: number;
@@ -119,6 +133,9 @@ export interface LmdbStoreOptions {
 }
 
 // @public
+export function openDatabase(input: DatabaseOptions): EarsDatabase;
+
+// @public
 export function openEnvironment(dir: string, input?: {
     readOnly?: boolean;
 }): LmdbEnvironment;
@@ -152,5 +169,14 @@ export const SYNC_IDLE_MS = 100;
 
 // @public
 export const SYNC_INTERVAL_MS = 1000;
+
+// @public
+export interface TemporaryDatabases {
+    disposeAll(): void;
+    open(schema: EngineSchema): {
+        database: EarsDatabase;
+        dispose(): void;
+    };
+}
 
 ```

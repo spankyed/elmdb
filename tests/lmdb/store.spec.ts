@@ -7,7 +7,8 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { open as openRaw } from 'lmdb';
-import { createEarsEngine, type EARS, type EarsEngine } from '../../src/index.ts';
+import type { EARS } from '../../src/index.ts';
+import { createKvEngine, type EarsEngine } from '../../src/kv/engine.ts';
 import { COMPACT_COPIES, LMDB_FORMAT_VERSION, openLmdbStore, SYNC_IDLE_MS, SYNC_INTERVAL_MS, type LmdbStore, type LmdbStoreOptions } from '../../src/lmdb/index.ts';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-lmdb-store-'));
@@ -26,7 +27,7 @@ afterEach(() => {
 function openStore(options: Omit<LmdbStoreOptions, 'path'> = {}, at = dbPath): { store: LmdbStore; engine: EarsEngine } {
   const store = openLmdbStore({ path: at, ...options });
   opened.push(store);
-  const engine = createEarsEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
+  const engine = createKvEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true });
   return { store, engine };
 }
 const closeAll = () => { for (const store of opened.splice(0)) store.close(); };
@@ -57,7 +58,7 @@ describe('openLmdbStore', () => {
 
   it('answers an index lookup on a read-only store whose index was never built, from the type\'s rows', () => {
     // Indexes are built on their first read, which a read-only store can't write: a converted database has none built
-    const indexing = (store: LmdbStore) => createEarsEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], indexes: ['status'] }) });
+    const indexing = (store: LmdbStore) => createKvEngine({ kv: store.kv, isEntityType: (name) => name === 'Note', isRelationKind: () => true, isRole: () => true, rowRules: () => ({ required: [], indexes: ['status'] }) });
     const writer = openLmdbStore({ path: dbPath });
     indexing(writer).create('Note', { id: id('Note-1'), status: 'open' }).grant('pinned');
     writer.close();
@@ -183,10 +184,10 @@ describe('durability', () => {
     const child = path.join(path.dirname(dbPath), 'writer.mts');
     const source = (file: string) => pathToFileURL(fileURLToPath(new URL(`../../src/${file}`, import.meta.url))).href;
     fs.writeFileSync(child, [
-      `import { createEarsEngine } from ${JSON.stringify(source('index.ts'))};`,
+      `import { createKvEngine } from ${JSON.stringify(source('kv/engine.ts'))};`,
       `import { openLmdbStore } from ${JSON.stringify(source('lmdb/index.ts'))};`,
       `const store = openLmdbStore({ path: process.argv[2], syncIntervalMs: 60_000 });`,
-      `const engine = createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });`,
+      `const engine = createKvEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });`,
       `engine.create('Note', { id: 'Note-killed', title: 'committed' });`,
       `process.stdout.write('written\\n');`,
       `setInterval(() => {}, 1000);`,

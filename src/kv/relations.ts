@@ -1,9 +1,9 @@
-import { EARS } from './entities.ts';
-import type { RelationEdge } from './runtime.ts';
-import type { KvReader, KvWriter } from './kv.ts';
+import { EARS } from '../entities.ts';
+import type { RelationEdge } from '../runtime.ts';
+import type { KvReader, KvWriter } from '../kv.ts';
 import type { StoreAccess } from './store-access.ts';
-import { RESERVED_ENTITY_TYPES } from './errors.ts';
-import { sameValue } from './utils.ts';
+import { RESERVED_ENTITY_TYPES } from '../errors.ts';
+import { sameValue } from '../utils.ts';
 
 /** Which relations to match: any combination of kind, source and target */
 export interface RelationMatch {
