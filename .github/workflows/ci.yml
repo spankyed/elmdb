@@ -1,0 +1,96 @@
+name: CI
+
+# Every push to main runs the Linux checks. Pull requests and a dispatch run the full platform matrix as well: the
+# targets the binding ships for (design.md, Packages), each building the binding and running every suite on it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  checks:
+    name: checks (Linux x64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 23
+      # rust-toolchain.toml names the toolchain; rustup installs it on first use
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo xtask check-generated
+      - run: cargo xtask check-one-lmdb
+      - name: binding
+        working-directory: crates/elmdb-node
+        run: |
+          npm ci
+          npm run build
+          npm test
+      - name: the generated loader and declarations are committed
+        run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts
+
+  platforms:
+    name: ${{ matrix.target }} on Node ${{ matrix.node }}
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: macos-14, target: aarch64-apple-darwin, node: 23 }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, node: 23 }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, node: 22 }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: 23 }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, node: 23 }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - name: binding
+        working-directory: crates/elmdb-node
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm test
+
+  musl:
+    name: ${{ matrix.target }}
+    if: github.event_name != 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    container: node:23-alpine
+    steps:
+      - run: apk add --no-cache bash curl git build-base
+      - uses: actions/checkout@v4
+      - name: rustup
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - run: rustup show active-toolchain
+      - run: cargo test --workspace
+      - name: binding
+        working-directory: crates/elmdb-node
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+          npm test

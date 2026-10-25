@@ -1,0 +1,19 @@
+[package]
+name = "elmdb-cli"
+description = "inspect, check, backup and upgrade elmdb databases"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "elmdb"
+path = "src/main.rs"
+
+[dependencies]
+elmdb.workspace = true
+
+[lints]
+workspace = true
