@@ -94,6 +94,8 @@ jobs:
             apk add --no-cache bash curl git build-base
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
+            # The runner builds for its own architecture, where the native gcc links musl binaries
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
             git config --global --add safe.directory /w
             rustup show active-toolchain
             cargo test --workspace

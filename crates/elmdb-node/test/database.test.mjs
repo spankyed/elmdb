@@ -66,6 +66,21 @@ test('stores a schema, reports what opening did, and refuses an invalid one list
   });
 });
 
+test('setSchema changes an open database\'s schema, and refuses while a unit is open', (t) => {
+  const dir = tempDir(t);
+  const db = Database.open(dir, { schema: noteSchema, syncs: false });
+  const wider = structuredClone(noteSchema);
+  wider.types.Note.fields.body = { type: 'string', optional: true };
+  assert.deepEqual(db.setSchema(wider).map((c) => c.path), ['types.Note.fields.body']);
+  assert.ok('body' in db.schema.types.Note.fields);
+  assert.deepEqual(db.setSchema(wider), [], 'the same schema changes nothing');
+  const unit = db.begin();
+  assert.throws(() => db.setSchema(noteSchema), (error) => error.code === 'UNIT_OPEN');
+  unit.abort();
+  assert.throws(() => db.setSchema({ ...noteSchema, types: { note: {} } }), (error) => error.code === 'SCHEMA_INVALID');
+  db.close();
+});
+
 test('durable() resolves once what was committed is on disk', async (t) => {
   const dir = tempDir(t);
   const db = Database.open(dir, { schema: noteSchema });
@@ -81,9 +96,16 @@ test('another elmdb binary in the process is refused at open, naming both files'
   // The first open claims the process for the binary index.js loaded
   Database.open(join(dir, 'first'), { syncs: false }).close();
   const binary = readdirSync(join(here, '..')).find((f) => f.endsWith('.node'));
-  const copy = join(dir, 'copy', binary);
-  rmSync(dirname(copy), { recursive: true, force: true });
-  require('node:fs').mkdirSync(dirname(copy));
+  // Windows holds a loaded binary's file open until the process exits, so the copy can't be removed after the test
+  const copyDir = mkdtempSync(join(tmpdir(), 'elmdb-binary-'));
+  t.after(() => {
+    try {
+      rmSync(copyDir, { recursive: true, force: true });
+    } catch (error) {
+      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+    }
+  });
+  const copy = join(copyDir, binary);
   copyFileSync(join(here, '..', binary), copy);
   const second = require(copy);
   assert.throws(() => second.Database.open(join(dir, 'second'), { syncs: false }), (error) => {
