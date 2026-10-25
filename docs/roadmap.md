@@ -41,6 +41,9 @@ Replacing apack's dormant library index.
 
 ## Later, each its own decision
 
+Directions past these, each a design to argue for before it is built, are in `roadmap/` (`roadmap/README.md`).
+
+
 - Value compression with per-type dictionaries.
 - `elmdb-cli`.
 - LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
