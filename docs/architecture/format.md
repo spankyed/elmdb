@@ -15,7 +15,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `p/r` relation | a relation's row | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
-| `m/` | the format, the schema, the last synced transaction | meta |
+| `m/` | the format, the schema, the last synced transaction, the last commit's sequence | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
 | `d/xb` type index | that a value index is built; a plan reads only a built one | derived |

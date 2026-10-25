@@ -59,16 +59,16 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **elmdb:** `main`, with local commits not yet on `origin` (the user's to push). apack links the checkout and pins
-  `4a1032a`. Rust needs `export PATH="$HOME/.cargo/bin:$PATH"`. Phase 14's elmdb half is in the working tree,
-  uncommitted: the commit sequence (`m/sequence`), tracked reads (`engine/tracking.rs`, `engine/watch.rs`), `touched`
-  on every change set, `Database::watch`, and the binding's `untrack`, `trackStats` and `sequence`.
+- **elmdb:** `main`, with local commits not yet on `origin`. apack links the checkout and pins `fd0c0d7`. Rust needs
+  `export PATH="$HOME/.cargo/bin:$PATH"`. `crates/elmdb-node/protocol/Change copy.js` is someone else's untracked
+  scratch file, left in place; it lands in the linked package's membership, and editing it during an apack chain fails
+  `build:default-setup`.
 - **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`.
-  Committed through Phase 13 (`794249720`). Not pushed.
-- **Proven (on `794249720`):** `npm run chain -- --no-native` passes (2026-10-25).
-- **Done:** Phases 0–13.
-- **Next:** Phase 14: build and test the binding, port `watch.ts`, `watch.spec.ts`, the harness's watch property and
-  the bench's watch cases onto tracked reads (D30).
+  Committed through Phase 14 (`cf810c91d`). Not pushed.
+- **Proven (on `cf810c91d`):** `npm run chain -- --no-native` passes (2026-10-25).
+- **Done:** Phases 0–14.
+- **Next:** Phase 15: push elmdb, elmdb's platform CI, `build:preview` with elmdb shipped as real files, the full chain
+  and `--e2e`, then push apack's branch, open a draft PR and dispatch `strict_chain` and `compiler_macos` (D16).
 - **Never edit `crates/elmdb-node` while an apack chain runs:** the pack compiler captures the linked package whole.
 - **Unresolved:** a pack disable under the full chain's load once ended the API silently (no fatal line, no crash
   report); it did not recur. 905 stale System V semaphore sets from elmdb's runs before `2cbcc6c` are on the user's
@@ -110,6 +110,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D29 | Vector indexes are hannoy's graphs, which measure cosine and euclidean distance over f32 vectors, so a vector index's `metric` is `cosine` or `l2` and its `precision` `f32`; `dot`, `f16` and `i8` are refused at schema time, saying why. A normalized embedding, which every model apack runs produces, ranks by dot product as by cosine. A text index's rule on `any` fields (D26) holds for a vector index's `from` too | `docs/architecture/schema.md`, Indexes; `docs/evidence/phase-13.md` |
 | D30 | **Watch is live-queries' contract, and the views are live-queries'.** apack's live-queries work (branch `live-queries`, plan `docs/plans/live-queries.md`) built `engine.watch` on the JavaScript engine (`517900b52`) and views over it in the SDK, host, API and renderer (its Step 2), and asked elmdb for tracked reads and a commit sequence (`78f9fb0`). So Phase 14 builds elmdb's side and `engine.watch` on it under that contract, with live-queries' specs as acceptance, and builds no watched query or adopting system of its own: views, and the features moved onto them, are live-queries' Steps 2–5. **Landing order:** this goal's branch lands on `master` first; then the live-queries session commits its Step 2, rebases `live-queries` onto it, drops `517900b52` (its contract and specs landed here) and keeps its plan and Step 2, whose views use only `watch` and `lastCommit`. Neither goal edits live-queries' plan or its views | the user, 2026-10-25 |
 | D31 | **The library's vector search has one model, and nothing embeds on a timer.** An elmdb vector index names one model, so the library's search indexes share `IndexedDoc`'s, declared in default-setup's manifest (`openai:text-embedding-3-small`, 1536 dims); an index's per-index model, metric and connectivity, and their controls in the dormant editor, are dropped with `fastembed`, `usearch` and the index files. The engine never calls a model: `embedPending` (`@apackdev/sdk/services`) embeds what a vector index holds pending, run by whoever wrote the text — the library after indexing — rather than by a timer or a commit hook; Phase 14 builds no adopter (D30), so no watch drives it | `docs/evidence/phase-13.md` |
+| D32 | **A tracked read adds to its token, and a change set is the commit's answer, not a listener's.** apack's watched reads are functions that make several read calls, so a read tracked under a token adds what it touches to what the token holds, and a caller re-running its reads drops the token first (`untrack`); `engine.md` had a read replace its token's ranges, which would keep only a run's last call. Change sets, their sequence and `touched` are what each write and unit commit answers, which is every commit a caller makes; no `db.changes(listener)` is built, since apack hears the commits it makes and a background index build changes no answer. Admin writes that aren't logged key by key are heard as touching everything | `docs/evidence/phase-14.md`; `docs/architecture/engine.md`, Change sets and watch |
 | D21 | apack pins the elmdb commit it builds against in a committed `vendor/elmdb.rev`. Locally the `vendor/elmdb` symlink stays live, and a check refuses when that checkout doesn't contain the pinned commit. In apack's CI, a step clones elmdb at that commit into `vendor/elmdb` and builds the binding, with the Cargo target directory cached | this goal |
 
 ## Phases
@@ -420,7 +421,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | `runs` database (P11) | done, apack `9c7f96003`, elmdb `6d337f6` | host `run-history.spec` (20), CLI `db.integration` (71, `import-runs` included), the backup round trip of both databases; the chain in `phase-10.md` | none |
 | Text search, in elmdb and in apack (P12) | done, elmdb `c1a1cb1`; apack `a402744fb`, `ea09dbf84` | `docs/evidence/phase-12.md`; apack's whole `chain --no-native` passed cold on `d21514bdb` (elmdb `a0da984`) | none; PR #148 is reported to the user as superseded |
 | Vector and hybrid search, library port tested and off (P13) | done, elmdb `90207fd`; apack `794249720` | `docs/evidence/phase-13.md`; apack's `chain --no-native` passed on it | none |
-| Change sets, tracked reads and `engine.watch` (P14) | missing | | all |
+| Change sets, tracked reads and `engine.watch` (P14) | done, elmdb `fd0c0d7`; apack `cf810c91d` | `docs/evidence/phase-14.md`; apack's `chain --no-native` passed on it | none |
 | Platforms in elmdb's CI, packaged app, apack's full chain, draft PR, strict chain (P15) | missing | | all |
 | Docs and closure (P16) | missing | | all |
 
