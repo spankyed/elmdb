@@ -59,20 +59,23 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **elmdb:** `badd720` on `main`, the design and this goal committed, pushed to `github.com/spankyed/elmdb` (public,
-  created 2026-10-25, no licence files or CI yet). No Rust toolchain on the Mac yet.
-- **apack:** `fe3785fb0` on `ears-disk-engine` (PR #273). apack's phases run in their own worktree, created with
-  `npm run session:new -- ears-on-elmdb <base>` from the main checkout: branch `session/ears-on-elmdb` in
-  `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, based on `master` once #273 has merged into it, otherwise on
-  `ears-disk-engine`. The main checkout is left alone.
-- **Done:** Phase 0 (`aff9050`; CI's Linux job passed), Phase 1 (readings in `docs/evidence/phase-1.md`; D4 stands;
-  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`), Phase 4 (`docs/evidence/phase-4.md`), Phase 5 (`docs/evidence/phase-5.md`), Phase 6 (`docs/evidence/phase-6.md`), Phase 7 (`docs/evidence/phase-7.md`; the real data upgrades with its counts
-  equal, and holds 17 duplicate short codes, recorded for the user).
-- **Next:** Phase 8: the crash harness (a child killed mid-workload), the failed-sync harness, binding fuzzing, and
-  elmdb's CI full matrix by dispatch (`gh workflow run ci.yml`).
-- **For Phase 9:** apack's facade encodes with msgpackr's `skipValues: [undefined]` (`docs/evidence/phase-7.md`).
-- **apack:** its main checkout has work of its own in progress on `ears-disk-engine`; Phase 9's worktree branches from
-  `master` once #273 merges, or from `ears-disk-engine` as it stands then.
+- **elmdb:** `main`, pushed to `github.com/spankyed/elmdb`. Beyond Phase 8: `Database::set_schema` (an open
+  database's schema changed as opening would; apack registers packs at runtime) and `Load::Unset` (a field removed
+  unchecked, for apack's `admin.deleteAttr`), `5075d6f`. The binding's build and test tooling is the root
+  `package.json`, so the binding package declares no dependencies (`cfcf6c4`). Rust needs
+  `export PATH="$HOME/.cargo/bin:$PATH"`, since rustup was installed without touching the shell's profile.
+- **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`, from
+  `ears-disk-engine` `3e0b280ff` (#273 is still open). The link is committed (`bf9222c1e`: `vendor/elmdb` gitignored,
+  `vendor/elmdb.rev`, `npm run link:elmdb`, called by `session:new` before `npm ci`). In progress, uncommitted:
+  `@apackdev/ears` on elmdb — the old engine moved to `src/kv/` as `createKvEngine` for the differential harness;
+  new `engine.ts`, `query.ts`, `write.ts`, `database.ts` (port and connection), `schema.ts`
+  (`EngineSchema` → elmdb's), `ids.ts`; `LinkOptions` without `replace`/`acyclicIn`; `EarsErrorCode` gains
+  `SELF_LINK`, `CYCLE`, `VALUE_INVALID`.
+- **Done:** Phases 0–8 (`docs/evidence/phase-0.md` … `phase-8.md`; the full matrix passes, run 40170026515).
+- **Next:** Phase 9: `index.ts` and `/lmdb` (`openDatabase`, temporary test databases), the engine specs on it, the
+  manifest's `data.relations` as a map of declarations with `acyclic`/`unique` (D9), composition, the differential
+  harness, the Linux runner and CI clone, then the suites and the chain. D17's reading before Phase 9 is taken
+  (scratchpad `bench-before-p9.txt`; it goes into `docs/evidence/phase-9.md`).
 - **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
   (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made, so a later session
   remakes them the same way.
@@ -389,7 +392,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| elmdb repository with checks, generated types, one-LMDB guard (P0) | done, `aff9050` | `docs/evidence/phase-0.md`; CI run 40159534326 | the full matrix, after Phase 8 |
+| elmdb repository with checks, generated types, one-LMDB guard (P0) | done, `aff9050` | `docs/evidence/phase-0.md`; CI run 40159534326; the full matrix, run 40170026515 | none |
 | Protocol cost measured, D4 confirmed (P1) | done | `docs/evidence/phase-1.md` | none |
 | Schema per `schema.md` (P2) | done, `9300b19` | 22 specs; two mutations caught (`cargo test -p elmdb schema`) | none |
 | Format, storage, durability per D5–D7 (P3) | done | `docs/evidence/phase-3.md` | none |
@@ -397,7 +400,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | Reads and value indexes (P5) | done | `docs/evidence/phase-5.md` | none |
 | Derived data, `check`, `rebuild`, schema changes (P6) | done | `docs/evidence/phase-6.md` | none |
 | Admin, upgrade from format 4, CLI (P7) | done | `docs/evidence/phase-7.md` | none; the 17 duplicate short codes are the user's to resolve when converting the real data (D12) |
-| Crash, failed-sync and fuzz suites (P8) | missing | | all |
+| Crash, failed-sync and fuzz suites (P8) | done, `68f6a96`, `a740ddd` | `docs/evidence/phase-8.md`; full matrix runs 40169607512 and 40170026515 | none |
 | apack parity, differential harness agreeing (P9) | missing | | all |
 | apack without lmdb-js (P10) | missing | | all |
 | `runs` database (P11) | missing | | all |
