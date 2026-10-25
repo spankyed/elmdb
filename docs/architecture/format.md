@@ -14,6 +14,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `p/i` id | an entity's type and sequence | primary |
 | `p/r` relation | a relation's row | primary |
 | `p/s` key | a numbering sequence | primary |
+| `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
 | `m/` | the format, the schema, the last synced transaction | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
@@ -25,9 +26,13 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
 | `d/fd` type index seq | the entity's document: its id, each field's length, its terms | derived |
 | `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
-| `d/q…` | vector indexes, through hannoy, and pending embeddings | derived |
+| `d/qc`, `d/qp` type index id chunk | a vector index's chunk: its hash and text; and that it waits for an embedding | derived |
+| `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
+| `d/qj` type index item | a unit's graph changes, applied as it commits | derived |
+| `d/qn` type index | the index's graph number and next item | derived |
 
-`rebuild()` deletes everything under `d/` and builds it from `p/`. `check()` does the same in a scratch transaction and
+`rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
+`elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` does the same in a scratch transaction and
 compares.
 
 ## Values
