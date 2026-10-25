@@ -307,3 +307,25 @@ fn rename_type_rewrites_ids_their_relations_and_the_refs_naming_them() {
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
 }
+
+#[test]
+fn an_index_declared_on_an_open_database_is_built_and_read_and_writes_go_on_to_the_new_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    let rows: Vec<Json> = (0..2500)
+        .map(|i| json!({ "op": "create", "type": "Note", "fields": { "kind": if i % 2 == 0 { "even" } else { "odd" } } }))
+        .collect();
+    write(&db, rows).unwrap();
+    let changes = db
+        .set_schema(
+            Schema::from_json(&notes(base_fields(), json!({ "ix": { "kind": "value", "fields": ["kind"] } }))).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(changes[0].effect, crate::schema::Effect::Builds);
+    db.wait_for_index_builds();
+    assert_eq!(ids_where(&db, "kind", json!("even")).1, 1250, "read from the index built after the change");
+    // A write after the change keeps the index
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-x", "fields": { "kind": "even" } })]).unwrap();
+    assert_eq!(ids_where(&db, "kind", json!("even")).1, 1251);
+    assert!(db.check().unwrap().is_clean());
+}

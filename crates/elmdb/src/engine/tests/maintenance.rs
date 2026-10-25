@@ -28,7 +28,7 @@ fn a_compacted_backup_of_multi_page_values_can_be_emptied_in_one_transaction() {
     assert_eq!(row(&restored, "Task-3-7").unwrap()["title"].as_str().unwrap().len(), 20_000);
     restored.reset().unwrap();
     assert!(row(&restored, "Task-3-7").is_none());
-    assert_eq!(restored.schema(), Some(&super::schema()), "a reset keeps the schema");
+    assert_eq!(restored.schema(), Some(super::schema()), "a reset keeps the schema");
     write(&restored, vec![json!({ "op": "create", "type": "Task", "id": "Task-after" })]).unwrap();
     assert!(restored.check().unwrap().is_clean());
 }
@@ -135,6 +135,36 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
     let said: Vec<&str> = report.violations.iter().map(|v| v.message.as_str()).collect();
     assert!(said.iter().any(|m| m.contains("which is unique")), "{said:?}");
     assert!(said.iter().any(|m| m.contains("Task-none")), "{said:?}");
+}
+
+#[test]
+fn an_unset_load_removes_any_field_and_keeps_derived_data_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": 1 } }),
+            json!({ "op": "trash", "id": "Task-1" }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(db.stats().unwrap().types["Task"].trashed, 1);
+    db.bulk_load(&[
+        Load::Unset { id: "Task-1".into(), field: "a".into() },
+        Load::Unset { id: "Task-1".into(), field: "trashedAt".into() },
+        Load::Unset { id: "Task-1".into(), field: "createdAt".into() },
+        Load::Unset { id: "Task-none".into(), field: "a".into() },
+    ])
+    .unwrap();
+    let held = row(&db, "Task-1").unwrap();
+    for gone in ["a", "trashedAt", "createdAt"] {
+        assert!(held.get(gone).is_none(), "{gone} is still held: {held}");
+    }
+    let stats = db.stats().unwrap();
+    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 0), "out of the trash");
+    assert!(row(&db, "Task-none").is_none(), "an unset makes no entity");
+    assert!(db.check().unwrap().differences.is_empty());
 }
 
 /// A format 4 dump of these entries, as `tools/lmdb-js-export` writes one

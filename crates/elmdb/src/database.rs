@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use parking_lot::{RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use crate::error::{Error, ErrorCode, Result};
@@ -52,9 +54,11 @@ pub struct Database {
     path: PathBuf,
     read_only: bool,
     store: Mutex<Option<Arc<Store>>>,
-    schema: Option<Schema>,
-    /// The schema the engine holds writes to: the database's, or one declaring nothing
-    engine_schema: Arc<Schema>,
+    schema: RwLock<Option<Schema>>,
+    /// The schema the engine holds writes to: the database's, or one declaring nothing. A write holds it read-locked
+    /// from before its transaction until it commits, and `set_schema` write-locked, so no write commits under a
+    /// schema that changed while it ran
+    engine_schema: RwLock<Arc<Schema>>,
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
     builder: Mutex<Option<crate::engine::Builder>>,
@@ -109,8 +113,8 @@ impl Database {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
             store: Mutex::new(Some(store)),
-            engine_schema,
-            schema,
+            engine_schema: RwLock::new(engine_schema),
+            schema: RwLock::new(schema),
             report,
             builder: Mutex::new(builder),
         })
@@ -130,8 +134,33 @@ impl Database {
     }
 
     /// The schema the database holds, if one was ever given
-    pub fn schema(&self) -> Option<&Schema> {
-        self.schema.as_ref()
+    pub fn schema(&self) -> Option<Schema> {
+        self.schema.read().clone()
+    }
+
+    /// Changes the schema of the open database as opening with `schema` would (`docs/schema.md`, Changing a schema),
+    /// answering the changes and what was done about each. Refused while a unit is open (`UNIT_OPEN`), in a
+    /// read-only database, and for a change opening refuses, which leaves the schema as it was
+    pub fn set_schema(&self, schema: Schema) -> Result<Vec<SchemaChange>> {
+        let mut current = self.engine_schema.write();
+        let store = self.store()?;
+        // The builder works to the schema it was started with, so it stops first and starts again on the one held
+        // after, whichever that is
+        if let Some(mut builder) = self.builder().take() {
+            builder.stop();
+        }
+        let applied = apply_schema(&store, Some(schema));
+        if let Ok((stored, _)) = &applied {
+            *current = Arc::new(stored.clone().unwrap_or_else(empty_schema));
+            *self.schema.write() = stored.clone();
+        }
+        let unbuilt = crate::engine::settle_indexes(&store, &current)?;
+        if !unbuilt.is_empty() {
+            let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&current));
+            builder.queue(unbuilt);
+            *self.builder() = Some(builder);
+        }
+        applied.map(|(_, report)| report.schema_changes)
     }
 
     /// What opening did
@@ -144,7 +173,12 @@ impl Database {
     }
 
     pub(crate) fn engine_schema(&self) -> Arc<Schema> {
-        Arc::clone(&self.engine_schema)
+        Arc::clone(&self.engine_schema.read())
+    }
+
+    /// The engine's schema, held read-locked for a write's length (`engine_schema`)
+    pub(crate) fn writing_schema(&self) -> RwLockReadGuard<'_, Arc<Schema>> {
+        self.engine_schema.read()
     }
 
     pub(crate) fn store(&self) -> Result<Arc<Store>> {
@@ -300,7 +334,7 @@ mod tests {
 
         // Opened again without a schema, it holds the stored one
         let again = Database::open(dir.path(), quiet()).unwrap();
-        assert_eq!(again.schema(), Some(&note_schema(None)));
+        assert_eq!(again.schema(), Some(note_schema(None)));
         assert!(again.open_report().schema_changes.is_empty());
         again.close().unwrap();
 
@@ -311,7 +345,32 @@ mod tests {
         changed.close().unwrap();
 
         let read_only = Database::open(dir.path(), OpenOptions { read_only: true, ..quiet() }).unwrap();
-        assert_eq!(read_only.schema(), Some(&note_schema(Some("body"))));
+        assert_eq!(read_only.schema(), Some(note_schema(Some("body"))));
+    }
+
+    #[test]
+    fn changes_the_schema_of_an_open_database_and_refuses_what_opening_refuses() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(note_schema(None)), ..quiet() }).unwrap();
+        let changes = db.set_schema(note_schema(Some("body"))).unwrap();
+        let paths: Vec<&str> = changes.iter().map(|c| c.path.as_str()).collect();
+        assert_eq!(paths, ["types.Note.fields.body"]);
+        assert_eq!(db.schema(), Some(note_schema(Some("body"))));
+        assert!(db.set_schema(note_schema(Some("body"))).unwrap().is_empty(), "the same schema changes nothing");
+
+        let mut recoded = note_schema(Some("body"));
+        recoded.types.get_mut("Note").unwrap().short_code.as_mut().unwrap().prefix = "NOT".to_owned();
+        assert_eq!(db.set_schema(recoded).err().unwrap().code, ErrorCode::SchemaChangeRefused);
+        assert_eq!(db.schema(), Some(note_schema(Some("body"))));
+
+        // An open unit holds the one write transaction, which the change needs
+        let unit = db.begin().unwrap();
+        assert_eq!(db.set_schema(note_schema(None)).err().unwrap().code, ErrorCode::UnitOpen);
+        drop(unit);
+        db.set_schema(note_schema(None)).unwrap();
+        db.close().unwrap();
+        let again = Database::open(dir.path(), quiet()).unwrap();
+        assert_eq!(again.schema(), Some(note_schema(None)), "the change is stored");
     }
 
     #[test]
@@ -328,7 +387,7 @@ mod tests {
         assert!(error.message.contains("types.Note.shortCode.prefix"), "{}", error.message);
         // The refused open released the files, and the stored schema is as it was
         let db = Database::open(dir.path(), quiet()).unwrap();
-        assert_eq!(db.schema(), Some(&note_schema(None)));
+        assert_eq!(db.schema(), Some(note_schema(None)));
         db.close().unwrap();
 
         let read_only = OpenOptions { read_only: true, schema: Some(note_schema(Some("body"))), ..quiet() };

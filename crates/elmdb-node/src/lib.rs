@@ -102,6 +102,15 @@ impl Database {
         self.inner.schema().map(|s| serde_json::from_str(&s.canonical()).expect("a canonical schema is JSON"))
     }
 
+    /// Changes the open database's schema as opening with it would, answering each change and what was done about it.
+    /// Refused while a unit is open, in a read-only database, and for a change opening refuses
+    #[napi(ts_args_type = "schema: Schema", ts_return_type = "SchemaChange[]")]
+    pub fn set_schema(&self, schema: serde_json::Value) -> Result<serde_json::Value, Code> {
+        let schema = elmdb::schema::Schema::from_json(&schema).map_err(to_js)?;
+        let changes = self.inner.set_schema(schema).map_err(to_js)?;
+        Ok(serde_json::to_value(changes).expect("schema changes serialize"))
+    }
+
     /// What opening did: `{ schemaChanges: [{ path, change, effect }] }`
     #[napi(getter, ts_return_type = "{ schemaChanges: SchemaChange[] }")]
     pub fn open_report(&self) -> serde_json::Value {

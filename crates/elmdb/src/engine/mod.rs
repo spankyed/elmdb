@@ -217,8 +217,8 @@ impl Database {
     }
 
     fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
+        let schema = self.writing_schema();
         let store = self.store()?;
-        let schema = self.engine_schema();
         let now = now_ms();
         store.write(
             |txn, db| {
@@ -273,8 +273,8 @@ impl Database {
 
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
+        let schema = self.writing_schema();
         let store = self.store()?;
-        let schema = self.engine_schema();
         let now = batch.now.unwrap_or_else(now_ms);
         store.write(
             |txn, db| {
@@ -299,8 +299,12 @@ impl Database {
     /// Opens a unit that stays open across calls until it is committed or aborted. One unit is open at a time, and
     /// while it is, `write` refuses (`UNIT_OPEN`): its writes go through the unit
     pub fn begin(&self) -> Result<Unit> {
+        // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
+        let held = self.writing_schema();
         let store = self.store()?;
         let (txn, gate) = store.begin()?;
+        let schema = Arc::clone(&held);
+        drop(held);
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
@@ -309,7 +313,7 @@ impl Database {
             state: UnitState::default(),
             poisoned: None,
             _gate: gate,
-            schema: self.engine_schema(),
+            schema,
             store,
             _thread: PhantomData,
         })

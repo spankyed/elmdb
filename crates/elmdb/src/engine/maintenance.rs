@@ -40,6 +40,9 @@ pub enum Load {
     },
     /// A numbering sequence's next number: `shortCode:<Type>`, `label:<Type>:<base>`, or the store's `seq`
     Sequence { name: String, next: u64 },
+    /// A field removed from an entity, any field the engine writes included: removing `trashedAt` takes it out of the
+    /// trash. An entity without the field, or no entity, is left as it is
+    Unset { id: String, field: String },
 }
 
 /// What a database holds
@@ -108,6 +111,11 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
             }
             Load::Sequence { name, next } => {
                 t.put(&keys::sequence(name), &values::encode(&(*next).into()))?;
+            }
+            Load::Unset { id, field } => {
+                if entities::record(t, id)?.is_some() {
+                    entities::delete_field(t, id, field)?;
+                }
             }
         }
     }

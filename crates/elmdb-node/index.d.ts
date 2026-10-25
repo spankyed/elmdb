@@ -23,6 +23,11 @@ export declare class Database {
   get isOpen(): boolean
   /** The schema the database holds, in its canonical form, or `null` when none was ever given */
   get schema(): Schema | null
+  /**
+   * Changes the open database's schema as opening with it would, answering each change and what was done about it.
+   * Refused while a unit is open, in a read-only database, and for a change opening refuses
+   */
+  setSchema(schema: Schema): SchemaChange[]
   /** What opening did: `{ schemaChanges: [{ path, change, effect }] }` */
   get openReport(): { schemaChanges: SchemaChange[] }
   /** Group commit's syncs so far */
