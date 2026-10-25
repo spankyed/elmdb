@@ -27,6 +27,13 @@ thiserror.workspace = true
 ts-rs = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 
+# On macOS LMDB locks with System V semaphore sets, keyed by `ftok` of the lock file's inode: 16 of its bits, so a set an
+# unrelated environment left (or holds) can share a key, and one LMDB build's set of another size refuses to open
+# (`EINVAL`). POSIX semaphores are named from the lock file's whole device and inode, and a stale one is removed by the
+# environment's first opener. Linux and Windows keep LMDB's robust mutexes
+[target.'cfg(target_os = "macos")'.dependencies]
+heed = { workspace = true, features = ["posix-sem"] }
+
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
