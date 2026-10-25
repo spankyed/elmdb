@@ -61,7 +61,9 @@ A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRo
 their answer, and a live type's `count` is read off its counter. A `where` or `withRole` straight after a type start
 reads a value index whose first field it names, a compound one's included.
 
-`db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
+A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last
+committed one, which a commit in any process moves), and opens one otherwise; a commit here drops the idle ones, so none
+pins the pages it freed. `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
 own, and resolves with the same answer, so a large read doesn't block the event loop.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.

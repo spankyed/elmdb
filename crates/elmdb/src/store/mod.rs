@@ -71,7 +71,12 @@ pub struct Store {
     /// Whether a unit is open, holding the environment's one write transaction, and the signal that one ended
     unit: Mutex<bool>,
     unit_ended: Condvar,
+    /// Read transactions a read finished with, for the next read to take while it is still current
+    idle: Mutex<Vec<RoTxn<'static, WithoutTls>>>,
 }
+
+/// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
+const MAX_IDLE: usize = 8;
 
 /// The environments open in this process, by canonical path. LMDB's locks are per process, so an environment opened
 /// twice in one process shares no locks with itself and can corrupt its own file.
@@ -169,6 +174,7 @@ impl Store {
             commit,
             unit: Mutex::new(false),
             unit_ended: Condvar::new(),
+            idle: Mutex::new(Vec::new()),
         })
     }
 
@@ -238,25 +244,55 @@ impl Store {
         self.gate.read()
     }
 
-    /// Runs `f` in a read transaction, a snapshot of the last commit
+    /// Runs `f` in a read transaction, a snapshot of the last commit. An idle one is taken while it still is that
+    /// snapshot — its id the environment's last committed one, which a commit in any process moves — and opening one
+    /// is what a read saves; a read transaction otherwise outlives its read only until the next commit here
     pub fn read<T>(&self, f: impl FnOnce(&RoTxn<'_, WithoutTls>, Db) -> Result<T>) -> Result<T> {
         let mut f = Some(f);
         loop {
             let guard = self.gate();
-            match self.env.read_txn() {
-                Ok(txn) => {
-                    let result = (f.take().expect("a read runs once"))(&txn, self.db);
-                    drop(txn);
-                    drop(guard);
-                    return result;
-                }
-                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                    drop(guard);
-                    self.adopt_map_size()?;
-                }
-                Err(e) => return Err(e.into()),
+            let txn = match self.current_idle() {
+                Some(txn) => txn,
+                None => match self.env.clone().static_read_txn() {
+                    Ok(txn) => txn,
+                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                        drop(guard);
+                        self.adopt_map_size()?;
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                },
+            };
+            let result = (f.take().expect("a read runs once"))(&txn, self.db);
+            let mut idle = self.idle.lock().expect("the idle transactions' lock is never poisoned");
+            if idle.len() < MAX_IDLE {
+                idle.push(txn);
+            }
+            drop(idle);
+            drop(guard);
+            return result;
+        }
+    }
+
+    /// An idle read transaction that is still the last commit's snapshot, the stale ones dropped
+    fn current_idle(&self) -> Option<RoTxn<'static, WithoutTls>> {
+        let mut idle = self.idle.lock().expect("the idle transactions' lock is never poisoned");
+        if idle.is_empty() {
+            return None;
+        }
+        let last = self.env.info().last_txn_id;
+        while let Some(txn) = idle.pop() {
+            if txn.id() == last {
+                return Some(txn);
             }
         }
+        None
+    }
+
+    /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized
+    /// or the environment closed, which no open transaction may outlast
+    fn drop_idle(&self) {
+        self.idle.lock().expect("the idle transactions' lock is never poisoned").clear();
     }
 
     /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
@@ -319,6 +355,8 @@ impl Store {
 
     /// What follows a commit: group commit hears of it, and a durable one waits for its sync
     pub fn committed(&self, durable: bool) -> Result<()> {
+        // Stale now: dropped rather than kept, so they pin none of the pages the commit freed
+        self.drop_idle();
         if let Some(commit) = &self.commit {
             commit.on_commit();
             if durable {
@@ -393,9 +431,11 @@ impl Store {
     /// Doubles the map, holding every transaction of this process off while it does
     pub fn grow(&self) -> Result<()> {
         let _gate = self.gate.write();
+        self.drop_idle();
         let size = self.env.info().map_size;
         let grown = size.saturating_mul(2).div_ceil(MAP_STEP) * MAP_STEP;
-        // SAFETY: the gate held for writing means no transaction of this process is open, which LMDB requires
+        // SAFETY: the gate held for writing means no read or write runs in this process, and the idle read
+        // transactions are dropped: no transaction is open, which LMDB requires
         unsafe { self.env.resize(grown) }?;
         Ok(())
     }
@@ -403,6 +443,7 @@ impl Store {
     /// Takes the map size another process grew the file to
     fn adopt_map_size(&self) -> Result<()> {
         let _gate = self.gate.write();
+        self.drop_idle();
         // SAFETY: as in `grow`; a size of 0 adopts the size the file's meta records
         unsafe { self.env.resize(0) }?;
         Ok(())
@@ -429,7 +470,9 @@ impl Store {
             Some(mut commit) => commit.close(),
             None => Ok(()),
         };
-        // LMDB closes the environment once its last handle goes, which dropping the store is
+        // LMDB closes the environment once its last handle goes, which dropping the store and its idle read
+        // transactions is
+        self.drop_idle();
         let closed = self.env.clone().prepare_for_closing();
         drop(self);
         closed.wait();

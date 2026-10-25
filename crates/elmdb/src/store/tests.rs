@@ -341,3 +341,31 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     drop(gate);
     store.end_unit();
 }
+
+/// The writer half of the next test, run as a child of this test binary: it overwrites `a` and closes
+#[test]
+fn child_overwriter() {
+    let Ok(path) = std::env::var("ELMDB_OVERWRITE_DB") else { return };
+    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    put(&store, "a", b"2").unwrap();
+    store.close().unwrap();
+}
+
+#[test]
+fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transaction_was_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // A read keeps its transaction idle for the next, at this snapshot
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "store::tests::child_overwriter", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_OVERWRITE_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"2"[..]));
+}
