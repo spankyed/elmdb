@@ -9,11 +9,14 @@ pub mod sync;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use heed::types::Bytes;
 use heed::{CommitOrAbort, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
+use parking_lot::lock_api::ArcRwLockReadGuard;
+use parking_lot::{RawRwLock, RwLock, RwLockReadGuard};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
@@ -64,8 +67,10 @@ pub struct Store {
     read_only: bool,
     env: Env<WithoutTls>,
     db: Db,
-    gate: RwLock<()>,
+    gate: Arc<RwLock<()>>,
     commit: Option<GroupCommit>,
+    /// Whether a unit is open, holding the environment's one write transaction
+    unit_open: AtomicBool,
 }
 
 /// The environments open in this process, by canonical path. LMDB's locks are per process, so an environment opened
@@ -89,6 +94,10 @@ impl Drop for Registration {
 /// A test's stand-in for a disk that fills while a new environment is stamped: stamping the environment at this path fails
 #[cfg(test)]
 pub(crate) static FAIL_STAMP_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// A test's stand-in for a disk that fills: the next commit of the environment at this path fails, once
+#[cfg(test)]
+pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 impl Store {
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self> {
@@ -140,7 +149,15 @@ impl Store {
             )
         });
         registration.0 = None;
-        Ok(Self { path: canonical, read_only: options.read_only, env, db, gate: RwLock::new(()), commit })
+        Ok(Self {
+            path: canonical,
+            read_only: options.read_only,
+            env,
+            db,
+            gate: Arc::new(RwLock::new(())),
+            commit,
+            unit_open: AtomicBool::new(false),
+        })
     }
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
@@ -206,7 +223,7 @@ impl Store {
     }
 
     fn gate(&self) -> RwLockReadGuard<'_, ()> {
-        self.gate.read().expect("the map gate is never poisoned")
+        self.gate.read()
     }
 
     /// Runs `f` in a read transaction, a snapshot of the last commit
@@ -233,10 +250,11 @@ impl Store {
     /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
     /// aborted, the map grown and `f` run again, so `f` must do nothing but write through its transaction
     pub fn write<T>(&self, mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
-        if self.read_only {
+        self.check_writable()?;
+        if self.unit_open.load(Ordering::SeqCst) {
             return Err(Error::new(
-                ErrorCode::ReadOnly,
-                format!("The database at {} is open read-only", self.path.display()),
+                ErrorCode::UnitOpen,
+                "A unit is open, holding the database's one write transaction: write through it, or commit it first",
             ));
         }
         let mut growths = 0;
@@ -251,16 +269,11 @@ impl Store {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let outcome = f(&mut txn, self.db).and_then(|t| txn.commit().map(|()| t).map_err(Error::from));
+            let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|()| t));
             drop(guard);
             match outcome {
                 Ok(t) => {
-                    if let Some(commit) = &self.commit {
-                        commit.on_commit();
-                        if durable {
-                            commit.durable().wait()?;
-                        }
-                    }
+                    self.committed(durable)?;
                     return Ok(t);
                 }
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
@@ -272,9 +285,78 @@ impl Store {
         }
     }
 
+    fn check_writable(&self) -> Result<()> {
+        if self.read_only {
+            return Err(Error::new(
+                ErrorCode::ReadOnly,
+                format!("The database at {} is open read-only", self.path.display()),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Commits a write transaction, which a test may refuse as a full disk would (`FAIL_COMMIT_AT`)
+    pub fn commit_txn(&self, txn: RwTxn<'_>) -> Result<()> {
+        #[cfg(test)]
+        if FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some() {
+            drop(txn);
+            return Err(Error::new(ErrorCode::Io, "No space left on device"));
+        }
+        txn.commit().map_err(Into::into)
+    }
+
+    /// What follows a commit: group commit hears of it, and a durable one waits for its sync
+    pub fn committed(&self, durable: bool) -> Result<()> {
+        if let Some(commit) = &self.commit {
+            commit.on_commit();
+            if durable {
+                commit.durable().wait()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The environment's write transaction for a unit held open across calls, with the gate held for it. Refuses a
+    /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
+    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLock, ()>)> {
+        self.check_writable()?;
+        if self.unit_open.swap(true, Ordering::SeqCst) {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
+        }
+        let begun = (|| {
+            let info = self.env.info();
+            let page = self.env.unnamed_database_stat().page_size as usize;
+            if (info.last_page_number + 1) * page * 2 > info.map_size {
+                self.grow()?;
+            }
+            let guard = self.gate.read_arc();
+            let txn = loop {
+                match self.env.write_txn() {
+                    Ok(txn) => break txn,
+                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => self.adopt_map_size()?,
+                    Err(e) => return Err(e.into()),
+                }
+            };
+            Ok((txn, guard))
+        })();
+        if begun.is_err() {
+            self.unit_open.store(false, Ordering::SeqCst);
+        }
+        begun
+    }
+
+    /// The open unit ended, committed or not
+    pub fn end_unit(&self) {
+        self.unit_open.store(false, Ordering::SeqCst);
+    }
+
+    pub fn db(&self) -> Db {
+        self.db
+    }
+
     /// Doubles the map, holding every transaction of this process off while it does
-    fn grow(&self) -> Result<()> {
-        let _gate = self.gate.write().expect("the map gate is never poisoned");
+    pub fn grow(&self) -> Result<()> {
+        let _gate = self.gate.write();
         let size = self.env.info().map_size;
         let grown = size.saturating_mul(2).div_ceil(MAP_STEP) * MAP_STEP;
         // SAFETY: the gate held for writing means no transaction of this process is open, which LMDB requires
@@ -284,7 +366,7 @@ impl Store {
 
     /// Takes the map size another process grew the file to
     fn adopt_map_size(&self) -> Result<()> {
-        let _gate = self.gate.write().expect("the map gate is never poisoned");
+        let _gate = self.gate.write();
         // SAFETY: as in `grow`; a size of 0 adopts the size the file's meta records
         unsafe { self.env.resize(0) }?;
         Ok(())

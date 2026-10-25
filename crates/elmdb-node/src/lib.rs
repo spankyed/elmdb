@@ -104,6 +104,20 @@ impl Database {
         self.inner.syncs().map(|n| n as u32).map_err(to_js)
     }
 
+    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
+    /// `{ results: OpResult[], changes: ChangeSet }`. `durable` commits it with a sync
+    #[napi]
+    pub fn write(&self, batch: Buffer, durable: Option<bool>) -> Result<Buffer, Code> {
+        self.inner.write_bytes(&batch, durable.unwrap_or(false)).map(Buffer::from).map_err(to_js)
+    }
+
+    /// Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
+    /// (`UNIT_OPEN`), and writes go through the unit
+    #[napi]
+    pub fn begin(&self) -> Result<Unit, Code> {
+        self.inner.begin().map(|inner| Unit { inner: Some(inner) }).map_err(to_js)
+    }
+
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails
     #[napi(ts_return_type = "Promise<void>")]
     pub fn durable(&self) -> Result<AsyncTask<DurableTask>, Code> {
@@ -147,5 +161,67 @@ impl Task for DurableTask {
             Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
             None => Err(error),
         }
+    }
+}
+
+/// A unit open across calls, on the thread that began it
+#[napi]
+pub struct Unit {
+    inner: Option<elmdb::Unit>,
+}
+
+impl Unit {
+    fn open(&mut self) -> Result<&mut elmdb::Unit, Code> {
+        self.inner.as_mut().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))
+    }
+}
+
+#[napi]
+impl Unit {
+    /// Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
+    /// bytes of `{ results: OpResult[] }`
+    #[napi]
+    pub fn write(&mut self, batch: Buffer) -> Result<Buffer, Code> {
+        self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
+    }
+
+    /// Opens a savepoint, answering its depth
+    #[napi]
+    pub fn savepoint(&mut self) -> Result<u32, Code> {
+        self.open()?.savepoint().map(|d| d as u32).map_err(to_js)
+    }
+
+    /// Undoes everything since the savepoint at `depth`, closing it
+    #[napi]
+    pub fn rollback_to(&mut self, depth: u32) -> Result<(), Code> {
+        self.open()?.rollback_to(depth as usize).map_err(to_js)
+    }
+
+    /// Closes the savepoint at `depth`, keeping its writes
+    #[napi]
+    pub fn release(&mut self, depth: u32) -> Result<(), Code> {
+        self.open()?.release(depth as usize).map_err(to_js)
+    }
+
+    /// Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it
+    #[napi]
+    pub fn commit(&mut self, durable: Option<bool>) -> Result<Buffer, Code> {
+        let unit =
+            self.inner.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;
+        let changes = unit.commit(durable.unwrap_or(false)).map_err(to_js)?;
+        Ok(rmp_serde::to_vec_named(&changes).expect("a change set serializes").into())
+    }
+
+    /// Ends the unit, keeping nothing of it
+    #[napi]
+    pub fn abort(&mut self) {
+        if let Some(mut unit) = self.inner.take() {
+            unit.abort();
+        }
+    }
+
+    #[napi(getter)]
+    pub fn is_open(&self) -> bool {
+        self.inner.as_ref().is_some_and(elmdb::Unit::is_open)
     }
 }

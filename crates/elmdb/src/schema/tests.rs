@@ -214,8 +214,8 @@ fn checks_what_each_index_covers() {
             "types.Message.indexes.x.fields: names no field (declared by default-setup)",
         ),
         (
-            json!({ "kind": "value", "fields": ["blocks"] }),
-            "types.Message.indexes.x.fields[0]: a value index can't hold a any field (\"blocks\") (declared by default-setup)",
+            json!({ "kind": "value", "fields": ["scratch"] }),
+            "types.Message.indexes.x.fields[0]: a value index can't hold a object field (\"scratch\") (declared by default-setup)",
         ),
         (
             json!({ "kind": "value", "fields": ["text", "text"] }),
@@ -251,7 +251,10 @@ fn checks_what_each_index_covers() {
         ),
     ];
     for (index, expected) in cases {
-        let json = edited(|j| j["types"]["Message"]["indexes"]["x"] = index);
+        let json = edited(|j| {
+            j["types"]["Message"]["fields"]["scratch"] = json!({ "type": "object", "optional": true });
+            j["types"]["Message"]["indexes"]["x"] = index;
+        });
         assert_eq!(problems(json), [expected]);
     }
     // The engine's own times are indexable

@@ -42,6 +42,8 @@
   },
   "devDependencies": {
     "@napi-rs/cli": "3.10.9",
+    "@types/node": "^24.1.0",
+    "msgpackr": "^1.11.9",
     "typescript": "^5.9.3"
   }
 }

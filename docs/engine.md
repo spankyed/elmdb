@@ -53,20 +53,32 @@ A caller's own function can't cross: a builder holding one sends the plan up to 
 **Results** are owned bytes in one envelope: ids as strings, each row's values as the value bytes the caller wrote,
 counts and scores as numbers. The caller decodes values.
 
-## Writes: batches
+## Writes: batches and units
 
-`db.write(batch, { durable? })` applies one unit:
+`db.write(batch, { durable? })` applies a batch as one unit. A unit can also stay open across calls, as a caller's
+transaction running its own code between writes needs: `db.begin()` opens one, `unit.write(batch)` applies a batch in
+it, its writes read their own, and `unit.commit({ durable? })` or `unit.abort()` ends it. One unit is open at a time,
+and while it is `db.write` refuses (`UNIT_OPEN`): its writes go through the unit. The unit's write transaction belongs
+to the thread that began it. A unit opening on a map more than half used grows the map first, since an open unit can't
+grow it.
+
+A batch is applied in a savepoint of its unit, so a refused operation keeps none of its batch, and the unit goes on.
+
+The operations:
 
 - **Operations:** create (a whole row; the engine assigns the id unless an import brings one, the code, `createdAt`
   and `updatedAt`), upsert, set, set many, append to a list, merge into an object, delete a field, remove from a list,
   trash, restore, grant and revoke a role, grant exclusively among entities, link (with info, replace, and refusing a
   cycle in a kind), unlink, unlink all, update and remove a relation, destroy.
-- **Savepoints:** a batch may hold nested groups; a failing group rolls back alone when the batch says so, as apack's
-  nested `transact` does.
+- **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
+  it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
+  is an undo log of each key's previous value, so rolling one back costs what it wrote.
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role, a missing required field, an id
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
-  or taken code. A relation's ends are checked at commit, so a batch may link to an entity it creates later in the
-  batch.
+  or taken code, a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
+  (`UNKNOWN_FIELD`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
+  counts every edge, a trashed entity's included, since restoring it would close the cycle). A relation's ends are
+  checked at commit, so a unit may link to an entity it creates later.
 - **The result** carries what the batch created (ids, codes), the rows asked for back, and the commit's change set.
 
 A batch is data, so the engine can retry it (after growing the map, `design.md`) without involving the caller.

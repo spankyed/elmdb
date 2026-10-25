@@ -184,7 +184,8 @@ search step names its text or vector index only when the type has more than one.
 ```
 
 - `fields`: one, or several for a compound index, which serves a filter on its leading fields together with order or a
-  range on the next: `where('sender', 'user').orderBy('timestamp')`.
+  range on the next: `where('sender', 'user').orderBy('timestamp')`. A field of any type but `bytes` and `object`: of
+  an `any` field the index holds the scalar values, and a lookup for another walks the type's rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`).
 - A `list` field is indexed per element. A string longer than 256 characters isn't indexed: the type's rows are walked
   for it instead.

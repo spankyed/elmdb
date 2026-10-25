@@ -24,10 +24,40 @@ export declare class Database {
   get openReport(): { schemaChanges: SchemaChange[] }
   /** Group commit's syncs so far */
   get syncs(): number
+  /**
+   * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
+   * `{ results: OpResult[], changes: ChangeSet }`. `durable` commits it with a sync
+   */
+  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  /**
+   * Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
+   * (`UNIT_OPEN`), and writes go through the unit
+   */
+  begin(): Unit
   /** Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails */
   durable(): Promise<void>
   /** Syncs what is owed and releases the environment; closing a closed database does nothing */
   close(): void
+}
+
+/** A unit open across calls, on the thread that began it */
+export declare class Unit {
+  /**
+   * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
+   * bytes of `{ results: OpResult[] }`
+   */
+  write(batch: Buffer): Buffer
+  /** Opens a savepoint, answering its depth */
+  savepoint(): number
+  /** Undoes everything since the savepoint at `depth`, closing it */
+  rollbackTo(depth: number): void
+  /** Closes the savepoint at `depth`, keeping its writes */
+  release(depth: number): void
+  /** Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it */
+  commit(durable?: boolean | undefined | null): Buffer
+  /** Ends the unit, keeping nothing of it */
+  abort(): void
+  get isOpen(): boolean
 }
 
 export interface OpenOptions {

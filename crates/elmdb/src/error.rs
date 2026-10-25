@@ -36,6 +36,50 @@ pub enum ErrorCode {
     WrongFormat,
     /// A value isn't in the value spec (`docs/format.md`, Values)
     ValueInvalid,
+    /// A batch or plan doesn't decode, or holds an operation this version doesn't know
+    BatchInvalid,
+    /// A type the schema doesn't declare
+    UnknownType,
+    /// A field its type doesn't declare, on a type that refuses additional fields
+    UnknownField,
+    /// A relation kind the schema doesn't declare
+    UnknownRelationKind,
+    /// A role the schema doesn't declare
+    UnknownRole,
+    /// An id no entity has
+    NoSuchEntity,
+    /// An id no relation has
+    NoSuchRelation,
+    /// A create given an id an entity already has
+    IdInUse,
+    /// An id that names another type than the one given
+    TypeMismatch,
+    /// A write to a field only the engine writes
+    ReservedField,
+    /// A type name the engine's own ids use
+    ReservedType,
+    /// A list write to a field whose value isn't a list
+    NotAList,
+    /// A created row lacking a field its type requires, or a delete of one
+    RequiredField,
+    /// A value its field's declared type doesn't take
+    FieldType,
+    /// A short code that isn't the type's `<prefix>-<n>`, or one an entity can't take
+    InvalidShortCode,
+    /// A short code another entity holds
+    ShortCodeInUse,
+    /// A link from an entity to itself
+    SelfLink,
+    /// A link between types its kind's endpoints don't allow
+    Endpoint,
+    /// A link past its kind's cardinality
+    Cardinality,
+    /// A link that would close a cycle through an acyclic kind
+    Cycle,
+    /// A write that would give two entities the same values in a unique index
+    Unique,
+    /// An operation a unit can't hold, made while one is open, or a second unit begun
+    UnitOpen,
 }
 
 impl ErrorCode {
@@ -56,6 +100,28 @@ impl ErrorCode {
             Self::NotADatabase => "NOT_A_DATABASE",
             Self::WrongFormat => "WRONG_FORMAT",
             Self::ValueInvalid => "VALUE_INVALID",
+            Self::BatchInvalid => "BATCH_INVALID",
+            Self::UnknownType => "UNKNOWN_TYPE",
+            Self::UnknownField => "UNKNOWN_FIELD",
+            Self::UnknownRelationKind => "UNKNOWN_RELATION_KIND",
+            Self::UnknownRole => "UNKNOWN_ROLE",
+            Self::NoSuchEntity => "NO_SUCH_ENTITY",
+            Self::NoSuchRelation => "NO_SUCH_RELATION",
+            Self::IdInUse => "ID_IN_USE",
+            Self::TypeMismatch => "TYPE_MISMATCH",
+            Self::ReservedField => "RESERVED_FIELD",
+            Self::ReservedType => "RESERVED_TYPE",
+            Self::NotAList => "NOT_A_LIST",
+            Self::RequiredField => "REQUIRED_FIELD",
+            Self::FieldType => "FIELD_TYPE",
+            Self::InvalidShortCode => "INVALID_SHORT_CODE",
+            Self::ShortCodeInUse => "SHORT_CODE_IN_USE",
+            Self::SelfLink => "SELF_LINK",
+            Self::Endpoint => "ENDPOINT",
+            Self::Cardinality => "CARDINALITY",
+            Self::Cycle => "CYCLE",
+            Self::Unique => "UNIQUE",
+            Self::UnitOpen => "UNIT_OPEN",
         }
     }
 }
@@ -117,6 +183,28 @@ mod tests {
             ErrorCode::NotADatabase,
             ErrorCode::WrongFormat,
             ErrorCode::ValueInvalid,
+            ErrorCode::BatchInvalid,
+            ErrorCode::UnknownType,
+            ErrorCode::UnknownField,
+            ErrorCode::UnknownRelationKind,
+            ErrorCode::UnknownRole,
+            ErrorCode::NoSuchEntity,
+            ErrorCode::NoSuchRelation,
+            ErrorCode::IdInUse,
+            ErrorCode::TypeMismatch,
+            ErrorCode::ReservedField,
+            ErrorCode::ReservedType,
+            ErrorCode::NotAList,
+            ErrorCode::RequiredField,
+            ErrorCode::FieldType,
+            ErrorCode::InvalidShortCode,
+            ErrorCode::ShortCodeInUse,
+            ErrorCode::SelfLink,
+            ErrorCode::Endpoint,
+            ErrorCode::Cardinality,
+            ErrorCode::Cycle,
+            ErrorCode::Unique,
+            ErrorCode::UnitOpen,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

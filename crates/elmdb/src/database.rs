@@ -53,6 +53,8 @@ pub struct Database {
     read_only: bool,
     store: Mutex<Option<Arc<Store>>>,
     schema: Option<Schema>,
+    /// The schema the engine holds writes to: the database's, or one declaring nothing
+    engine_schema: Arc<Schema>,
     report: OpenReport,
 }
 
@@ -91,6 +93,7 @@ impl Database {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
             store: Mutex::new(Some(Arc::new(store))),
+            engine_schema: Arc::new(schema.clone().unwrap_or_else(empty_schema)),
             schema,
             report,
         })
@@ -117,6 +120,10 @@ impl Database {
     /// What opening did
     pub fn open_report(&self) -> &OpenReport {
         &self.report
+    }
+
+    pub(crate) fn engine_schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.engine_schema)
     }
 
     pub(crate) fn store(&self) -> Result<Arc<Store>> {

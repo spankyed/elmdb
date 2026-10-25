@@ -184,12 +184,19 @@ impl ValueType {
         }
     }
 
-    /// Whether a value index can hold it: a scalar the key codec orders, or a list of those
+    /// Whether a value index can hold it: a scalar the key codec orders, a list of those, or `any`, of whose values
+    /// the index holds the scalars (the rest are found by walking the type's rows)
     pub fn is_value_indexable(&self) -> bool {
         match self {
-            Self::String | Self::Number | Self::Integer | Self::Boolean | Self::Enum { .. } | Self::Ref { .. } => true,
+            Self::String
+            | Self::Number
+            | Self::Integer
+            | Self::Boolean
+            | Self::Enum { .. }
+            | Self::Ref { .. }
+            | Self::Any => true,
             Self::List { of } => of.is_value_indexable() && !matches!(**of, Self::List { .. }),
-            Self::Bytes | Self::Object | Self::Any => false,
+            Self::Bytes | Self::Object => false,
         }
     }
 

@@ -66,9 +66,11 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
   `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, based on `master` once #273 has merged into it, otherwise on
   `ears-disk-engine`. The main checkout is left alone.
 - **Done:** Phase 0 (`aff9050`; CI's Linux job passed), Phase 1 (readings in `docs/evidence/phase-1.md`; D4 stands;
-  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`).
-- **Next:** Phase 4: batches and the model harness, on `store::Store::write` (`crates/elmdb/src/store/mod.rs`) and
-  the key codec and prefixes in `crates/elmdb/src/format/`.
+  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`), Phase 4 (`docs/evidence/phase-4.md`).
+- **Next:** Phase 5: plans and reads, on the read helpers in `crates/elmdb/src/engine/` (`entities`, `relations`, the
+  `Read` trait in `unit.rs`, and the `#[cfg(test)]` snapshot reads Phase 4's tests use, which plans make the API).
+- **apack:** its main checkout has work of its own in progress on `ears-disk-engine`; Phase 9's worktree branches from
+  `master` once #273 merges, or from `ears-disk-engine` as it stands then.
 - **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
   (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made, so a later session
   remakes them the same way.
@@ -389,7 +391,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | Protocol cost measured, D4 confirmed (P1) | done | `docs/evidence/phase-1.md` | none |
 | Schema per `schema.md` (P2) | done, `9300b19` | 22 specs; two mutations caught (`cargo test -p elmdb schema`) | none |
 | Format, storage, durability per D5–D7 (P3) | done | `docs/evidence/phase-3.md` | none |
-| Writes and model harness (P4) | missing | | all |
+| Writes and model harness (P4) | done | `docs/evidence/phase-4.md` | none |
 | Reads and value indexes (P5) | missing | | all |
 | Derived data, `check`, `rebuild`, schema changes (P6) | missing | | all |
 | Admin, upgrade from format 4, CLI (P7) | missing | | all |

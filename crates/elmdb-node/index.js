@@ -836,3 +836,4 @@ function __napiStampBindingTarget(exportsObject, target) {
 module.exports.__napiBindingTarget = __napiStampBindingTarget(nativeBinding, __napiLoadedBindingTarget)
 module.exports = nativeBinding
 module.exports.Database = nativeBinding.Database
+module.exports.Unit = nativeBinding.Unit
