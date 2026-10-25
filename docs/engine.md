@@ -11,6 +11,15 @@ const db = Database.open(path, { schema, readOnly?, mapSizeBytes?, syncIdleMs?, 
 `syncs: false` skips group commit's syncs, for tests on a temporary directory, where a crash of the machine can't
 matter; `durable()` then resolves at once.
 
+The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
+map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
+engine can run it again without the caller. On Windows LMDB sizes the file to the map, which is why it starts no
+larger.
+
+An open refuses files that aren't an elmdb database (`NOT_A_DATABASE`, which names `tools/lmdb-js-export` for files
+lmdb-js wrote) and a database in another format (`WRONG_FORMAT`), and a new database is stamped with its format, and
+synced, before anything else is written to it.
+
 A database is one directory. A program that needs data with its own life cycle opens a second one: apack opens `main`
 and `runs` (its flow run history), which reset and back up independently.
 

@@ -30,6 +30,12 @@ pub enum ErrorCode {
     SchemaInvalid,
     /// The given schema changes the stored one in a way opening refuses, such as a short code prefix
     SchemaChangeRefused,
+    /// The files hold something other than an elmdb database
+    NotADatabase,
+    /// The database is in a format this version doesn't read
+    WrongFormat,
+    /// A value isn't in the value spec (`docs/format.md`, Values)
+    ValueInvalid,
 }
 
 impl ErrorCode {
@@ -47,6 +53,9 @@ impl ErrorCode {
             Self::NoDatabase => "NO_DATABASE",
             Self::SchemaInvalid => "SCHEMA_INVALID",
             Self::SchemaChangeRefused => "SCHEMA_CHANGE_REFUSED",
+            Self::NotADatabase => "NOT_A_DATABASE",
+            Self::WrongFormat => "WRONG_FORMAT",
+            Self::ValueInvalid => "VALUE_INVALID",
         }
     }
 }
@@ -105,6 +114,9 @@ mod tests {
             ErrorCode::NoDatabase,
             ErrorCode::SchemaInvalid,
             ErrorCode::SchemaChangeRefused,
+            ErrorCode::NotADatabase,
+            ErrorCode::WrongFormat,
+            ErrorCode::ValueInvalid,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

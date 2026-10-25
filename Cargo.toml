@@ -16,11 +16,15 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"
 rmp-serde = "1.3.1"
+rmpv = "1.3.1"
+rmp = "0.8.15"
+proptest = "1.12.0"
 thiserror = "2.0.21"
 ts-rs = "12.0.1"
 schemars = "1.2.3"
 tempfile = "3.27.0"
-napi = { version = "3.15.0", default-features = false, features = ["napi9"] }
+napi = { version = "3.15.0", default-features = false, features = ["napi9", "serde-json"] }
+process_path = "0.1.4"
 napi-derive = "3.6.13"
 napi-build = "2.6.0"
 

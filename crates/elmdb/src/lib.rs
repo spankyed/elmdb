@@ -2,7 +2,10 @@
 
 mod database;
 mod error;
+pub mod format;
 pub mod schema;
+mod store;
 
-pub use database::{Database, OpenOptions};
+pub use database::{Database, OpenOptions, OpenReport};
 pub use error::{Error, ErrorCode, Result};
+pub use store::sync::Durable;

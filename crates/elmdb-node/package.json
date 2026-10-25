@@ -31,7 +31,8 @@
       "x86_64-unknown-linux-musl",
       "aarch64-unknown-linux-musl",
       "x86_64-pc-windows-msvc"
-    ]
+    ],
+    "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Schema, SchemaChange }\n"
   },
   "scripts": {
     "build": "napi build --platform --release",

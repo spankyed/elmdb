@@ -116,12 +116,8 @@ builders settle and another program wants them, they move into elmdb then. apack
 - Access control: the caller is trusted, as apack's packs run in-process.
 - A general-purpose LMDB binding for JavaScript.
 
-## Open questions
+## Settled questions
 
-- **Growing the map.** LMDB refuses a write past the map size (`MDB_MAP_FULL`). A large map costs only address space
-  on macOS and Linux, but on Windows LMDB sizes the file to the map. Options: a large map everywhere but Windows, or
-  the engine growing the map between units when one fails, and retrying that unit, which it can do because a batch is
-  data rather than a caller's function.
-- **Tests without an in-memory backend.** Every test opens a database in a temporary directory. Whether that is fast
-  enough for apack's suites is measured during parity (`roadmap.md`); the fallback is an in-memory backend inside the
-  engine, which is still one implementation.
+- **Growing the map.** The engine grows it itself, between units (`engine.md`, Opening).
+- **Tests without an in-memory backend.** There is none: a test opens a database in a temporary directory with
+  `syncs: false`. What that costs apack's suites is recorded during parity (`roadmap.md`), not gated.

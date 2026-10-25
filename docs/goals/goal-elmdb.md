@@ -66,8 +66,9 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
   `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, based on `master` once #273 has merged into it, otherwise on
   `ears-disk-engine`. The main checkout is left alone.
 - **Done:** Phase 0 (`aff9050`; CI's Linux job passed), Phase 1 (readings in `docs/evidence/phase-1.md`; D4 stands;
-  the spike deleted), Phase 2 (`9300b19`).
-- **Next:** Phase 3, then 4. Phase 3 starts from the store in `crates/elmdb/src/database.rs`.
+  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`).
+- **Next:** Phase 4: batches and the model harness, on `store::Store::write` (`crates/elmdb/src/store/mod.rs`) and
+  the key codec and prefixes in `crates/elmdb/src/format/`.
 - **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
   (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made, so a later session
   remakes them the same way.
@@ -85,7 +86,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D4 | Plans and batches cross the binding as one msgpack buffer each, and a result comes back as one buffer that apack's facade decodes. Their Rust types are the definition; the TypeScript is generated (ts-rs), and the JSON Schema of the schema (schemars) | this goal; `design.md`, principle 6 |
 | D5 | The key layout is `format.md`'s, primary under `p/` and derived under `d/`, one LMDB database per environment | `format.md` |
 | D6 | Durability keeps apack's semantics: a commit survives a process crash; group commit syncs after 100 ms idle and within 1 s; `durable()` waits for the sync it needs and rejects when that fails, leaving its commits owed | `engine.md`, Durability; apack's `tests/lmdb/durability.spec.ts` |
-| D7 | The engine grows the map: on `MAP_FULL` it grows the map between units and retries the batch once, which it can since a batch is data. Initial and growth sizes are a measured choice recorded in evidence | this goal (closes `design.md`'s open question) |
+| D7 | The engine grows the map: on `MAP_FULL` it aborts the unit, doubles the map with no transaction of the process open, and runs the unit again, up to 16 times, which it can since a unit is data. The map starts at twice the data file and 64 MiB at least, and grows in 64 MiB steps; a growth costs about 0.3 ms over the unit it retries (`docs/evidence/phase-3.md`) | this goal (closes `design.md`'s open question) |
 | D8 | Strings sort by icu4x's root collation. apack accepts that `orderBy` order may change once, at the switch | `design.md`, principle 8; apack's plan, String order |
 | D9 | `link`'s `acyclicIn` and `replace` leave apack's write builder; relation kinds declare `acyclic` and `unique` | `schema.md`, Relations |
 | D10 | Every test opens a database in a temporary directory; there is no memory backend. Tests open with `syncs: false`, which skips group commit's syncs (a crash of the machine can't matter to a temporary directory). Phase 9 records what this costs apack's unit pools; the reading is reported, not gated | this goal (closes `design.md`'s open question) |
@@ -387,7 +388,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | elmdb repository with checks, generated types, one-LMDB guard (P0) | done, `aff9050` | `docs/evidence/phase-0.md`; CI run 40159534326 | the full matrix, after Phase 8 |
 | Protocol cost measured, D4 confirmed (P1) | done | `docs/evidence/phase-1.md` | none |
 | Schema per `schema.md` (P2) | done, `9300b19` | 22 specs; two mutations caught (`cargo test -p elmdb schema`) | none |
-| Format, storage, durability per D5–D7 (P3) | missing | | all |
+| Format, storage, durability per D5–D7 (P3) | done | `docs/evidence/phase-3.md` | none |
 | Writes and model harness (P4) | missing | | all |
 | Reads and value indexes (P5) | missing | | all |
 | Derived data, `check`, `rebuild`, schema changes (P6) | missing | | all |
