@@ -8,6 +8,8 @@ export default defineConfig({
   resolve: { conditions },
   ssr: { resolve: { conditions } },
   test: {
+    // A worker exits when its vitest does, rather than running on orphaned
+    setupFiles: ['../../scripts/lib/vitest-exit-with-parent.ts'],
     // Large (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts): the harness's halves that open real LMDB
     // environments and kill child processes
     testTimeout: 120_000,
