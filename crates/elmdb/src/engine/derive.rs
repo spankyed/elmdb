@@ -15,7 +15,7 @@ use crate::schema::{Cardinality, Schema};
 use super::entities::{self, ValueIndex, entries_of, value_indexes};
 use super::keys;
 use super::unit::{Read, Txn};
-use super::{ids, relations, values};
+use super::{ids, relations, text, values};
 
 /// One entity as primary data holds it
 struct Entity {
@@ -92,6 +92,12 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
                 out.extend(index_entries(r, t, &index, of)?);
             }
         }
+        let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
+        for index in text::text_indexes(r.schema(), t) {
+            if is_built(r, t, &index.name)? {
+                out.extend(text::entries(r, t, &index, &places)?);
+            }
+        }
     }
     for (key, bytes) in r.scan(&keys::all_relations())? {
         let relation = match decode_key(&key)?.pop() {
@@ -110,15 +116,37 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 7] =
-    [Prefix::Live, Prefix::Trashed, Prefix::Count, Prefix::Index, Prefix::Out, Prefix::In, Prefix::Between];
+const COMPARED: [Prefix; 11] = [
+    Prefix::Live,
+    Prefix::Trashed,
+    Prefix::Count,
+    Prefix::Index,
+    Prefix::Out,
+    Prefix::In,
+    Prefix::Between,
+    Prefix::TextTerm,
+    Prefix::TextPositions,
+    Prefix::TextDocument,
+    Prefix::TextStats,
+];
+
+/// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
+const PER_INDEX: [Prefix; 5] =
+    [Prefix::Index, Prefix::TextTerm, Prefix::TextPositions, Prefix::TextDocument, Prefix::TextStats];
+
+/// Every index of a type that is built or waits to be: its value indexes and its text indexes
+pub fn index_names(schema: &Schema, entity_type: &str) -> Vec<String> {
+    let mut names: Vec<String> = value_indexes(schema, entity_type).into_iter().map(|i| i.name).collect();
+    names.extend(text::text_indexes(schema, entity_type).into_iter().map(|i| i.name));
+    names
+}
 
 /// What is stored under the compared prefixes, an unbuilt index's entries left out
 fn stored(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
     let mut out = BTreeMap::new();
     for prefix in COMPARED {
         for (key, value) in r.scan(&prefix.key().to_vec())? {
-            if prefix == Prefix::Index {
+            if PER_INDEX.contains(&prefix) {
                 let parts = decode_key(&key)?;
                 let built = match (parts.get(1), parts.get(2)) {
                     (Some(Part::String(t)), Some(Part::String(i))) => is_built(r, t, i)?,
@@ -319,12 +347,19 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             for (key, _) in t.scan(&keys::index_range(entity_type, name, &[]))? {
                 t.del(&key)?;
             }
+            text::clear(t, entity_type, name)?;
             t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
             let all = entities_of(t)?;
             let of: Vec<&Entity> = all.iter().filter(|e| ids::type_of(&e.id) == entity_type).collect();
             let found = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name);
             if let Some(found) = found {
                 for (key, value) in index_entries(t, entity_type, &found, &of)? {
+                    t.put(&key, &value)?;
+                }
+            }
+            if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+                let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
+                for (key, value) in text::entries(t, entity_type, &found, &places)? {
                     t.put(&key, &value)?;
                 }
             }
@@ -339,8 +374,8 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             let types: std::collections::BTreeSet<String> =
                 entities_of(t)?.iter().map(|e| ids::type_of(&e.id).to_owned()).collect();
             for ty in &types {
-                for index in value_indexes(t.schema, ty) {
-                    t.put(&keys::index_built(ty, &index.name), &values::encode(&true.into()))?;
+                for index in index_names(t.schema, ty) {
+                    t.put(&keys::index_built(ty, &index), &values::encode(&true.into()))?;
                 }
             }
             for (key, value) in derive(t)? {
@@ -361,9 +396,6 @@ pub fn build_chunk(
     after: u64,
     limit: usize,
 ) -> Result<Option<u64>> {
-    let Some(index) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
-        return Ok(None);
-    };
     let mut ranged: Vec<(u64, String)> = Vec::new();
     for trashed in [false, true] {
         for (key, id) in t.scan(&keys::type_range(trashed, entity_type))? {
@@ -380,6 +412,20 @@ pub fn build_chunk(
     let chunk: Vec<(u64, String)> = ranged.into_iter().take(limit + 1).collect();
     let done = chunk.len() <= limit;
     let mut last = after;
+    let Some(index) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
+        let Some(index) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
+            return Ok(None);
+        };
+        for (seq, id) in chunk.iter().take(limit) {
+            text::refile_at(t, entity_type, &index, id, *seq)?;
+            last = *seq;
+        }
+        if done {
+            t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+            return Ok(None);
+        }
+        return Ok(Some(last));
+    };
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
         for parts in entries_of(&fields) {

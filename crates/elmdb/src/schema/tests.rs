@@ -223,7 +223,7 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "text", "fields": { "timestamp": {} } }),
-            "types.Message.indexes.x.fields.timestamp: a text index reads string fields, and \"timestamp\" is a number field (declared by default-setup)",
+            "types.Message.indexes.x.fields.timestamp: a text index reads string and any fields, and \"timestamp\" is a number field (declared by default-setup)",
         ),
         (
             json!({ "kind": "text", "fields": { "text": { "weight": 0 } } }),

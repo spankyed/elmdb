@@ -40,6 +40,31 @@ pub enum ReadOp {
     },
     /// Whether linking `source` to `target` would close a cycle through these kinds
     WouldCreateCycle { source: String, target: String, kinds: Vec<String> },
+    /// Terms of a type's text index for a word being typed: those it starts (`completions`, most held first) and the
+    /// nearest to it (`corrections`, for "did you mean")
+    Suggest {
+        #[serde(rename = "type")]
+        entity_type: String,
+        #[serde(default)]
+        index: Option<String>,
+        term: String,
+        #[serde(default = "ten")]
+        limit: u32,
+    },
+    /// The entities whose label holds the query's characters in order, best first: for a quick-open across types.
+    /// `fields` names each type's label field
+    FindLabels {
+        query: String,
+        fields: std::collections::BTreeMap<String, String>,
+        #[serde(default = "ten")]
+        limit: u32,
+        #[serde(default)]
+        scope: Scope,
+    },
+}
+
+fn ten() -> u32 {
+    10
 }
 
 /// A query: where it starts, the steps after, and what it answers
@@ -171,6 +196,63 @@ pub enum Step {
         #[serde(default)]
         field: Option<String>,
     },
+    /// The entities after `id` in the order so far: a page's cursor, the last id of the page before
+    After {
+        id: String,
+    },
+    /// The entities a type's text index matches to `query`, most relevant first (`docs/search.md`). `index` names
+    /// the index on a type with more than one
+    Search {
+        query: String,
+        #[serde(default)]
+        index: Option<String>,
+        #[serde(default)]
+        options: SearchOptions,
+    },
+}
+
+/// How a search matches and ranks
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SearchOptions {
+    /// The query's last word matches the terms it starts, for search as you type
+    #[serde(default)]
+    pub prefix: bool,
+    /// A word of five letters or more also matches a term one edit away, nine or more two
+    #[serde(default = "yes")]
+    pub fuzzy: bool,
+    /// Any clause matching is enough, rather than every one
+    #[serde(default)]
+    pub any: bool,
+    /// Only these of the index's fields
+    #[serde(default)]
+    pub fields: Option<Vec<String>>,
+    /// A score halved for every `halfLife` milliseconds the field's time is before `now`
+    #[serde(default)]
+    pub recency: Option<Recency>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self { prefix: false, fuzzy: true, any: false, fields: None, recency: None }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Recency {
+    /// A number of milliseconds since the epoch, or a timestamp
+    pub field: String,
+    pub half_life: f64,
+    /// The time ages are measured from; the read's clock when absent
+    #[serde(default)]
+    pub now: Option<f64>,
 }
 
 /// What a query answers
@@ -200,8 +282,18 @@ pub enum Terminal {
         #[serde(default)]
         types: Option<Vec<String>>,
     },
-    /// The ids by the field's value, in the order each value first appears
+    /// The ids by the field's value, in the order each value first appears; with `counts`, how many in place of the ids
     GroupBy {
         field: String,
+        #[serde(default)]
+        counts: bool,
+    },
+    /// Each entity with what a search found in it: its score, the index's terms it matched, and with `highlights`
+    /// where they are in each field, `[element, start, end]` in UTF-16 units; with `fields`, its id and those fields
+    Hits {
+        #[serde(default)]
+        fields: Option<Vec<String>>,
+        #[serde(default)]
+        highlights: bool,
     },
 }

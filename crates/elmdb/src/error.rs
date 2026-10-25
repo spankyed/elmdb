@@ -80,6 +80,8 @@ pub enum ErrorCode {
     Unique,
     /// An operation a unit can't hold, made while one is open, or a second unit begun
     UnitOpen,
+    /// A search naming an index its type doesn't have, or none on a type with no text index or with several
+    UnknownIndex,
 }
 
 impl ErrorCode {
@@ -122,6 +124,7 @@ impl ErrorCode {
             Self::Cycle => "CYCLE",
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
+            Self::UnknownIndex => "UNKNOWN_INDEX",
         }
     }
 }

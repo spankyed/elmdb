@@ -217,6 +217,31 @@ pub fn matches_removal(element: &Value, criterion: &Value) -> bool {
     }
 }
 
+/// A msgpack timestamp's milliseconds: 32 bits of seconds, 64 bits of nanoseconds and seconds, or 96 bits
+pub fn timestamp_ms(data: &[u8]) -> f64 {
+    match data.len() {
+        4 => f64::from(u32::from_be_bytes(data.try_into().unwrap())) * 1000.0,
+        8 => {
+            let v = u64::from_be_bytes(data.try_into().unwrap());
+            (v & 0x3_ffff_ffff) as f64 * 1000.0 + (v >> 34) as f64 / 1e6
+        }
+        12 => {
+            let nanos = u32::from_be_bytes(data[..4].try_into().unwrap());
+            let secs = i64::from_be_bytes(data[4..].try_into().unwrap());
+            secs as f64 * 1000.0 + f64::from(nanos) / 1e6
+        }
+        _ => 0.0,
+    }
+}
+
+/// A time a value holds, in milliseconds since the epoch: a number, or a timestamp
+pub fn as_time(value: &Value) -> Option<f64> {
+    match value {
+        Value::Ext(t, data) if *t == TIMESTAMP_EXTENSION => Some(timestamp_ms(data)),
+        other => as_number(other),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

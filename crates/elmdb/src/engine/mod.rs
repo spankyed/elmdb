@@ -19,6 +19,7 @@ mod numbering;
 pub mod plan;
 mod reads;
 mod relations;
+mod text;
 mod unit;
 mod values;
 
@@ -114,6 +115,16 @@ pub(crate) fn drop_index_data(
             for key in doomed {
                 db.delete(txn, &key)?;
             }
+            for range in keys::text_index_ranges(entity_type, index) {
+                let (low, high) = crate::format::key::prefix_range(&range);
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let doomed: Vec<Vec<u8>> =
+                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                for key in doomed {
+                    db.delete(txn, &key)?;
+                }
+            }
+            db.delete(txn, &keys::text_stats(entity_type, index))?;
             db.delete(txn, &keys::index_built(entity_type, index))?;
         }
     }
@@ -134,10 +145,9 @@ pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(Stri
                     false
                 })?;
             }
-            for index in entities::value_indexes(schema, entity_type) {
-                if !derive::is_built(&s, entity_type, &index.name)? {
-                    if has_entities { &mut unbuilt } else { &mut empty }
-                        .push((entity_type.clone(), index.name.clone()));
+            for index in derive::index_names(schema, entity_type) {
+                if !derive::is_built(&s, entity_type, &index)? {
+                    if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
                 }
             }
         }

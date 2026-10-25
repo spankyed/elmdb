@@ -1,6 +1,7 @@
 # Search
 
-Text and vector indexes, and search as plan steps. Status: designed, not built.
+Text and vector indexes, and search as plan steps. Status: text search and fuzzy labels are built
+(`crates/elmdb/src/engine/text/`); vector and hybrid search, and substring and regex, are designed, not built.
 
 ## Why in the engine
 
@@ -70,6 +71,29 @@ The engine never calls a model. A write that changes a vector index's source fie
 pending, in the same unit. A caller's worker takes pending chunks (`db.pendingEmbeddings(index, limit)`), embeds them
 and writes the vectors back in a batch, which the engine accepts only if the source hasn't changed since. `stats()`
 reports how many are pending, so a search can say it is incomplete.
+
+## Text search as built
+
+- **Keys** (`format.md`, Keys): per type and index, a term's posting list (`d/ft`, a roaring bitmap of the
+  entities' places), its positions in each entity (`d/fp`), each entity's document — id, each field's length, its
+  terms — (`d/fd`), and the index's statistics (`d/fs`: documents, each field's total length). Every write that changes
+  an indexed field refiles the entity from its stored document, in the same unit; an index declared over existing data
+  is built in the background as a value index is, and `check()` and `rebuild()` cover it.
+- **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
+  A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
+- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`; `field:word`;
+  `a OR b`. The last word matches the terms it starts with `prefix`; a word of five letters or more also matches a term
+  an edit away, nine or more two, unless `fuzzy: false`; the word itself outranks both.
+- **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
+  when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
+  order.
+- **As a plan step**: `search` after a type start reads the posting lists; after other steps it searches among the
+  entities they reached, in which a type with no text index holds no match. `hits` answers each entity's score,
+  matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
+  `counts` is a facet; `after` pages by the last id of the page before.
+- **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first.
+  `findLabels` is the quick-open: a query's characters in order in each type's label field, scored for word starts,
+  runs and position, best first.
 
 ## Order of work
 

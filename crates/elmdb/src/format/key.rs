@@ -105,20 +105,34 @@ impl KeyWriter {
         self
     }
 
+    /// A string's leading characters, left open: the key this writes is a byte prefix of every key whose part here is
+    /// a string starting with `s`, which `Read::visit_starting` ranges over
+    pub fn string_prefix(&mut self, s: &str) -> &mut Self {
+        self.bytes.push(STRING);
+        self.escaped_open(s.as_bytes());
+        self
+    }
+
     pub fn bytes(&mut self, b: &[u8]) -> &mut Self {
         self.bytes.push(BYTES);
         self.escaped(b);
         self
     }
 
+    /// The bytes escaped and ended
     fn escaped(&mut self, b: &[u8]) {
+        self.escaped_open(b);
+        self.bytes.push(0);
+    }
+
+    /// The bytes escaped, left open for more
+    fn escaped_open(&mut self, b: &[u8]) {
         for &byte in b {
             self.bytes.push(byte);
             if byte == 0 {
                 self.bytes.push(ESCAPE);
             }
         }
-        self.bytes.push(0);
     }
 
     pub fn part(&mut self, part: &Part) -> &mut Self {

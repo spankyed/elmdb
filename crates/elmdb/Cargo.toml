@@ -24,6 +24,11 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# Text indexes (`docs/search.md`): tokenizing and normalizing, the posting lists, fuzzy terms, and stemming
+charabia.workspace = true
+roaring.workspace = true
+levenshtein_automata.workspace = true
+rust-stemmers.workspace = true
 ts-rs = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 

@@ -6,7 +6,8 @@
 //! - `d/c type` → the type's count of live entities
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
 //!
-//! Every write goes through `put_field` and `delete_field`, which keep the derived keys.
+//! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
+//! among them.
 
 use rmpv::Value;
 
@@ -133,6 +134,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     let before = get(t, id, field)?;
     reindex(t, id, field, before.as_ref(), Some(value))?;
     t.put(&keys::value(id, field), &values::encode(value))?;
+    super::text::refile(t, id, Some(field))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, true)?;
@@ -145,6 +147,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     let Some(before) = get(t, id, field)? else { return Ok(()) };
     reindex(t, id, field, Some(&before), None)?;
     t.del(&keys::value(id, field))?;
+    super::text::refile(t, id, Some(field))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, false)?;
@@ -155,6 +158,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
 /// Removes the entity's fields, their index entries, and its place in its type's order; its relations go first,
 /// removed by the relations module
 pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
+    super::text::remove(t, id)?;
     for (field, bytes) in fields(t, id)? {
         let before = values::decode(&bytes)?;
         reindex(t, id, &field, Some(&before), None)?;

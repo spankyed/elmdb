@@ -3,9 +3,9 @@
 //! have their answer; a step needing the whole set (`orderBy`, `reverse`, `distinct`, the deep walks) collects it.
 //! A `where` or `withRole` straight after a type start reads a value index where one covers the field.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use rmpv::Value;
 
@@ -15,7 +15,8 @@ use crate::format::value::TIMESTAMP_EXTENSION;
 
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
-use super::plan::{Plan, ReadOp, Scope, Start, Step, Terminal};
+use super::plan::{Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
+use super::text::{self, search::Hit};
 use super::unit::Read;
 use super::{ids, relations, values};
 
@@ -158,6 +159,24 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
                 write_relation(id, stored, &mut w);
             }
             Ok(())
+        }
+        ReadOp::Suggest { entity_type, index, term, limit } => {
+            let found = text::resolve(r.schema(), entity_type, index.as_deref(), "suggest")?;
+            let (completions, corrections) = text::search::suggest(r, entity_type, &found, term, *limit as usize)?;
+            let mut w = W(out);
+            w.map(3);
+            w.kind("suggestions");
+            for (name, terms) in [("completions", &completions), ("corrections", &corrections)] {
+                w.str(name);
+                w.array(terms.len() as u32);
+                for t in terms {
+                    w.str(t);
+                }
+            }
+            Ok(())
+        }
+        ReadOp::FindLabels { query, fields, limit, scope } => {
+            find_labels(r, query, fields, *limit, *scope, &mut W(out))
         }
         ReadOp::WouldCreateCycle { source, target, kinds } => {
             for kind in kinds {
@@ -310,6 +329,8 @@ struct Query<'r, R: Read> {
     r: &'r R,
     plan: &'r Plan,
     visited: Cell<u64>,
+    /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
+    hits: RefCell<HashMap<String, (Hit, String)>>,
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
@@ -546,6 +567,17 @@ impl<R: Read> Query<'_, R> {
                 })?;
                 Ok(!stopped)
             }
+            Step::After { id: cursor } => {
+                let mut past = false;
+                self.pull(before, &mut |id| {
+                    if past {
+                        return visit(id);
+                    }
+                    past = id == cursor;
+                    Ok(true)
+                })
+            }
+            Step::Search { query, index, options } => self.search(before, query, index.as_deref(), options, visit),
             Step::Distinct { field: name } => {
                 let ids = self.collect(before)?;
                 let mut kept = Vec::new();
@@ -572,6 +604,73 @@ impl<R: Read> Query<'_, R> {
                 each(kept, visit)
             }
         }
+    }
+
+    /// The entities a search matches, most relevant first, ties in the order they came: a type start's whole types,
+    /// or the set before the step, of whose types one with no text index holds no match
+    fn search(
+        &self,
+        before: usize,
+        query: &str,
+        index: Option<&str>,
+        options: &SearchOptions,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
+        let raw = text::search::parse(query);
+        let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
+        let among = match self.start_types() {
+            Some(_) if before == 0 => None,
+            _ => Some(self.collect(before)?),
+        };
+        let types: Vec<String> = match &among {
+            None => self.start_types().unwrap_or_default().to_vec(),
+            Some(ids) => {
+                let mut types: Vec<String> = Vec::new();
+                for id in ids {
+                    let t = ids::type_of(id);
+                    if !types.iter().any(|known| known == t) {
+                        types.push(t.to_owned());
+                    }
+                }
+                types
+            }
+        };
+        let order: Option<HashMap<&str, usize>> =
+            among.as_ref().map(|ids| ids.iter().enumerate().rev().map(|(at, id)| (id.as_str(), at)).collect());
+        let mut found: Vec<((usize, u64), Hit, String)> = Vec::new();
+        for (at, entity_type) in types.iter().enumerate() {
+            let text_index = match text::resolve(self.r.schema(), entity_type, index, "search") {
+                Ok(found) => found,
+                Err(e) if among.is_some() && index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                Err(e) => return Err(e),
+            };
+            let within = match &among {
+                None => None,
+                Some(ids) => {
+                    let of_type: Vec<String> =
+                        ids.iter().filter(|id| ids::type_of(id) == entity_type).cloned().collect();
+                    Some(text::search::places(self.r, &of_type)?.into_keys().collect::<roaring::RoaringTreemap>())
+                }
+            };
+            for hit in text::search::search(self.r, entity_type, &text_index, &raw, options, within.as_ref(), now)? {
+                self.visited.set(self.visited.get() + 1);
+                let place = match &order {
+                    Some(order) => (order.get(hit.id.as_str()).copied().unwrap_or(usize::MAX), 0),
+                    None if self.admits(&hit.id)? => (at, hit.seq),
+                    None => continue,
+                };
+                found.push((place, hit, text_index.name.clone()));
+            }
+        }
+        found.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
+        let ids: Vec<String> = found.iter().map(|(_, hit, _)| hit.id.clone()).collect();
+        {
+            let mut hits = self.hits.borrow_mut();
+            for (_, hit, name) in found {
+                hits.insert(hit.id.clone(), (hit, name));
+            }
+        }
+        each(ids, visit)
     }
 
     /// Every id after the first `upto` steps
@@ -778,7 +877,7 @@ fn sort_key(value: Option<&Value>) -> SortKey {
         None | Some(Value::Nil) => SortKey::Last,
         Some(Value::Boolean(b)) => SortKey::Bool(*b),
         Some(Value::String(s)) => SortKey::Text(s.as_str().unwrap_or_default().to_owned()),
-        Some(Value::Ext(t, data)) if *t == TIMESTAMP_EXTENSION => SortKey::Time(timestamp_ms(data)),
+        Some(Value::Ext(t, data)) if *t == TIMESTAMP_EXTENSION => SortKey::Time(values::timestamp_ms(data)),
         Some(v) => match values::as_number(v) {
             Some(n) => SortKey::Number(n),
             None => SortKey::Json(json_text(v)),
@@ -809,23 +908,6 @@ pub fn collator(collation: &str) -> Result<icu_collator::CollatorBorrowed<'stati
     };
     icu_collator::CollatorBorrowed::try_new(prefs, icu_collator::options::CollatorOptions::default())
         .map_err(|e| Error::new(ErrorCode::SchemaInvalid, format!("No collation for \"{collation}\": {e}")))
-}
-
-/// A msgpack timestamp's milliseconds: 32 bits of seconds, 64 bits of nanoseconds and seconds, or 96 bits
-fn timestamp_ms(data: &[u8]) -> f64 {
-    match data.len() {
-        4 => f64::from(u32::from_be_bytes(data.try_into().unwrap())) * 1000.0,
-        8 => {
-            let v = u64::from_be_bytes(data.try_into().unwrap());
-            (v & 0x3_ffff_ffff) as f64 * 1000.0 + (v >> 34) as f64 / 1e6
-        }
-        12 => {
-            let nanos = u32::from_be_bytes(data[..4].try_into().unwrap());
-            let secs = i64::from_be_bytes(data[4..].try_into().unwrap());
-            secs as f64 * 1000.0 + f64::from(nanos) / 1e6
-        }
-        _ => 0.0,
-    }
 }
 
 /// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
@@ -887,7 +969,7 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             ));
         }
     }
-    let q = Query { r, plan, visited: Cell::new(0) };
+    let q = Query { r, plan, visited: Cell::new(0), hits: RefCell::new(HashMap::new()) };
     let last = plan.steps.len();
     let mut w = W(out);
     match &plan.terminal {
@@ -1011,7 +1093,7 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
                 write_relation(id, stored, &mut w);
             }
         }
-        Terminal::GroupBy { field: name } => {
+        Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;
             let mut groups: Vec<(SameValue, Vec<u8>, Vec<String>)> = Vec::new();
             for id in ids {
@@ -1032,6 +1114,10 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             for (_, raw, members) in &groups {
                 w.array(2);
                 w.raw(raw);
+                if *counts {
+                    w.uint(members.len() as u64);
+                    continue;
+                }
                 w.array(members.len() as u32);
                 for id in members {
                     w.str(id);
@@ -1041,7 +1127,128 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             w.str("plainObjects");
             w.bool(plain);
         }
+        Terminal::Hits { fields, highlights } => {
+            if !plan.steps.iter().any(|step| matches!(step, Step::Search { .. })) {
+                return Err(Error::new(ErrorCode::BatchInvalid, "hits() answers a search, and the plan has none"));
+            }
+            let ids = q.collect(last)?;
+            let hits = q.hits.borrow();
+            w.map(3);
+            w.kind("hits");
+            w.str("hits");
+            let start = w.0.len();
+            w.array(ids.len() as u32);
+            for id in &ids {
+                let hit = hits.get(id);
+                let marks = match (hit, *highlights) {
+                    (Some((hit, name)), true) => {
+                        let index = text::resolve(r.schema(), ids::type_of(id), Some(name), "hits")?;
+                        Some(text::search::highlights(r, &index, hit)?)
+                    }
+                    _ => None,
+                };
+                w.map(3 + u32::from(marks.is_some()) + u32::from(fields.is_some()));
+                w.str("id");
+                w.str(id);
+                w.str("score");
+                rmp::encode::write_f64(w.0, hit.map(|(h, _)| h.score).unwrap_or(0.0)).expect("a Vec");
+                w.str("terms");
+                let terms = hit.map(|(h, _)| h.terms.as_slice()).unwrap_or_default();
+                w.array(terms.len() as u32);
+                for term in terms {
+                    w.str(term);
+                }
+                if let Some(marks) = marks {
+                    w.str("highlights");
+                    w.map(marks.len() as u32);
+                    for (field, spans) in &marks {
+                        w.str(field);
+                        w.array(spans.len() as u32);
+                        for span in spans {
+                            w.array(3);
+                            for n in span {
+                                w.uint(u64::from(*n));
+                            }
+                        }
+                    }
+                }
+                if let Some(names) = fields {
+                    w.str("row");
+                    write_row(r, id, Some(names), &mut w)?;
+                }
+            }
+            let plain = !may_hold_proto(&w.0[start..]);
+            w.str("plainObjects");
+            w.bool(plain);
+        }
     }
     visited.entities += q.visited.get();
+    Ok(())
+}
+
+/// A type's entities in the scope's ranges, with their places, in creation order
+fn type_entities(r: &impl Read, entity_type: &str, scope: Scope) -> Result<Vec<(u64, String)>> {
+    let mut out = Vec::new();
+    let ranges: &[bool] = match scope {
+        Scope::Live => &[false],
+        Scope::Trashed => &[true],
+        Scope::WithTrashed => &[false, true],
+    };
+    for &trashed in ranges {
+        for (key, id) in r.scan(&keys::type_range(trashed, entity_type))? {
+            let seq = match decode_key(&key)?.pop() {
+                Some(Part::Number(n)) => n as u64,
+                _ => 0,
+            };
+            out.push((seq, values::decode(&id)?.as_str().unwrap_or_default().to_owned()));
+        }
+    }
+    out.sort_by_key(|(seq, _)| *seq);
+    Ok(out)
+}
+
+/// The labels matching a quick-open's query, best first, ties in creation order
+fn find_labels(
+    r: &impl Read,
+    query: &str,
+    fields: &std::collections::BTreeMap<String, String>,
+    limit: u32,
+    scope: Scope,
+    w: &mut W<'_>,
+) -> Result<()> {
+    let mut found: Vec<(f64, u64, String, Vec<u32>)> = Vec::new();
+    for (entity_type, name) in fields {
+        if !r.schema().types.contains_key(entity_type) {
+            return Err(Error::new(
+                ErrorCode::UnknownType,
+                format!("findLabels: \"{entity_type}\" isn't a type the schema declares"),
+            ));
+        }
+        for (seq, id) in type_entities(r, entity_type, scope)? {
+            let Some(label) = entities::get(r, &id, name)? else { continue };
+            let Some(label) = label.as_str() else { continue };
+            if let Some(m) = text::labels::score(query, label) {
+                found.push((m.score, seq, id, m.positions));
+            }
+        }
+    }
+    found.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal).then_with(|| a.1.cmp(&b.1)));
+    found.truncate(limit as usize);
+    w.map(2);
+    w.kind("labels");
+    w.str("hits");
+    w.array(found.len() as u32);
+    for (score, _, id, positions) in &found {
+        w.map(3);
+        w.str("id");
+        w.str(id);
+        w.str("score");
+        rmp::encode::write_f64(w.0, *score).expect("a Vec");
+        w.str("positions");
+        w.array(positions.len() as u32);
+        for p in positions {
+            w.uint(u64::from(*p));
+        }
+    }
     Ok(())
 }

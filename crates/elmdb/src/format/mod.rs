@@ -51,10 +51,18 @@ pub enum Prefix {
     In,
     /// `d/b source kind target seq` → the edges between two entities
     Between,
+    /// `d/ft type index term` → a text index's posting list: the places of the entities holding the term
+    TextTerm,
+    /// `d/fp type index term seq` → where in the entity's fields the term is
+    TextPositions,
+    /// `d/fd type index seq` → what a text index holds of one entity: its id, each field's length and its terms
+    TextDocument,
+    /// `d/fs type index` → a text index's statistics: its entities and each field's total length
+    TextStats,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 13] = [
+    pub const ALL: [Prefix; 17] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -68,6 +76,10 @@ impl Prefix {
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
+        Prefix::TextTerm,
+        Prefix::TextPositions,
+        Prefix::TextDocument,
+        Prefix::TextStats,
     ];
 
     /// The string the key's first part holds
@@ -86,6 +98,10 @@ impl Prefix {
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",
+            Prefix::TextTerm => "d/ft",
+            Prefix::TextPositions => "d/fp",
+            Prefix::TextDocument => "d/fd",
+            Prefix::TextStats => "d/fs",
         }
     }
 

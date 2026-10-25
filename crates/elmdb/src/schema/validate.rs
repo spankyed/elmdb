@@ -207,9 +207,12 @@ impl Validator<'_> {
                     let field_at = format!("{at}.fields.{field}");
                     match field_of(field) {
                         None => self.problem(field_at.clone(), format!("no such field on {type_name}"), who),
-                        Some(value) if !value.is_text() => self.problem(
+                        Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
                             field_at.clone(),
-                            format!("a text index reads string fields, and \"{field}\" is a {} field", value.name()),
+                            format!(
+                                "a text index reads string and any fields, and \"{field}\" is a {} field",
+                                value.name()
+                            ),
                             who,
                         ),
                         Some(_) => {}

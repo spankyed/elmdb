@@ -21,7 +21,10 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/x` type field value seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges | derived |
 | `d/b` source kind target seq | the edges between two entities | derived |
-| `d/f…` | text indexes: terms, postings, positions, statistics | derived |
+| `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
+| `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
+| `d/fd` type index seq | the entity's document: its id, each field's length, its terms | derived |
+| `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
 | `d/q…` | vector indexes, through hannoy, and pending embeddings | derived |
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`. `check()` does the same in a scratch transaction and

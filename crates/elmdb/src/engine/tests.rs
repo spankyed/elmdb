@@ -50,7 +50,8 @@ pub(super) fn schema() -> Schema {
                     "c": { "type": "any", "optional": true },
                     "tags": { "type": "list", "of": { "type": "string" }, "optional": true },
                     "status": { "type": "enum", "values": ["open", "done"], "optional": true, "nullable": true }
-                }
+                },
+                "indexes": { "text": { "kind": "text", "fields": { "a": { "weight": 2 }, "b": {} } } }
             },
             "Doc": { "fields": { "title": { "type": "string" }, "body": { "type": "string", "optional": true } } },
             "Bag": { "additionalFields": "allow", "fields": {} }

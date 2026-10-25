@@ -3,4 +3,4 @@
 /**
  * What a query answers
  */
-export type Terminal = { "answer": "ids" } | { "answer": "count" } | { "answer": "first" } | { "answer": "last" } | { "answer": "exists" } | { "answer": "rows", fields: Array<string> | null, } | { "answer": "firstRow", fields: Array<string> | null, } | { "answer": "edges", kinds: Array<string>, outward: boolean, types: Array<string> | null, } | { "answer": "groupBy", field: string, };
+export type Terminal = { "answer": "ids" } | { "answer": "count" } | { "answer": "first" } | { "answer": "last" } | { "answer": "exists" } | { "answer": "rows", fields: Array<string> | null, } | { "answer": "firstRow", fields: Array<string> | null, } | { "answer": "edges", kinds: Array<string>, outward: boolean, types: Array<string> | null, } | { "answer": "groupBy", field: string, counts: boolean, } | { "answer": "hits", fields: Array<string> | null, highlights: boolean, };

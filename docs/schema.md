@@ -197,7 +197,8 @@ search step names its text or vector index only when the type has more than one.
 "text": { "kind": "text", "fields": { "title": { "weight": 3 }, "body": { "weight": 1 } }, "analyzer": "standard" }
 ```
 
-- `fields`: `string` fields, or lists of strings, each with a weight.
+- `fields`: `string` fields, lists of strings, or `any` fields, each with a weight; an `any` field's value is text
+  when it is a string or a list of strings, and no text otherwise.
 - `analyzer`: `standard` (charabia's tokenizing, identifiers split on case and punctuation, case and accents folded) or
   `exact` (whole values, case folded). Stemming is `standard`'s option `{ "analyzer": "standard", "stem": "en" }`.
 

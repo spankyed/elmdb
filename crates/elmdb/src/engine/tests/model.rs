@@ -2,7 +2,7 @@
 //! so they collide, refer to each other and are refused, checked after every operation against a reference model kept
 //! as plainly as a model can be. The engine must hold what the model holds, refuse what it refuses, and keep every
 //! derived key in step: a type's live and trashed entities in creation order, its count, each value index's entries,
-//! the role index, and each entity's edges out and in.
+//! the role index, each entity's edges out and in, and what a text index matches.
 
 use std::collections::BTreeMap;
 
@@ -723,6 +723,9 @@ fn sorted_far_ends(mut derived: BTreeMap<String, Json>) -> BTreeMap<String, Json
     derived
 }
 
+/// The words a search of Note's text index (its fields `a` and `b`) asks for: strings the workload writes
+const SEARCHED: [&str; 4] = ["a", "ab", "abc", "c"];
+
 /// What a `where` asks for: every number the workload writes, alone or in a list, and two of its long strings
 fn probes() -> Vec<Json> {
     let mut out: Vec<Json> = (0..10).map(Json::from).collect();
@@ -760,6 +763,12 @@ fn derived_reads() -> Vec<(String, Json)> {
                 ));
             }
         }
+        if t == "Note" {
+            for word in SEARCHED {
+                let steps = json!([{ "step": "search", "query": word, "options": { "fuzzy": false } }]);
+                out.push((format!("{t} search {word}"), ids(start.clone(), steps, "live")));
+            }
+        }
         for role in ROLES {
             out.push((
                 format!("{t} role {role}"),
@@ -793,7 +802,7 @@ fn plans_of(db: &Database) -> BTreeMap<String, Json> {
         .zip(answers.as_array().unwrap())
         .map(|((label, _), answer)| {
             let mut value = if answer["kind"] == "count" { answer["n"].clone() } else { answer["ids"].clone() };
-            if (label.contains(" out ") || label.contains(" in "))
+            if (label.contains(" out ") || label.contains(" in ") || label.contains(" search "))
                 && let Json::Array(items) = &mut value
             {
                 items.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
@@ -841,6 +850,23 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                 ["trashed"] => json!(of_type().filter(|(_, e)| e.trashed).map(|(id, _)| id).collect::<Vec<_>>()),
                 ["with", "trashed"] => json!(of_type().map(|(id, _)| id).collect::<Vec<_>>()),
                 ["count"] => json!(of_type().filter(|(_, e)| !e.trashed).count()),
+                // A field's text is a string or a list's strings; the workload's strings are one word each. Ranking
+                // is the corpora specs' (`text/tests.rs`): a match set is ordered here as the engine's ties are
+                ["search", word] => {
+                    let mut found: Vec<&String> = of_type()
+                        .filter(|(_, e)| {
+                            !e.trashed
+                                && ["a", "b"].iter().any(|f| match e.fields.get(*f) {
+                                    Some(Json::String(s)) => s == word,
+                                    Some(Json::Array(items)) => items.iter().any(|v| v.as_str() == Some(*word)),
+                                    _ => false,
+                                })
+                        })
+                        .map(|(id, _)| *id)
+                        .collect();
+                    found.sort();
+                    json!(found)
+                }
                 ["role", role] => json!(
                     of_type()
                         .filter(|(_, e)| !e.trashed && e.roles.iter().any(|r| r == role))

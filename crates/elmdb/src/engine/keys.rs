@@ -132,3 +132,55 @@ pub fn between_range(source: &str, kind: &str, target: &str) -> Vec<u8> {
         w.string(source).string(kind).string(target);
     })
 }
+
+/// A text index's posting list for a term
+pub fn text_term(entity_type: &str, index: &str, term: &str) -> Vec<u8> {
+    with(Prefix::TextTerm, |w| {
+        w.string(entity_type).string(index).string(term);
+    })
+}
+
+/// Every term of a text index, in term order
+pub fn text_terms(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::TextTerm, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// The bytes every term of a text index starting with `prefix` starts with, for `Read::visit_starting`
+pub fn text_terms_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<u8> {
+    with(Prefix::TextTerm, |w| {
+        w.string(entity_type).string(index).string_prefix(prefix);
+    })
+}
+
+/// Where a term is in one entity's fields
+pub fn text_positions(entity_type: &str, index: &str, term: &str, seq: u64) -> Vec<u8> {
+    with(Prefix::TextPositions, |w| {
+        w.string(entity_type).string(index).string(term).number(seq as f64);
+    })
+}
+
+/// What a text index holds of one entity
+pub fn text_document(entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
+    with(Prefix::TextDocument, |w| {
+        w.string(entity_type).string(index).number(seq as f64);
+    })
+}
+
+/// A text index's statistics
+pub fn text_stats(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::TextStats, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// The ranges of a text index's terms, positions and documents; its statistics are the one key `text_stats` builds
+pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
+    let range = |prefix: Prefix| {
+        with(prefix, |w| {
+            w.string(entity_type).string(index);
+        })
+    };
+    [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument)]
+}

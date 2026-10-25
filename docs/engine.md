@@ -35,7 +35,9 @@ compared at open. A type, field, relation kind or role the schema doesn't declar
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
 envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
-whether it is present), a relation's row, `findRelations` by kind and ends, and `wouldCreateCycle`.
+whether it is present), a relation's row, `findRelations` by kind and ends, `wouldCreateCycle`, and search's
+`suggest` and `findLabels`. A search naming an index its type lacks, or none on a type with none or several, is refused
+(`UNKNOWN_INDEX`).
 
 A plan is a scope, a start, steps and a terminal:
 
@@ -48,9 +50,12 @@ A plan is a scope, a start, steps and a terminal:
 - **Walks:** `out` and `in` (each far end once, of the types when given), `descendants` and `ancestors` (nearest first,
   each entity once, so a cycle ends the walk).
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
-  then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`.
+  then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
+  after an id, a page's cursor).
+- **Search:** `search` (a text index's matches, most relevant first; `search.md`, Text search as built).
 - **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
-  `edges` (relation rows), `groupBy`.
+  `edges` (relation rows), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
+  entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. A `where` or `withRole` straight after a type start

@@ -55,6 +55,9 @@ pub trait Read {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
     /// Visits the entries under `prefix` in key order until `visit` answers false
     fn visit(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
+    /// in key order until `visit` answers false
+    fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     fn schema(&self) -> &Schema;
 
     fn contains(&self, key: &[u8]) -> Result<bool> {
@@ -89,6 +92,32 @@ fn visit_in(
     Ok(())
 }
 
+/// The entries whose keys start with `bytes`: from `bytes` to its successor, its last byte below `0xFF` raised by one.
+/// An escaped string's bytes end in no `0xFF`, which UTF-8 never holds
+fn visit_starting_in(
+    db: Db,
+    txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    bytes: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]) -> bool,
+) -> Result<()> {
+    let mut high = bytes.to_vec();
+    while high.last() == Some(&0xFF) {
+        high.pop();
+    }
+    let Some(last) = high.last_mut() else {
+        return visit_in(db, txn, &[], visit);
+    };
+    *last += 1;
+    let range = (std::ops::Bound::Included(bytes), std::ops::Bound::Excluded(high.as_slice()));
+    for entry in db.range(txn, &range)? {
+        let (k, v) = entry?;
+        if !visit(k, v) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 /// A read snapshot as the engine reads through it
 pub struct Snapshot<'a, 'e> {
     pub txn: &'a heed::RoTxn<'e, heed::WithoutTls>,
@@ -105,6 +134,10 @@ impl Read for Snapshot<'_, '_> {
         visit_in(self.db, self.txn, prefix, visit)
     }
 
+    fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_starting_in(self.db, self.txn, bytes, visit)
+    }
+
     fn schema(&self) -> &Schema {
         self.schema
     }
@@ -117,6 +150,10 @@ impl Read for Txn<'_, '_> {
 
     fn visit(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         visit_in(self.db, self.txn, prefix, visit)
+    }
+
+    fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
     fn schema(&self) -> &Schema {
