@@ -59,20 +59,30 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **elmdb:** `main`, with local commits not yet on `origin`. apack links the checkout and pins `fd0c0d7`. Rust needs
-  `export PATH="$HOME/.cargo/bin:$PATH"`. `crates/elmdb-node/protocol/Change copy.js` is someone else's untracked
-  scratch file, left in place; it lands in the linked package's membership, and editing it during an apack chain fails
-  `build:default-setup`.
-- **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`.
-  Committed through Phase 14 (`cf810c91d`). Not pushed.
-- **Proven (on `cf810c91d`):** `npm run chain -- --no-native` passes (2026-10-25).
+- **Blocked on a reboot of the Mac (2026-10-25).** Every elmdb open fails with `No space left on device (os error 28)`:
+  macOS's table of named POSIX semaphores (`kern.posix.sem.max`, 10,000) is full. LMDB locks with two per database
+  (D24) and removes them as the last process closes; Node runs no destructor as it exits, so each database a test
+  process still had open at exit kept its pair, and a temporary directory's is never reclaimed. Nothing lists them,
+  and unlinking guessed names could take another process's, so only a restart empties the table.
+- **The fix, uncommitted in elmdb:** the binding closes every database still open as its Node environment tears down
+  (`napi_add_env_cleanup_hook`, `crates/elmdb-node/src/lib.rs`), over `Database::close_within`, a bounded close that
+  leaves a database a unit still holds. `crates/elmdb-node/test/exit.test.mjs` checks a child exiting with a database
+  open leaves neither of its semaphores. **After the reboot:** `npm run build && npm test` in elmdb; remove the hook and
+  see `exit.test.mjs` fail; `cargo test --workspace`, clippy, fmt; commit; push (D20); pin apack's `vendor/elmdb.rev`;
+  record D33.
+- **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`,
+  committed through `b22412320` (Phase 15's packaging, the bookmark fix, the stale E2E case, the facade report). Not
+  pushed. **After the binding fix:** `npm run chain -- --e2e`. The last runs before the table filled passed every step
+  but `test:integration`: one `pack build` in `dependency-graph.integration.spec.ts` passed its 60s operation deadline
+  while `test:native` ran beside it (46s alone); the run after it failed on the full table.
+- **Then Phase 15's rest:** push apack's branch, open a draft PR, dispatch `strict_chain` and `compiler_macos` (D16);
+  `docs/evidence/phase-15.md` (drafted, uncommitted) gets their runs. Then Phase 16.
+- **Proven:** elmdb's full CI matrix passed at `2bfe5e9` (run 40202507275); the packaged preview holds elmdb as real
+  files, loads it, and boots to `connected` against isolated data (E2E smoke 5/5).
 - **Done:** Phases 0–14.
-- **Next:** Phase 15: push elmdb, elmdb's platform CI, `build:preview` with elmdb shipped as real files, the full chain
-  and `--e2e`, then push apack's branch, open a draft PR and dispatch `strict_chain` and `compiler_macos` (D16).
 - **Never edit `crates/elmdb-node` while an apack chain runs:** the pack compiler captures the linked package whole.
-- **Unresolved:** a pack disable under the full chain's load once ended the API silently (no fatal line, no crash
-  report); it did not recur. 905 stale System V semaphore sets from elmdb's runs before `2cbcc6c` are on the user's
-  Mac. **Evidence:** `docs/evidence/`.
+- **Unresolved:** a pack disable under the full chain's load once ended the API silently; it did not recur. 905 stale
+  System V semaphore sets from elmdb's runs before `2cbcc6c` are on the user's Mac.
 
 ## Decisions
 
