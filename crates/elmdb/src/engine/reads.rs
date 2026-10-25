@@ -335,32 +335,53 @@ impl<R: Read> Query<'_, R> {
         })
     }
 
-    /// Visits a type's entities in creation order, in the scope's ranges; false when `visit` stopped it
+    /// Visits a type's entities in creation order, in the scope's ranges; false when `visit` stopped it. A walk goes
+    /// through its range as it visits, so one stopped early reads no further; a walk of both ranges collects the
+    /// trash, which is the smaller, and merges it into the live range by place
     fn walk_type(&self, entity_type: &str, visit: &mut Visit<'_>) -> Result<bool> {
-        let read = |trashed: bool| -> Result<Vec<(u64, String)>> {
-            let mut out = Vec::new();
-            for (key, id) in self.r.scan(&keys::type_range(trashed, entity_type))? {
-                let seq = match decode_key(&key)?.pop() {
-                    Some(Part::Number(n)) => n as u64,
-                    _ => 0,
-                };
-                out.push((seq, values::decode(&id)?.as_str().unwrap_or_default().to_owned()));
-            }
-            Ok(out)
+        let entry = |key: &[u8], id: &[u8]| -> Result<(u64, String)> {
+            let seq = match decode_key(key)?.pop() {
+                Some(Part::Number(n)) => n as u64,
+                _ => 0,
+            };
+            Ok((seq, values::decode(id)?.as_str().unwrap_or_default().to_owned()))
         };
-        let ids: Vec<(u64, String)> = match self.plan.scope {
-            Scope::Live => read(false)?,
-            Scope::Trashed => read(true)?,
-            Scope::WithTrashed => {
-                let mut both = read(false)?;
-                both.extend(read(true)?);
-                both.sort_by_key(|(seq, _)| *seq);
-                both
+        let mut trash: std::collections::VecDeque<(u64, String)> = Default::default();
+        if self.plan.scope == Scope::WithTrashed {
+            for (key, id) in self.r.scan(&keys::type_range(true, entity_type))? {
+                trash.push_back(entry(&key, &id)?);
             }
-        };
-        for (_, id) in ids {
+        }
+        let mut go = |id: &str| -> Result<bool> {
             self.visited.set(self.visited.get() + 1);
-            if !visit(&id)? {
+            visit(id)
+        };
+        let mut outcome: Result<bool> = Ok(true);
+        let range = keys::type_range(self.plan.scope == Scope::Trashed, entity_type);
+        self.r.visit(&range, |key, id| {
+            let step = (|| -> Result<bool> {
+                let (seq, id) = entry(key, id)?;
+                while trash.front().is_some_and(|(t, _)| *t < seq) {
+                    let (_, trashed) = trash.pop_front().expect("a front entry");
+                    if !go(&trashed)? {
+                        return Ok(false);
+                    }
+                }
+                go(&id)
+            })();
+            match step {
+                Ok(true) => true,
+                other => {
+                    outcome = other;
+                    false
+                }
+            }
+        })?;
+        if !outcome? {
+            return Ok(false);
+        }
+        while let Some((_, trashed)) = trash.pop_front() {
+            if !go(&trashed)? {
                 return Ok(false);
             }
         }

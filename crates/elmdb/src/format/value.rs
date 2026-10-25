@@ -9,128 +9,168 @@ pub const TIMESTAMP_EXTENSION: i8 = -1;
 /// The deepest a value nests: arrays and maps inside each other. Deeper is refused rather than walked
 pub const MAX_DEPTH: usize = 256;
 
-/// Checks `bytes` are one value in the spec, with nothing after it, and decodes it
-pub fn decode(bytes: &[u8]) -> Result<rmpv::Value> {
-    let invalid =
-        |why: &str| Error::new(ErrorCode::ValueInvalid, format!("A value isn't valid msgpack for elmdb: {why}"));
-    // The markers first: rmpv reads the reserved marker as nil, and a value must never hold it
+fn invalid(why: &str) -> Error {
+    Error::new(ErrorCode::ValueInvalid, format!("A value isn't valid msgpack for elmdb: {why}"))
+}
+
+/// Checks `bytes` are one value in the spec, with nothing after it, reading them once and allocating nothing
+pub fn validate(bytes: &[u8]) -> Result<()> {
     let mut slice = bytes;
     walk(&mut slice, 0).map_err(|why| invalid(&why))?;
     if !slice.is_empty() {
         return Err(invalid(&format!("{} bytes follow the value", slice.len())));
     }
-    let mut slice = bytes;
-    let value = rmpv::decode::read_value_with_max_depth(&mut slice, MAX_DEPTH).map_err(|e| invalid(&e.to_string()))?;
-    check(&value).map_err(|why| invalid(&why))?;
-    Ok(value)
+    Ok(())
 }
 
-/// Steps over one value's bytes, marker by marker, refusing a marker msgpack reserves
+/// Checks `bytes` are one value in the spec, with nothing after it, and decodes it
+pub fn decode(bytes: &[u8]) -> Result<rmpv::Value> {
+    // The markers first: rmpv reads the reserved marker as nil, and a value must never hold it
+    validate(bytes)?;
+    let mut slice = bytes;
+    rmpv::decode::read_value_with_max_depth(&mut slice, MAX_DEPTH).map_err(|e| invalid(&e.to_string()))
+}
+
+/// Steps over one value's bytes, marker by marker, refusing what the spec doesn't hold: a marker msgpack reserves, a
+/// map key that isn't a string, an extension but the timestamp, and a number that isn't finite
 fn walk(bytes: &mut &[u8], depth: usize) -> std::result::Result<(), String> {
     use rmp::Marker;
     if depth > MAX_DEPTH {
         return Err(format!("it nests deeper than {MAX_DEPTH}"));
     }
     let marker = rmp::decode::read_marker(bytes).map_err(|_| "it ends early".to_owned())?;
-    let skip = |n: usize, bytes: &mut &[u8]| -> std::result::Result<(), String> {
-        if bytes.len() < n {
-            return Err("it ends early".to_owned());
-        }
+    let take = |n: usize, bytes: &mut &[u8]| -> std::result::Result<u64, String> {
+        let raw = bytes.get(..n).ok_or("it ends early")?;
+        let value = raw.iter().fold(0u64, |v, b| (v << 8) | u64::from(*b));
         *bytes = &bytes[n..];
+        Ok(value)
+    };
+    let skip = |n: usize, bytes: &mut &[u8]| take_slice(n, bytes).map(|_| ());
+    let items = |n: usize, bytes: &mut &[u8]| (0..n).try_for_each(|_| walk(bytes, depth + 1));
+    let entries = |n: usize, bytes: &mut &[u8]| -> std::result::Result<(), String> {
+        for _ in 0..n {
+            let key = bytes.first().copied().ok_or("it ends early")?;
+            if !matches!(Marker::from_u8(key), Marker::FixStr(_) | Marker::Str8 | Marker::Str16 | Marker::Str32) {
+                return Err(format!("a map key is {}, and keys are strings", kind_of_marker(Marker::from_u8(key))));
+            }
+            walk(bytes, depth + 1)?;
+            walk(bytes, depth + 1)?;
+        }
         Ok(())
     };
-    let length = |width: usize, bytes: &mut &[u8]| -> std::result::Result<usize, String> {
-        let raw = bytes.get(..width).ok_or("it ends early")?;
-        let n = raw.iter().fold(0usize, |n, b| (n << 8) | usize::from(*b));
-        *bytes = &bytes[width..];
-        Ok(n)
+    let extension = |n: usize, bytes: &mut &[u8]| -> std::result::Result<(), String> {
+        let ext = take_slice(n + 1, bytes)?;
+        let t = ext[0] as i8;
+        if t != TIMESTAMP_EXTENSION {
+            return Err(format!("it holds extension type {t}, and the only one allowed is the timestamp (-1)"));
+        }
+        Ok(())
     };
+    let not_finite = || Err("it holds a number that isn't finite".to_owned());
     match marker {
         Marker::Reserved => Err("it holds the reserved marker 0xc1".to_owned()),
         Marker::Null | Marker::True | Marker::False | Marker::FixPos(_) | Marker::FixNeg(_) => Ok(()),
         Marker::U8 | Marker::I8 => skip(1, bytes),
         Marker::U16 | Marker::I16 => skip(2, bytes),
-        Marker::U32 | Marker::I32 | Marker::F32 => skip(4, bytes),
-        Marker::U64 | Marker::I64 | Marker::F64 => skip(8, bytes),
+        Marker::U32 | Marker::I32 => skip(4, bytes),
+        Marker::U64 | Marker::I64 => skip(8, bytes),
+        Marker::F32 => {
+            if f32::from_bits(take(4, bytes)? as u32).is_finite() {
+                Ok(())
+            } else {
+                not_finite()
+            }
+        }
+        Marker::F64 => {
+            if f64::from_bits(take(8, bytes)?).is_finite() {
+                Ok(())
+            } else {
+                not_finite()
+            }
+        }
         Marker::FixStr(n) => skip(usize::from(n), bytes),
         Marker::Str8 | Marker::Bin8 => {
-            let n = length(1, bytes)?;
+            let n = take(1, bytes)? as usize;
             skip(n, bytes)
         }
         Marker::Str16 | Marker::Bin16 => {
-            let n = length(2, bytes)?;
+            let n = take(2, bytes)? as usize;
             skip(n, bytes)
         }
         Marker::Str32 | Marker::Bin32 => {
-            let n = length(4, bytes)?;
+            let n = take(4, bytes)? as usize;
             skip(n, bytes)
         }
-        Marker::FixArray(n) => (0..n).try_for_each(|_| walk(bytes, depth + 1)),
+        Marker::FixArray(n) => items(usize::from(n), bytes),
         Marker::Array16 => {
-            let n = length(2, bytes)?;
-            (0..n).try_for_each(|_| walk(bytes, depth + 1))
+            let n = take(2, bytes)? as usize;
+            items(n, bytes)
         }
         Marker::Array32 => {
-            let n = length(4, bytes)?;
-            (0..n).try_for_each(|_| walk(bytes, depth + 1))
+            let n = take(4, bytes)? as usize;
+            items(n, bytes)
         }
-        Marker::FixMap(n) => (0..usize::from(n) * 2).try_for_each(|_| walk(bytes, depth + 1)),
+        Marker::FixMap(n) => entries(usize::from(n), bytes),
         Marker::Map16 => {
-            let n = length(2, bytes)?;
-            (0..n * 2).try_for_each(|_| walk(bytes, depth + 1))
+            let n = take(2, bytes)? as usize;
+            entries(n, bytes)
         }
         Marker::Map32 => {
-            let n = length(4, bytes)?;
-            (0..n * 2).try_for_each(|_| walk(bytes, depth + 1))
+            let n = take(4, bytes)? as usize;
+            entries(n, bytes)
         }
-        Marker::FixExt1 => skip(2, bytes),
-        Marker::FixExt2 => skip(3, bytes),
-        Marker::FixExt4 => skip(5, bytes),
-        Marker::FixExt8 => skip(9, bytes),
-        Marker::FixExt16 => skip(17, bytes),
+        Marker::FixExt1 => extension(1, bytes),
+        Marker::FixExt2 => extension(2, bytes),
+        Marker::FixExt4 => extension(4, bytes),
+        Marker::FixExt8 => extension(8, bytes),
+        Marker::FixExt16 => extension(16, bytes),
         Marker::Ext8 => {
-            let n = length(1, bytes)?;
-            skip(n + 1, bytes)
+            let n = take(1, bytes)? as usize;
+            extension(n, bytes)
         }
         Marker::Ext16 => {
-            let n = length(2, bytes)?;
-            skip(n + 1, bytes)
+            let n = take(2, bytes)? as usize;
+            extension(n, bytes)
         }
         Marker::Ext32 => {
-            let n = length(4, bytes)?;
-            skip(n + 1, bytes)
+            let n = take(4, bytes)? as usize;
+            extension(n, bytes)
         }
     }
 }
 
-fn check(value: &rmpv::Value) -> std::result::Result<(), String> {
-    match value {
-        rmpv::Value::Array(items) => items.iter().try_for_each(check),
-        rmpv::Value::Map(entries) => entries.iter().try_for_each(|(k, v)| {
-            if !k.is_str() {
-                return Err(format!("a map key is {}, and keys are strings", kind_of(k)));
-            }
-            check(v)
-        }),
-        rmpv::Value::Ext(t, _) if *t != TIMESTAMP_EXTENSION => {
-            Err(format!("it holds extension type {t}, and the only one allowed is the timestamp (-1)"))
-        }
-        rmpv::Value::F64(n) if !n.is_finite() => Err("it holds a number that isn't finite".to_owned()),
-        rmpv::Value::F32(n) if !n.is_finite() => Err("it holds a number that isn't finite".to_owned()),
-        _ => Ok(()),
+/// The next `n` bytes, stepped over
+fn take_slice<'a>(n: usize, bytes: &mut &'a [u8]) -> std::result::Result<&'a [u8], String> {
+    if bytes.len() < n {
+        return Err("it ends early".to_owned());
     }
+    let (head, rest) = bytes.split_at(n);
+    *bytes = rest;
+    Ok(head)
 }
 
-fn kind_of(value: &rmpv::Value) -> &'static str {
-    match value {
-        rmpv::Value::Nil => "nil",
-        rmpv::Value::Boolean(_) => "a boolean",
-        rmpv::Value::Integer(_) | rmpv::Value::F32(_) | rmpv::Value::F64(_) => "a number",
-        rmpv::Value::String(_) => "a string",
-        rmpv::Value::Binary(_) => "binary",
-        rmpv::Value::Array(_) => "an array",
-        rmpv::Value::Map(_) => "a map",
-        rmpv::Value::Ext(..) => "an extension",
+fn kind_of_marker(marker: rmp::Marker) -> &'static str {
+    use rmp::Marker;
+    match marker {
+        Marker::Null => "nil",
+        Marker::True | Marker::False => "a boolean",
+        Marker::FixPos(_)
+        | Marker::FixNeg(_)
+        | Marker::U8
+        | Marker::U16
+        | Marker::U32
+        | Marker::U64
+        | Marker::I8
+        | Marker::I16
+        | Marker::I32
+        | Marker::I64
+        | Marker::F32
+        | Marker::F64 => "a number",
+        Marker::Bin8 | Marker::Bin16 | Marker::Bin32 => "binary",
+        Marker::FixArray(_) | Marker::Array16 | Marker::Array32 => "an array",
+        Marker::FixMap(_) | Marker::Map16 | Marker::Map32 => "a map",
+        Marker::Reserved => "the reserved marker",
+        _ => "an extension",
     }
 }
 

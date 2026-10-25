@@ -68,7 +68,7 @@ fn run_checks(t: &Txn<'_, '_>) -> Result<()> {
 /// Reads from their msgpack bytes, the whole buffer checked against the value spec first: a value outside it is refused
 /// as such (`VALUE_INVALID`), and a read that isn't one as `BATCH_INVALID`
 pub fn decode_reads(bytes: &[u8]) -> Result<plan::Reads> {
-    crate::format::value::decode(bytes)
+    crate::format::value::validate(bytes)
         .map_err(|e| Error::new(e.code, format!("The reads aren't valid: {}", e.message)))?;
     rmp_serde::from_slice(bytes)
         .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The reads don't decode: {e}")))
@@ -77,7 +77,7 @@ pub fn decode_reads(bytes: &[u8]) -> Result<plan::Reads> {
 /// A batch from its msgpack bytes, the whole buffer checked against the value spec first: a value outside it is refused
 /// as such (`VALUE_INVALID`), and an operation that isn't one as `BATCH_INVALID`
 pub fn decode_batch(bytes: &[u8]) -> Result<Batch> {
-    crate::format::value::decode(bytes)
+    crate::format::value::validate(bytes)
         .map_err(|e| Error::new(e.code, format!("The batch isn't valid: {}", e.message)))?;
     rmp_serde::from_slice(bytes)
         .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The batch doesn't decode: {e}")))
