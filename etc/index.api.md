@@ -97,6 +97,11 @@ export namespace EARS {
 // @public
 export interface Ears {
     create: Create;
+    embed(embeddings: readonly Embedding[]): {
+        stored: number;
+        stale: number;
+    };
+    embeddedTypes(): string[];
     findRelations(match?: RelationMatch): RelationRow[];
     getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
     getRelation(relId: EARS.RelationId): RelationRow | undefined;
@@ -108,6 +113,9 @@ export interface Ears {
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
     nextLabel(type: EARS.Entity, base: string): string;
+    pendingEmbeddings(type: EARS.Entity, options?: {
+        limit?: number;
+    }): PendingEmbeddings;
     query: Query;
     removeRelation(relId: EARS.RelationId): void;
     transact<T>(fn: () => T, options?: UnitOptions): T;
@@ -231,9 +239,9 @@ export type EarsErrorCode =
 | 'CYCLE'
 /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
 | 'VALUE_INVALID'
-/** `search` was on a type with no text index (no `search` in its manifest entry) */
+/** `search` was on a type with no text index (no `search` in its manifest entry), or `near`, `like`, `hybrid` or `pendingEmbeddings` on one with no vector index (no `embed`) */
 | 'UNKNOWN_INDEX'
-/** `hits()` was asked of a query with no `search`, or with a `where` given a function after it */
+/** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
 | 'NO_SEARCH';
 
 // @public
@@ -269,6 +277,28 @@ export interface EarsUnit {
     savepoint(): number;
     // (undocumented)
     write(batch: Uint8Array): Uint8Array;
+}
+
+// @public
+export interface EmbedDeclaration {
+    readonly chunk?: 'whole' | 'paragraph' | 'heading';
+    readonly dims: number;
+    readonly from: readonly string[];
+    readonly model: string;
+}
+
+// @public
+export interface Embedding {
+    // (undocumented)
+    chunk: number;
+    // (undocumented)
+    hash: string;
+    // (undocumented)
+    id: EARS.EntityId;
+    // (undocumented)
+    model: string;
+    // (undocumented)
+    vector: readonly number[];
 }
 
 // @public
@@ -327,6 +357,21 @@ E
 }[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
 
 // @public
+export interface PendingEmbeddings {
+    chunks: Array<{
+        id: EARS.EntityId;
+        chunk: number;
+        hash: string;
+        text: string;
+    }>;
+    count: number;
+    // (undocumented)
+    dims: number;
+    // (undocumented)
+    model: string;
+}
+
+// @public
 export interface Query extends QueryEntries {
     // (undocumented)
     trashed: QueryEntries;
@@ -366,6 +411,9 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     hits(options?: {
         highlights?: boolean;
     }): SearchHit<E>[];
+    hybrid(query: string, vector: readonly number[], options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string> & {
+        k?: number;
+    }): QueryBuilder<E, D>;
     // (undocumented)
     ids(): EARS.EntityId<E>[];
     in<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
@@ -374,6 +422,9 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
     lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
     last(): EARS.EntityId<E> | undefined;
+    like(id: EARS.EntityId, options?: {
+        k?: number;
+    }): QueryBuilder<E, D>;
     // (undocumented)
     limit(n: number): QueryBuilder<E, D>;
     linkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
@@ -381,6 +432,9 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     linkedWith(other: EARS.EntityId): QueryBuilder<E, D>;
     // (undocumented)
     map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
+    near(vector: readonly number[], options?: {
+        k?: number;
+    }): QueryBuilder<E, D>;
     // (undocumented)
     ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
     // (undocumented)
@@ -474,6 +528,7 @@ export interface RowIdentity {
 
 // @public
 export interface RowRules {
+    embed?: EmbedDeclaration;
     indexes?: readonly string[];
     required: readonly string[];
     search?: SearchDeclaration;

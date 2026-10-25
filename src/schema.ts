@@ -60,6 +60,14 @@ export function toElmdbSchema(schema: EngineSchema): object {
       }
       setField(indexes, 'search', { kind: 'text', fields: textFields, ...(rules.search.stem !== undefined && { stem: rules.search.stem }) });
     }
+    // The vector index (`embed`), over the fields its text is made of, read as the text index reads them
+    if (rules.embed) {
+      for (const field of rules.embed.from) {
+        if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      }
+      const { from, chunk = 'whole', model, dims } = rules.embed;
+      setField(indexes, 'embedding', { kind: 'vector', from: [...from], chunk, dims, metric: 'cosine', precision: 'f32', model });
+    }
     setField(types, type, {
       ...(rules.shortCode !== undefined && { shortCode: { prefix: rules.shortCode } }),
       fields,
@@ -100,6 +108,8 @@ export interface DeclaredNames {
   roles: ReadonlySet<string>;
   /** Per type, the fields a value index leads with */
   indexed: ReadonlyMap<string, ReadonlySet<string>>;
+  /** The types holding a vector index */
+  embedded: ReadonlySet<string>;
 }
 
 /** What a database's elmdb schema (its `schema`, canonical JSON, or `null` when it holds none) declares */
@@ -110,7 +120,9 @@ export function declaredNames(elmdbSchema: unknown): DeclaredNames {
     roles?: Record<string, unknown>;
   };
   const indexed = new Map<string, ReadonlySet<string>>();
+  const embedded = new Set<string>();
   for (const [type, def] of Object.entries(schema.types ?? {})) {
+    if (Object.values(def.indexes ?? {}).some((index) => index.kind === 'vector')) embedded.add(type);
     const leading = Object.values(def.indexes ?? {})
       .flatMap((index) => (index.kind === 'value' && Array.isArray(index.fields) ? [String(index.fields[0])] : []));
     indexed.set(type, new Set(['role', 'shortCode', ...leading]));
@@ -120,5 +132,6 @@ export function declaredNames(elmdbSchema: unknown): DeclaredNames {
     relationKinds: new Set(Object.keys(schema.relations ?? {})),
     roles: new Set(Object.keys(schema.roles ?? {})),
     indexed,
+    embedded,
   };
 }

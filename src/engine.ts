@@ -3,7 +3,7 @@
 // contract, not a security boundary (packs run in-process). Everything the engine holds is in the database; the
 // engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
 import type { EARS } from './entities.ts';
-import type { EARSRuntimeDeps, RelationEdge } from './runtime.ts';
+import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge } from './runtime.ts';
 import { createConnection, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
@@ -91,6 +91,15 @@ export interface Ears {
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
   nextLabel(type: EARS.Entity, base: string): string;
+  /** The entity types holding a vector index (a manifest entry's `embed`) */
+  embeddedTypes(): string[];
+  /** Up to `limit` (100 unless given) of the type's chunks waiting for embeddings, in key order, and how many wait in all */
+  pendingEmbeddings(type: EARS.Entity, options?: { limit?: number }): PendingEmbeddings;
+  /**
+   * Stores embeddings of pending chunks, together: each one whose chunk's text has changed since `pendingEmbeddings`
+   * answered is not stored, its chunk still pending under its new hash, and counted `stale`
+   */
+  embed(embeddings: readonly Embedding[]): { stored: number; stale: number };
 }
 
 /** An engine's data lifecycle and direct writes: for the code that created it (the app's composition root, tests, tooling) */
@@ -226,6 +235,17 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     wouldCreateCycle: (source, target, kinds) => {
       names.relationKinds(kinds, 'wouldCreateCycle');
       return one({ read: 'wouldCreateCycle', source, target, kinds: [...kinds] }).value as boolean;
+    },
+    embeddedTypes: () => [...declared.embedded],
+    pendingEmbeddings: (type, { limit = 100 } = {}) => {
+      const { model, dims, count, chunks } = one({ read: 'pendingEmbeddings', type, limit });
+      return { model, dims, count, chunks } as PendingEmbeddings;
+    },
+    embed(embeddings) {
+      if (!embeddings.length) return { stored: 0, stale: 0 };
+      const results = connection.write(embeddings.map(({ id, chunk, hash, model, vector }) => ({ op: 'embed', id, chunk, hash, model, vector: [...vector] })));
+      const stale = results.filter((result) => result.kind === 'stale').length;
+      return { stored: results.length - stale, stale };
     },
     getRow,
     getAttr,

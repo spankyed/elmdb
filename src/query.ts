@@ -88,6 +88,8 @@ const FIRST: readonly string[] = ['first', 'exists', 'firstRow'];
 const STREAMING: readonly string[] = [
   'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'limit',
 ];
+/** The steps whose hits `hits()` answers */
+const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid'];
 
 /** Whether a value is one a `where` sends to elmdb, which matches it with `===` or as an element of a list */
 const sendable = (v: unknown) =>
@@ -259,14 +261,18 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
 
       search: (text: string, options: Record<string, unknown> = {}) => next({ step: 'search', query: text, options }),
       after: (id: EARS.EntityId) => next({ step: 'after', id }),
+      near: (vector: readonly number[], { k = 10 }: { k?: number } = {}) => next({ step: 'near', vector: [...vector], k }),
+      like: (id: EARS.EntityId, { k = 10 }: { k?: number } = {}) => next({ step: 'like', id, k }),
+      hybrid: (text: string, vector: readonly number[], { k = 10, ...options }: Record<string, unknown> & { k?: number } = {}) =>
+        next({ step: 'hybrid', query: text, vector: [...vector], k, options }),
       hits: ({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean } = {}) => {
         // The search must be in the plan the terminal ends, after every function a `where` was given
         const lastWhere = (test: (p: Pending) => boolean) => recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
-        const searched = lastWhere((p) => 'step' in p && p.step.step === 'search');
+        const searched = lastWhere((p) => 'step' in p && SEARCHES.includes(p.step.step as string));
         const split = lastWhere((p) => !('step' in p));
         if (searched < 0 || split > searched) {
           throw new EarsError('NO_SEARCH', searched < 0
-            ? 'hits() answers what a search found: the query has no search(...)'
+            ? 'hits() answers what a search found: the query has no search(...), near(...), like(...) or hybrid(...)'
             : 'hits() answers what a search found, and a where(...) given a function follows the search: put the search after it');
         }
         const answer = run(recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });

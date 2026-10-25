@@ -93,6 +93,12 @@ Held by the types and the engine specs, which say more than a rule over names co
   highlights? })` is its terminal, refused (`NO_SEARCH`) for a query with no search or with a `where` given a function
   after it, since a function splits the plan and the search would not be in the plan the terminal ends. A type with
   no text index refuses a search (`UNKNOWN_INDEX`).
+- **Vector search.** A type whose row rules declare `embed` (`{ from, chunk?, model, dims }`) has an elmdb vector index
+  named `embedding` over those fields, cosine over f32 (`schema.ts`). A write to them leaves the entity's changed chunks
+  pending; `pendingEmbeddings(type)` answers them with the model and dimensions, and `embed(embeddings)` stores vectors,
+  counting `stale` each whose chunk changed since. `near(vector, { k })`, `like(id, { k })` and `hybrid(text, vector,
+  { k, ...searchOptions })` are plan steps that `hits()` ends as it does `search`; a pending chunk is found by none of
+  them. The engine never calls a model: the SDK's `embedPending` does (`@apackdev/sdk/services`).
 - **One row shape.** A row is `{ id, entityType, ...attributes }` (`EntityRow`) wherever a read returns one: `getRow(id)`, which reads through the trash and is `undefined` for an id no entity has, and `pickAll`, `pickOne()` and a write builder's `row()`, which are rows of `getRow`.
 - **One relation shape.** A relation is `{ id, kind, source, target, info }` (`RelationRow`) wherever a read returns one — `findRelations`, `outEdges`, `inEdges` — and `findRelations` and `updateRelation` take its field names (`{ kind?, source?, target? }`, `{ source?, target?, info? }`).
 - **Declared indexes.** A type indexes the fields its row rules declare (`RowRules.indexes`, written by codegen from a manifest entry's `indexes`), each an elmdb value index of one field (`schema.ts`), and every type indexes `role` and `shortCode`. An index holds `null`, booleans, finite numbers and strings up to 256 characters, a list's elements each; elmdb keeps it in the unit of every write, and builds one a schema change adds in the background, a query answering from a walk until it is ready. A `where(k, v)` or `withRole` on a type start reads the index where the type declares the field; where it doesn't, it filters the type's rows, finding the same matches, and warns through `warn` past `UNINDEXED_WALK_WARNING` visits.

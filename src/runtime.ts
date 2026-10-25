@@ -65,6 +65,8 @@ export interface RowRules {
   indexes?: readonly string[];
   /** The fields its text index reads, each at its weight, and the language its words are stemmed in: what `search` matches */
   search?: SearchDeclaration;
+  /** The fields its vector index embeds, and the model it embeds them with: what `near`, `like` and `hybrid` rank by */
+  embed?: EmbedDeclaration;
 }
 
 /** A type's text index, as its manifest entry declares it (`search`) */
@@ -73,6 +75,41 @@ export interface SearchDeclaration {
   readonly fields: Readonly<Record<string, number>>;
   /** The language whose stems a word is matched by (`en`, `de`, …), when the index stems */
   readonly stem?: string;
+}
+
+/**
+ * A type's vector index, as its manifest entry declares it (`embed`). A write that changes one of its fields leaves the
+ * entity's chunks pending until an embedding of their text is stored (`embed`), which a later write's change refuses as
+ * stale. Embeddings are compared by cosine distance
+ */
+export interface EmbedDeclaration {
+  /** The fields whose text is embedded, in this order: strings, or lists of strings */
+  readonly from: readonly string[];
+  /** How the text is split, each part embedded on its own: whole (the default), at blank lines, or at Markdown headings */
+  readonly chunk?: 'whole' | 'paragraph' | 'heading';
+  /** The model the embeddings are made with: an embedding made with another is refused */
+  readonly model: string;
+  /** The numbers in each embedding, which the model decides */
+  readonly dims: number;
+}
+
+/** Chunks of a type's vector index waiting for embeddings, and what to make them with */
+export interface PendingEmbeddings {
+  model: string;
+  dims: number;
+  /** How many chunks wait in all, those beyond the limit included */
+  count: number;
+  /** Up to the limit of them: each one's entity, its number in the entity, its text's hash and the text to embed */
+  chunks: Array<{ id: EARS.EntityId; chunk: number; hash: string; text: string }>;
+}
+
+/** An embedding of one pending chunk, naming the chunk as `pendingEmbeddings` did */
+export interface Embedding {
+  id: EARS.EntityId;
+  chunk: number;
+  hash: string;
+  model: string;
+  vector: readonly number[];
 }
 
 /**
@@ -239,10 +276,23 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * steps it searches among the entities they reached
    */
   search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
+  /**
+   * The `k` entities (10 unless given) whose embeddings in the type's vector index (its manifest entry's `embed`) are
+   * nearest `vector`, nearest first, each scored `1 / (1 + distance)` by its nearest chunk; after other steps, among the
+   * entities they reached. An entity whose chunks are pending is not found until they are embedded
+   */
+  near(vector: readonly number[], options?: { k?: number }): QueryBuilder<E, D>;
+  /** `near` the embedding the entity with `id` holds, itself excepted: more like it */
+  like(id: EARS.EntityId, options?: { k?: number }): QueryBuilder<E, D>;
+  /**
+   * The text index's matches to `query` and the vector index's nearest to `vector`, merged by reciprocal rank fusion:
+   * an entity both find ranks above one either finds alone. The `k` best (10 unless given)
+   */
+  hybrid(query: string, vector: readonly number[], options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string> & { k?: number }): QueryBuilder<E, D>;
   /** The entities after `id` in the order so far: the page after one that ended at `id` */
   after(id: EARS.EntityId): QueryBuilder<E, D>;
   /**
-   * What the query's `search` found in each entity it reaches: its score and matched words, with `highlights` where
+   * What the query's `search` (or `near`, `like` or `hybrid`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
    * they are, and with `fields` its row's fields picked (`pick`'s)
    */
   hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(

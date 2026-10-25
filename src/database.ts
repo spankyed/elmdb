@@ -151,7 +151,7 @@ export function crossing<T>(fn: () => T): T {
 export type Op = { op: string } & Record<string, unknown>;
 /** One answer of a batch */
 export type OpResult = { kind: 'done' } | { kind: 'entity'; id: string; shortCode: string | null; created: boolean }
-  | { kind: 'relation'; id: string; linked: boolean } | { kind: 'label'; label: string };
+  | { kind: 'relation'; id: string; linked: boolean } | { kind: 'label'; label: string } | { kind: 'stale' };
 
 /** The engine's crossing to its database: reads and writes, in the unit `transact` holds open or each its own */
 export interface Connection {
