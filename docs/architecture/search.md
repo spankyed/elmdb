@@ -1,7 +1,8 @@
 # Search
 
 Text and vector indexes, and search as plan steps. Status: text search and fuzzy labels are built
-(`crates/elmdb/src/engine/text/`); vector and hybrid search, and substring and regex, are designed, not built.
+(`crates/elmdb/src/engine/text/`), and vector and hybrid search (`crates/elmdb/src/engine/vector/`); substring and
+regex are designed, not built.
 
 ## Why in the engine
 
@@ -94,6 +95,20 @@ reports how many are pending, so a search can say it is incomplete.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first.
   `findLabels` is the quick-open: a query's characters in order in each type's label field, scored for word starts,
   runs and position, best first.
+
+## Vector search as built
+
+- **Keys** (`format.md`, Keys): an embedding is primary data (`p/q`: its model, its chunk's hash, its f32 values); each
+  chunk's hash and text (`d/qc`), a pending marker per chunk waiting for one (`d/qp`), the graph item of each embedded
+  chunk both ways (`d/qi`, `d/qm`), a unit's graph changes (`d/qj`) and each index's graph number (`d/qn`). The graphs
+  are hannoy's, in LMDB databases of their own (`elmdb.graphs.cosine`, `elmdb.graphs.euclidean`).
+- **Writes** refile a changed entity's chunks in the same unit: a chunk whose text changed loses its embedding and its
+  graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
+- **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
+  everything else; `check()` and `rebuild()` treat them as derived from the stored embeddings.
+- **Reads**: `near` (score `1 / (1 + distance)`, an entity once by its nearest chunk), `like` (an entity's own
+  embedding), `hybrid` (reciprocal rank fusion of the text ranking and the vector ranking, k = 60), each among what
+  the steps before it reached and ended by `hits`; `pendingEmbeddings`.
 
 ## Order of work
 
