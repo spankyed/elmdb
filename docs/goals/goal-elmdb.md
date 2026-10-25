@@ -59,19 +59,17 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **elmdb:** `main`, pushed to `github.com/spankyed/elmdb`; the code apack pins is `2cbcc6c` (POSIX semaphores on
-  macOS, D24). Rust needs `export PATH="$HOME/.cargo/bin:$PATH"`.
+- **elmdb:** `main`, with local commits not yet on `origin` (the user's to push). apack links the checkout and pins
+  `a0da984`. Rust needs `export PATH="$HOME/.cargo/bin:$PATH"`.
 - **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`, from
-  `ears-disk-engine` `3e0b280ff` (#273 still open). Committed: the link (`bf9222c1e`), the engine on elmdb
-  (`fe5258646`), the `runs` database (`9c7f96003`), lmdb-js removed (`974faa775`). Nothing uncommitted.
-- **Proven (on `974faa775`):** `npm run chain -- --no-native` passes; the model harness passes on elmdb.
-- **Done:** Phases 0–11 (`docs/evidence/phase-0.md` … `phase-10.md`; Phase 11's evidence is in the acceptance row).
-- **Next:** Phase 12, text search: elmdb's index (charabia, default features off, with its Latin camelCase and
-  snake_case segmenters), then apack's adopter.
-- **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
-  (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made.
-- **Unresolved:** 905 stale two-semaphore System V sets that elmdb's runs before `2cbcc6c` left on the user's Mac;
-  removing them is the user's call. **Evidence:** `docs/evidence/`.
+  `ears-disk-engine` `3e0b280ff` (#273 still open). Committed through Phase 12 (`a402744fb`, `ea09dbf84`), and
+  `d21514bdb` pins elmdb `a0da984`. Not pushed.
+- **Proven (on `d21514bdb`):** `npm run chain -- --no-native` passes cold, every step run (2026-10-25).
+- **Done:** Phases 0–12.
+- **Next:** Phase 13, vector and hybrid search (hannoy), apack's library port tested and off (D15).
+- **Unresolved:** a pack disable under the full chain's load once ended the API silently (no fatal line, no crash
+  report); it did not recur alone or in the next three chains. 905 stale System V semaphore sets from elmdb's runs
+  before `2cbcc6c` are on the user's Mac. **Evidence:** `docs/evidence/`.
 
 ## Decisions
 
@@ -402,7 +400,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | apack parity, differential harness agreeing (P9) | done, apack `fe5258646`, `9c7f96003` | `docs/evidence/phase-9.md`; the chain and test speed in `phase-10.md` | none |
 | apack without lmdb-js (P10) | done, apack `974faa775` | `docs/evidence/phase-10.md` | none |
 | `runs` database (P11) | done, apack `9c7f96003`, elmdb `6d337f6` | host `run-history.spec` (20), CLI `db.integration` (71, `import-runs` included), the backup round trip of both databases; the chain in `phase-10.md` | none |
-| Text search, in elmdb and in apack (P12) | missing | | all |
+| Text search, in elmdb and in apack (P12) | done, elmdb `c1a1cb1`; apack `a402744fb`, `ea09dbf84` | `docs/evidence/phase-12.md`; apack's whole `chain --no-native` passed cold on `d21514bdb` (elmdb `a0da984`) | none; PR #148 is reported to the user as superseded |
 | Vector and hybrid search, library port tested and off (P13) | missing | | all |
 | Change sets and watch, one adopter (P14) | missing | | all |
 | Platforms in elmdb's CI, packaged app, apack's full chain, draft PR, strict chain (P15) | missing | | all |
