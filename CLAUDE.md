@@ -23,11 +23,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
-(cd crates/elmdb-node && npm run build && npm run typecheck && npm test)
+npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
-- **Changed the binding's exports?** `npm run build` in `crates/elmdb-node` regenerates `index.js` and `index.d.ts`;
+- **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`, and on every target the binding
   ships for on a pull request or a dispatch.

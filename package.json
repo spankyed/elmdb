@@ -1,0 +1,17 @@
+{
+  "name": "elmdb-workspace",
+  "private": true,
+  "description": "The tooling that builds and tests elmdb's binding (crates/elmdb-node), kept out of the package it publishes so that a project linking the binding installs none of it",
+  "scripts": {
+    "build": "napi build --cwd crates/elmdb-node --platform --release",
+    "build:debug": "napi build --cwd crates/elmdb-node --platform",
+    "test": "node --test \"crates/elmdb-node/test/**/*.test.mjs\"",
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 crates/elmdb-node/protocol/*.ts crates/elmdb-node/index.d.ts"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.9",
+    "@types/node": "^24.1.0",
+    "msgpackr": "^1.11.9",
+    "typescript": "^5.9.3"
+  }
+}

@@ -29,7 +29,6 @@ jobs:
       - run: cargo xtask check-generated
       - run: cargo xtask check-one-lmdb
       - name: binding
-        working-directory: crates/elmdb-node
         run: |
           npm ci
           npm run build
@@ -62,13 +61,12 @@ jobs:
       # On Windows, @napi-rs/cli 3.10.9's build times out on its own filesystem-reconciliation lock, so the binding
       # is built by cargo and named as napi's loader expects; everywhere else napi builds it
       - name: binding
-        working-directory: crates/elmdb-node
         shell: bash
         run: |
           npm ci
           if [ "$RUNNER_OS" = Windows ]; then
             cargo build -p elmdb-node --release
-            cp ../../target/release/elmdb_node.dll elmdb.win32-x64-msvc.node
+            cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
           else
             npm run build
           fi
@@ -99,7 +97,6 @@ jobs:
             git config --global --add safe.directory /w
             rustup show active-toolchain
             cargo test --workspace
-            cd crates/elmdb-node
             npm ci
             npm run build
             npm test

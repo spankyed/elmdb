@@ -33,17 +33,5 @@
       "x86_64-pc-windows-msvc"
     ],
     "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nimport type { CheckReport } from './protocol/CheckReport.js'\nimport type { IndexStatus } from './protocol/IndexStatus.js'\nimport type { Stats } from './protocol/Stats.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }\n"
-  },
-  "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "test": "node --test \"test/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 protocol/*.ts index.d.ts"
-  },
-  "devDependencies": {
-    "@napi-rs/cli": "3.10.9",
-    "@types/node": "^24.1.0",
-    "msgpackr": "^1.11.9",
-    "typescript": "^5.9.3"
   }
 }
