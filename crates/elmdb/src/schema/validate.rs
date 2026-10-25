@@ -233,7 +233,18 @@ impl Validator<'_> {
                     }
                 }
             }
-            IndexDef::Vector { from, model, .. } => {
+            IndexDef::Vector { from, model, metric, precision, .. } => {
+                // hannoy's graphs measure cosine or euclidean distance, over f32 vectors
+                if *metric == Metric::Dot {
+                    self.problem(
+                        format!("{at}.metric"),
+                        "is cosine or l2: a normalized embedding ranks by dot product as it does by cosine".into(),
+                        who,
+                    );
+                }
+                if *precision != Precision::F32 {
+                    self.problem(format!("{at}.precision"), "is f32, the one precision the graphs store".into(), who);
+                }
                 if from.is_empty() {
                     self.problem(format!("{at}.from"), "names no field".into(), who);
                 }
@@ -241,9 +252,12 @@ impl Validator<'_> {
                     let field_at = format!("{at}.from[{i}]");
                     match field_of(field) {
                         None => self.problem(field_at, format!("no such field on {type_name}"), who),
-                        Some(value) if !value.is_text() => self.problem(
+                        Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
                             field_at,
-                            format!("a vector index embeds string fields, and \"{field}\" is a {} field", value.name()),
+                            format!(
+                                "a vector index embeds string and any fields, and \"{field}\" is a {} field",
+                                value.name()
+                            ),
                             who,
                         ),
                         Some(_) => {}

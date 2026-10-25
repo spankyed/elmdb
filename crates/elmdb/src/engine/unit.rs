@@ -59,6 +59,8 @@ pub trait Read {
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     fn schema(&self) -> &Schema;
+    /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
+    fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);
 
     fn contains(&self, key: &[u8]) -> Result<bool> {
         Ok(self.get(key)?.is_some())
@@ -138,6 +140,10 @@ impl Read for Snapshot<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
+    fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
+        (self.txn, self.db)
+    }
+
     fn schema(&self) -> &Schema {
         self.schema
     }
@@ -154,6 +160,10 @@ impl Read for Txn<'_, '_> {
 
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         visit_starting_in(self.db, self.txn, bytes, visit)
+    }
+
+    fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
+        (self.txn, self.db)
     }
 
     fn schema(&self) -> &Schema {

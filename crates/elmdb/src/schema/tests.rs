@@ -40,7 +40,7 @@ fn example() -> Value {
             "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"] },
             "text":         { "kind": "text", "fields": { "text": { "weight": 1 } } },
             "meaning":      { "kind": "vector", "from": ["text"], "chunk": "paragraph",
-                              "dims": 384, "metric": "cosine", "precision": "f16", "model": "bge-small-en-v1.5" }
+                              "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
           }
         },
         "Note": { "fields": { "title": { "type": "string" } } },
@@ -239,7 +239,15 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "vector", "from": ["sender"], "dims": 8, "model": "m" }),
-            "types.Message.indexes.x.from[0]: a vector index embeds string fields, and \"sender\" is a enum field (declared by default-setup)",
+            "types.Message.indexes.x.from[0]: a vector index embeds string and any fields, and \"sender\" is a enum field (declared by default-setup)",
+        ),
+        (
+            json!({ "kind": "vector", "from": ["text"], "dims": 8, "model": "m", "metric": "dot" }),
+            "types.Message.indexes.x.metric: is cosine or l2: a normalized embedding ranks by dot product as it does by cosine (declared by default-setup)",
+        ),
+        (
+            json!({ "kind": "vector", "from": ["text"], "dims": 8, "model": "m", "precision": "i8" }),
+            "types.Message.indexes.x.precision: is f32, the one precision the graphs store (declared by default-setup)",
         ),
         (
             json!({ "kind": "vector", "from": ["text"], "dims": 8, "model": " " }),

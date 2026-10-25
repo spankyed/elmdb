@@ -184,3 +184,55 @@ pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
     };
     [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument)]
 }
+
+/// A chunk's stored embedding, the vectors of an entity's chunks, and of an index
+pub fn vector(entity_type: &str, index: &str, id: &str, chunk: u32) -> Vec<u8> {
+    with(Prefix::Vector, |w| {
+        w.string(entity_type).string(index).string(id).number(f64::from(chunk));
+    })
+}
+
+pub fn vectors_of(entity_type: &str, index: &str, id: &str) -> Vec<u8> {
+    with(Prefix::Vector, |w| {
+        w.string(entity_type).string(index).string(id);
+    })
+}
+
+/// A key under a vector index's derived prefix, and its ranges: `(type, index, id, chunk)` for chunks, pending
+/// markers and an item's place; `(type, index, item)` for items and journal entries
+pub fn vector_chunk_key(prefix: Prefix, entity_type: &str, index: &str, id: &str, chunk: u32) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index).string(id).number(f64::from(chunk));
+    })
+}
+
+pub fn vector_chunks_of(prefix: Prefix, entity_type: &str, index: &str, id: &str) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index).string(id);
+    })
+}
+
+pub fn vector_item_key(prefix: Prefix, entity_type: &str, index: &str, item: u32) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index).number(f64::from(item));
+    })
+}
+
+/// Every key of a vector index under one of its prefixes
+pub fn vector_index_range(prefix: Prefix, entity_type: &str, index: &str) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// A vector index's graph record: its number among the graphs, and its next item
+pub fn vector_graph(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::VectorGraph, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// Every vector index's graph record
+pub fn vector_graphs() -> Vec<u8> {
+    Prefix::VectorGraph.key().to_vec()
+}

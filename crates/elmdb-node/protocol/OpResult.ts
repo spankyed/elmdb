@@ -3,4 +3,4 @@
 /**
  * One operation's answer
  */
-export type OpResult = { "kind": "done" } | { "kind": "entity", id: string, shortCode: string | null, created: boolean, } | { "kind": "relation", id: string, linked: boolean, } | { "kind": "label", label: string, };
+export type OpResult = { "kind": "done" } | { "kind": "entity", id: string, shortCode: string | null, created: boolean, } | { "kind": "relation", id: string, linked: boolean, } | { "kind": "label", label: string, } | { "kind": "stale" };

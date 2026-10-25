@@ -167,6 +167,17 @@ pub enum Op {
         entity_type: String,
         base: String,
     },
+    /// A caller's embedding of one chunk of an entity's text in a vector index (`pendingEmbeddings` lists them):
+    /// stored when `hash` is still the chunk's, and answered `stale` when the text has changed since
+    Embed {
+        id: String,
+        #[serde(default)]
+        index: Option<String>,
+        chunk: u32,
+        hash: String,
+        model: String,
+        vector: Vec<f32>,
+    },
 }
 
 fn yes() -> bool {
@@ -202,4 +213,6 @@ pub enum OpResult {
     Label {
         label: String,
     },
+    /// An embedding not stored: its chunk's text changed after it was read
+    Stale,
 }

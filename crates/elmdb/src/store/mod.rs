@@ -21,8 +21,25 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
 use sync::{Durable, GroupCommit, Policy, Syncer, SystemClock};
 
-/// The store's database handle
-pub type Db = heed::Database<'static, Bytes, Bytes>;
+/// A vector index's graph database, by its distance
+pub type CosineGraphs = hannoy::Database<'static, hannoy::distances::Cosine>;
+pub type EuclideanGraphs = hannoy::Database<'static, hannoy::distances::Euclidean>;
+
+/// The store's databases: the one of keys (`main`, which `Db` dereferences to), and hannoy's graph databases, one per
+/// distance, absent from a read-only environment that predates them
+#[derive(Clone, Copy)]
+pub struct Db {
+    pub main: heed::Database<'static, Bytes, Bytes>,
+    pub cosine: Option<CosineGraphs>,
+    pub euclidean: Option<EuclideanGraphs>,
+}
+
+impl std::ops::Deref for Db {
+    type Target = heed::Database<'static, Bytes, Bytes>;
+    fn deref(&self) -> &Self::Target {
+        &self.main
+    }
+}
 
 /// How the store opens
 #[derive(Debug, Clone)]
@@ -189,17 +206,23 @@ impl Store {
                 Ok(CommitOrAbort::<_, ()>::Commit((elmdb, main)))
             })?
             .unwrap_commit();
-        // The unnamed database lists the named ones: anything in it but elmdb's is another program's data
+        // The unnamed database lists the named ones: anything in it but elmdb's own is another program's data
         let foreign = match main {
             Some(main) => {
                 let txn = env.read_txn()?;
-                main.iter(&txn)?.any(|e| e.is_ok_and(|(k, _)| k != format::DB_NAME.as_bytes()))
+                main.iter(&txn)?.any(|e| {
+                    e.is_ok_and(|(k, _)| {
+                        ![format::DB_NAME, format::COSINE_GRAPHS, format::EUCLIDEAN_GRAPHS]
+                            .iter()
+                            .any(|n| k == n.as_bytes())
+                    })
+                })
             }
             None => false,
         };
         if let Some(db) = db {
             check_stamp(env, db, path)?;
-            return Ok(db);
+            return Self::with_graphs(env, db, read_only);
         }
         if read_only || foreign {
             return Err(Error::new(
@@ -229,7 +252,32 @@ impl Store {
             })?
             .unwrap_commit();
         env.force_sync()?;
-        Ok(db)
+        Self::with_graphs(env, db, read_only)
+    }
+
+    /// The databases around `main`: hannoy's graph databases, created in a writable environment that lacks them, and
+    /// opened, when there, in a read-only one
+    fn with_graphs(env: &Env<WithoutTls>, main: heed::Database<'static, Bytes, Bytes>, read_only: bool) -> Result<Db> {
+        let rtxn = env.read_txn()?;
+        let (cosine, euclidean) = env
+            .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
+                let cosine = opener.open_database(rtxn, Some(format::COSINE_GRAPHS))?;
+                let euclidean = opener.open_database(rtxn, Some(format::EUCLIDEAN_GRAPHS))?;
+                Ok(CommitOrAbort::<_, ()>::Commit((cosine, euclidean)))
+            })?
+            .unwrap_commit();
+        if read_only || (cosine.is_some() && euclidean.is_some()) {
+            return Ok(Db { main, cosine, euclidean });
+        }
+        let wtxn = env.write_txn()?;
+        let (cosine, euclidean) = env
+            .create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
+                let cosine = opener.create_database(wtxn, Some(format::COSINE_GRAPHS))?;
+                let euclidean = opener.create_database(wtxn, Some(format::EUCLIDEAN_GRAPHS))?;
+                Ok(CommitOrAbort::<_, ()>::Commit((cosine, euclidean)))
+            })?
+            .unwrap_commit();
+        Ok(Db { main, cosine: Some(cosine), euclidean: Some(euclidean) })
     }
 
     pub fn path(&self) -> &Path {
@@ -525,7 +573,7 @@ pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name:
     db.put(txn, &meta_key(name), value).map_err(Into::into)
 }
 
-fn check_stamp(env: &Env<WithoutTls>, db: Db, path: &Path) -> Result<()> {
+fn check_stamp(env: &Env<WithoutTls>, db: heed::Database<'_, Bytes, Bytes>, path: &Path) -> Result<()> {
     let txn = env.read_txn()?;
     let kind = db.get(&txn, &meta_key(meta::KIND))?;
     if kind != Some(format::KIND.as_bytes()) {

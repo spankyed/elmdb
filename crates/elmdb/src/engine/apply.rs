@@ -148,6 +148,12 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             type_def(t, entity_type, "takeLabel")?;
             Ok(OpResult::Label { label: numbering::next_label(t, entity_type, base)? })
         }
+        Op::Embed { id, index, chunk, hash, model, vector } => {
+            match super::vector::embed(t, id, index.as_deref(), *chunk, hash, model, vector)? {
+                super::vector::Embedded::Stored => Ok(OpResult::Done),
+                super::vector::Embedded::Stale => Ok(OpResult::Stale),
+            }
+        }
     }
 }
 

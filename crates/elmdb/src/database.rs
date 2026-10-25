@@ -262,8 +262,8 @@ fn apply_schema(store: &Store, given: Option<Schema>) -> Result<(Option<Schema>,
     store.write(
         |txn, db| {
             crate::engine::drop_index_data(db, txn, &changes)?;
-            put_meta(txn, db, meta::SCHEMA, canonical.as_bytes())?;
-            put_meta(txn, db, meta::SCHEMA_HASH, hash.as_bytes())
+            put_meta(txn, db.main, meta::SCHEMA, canonical.as_bytes())?;
+            put_meta(txn, db.main, meta::SCHEMA_HASH, hash.as_bytes())
         },
         true,
     )?;

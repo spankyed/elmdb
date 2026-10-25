@@ -13,6 +13,10 @@ pub const KIND: &str = "elmdb";
 /// The LMDB database inside the environment that holds every key
 pub const DB_NAME: &str = "elmdb";
 
+/// The LMDB databases hannoy keeps the vector indexes' graphs in, one per distance: derived, rebuilt from `p/q`
+pub const COSINE_GRAPHS: &str = "elmdb.graphs.cosine";
+pub const EUCLIDEAN_GRAPHS: &str = "elmdb.graphs.euclidean";
+
 /// Whether a prefix's keys are the truth, derived from it, or about the database itself
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixKind {
@@ -59,10 +63,24 @@ pub enum Prefix {
     TextDocument,
     /// `d/fs type index` → a text index's statistics: its entities and each field's total length
     TextStats,
+    /// `p/q type index id chunk` → an embedding a caller wrote for a chunk: its model, the chunk's hash, the vector
+    Vector,
+    /// `d/qc type index id chunk` → a chunk of an entity's text a vector index embeds: its hash and its text
+    VectorChunk,
+    /// `d/qp type index id chunk` → that a chunk has no embedding of its current text under the index's model
+    VectorPending,
+    /// `d/qi type index item` → the entity and chunk a graph item is
+    VectorItem,
+    /// `d/qm type index id chunk` → the graph item a chunk is
+    VectorItemOf,
+    /// `d/qj type index item` → a graph change the unit makes as it commits: an item added or removed
+    VectorJournal,
+    /// `d/qn type index` → a vector index's graph: its number among the graphs, and its next item
+    VectorGraph,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 17] = [
+    pub const ALL: [Prefix; 24] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -80,6 +98,13 @@ impl Prefix {
         Prefix::TextPositions,
         Prefix::TextDocument,
         Prefix::TextStats,
+        Prefix::Vector,
+        Prefix::VectorChunk,
+        Prefix::VectorPending,
+        Prefix::VectorItem,
+        Prefix::VectorItemOf,
+        Prefix::VectorJournal,
+        Prefix::VectorGraph,
     ];
 
     /// The string the key's first part holds
@@ -102,12 +127,21 @@ impl Prefix {
             Prefix::TextPositions => "d/fp",
             Prefix::TextDocument => "d/fd",
             Prefix::TextStats => "d/fs",
+            Prefix::Vector => "p/q",
+            Prefix::VectorChunk => "d/qc",
+            Prefix::VectorPending => "d/qp",
+            Prefix::VectorItem => "d/qi",
+            Prefix::VectorItemOf => "d/qm",
+            Prefix::VectorJournal => "d/qj",
+            Prefix::VectorGraph => "d/qn",
         }
     }
 
     pub const fn kind(self) -> PrefixKind {
         match self {
-            Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence => PrefixKind::Primary,
+            Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
+                PrefixKind::Primary
+            }
             Prefix::Meta => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }

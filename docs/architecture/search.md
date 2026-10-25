@@ -27,7 +27,7 @@ Text and vector indexes are named indexes on a type, beside its value indexes (`
 "indexes": {
   "text":    { "kind": "text", "fields": { "title": { "weight": 3 }, "body": { "weight": 1 } }, "analyzer": "standard" },
   "meaning": { "kind": "vector", "from": ["title", "body"], "chunk": "paragraph",
-               "dims": 384, "metric": "cosine", "precision": "f16", "model": "bge-small-en-v1.5" }
+               "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
 }
 ```
 

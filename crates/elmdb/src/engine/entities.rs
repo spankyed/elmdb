@@ -135,6 +135,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     reindex(t, id, field, before.as_ref(), Some(value))?;
     t.put(&keys::value(id, field), &values::encode(value))?;
     super::text::refile(t, id, Some(field))?;
+    super::vector::refile(t, id, Some(field))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, true)?;
@@ -148,6 +149,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     reindex(t, id, field, Some(&before), None)?;
     t.del(&keys::value(id, field))?;
     super::text::refile(t, id, Some(field))?;
+    super::vector::refile(t, id, Some(field))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, false)?;
@@ -159,6 +161,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
 /// removed by the relations module
 pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     super::text::remove(t, id)?;
+    super::vector::remove(t, id)?;
     for (field, bytes) in fields(t, id)? {
         let before = values::decode(&bytes)?;
         reindex(t, id, &field, Some(&before), None)?;

@@ -15,7 +15,7 @@ use crate::schema::{Cardinality, Schema};
 use super::entities::{self, ValueIndex, entries_of, value_indexes};
 use super::keys;
 use super::unit::{Read, Txn};
-use super::{ids, relations, text, values};
+use super::{ids, relations, text, values, vector};
 
 /// One entity as primary data holds it
 struct Entity {
@@ -98,6 +98,12 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
                 out.extend(text::entries(r, t, &index, &places)?);
             }
         }
+        let ids: Vec<String> = of.iter().map(|e| e.id.clone()).collect();
+        for index in vector::vector_indexes(r.schema(), t) {
+            if is_built(r, t, &index.name)? {
+                out.extend(vector::entries(r, t, &index, &ids)?);
+            }
+        }
     }
     for (key, bytes) in r.scan(&keys::all_relations())? {
         let relation = match decode_key(&key)?.pop() {
@@ -116,7 +122,7 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 11] = [
+const COMPARED: [Prefix; 13] = [
     Prefix::Live,
     Prefix::Trashed,
     Prefix::Count,
@@ -128,16 +134,26 @@ const COMPARED: [Prefix; 11] = [
     Prefix::TextPositions,
     Prefix::TextDocument,
     Prefix::TextStats,
+    Prefix::VectorChunk,
+    Prefix::VectorPending,
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 5] =
-    [Prefix::Index, Prefix::TextTerm, Prefix::TextPositions, Prefix::TextDocument, Prefix::TextStats];
+const PER_INDEX: [Prefix; 7] = [
+    Prefix::Index,
+    Prefix::TextTerm,
+    Prefix::TextPositions,
+    Prefix::TextDocument,
+    Prefix::TextStats,
+    Prefix::VectorChunk,
+    Prefix::VectorPending,
+];
 
 /// Every index of a type that is built or waits to be: its value indexes and its text indexes
 pub fn index_names(schema: &Schema, entity_type: &str) -> Vec<String> {
     let mut names: Vec<String> = value_indexes(schema, entity_type).into_iter().map(|i| i.name).collect();
     names.extend(text::text_indexes(schema, entity_type).into_iter().map(|i| i.name));
+    names.extend(vector::vector_indexes(schema, entity_type).into_iter().map(|i| i.name));
     names
 }
 
@@ -230,7 +246,11 @@ pub fn check(r: &impl Read) -> Result<CheckReport> {
     for key in actual.keys().filter(|k| !expected.contains_key(*k)) {
         differences.push(Difference { key: key_text(key), kind: "extra".into() });
     }
-    Ok(CheckReport { differences, violations: violations(r)? })
+    let mut violations = violations(r)?;
+    for message in vector::check_items(r, r.schema())? {
+        violations.push(Violation { subject: "vector graph".into(), message });
+    }
+    Ok(CheckReport { differences, violations })
 }
 
 /// Rows that break the schema's rules: a missing required field, a value its field doesn't take, a field its type
@@ -363,6 +383,14 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     t.put(&key, &value)?;
                 }
             }
+            if let Some(found) = vector::vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+                vector::clear(t, entity_type, name)?;
+                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+                for e in &of {
+                    vector::refile_at(t, entity_type, &found, &e.id)?;
+                }
+                vector::flush(t)?;
+            }
         }
         None => {
             for prefix in COMPARED {
@@ -381,6 +409,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             for (key, value) in derive(t)? {
                 t.put(&key, &value)?;
             }
+            vector::rebuild_graphs(t)?;
         }
     }
     Ok(())
@@ -413,6 +442,18 @@ pub fn build_chunk(
     let done = chunk.len() <= limit;
     let mut last = after;
     let Some(index) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
+        if let Some(index) = vector::vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+            for (seq, id) in chunk.iter().take(limit) {
+                vector::refile_at(t, entity_type, &index, id)?;
+                last = *seq;
+            }
+            vector::flush(t)?;
+            if done {
+                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+                return Ok(None);
+            }
+            return Ok(Some(last));
+        }
         let Some(index) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
             return Ok(None);
         };

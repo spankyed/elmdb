@@ -22,6 +22,7 @@ mod relations;
 mod text;
 mod unit;
 mod values;
+mod vector;
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -125,6 +126,31 @@ pub(crate) fn drop_index_data(
                 }
             }
             db.delete(txn, &keys::text_stats(entity_type, index))?;
+            // A vector index's derived keys, the embeddings stored for it, and its graph
+            for prefix in [
+                crate::format::Prefix::Vector,
+                crate::format::Prefix::VectorChunk,
+                crate::format::Prefix::VectorPending,
+                crate::format::Prefix::VectorItem,
+                crate::format::Prefix::VectorItemOf,
+                crate::format::Prefix::VectorJournal,
+            ] {
+                let (low, high) =
+                    crate::format::key::prefix_range(&keys::vector_index_range(prefix, entity_type, index));
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let doomed: Vec<Vec<u8>> =
+                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                for key in doomed {
+                    db.delete(txn, &key)?;
+                }
+            }
+            if let Some(graph) = db.get(txn, &keys::vector_graph(entity_type, index))? {
+                let number = values::decode(graph)?.as_array().and_then(|a| a.first()).and_then(rmpv::Value::as_u64);
+                if let Some(number) = number {
+                    vector::clear_graph(txn, db, number as u16)?;
+                }
+                db.delete(txn, &keys::vector_graph(entity_type, index))?;
+            }
             db.delete(txn, &keys::index_built(entity_type, index))?;
         }
     }
@@ -235,7 +261,9 @@ impl Database {
         store.write(
             |txn, db| {
                 let mut state = UnitState::default();
-                f(&mut Txn { txn, db, state: &mut state, schema: &schema, now })
+                let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
+                f(&mut t)?;
+                vector::flush(&mut t)
             },
             true,
         )
@@ -294,6 +322,7 @@ impl Database {
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
+                vector::flush(&mut t)?;
                 Ok((results, ChangeSet::of(&state.events)))
             },
             durable,
@@ -423,7 +452,10 @@ impl Unit {
     /// Commits the unit, after its deferred checks; a check that fails aborts the whole unit. `durable` waits for the
     /// commit's sync
     pub fn commit(mut self, durable: bool) -> Result<ChangeSet> {
-        let checked = self.view(0.0).and_then(|t| run_checks(&t));
+        let checked = self.view(0.0).and_then(|mut t| {
+            run_checks(&t)?;
+            vector::flush(&mut t)
+        });
         if let Err(error) = checked {
             self.abort();
             return Err(error);

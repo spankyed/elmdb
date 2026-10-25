@@ -51,6 +51,16 @@ pub enum ReadOp {
         #[serde(default = "ten")]
         limit: u32,
     },
+    /// The chunks of a type's vector index waiting for embeddings, up to `limit`, with the model and dimensions to embed
+    /// them by and how many wait in all: what a caller's worker embeds and writes back with `embed`
+    PendingEmbeddings {
+        #[serde(rename = "type")]
+        entity_type: String,
+        #[serde(default)]
+        index: Option<String>,
+        #[serde(default = "hundred")]
+        limit: u32,
+    },
     /// The entities whose label holds the query's characters in order, best first: for a quick-open across types.
     /// `fields` names each type's label field
     FindLabels {
@@ -65,6 +75,10 @@ pub enum ReadOp {
 
 fn ten() -> u32 {
     10
+}
+
+fn hundred() -> u32 {
+    100
 }
 
 /// A query: where it starts, the steps after, and what it answers
@@ -199,6 +213,35 @@ pub enum Step {
     /// The entities after `id` in the order so far: a page's cursor, the last id of the page before
     After {
         id: String,
+    },
+    /// The `k` entities nearest `vector` in a type's vector index, nearest first, each by its nearest chunk
+    Near {
+        vector: Vec<f32>,
+        #[serde(default)]
+        index: Option<String>,
+        #[serde(default = "ten")]
+        k: u32,
+    },
+    /// The `k` entities nearest the entity `id`'s own embedding, nearest first, `id` itself left out: more like this
+    Like {
+        id: String,
+        #[serde(default)]
+        index: Option<String>,
+        #[serde(default = "ten")]
+        k: u32,
+    },
+    /// A text search and a vector search of one type, their rankings fused (reciprocal rank fusion, 60): the `k` best
+    Hybrid {
+        query: String,
+        vector: Vec<f32>,
+        #[serde(default)]
+        text_index: Option<String>,
+        #[serde(default)]
+        vector_index: Option<String>,
+        #[serde(default = "ten")]
+        k: u32,
+        #[serde(default)]
+        options: SearchOptions,
     },
     /// The entities a type's text index matches to `query`, most relevant first (`docs/architecture/search.md`). `index` names
     /// the index on a type with more than one

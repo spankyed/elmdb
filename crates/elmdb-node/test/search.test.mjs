@@ -47,3 +47,26 @@ test('a search crosses the binding: hits with highlights, a suggestion and a qui
   assert.deepEqual(suggestions.completions, ['deploying']);
   assert.deepEqual(labels.hits.map((h) => h.id), ['Message-2']);
 });
+
+test('a worker embeds what is pending through the binding, and a vector search finds it', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  const db = Database.open(dir, { syncs: false, schema: {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Doc: { fields: { body: { type: 'any', optional: true } },
+      indexes: { meaning: { kind: 'vector', from: ['body'], dims: 2, model: 'm' } } } },
+  } });
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  db.write(packr.pack({ ops: [
+    { op: 'create', type: 'Doc', id: 'Doc-a', fields: { body: 'apples' } },
+    { op: 'create', type: 'Doc', id: 'Doc-b', fields: { body: 'boats' } },
+  ], now: 1000 }));
+  const [pending] = packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'pendingEmbeddings', type: 'Doc' }] })));
+  assert.deepEqual([pending.model, pending.dims, pending.count], ['m', 2, 2]);
+  const vectorOf = (text) => (text === 'apples' ? [1, 0] : [0, 1]);
+  const written = packr.unpack(db.write(packr.pack({ ops: pending.chunks.map((c) =>
+    ({ op: 'embed', id: c.id, chunk: c.chunk, hash: c.hash, model: 'm', vector: vectorOf(c.text) })), now: 1000 })));
+  assert.deepEqual(written.results.map((r) => r.kind), ['done', 'done']);
+  const [near] = packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan: {
+    start: { from: 'types', types: ['Doc'] }, steps: [{ step: 'near', vector: [0.9, 0.1], k: 1 }], terminal: { answer: 'ids' } } }] })));
+  assert.deepEqual(near.ids, ['Doc-a']);
+});

@@ -61,7 +61,7 @@ What a database holds and the rules it keeps, declared as data. Status: designed
         "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"] },
         "text":         { "kind": "text", "fields": { "text": { "weight": 1 } } },
         "meaning":      { "kind": "vector", "from": ["text"], "chunk": "paragraph",
-                          "dims": 384, "metric": "cosine", "precision": "f16", "model": "bge-small-en-v1.5" }
+                          "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
       }
     },
     "IndexedDoc": {
@@ -206,12 +206,13 @@ search step names its text or vector index only when the type has more than one.
 
 ```json
 "meaning": { "kind": "vector", "from": ["title", "body"], "chunk": "paragraph",
-             "dims": 384, "metric": "cosine", "precision": "f16", "model": "bge-small-en-v1.5" }
+             "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
 ```
 
 - `from`: the `string` fields the text to embed is made of. `chunk`: `whole`, `paragraph` or `heading` (Markdown
   sections).
-- `dims`, `metric` (`cosine`, `dot`, `l2`), `precision` (`f32`, `f16`, `i8`).
+- `dims`, `metric` (`cosine` or `l2`), `precision` (`f32`). hannoy's graphs measure cosine and euclidean distance over
+  f32 vectors; a normalized embedding ranks by dot product as it does by cosine.
 - `model`: an opaque name the engine records with each vector. A changed model makes every vector pending again, and
   a vector written under another model is refused.
 

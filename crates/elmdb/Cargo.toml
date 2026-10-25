@@ -29,6 +29,9 @@ charabia.workspace = true
 roaring.workspace = true
 levenshtein_automata.workspace = true
 rust-stemmers.workspace = true
+# Vector indexes: hannoy's HNSW graphs in the same environment, built with a seeded generator
+hannoy.workspace = true
+rand.workspace = true
 ts-rs = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 

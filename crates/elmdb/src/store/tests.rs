@@ -85,7 +85,7 @@ fn refuses_new_files_it_could_not_stamp_and_stamps_them_once_it_can() {
 /// Rewrites the stored format, as a database of another version would hold it
 fn stamp_format(path: &Path, version: u32) {
     let store = Store::open(path, quiet()).unwrap();
-    store.write(|txn, db| put_meta(txn, db, meta::FORMAT, &version.to_be_bytes()), false).unwrap();
+    store.write(|txn, db| put_meta(txn, db.main, meta::FORMAT, &version.to_be_bytes()), false).unwrap();
     store.close().unwrap();
 }
 

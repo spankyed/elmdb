@@ -185,6 +185,13 @@ impl Database {
                         .collect::<heed::Result<_>>()?
                 };
                 db.clear(txn)?;
+                // The vector graphs go with the keys they are derived from
+                if let Some(cosine) = db.cosine {
+                    cosine.clear(txn)?;
+                }
+                if let Some(euclidean) = db.euclidean {
+                    euclidean.clear(txn)?;
+                }
                 for (k, v) in kept {
                     db.put(txn, &k, &v)?;
                 }

@@ -178,6 +178,35 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
         ReadOp::FindLabels { query, fields, limit, scope } => {
             find_labels(r, query, fields, *limit, *scope, &mut W(out))
         }
+        ReadOp::PendingEmbeddings { entity_type, index, limit } => {
+            let def = super::vector::resolve(r.schema(), entity_type, index.as_deref(), "pendingEmbeddings")?;
+            let (chunks, count) = super::vector::pending(r, entity_type, &def.name, *limit as usize)?;
+            let mut w = W(out);
+            w.map(6);
+            w.kind("pending");
+            w.str("index");
+            w.str(&def.name);
+            w.str("model");
+            w.str(&def.model);
+            w.str("dims");
+            w.uint(def.dims as u64);
+            w.str("count");
+            w.uint(count);
+            w.str("chunks");
+            w.array(chunks.len() as u32);
+            for c in &chunks {
+                w.map(4);
+                w.str("id");
+                w.str(&c.id);
+                w.str("chunk");
+                w.uint(u64::from(c.chunk));
+                w.str("hash");
+                w.str(&c.hash);
+                w.str("text");
+                w.str(&c.text);
+            }
+            Ok(())
+        }
         ReadOp::WouldCreateCycle { source, target, kinds } => {
             for kind in kinds {
                 relations::definition(r, kind)?;
@@ -578,6 +607,29 @@ impl<R: Read> Query<'_, R> {
                 })
             }
             Step::Search { query, index, options } => self.search(before, query, index.as_deref(), options, visit),
+            Step::Near { vector, index, k } => {
+                let found = self.nearest(before, vector, index.as_deref(), *k as usize, None)?;
+                self.record_and_visit(found, visit)
+            }
+            Step::Like { id, index, k } => {
+                let entity_type = ids::type_of(id);
+                let def = super::vector::resolve(self.r.schema(), entity_type, index.as_deref(), "like")?;
+                let Some(own) = super::vector::own_vector(self.r, entity_type, &def, id)? else { return Ok(true) };
+                let found = self.nearest(before, &own, Some(&def.name), *k as usize, Some(id))?;
+                self.record_and_visit(found, visit)
+            }
+            Step::Hybrid { query, vector, text_index, vector_index, k, options } => {
+                let found = self.hybrid(
+                    before,
+                    query,
+                    vector,
+                    text_index.as_deref(),
+                    vector_index.as_deref(),
+                    *k as usize,
+                    options,
+                )?;
+                self.record_and_visit(found, visit)
+            }
             Step::Distinct { field: name } => {
                 let ids = self.collect(before)?;
                 let mut kept = Vec::new();
@@ -667,6 +719,156 @@ impl<R: Read> Query<'_, R> {
         {
             let mut hits = self.hits.borrow_mut();
             for (_, hit, name) in found {
+                hits.insert(hit.id.clone(), (hit, name));
+            }
+        }
+        each(ids, visit)
+    }
+
+    /// The types a step searches, and the entities it searches among: a type start's whole types, or the set before
+    fn searched(&self, before: usize) -> Result<(Vec<String>, Option<Vec<String>>)> {
+        let among = match self.start_types() {
+            Some(_) if before == 0 => None,
+            _ => Some(self.collect(before)?),
+        };
+        let types = match &among {
+            None => self.start_types().unwrap_or_default().to_vec(),
+            Some(ids) => {
+                let mut types: Vec<String> = Vec::new();
+                for id in ids {
+                    let t = ids::type_of(id);
+                    if !types.iter().any(|known| known == t) {
+                        types.push(t.to_owned());
+                    }
+                }
+                types
+            }
+        };
+        Ok((types, among))
+    }
+
+    /// The `k` entities nearest `vector` among the searched types' vector indexes, nearest first, as hits scored by
+    /// nearness (`1 / (1 + distance)`), `except` left out
+    fn nearest(
+        &self,
+        before: usize,
+        vector: &[f32],
+        index: Option<&str>,
+        k: usize,
+        except: Option<&str>,
+    ) -> Result<Vec<(Hit, String)>> {
+        let (types, among) = self.searched(before)?;
+        let mut found: Vec<(f32, Hit, String)> = Vec::new();
+        for entity_type in &types {
+            let def = match super::vector::resolve(self.r.schema(), entity_type, index, "near") {
+                Ok(def) => def,
+                Err(e) if among.is_some() && index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                Err(e) => return Err(e),
+            };
+            let within = match &among {
+                None => None,
+                Some(ids) => {
+                    let of_type: Vec<String> =
+                        ids.iter().filter(|id| ids::type_of(id) == entity_type).cloned().collect();
+                    Some(super::vector::items_of(self.r, entity_type, &def.name, &of_type)?)
+                }
+            };
+            // Asked for more than `k`: the trash and `except` are left out after the graph answers
+            for (id, distance) in super::vector::nearest(self.r, entity_type, &def, vector, k + 8, within.as_ref())? {
+                self.visited.set(self.visited.get() + 1);
+                if except == Some(id.as_str()) || (among.is_none() && !self.admits(&id)?) {
+                    continue;
+                }
+                let hit =
+                    Hit { id, seq: 0, score: 1.0 / (1.0 + f64::from(distance)), terms: Vec::new(), fields: Vec::new() };
+                found.push((distance, hit, def.name.clone()));
+            }
+        }
+        found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+        found.truncate(k);
+        Ok(found.into_iter().map(|(_, hit, name)| (hit, name)).collect())
+    }
+
+    /// A text search and a vector search fused by reciprocal rank (each list's rank `r` adds `1 / (60 + r)`), the
+    /// `k` best; a hit keeps the text search's matched terms, and so its highlights
+    #[allow(clippy::too_many_arguments)]
+    fn hybrid(
+        &self,
+        before: usize,
+        query: &str,
+        vector: &[f32],
+        text_index: Option<&str>,
+        vector_index: Option<&str>,
+        k: usize,
+        options: &SearchOptions,
+    ) -> Result<Vec<(Hit, String)>> {
+        const FUSION: f64 = 60.0;
+        let wide = (k * 4).max(40);
+        let near = self.nearest(before, vector, vector_index, wide, None)?;
+        let (types, among) = self.searched(before)?;
+        let raw = text::search::parse(query);
+        let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
+        let mut texts: Vec<(Hit, String)> = Vec::new();
+        for entity_type in &types {
+            let def = match text::resolve(self.r.schema(), entity_type, text_index, "hybrid") {
+                Ok(def) => def,
+                Err(e) if among.is_some() && text_index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                Err(e) => return Err(e),
+            };
+            let within = match &among {
+                None => None,
+                Some(ids) => {
+                    let of_type: Vec<String> =
+                        ids.iter().filter(|id| ids::type_of(id) == entity_type).cloned().collect();
+                    Some(text::search::places(self.r, &of_type)?.into_keys().collect::<roaring::RoaringTreemap>())
+                }
+            };
+            for hit in text::search::search(self.r, entity_type, &def, &raw, options, within.as_ref(), now)? {
+                if among.is_none() && !self.admits(&hit.id)? {
+                    continue;
+                }
+                texts.push((hit, def.name.clone()));
+            }
+        }
+        texts.sort_by(|a, b| b.0.score.partial_cmp(&a.0.score).unwrap_or(Ordering::Equal));
+        let mut fused: Vec<(f64, Hit, String)> = Vec::new();
+        let mut at: HashMap<String, usize> = HashMap::new();
+        for list in [texts, near] {
+            for (rank, (hit, name)) in list.into_iter().enumerate() {
+                let add = 1.0 / (FUSION + rank as f64 + 1.0);
+                match at.get(&hit.id) {
+                    Some(&i) => {
+                        fused[i].0 += add;
+                        if fused[i].1.terms.is_empty() {
+                            fused[i].1.terms = hit.terms;
+                            fused[i].1.fields = hit.fields;
+                            fused[i].2 = name;
+                        }
+                    }
+                    None => {
+                        at.insert(hit.id.clone(), fused.len());
+                        fused.push((add, hit, name));
+                    }
+                }
+            }
+        }
+        fused.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
+        fused.truncate(k);
+        Ok(fused
+            .into_iter()
+            .map(|(score, mut hit, name)| {
+                hit.score = score;
+                (hit, name)
+            })
+            .collect())
+    }
+
+    /// Records each hit for the `hits` terminal and visits its entity, in the order given
+    fn record_and_visit(&self, found: Vec<(Hit, String)>, visit: &mut Visit<'_>) -> Result<bool> {
+        let ids: Vec<String> = found.iter().map(|(hit, _)| hit.id.clone()).collect();
+        {
+            let mut hits = self.hits.borrow_mut();
+            for (hit, name) in found {
                 hits.insert(hit.id.clone(), (hit, name));
             }
         }
@@ -1128,7 +1330,10 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             w.bool(plain);
         }
         Terminal::Hits { fields, highlights } => {
-            if !plan.steps.iter().any(|step| matches!(step, Step::Search { .. })) {
+            let searches = |step: &Step| {
+                matches!(step, Step::Search { .. } | Step::Near { .. } | Step::Like { .. } | Step::Hybrid { .. })
+            };
+            if !plan.steps.iter().any(searches) {
                 return Err(Error::new(ErrorCode::BatchInvalid, "hits() answers a search, and the plan has none"));
             }
             let ids = q.collect(last)?;
@@ -1140,11 +1345,13 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             w.array(ids.len() as u32);
             for id in &ids {
                 let hit = hits.get(id);
+                // A vector search matches no terms, so its hits have nothing to highlight
                 let marks = match (hit, *highlights) {
-                    (Some((hit, name)), true) => {
+                    (Some((hit, name)), true) if !hit.terms.is_empty() => {
                         let index = text::resolve(r.schema(), ids::type_of(id), Some(name), "hits")?;
                         Some(text::search::highlights(r, &index, hit)?)
                     }
+                    (_, true) => Some(Vec::new()),
                     _ => None,
                 };
                 w.map(3 + u32::from(marks.is_some()) + u32::from(fields.is_some()));
