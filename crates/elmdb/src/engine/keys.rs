@@ -38,9 +38,12 @@ pub fn relation(id: &str) -> Vec<u8> {
     })
 }
 
-#[cfg(test)]
 pub fn all_relations() -> Vec<u8> {
     Prefix::Relation.key().to_vec()
+}
+
+pub fn all_entities() -> Vec<u8> {
+    Prefix::Entity.key().to_vec()
 }
 
 pub fn sequence(name: &str) -> Vec<u8> {

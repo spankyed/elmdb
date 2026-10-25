@@ -59,3 +59,27 @@ test('a unit reads its own writes, refuses a write beside it, and commits its ch
   assert.throws(() => unit.commit(), { code: 'CLOSED' });
   write(db, [{ op: 'set', id: 'Note-1', fields: { title: 'after' } }]);
 });
+
+test('reads answer on this thread and on the pool, the same, and a unit reads its own writes', async (t) => {
+  const db = open(t);
+  write(db, [
+    { op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } },
+    { op: 'create', type: 'Note', id: 'Note-2', fields: { title: 'two' } },
+  ]);
+  const reads = packr.pack({ reads: [
+    { read: 'query', plan: { start: { from: 'types', types: ['Note'] }, steps: [{ step: 'orderBy', field: 'title', descending: true }], terminal: { answer: 'rows', fields: ['title'] } } },
+    { read: 'row', id: 'Note-1' },
+  ] });
+  const now = packr.unpack(db.readSync(reads));
+  const pooled = packr.unpack(await db.read(reads));
+  assert.deepEqual(pooled, now);
+  assert.deepEqual(now[0].rows, [{ id: 'Note-2', title: 'two' }, { id: 'Note-1', title: 'one' }]);
+  assert.equal(now[0].plainObjects, true);
+  assert.equal(now[1].row.entityType, 'Note');
+  await assert.rejects(db.read(packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Nope'] }, terminal: { answer: 'ids' } } }] })), { code: 'UNKNOWN_TYPE' });
+  const unit = db.begin();
+  write(unit, [{ op: 'create', type: 'Note', id: 'Note-3', fields: { title: 'three' } }]);
+  const inUnit = packr.unpack(unit.read(packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'count' } } }] })));
+  assert.equal(inUnit[0].n, 3);
+  unit.abort();
+});

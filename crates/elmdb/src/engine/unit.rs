@@ -84,14 +84,12 @@ fn visit_in(
 }
 
 /// A read snapshot as the engine reads through it
-#[cfg(test)]
 pub struct Snapshot<'a, 'e> {
     pub txn: &'a heed::RoTxn<'e, heed::WithoutTls>,
     pub db: Db,
     pub schema: &'a Schema,
 }
 
-#[cfg(test)]
 impl Read for Snapshot<'_, '_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
         Ok(self.db.get(self.txn, key)?.map(<[u8]>::to_vec))

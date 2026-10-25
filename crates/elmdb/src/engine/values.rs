@@ -65,6 +65,11 @@ fn scalar_equal(a: &Value, b: &Value) -> bool {
     }
 }
 
+/// Whether a stored value is `probe`, or a list holding it: what an equality filter matches
+pub fn holds(stored: &Value, probe: &Value) -> bool {
+    strict_equal(stored, probe) || matches!(stored, Value::Array(items) if items.iter().any(|v| strict_equal(v, probe)))
+}
+
 /// The key part an index files a scalar under, or `None` for a value no index holds (a map, a list, bytes, a
 /// timestamp, a string longer than `MAX_INDEXED_STRING`)
 pub fn index_part(value: &Value) -> Option<Part> {

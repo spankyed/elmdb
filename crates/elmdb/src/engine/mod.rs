@@ -12,6 +12,8 @@ mod entities;
 mod ids;
 mod keys;
 mod numbering;
+pub mod plan;
+mod reads;
 mod relations;
 mod unit;
 mod values;
@@ -54,6 +56,14 @@ fn run_checks(t: &Txn<'_, '_>) -> Result<()> {
     Ok(())
 }
 
+/// Reads from their msgpack bytes, the whole buffer checked against the value spec first
+pub fn decode_reads(bytes: &[u8]) -> Result<plan::Reads> {
+    crate::format::value::decode(bytes)
+        .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The reads aren't valid: {}", e.message)))?;
+    rmp_serde::from_slice(bytes)
+        .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The reads don't decode: {e}")))
+}
+
 /// A batch from its msgpack bytes, the whole buffer checked against the value spec first
 pub fn decode_batch(bytes: &[u8]) -> Result<Batch> {
     crate::format::value::decode(bytes)
@@ -77,6 +87,18 @@ impl Database {
         let (results, changes) = self.write(&batch, durable)?;
         Ok(rmp_serde::to_vec_named(&Written { results: &results.results, changes: &changes })
             .expect("an answer serializes"))
+    }
+
+    /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/engine.md`, Reads)
+    pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
+        let store = self.store()?;
+        let schema = self.engine_schema();
+        store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads))
+    }
+
+    /// `read` with the reads as msgpack bytes, as the binding takes them
+    pub fn read_bytes(&self, reads: &[u8]) -> Result<Vec<u8>> {
+        self.read(&decode_reads(reads)?)
     }
 
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync
@@ -182,6 +204,18 @@ impl Unit {
         let batch = decode_batch(batch)?;
         let results = self.write(&batch)?;
         Ok(rmp_serde::to_vec_named(&results).expect("an answer serializes"))
+    }
+
+    /// Answers reads from the unit's transaction, which sees the unit's own writes
+    pub fn read(&mut self, reads: &plan::Reads) -> Result<Vec<u8>> {
+        let t = self.view(0.0)?;
+        reads::run(&t, &reads.reads)
+    }
+
+    /// `read` with the reads as msgpack bytes
+    pub fn read_bytes(&mut self, reads: &[u8]) -> Result<Vec<u8>> {
+        let reads = decode_reads(reads)?;
+        self.read(&reads)
     }
 
     /// Opens a savepoint, returning its depth for `rollback_to` and `release`

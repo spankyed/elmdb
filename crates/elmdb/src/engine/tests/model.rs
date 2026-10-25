@@ -723,6 +723,151 @@ fn sorted_far_ends(mut derived: BTreeMap<String, Json>) -> BTreeMap<String, Json
     derived
 }
 
+/// What a `where` asks for: every number the workload writes, alone or in a list, and two of its long strings
+fn probes() -> Vec<Json> {
+    let mut out: Vec<Json> = (0..10).map(Json::from).collect();
+    out.push(Json::from("0".repeat(2100)));
+    out.push(Json::from("5".repeat(2100)));
+    out
+}
+
+/// The derived reads as data: a label and its read, a query plan answering ids or a count
+fn derived_reads() -> Vec<(String, Json)> {
+    let mut out = Vec::new();
+    let ids = |start: Json, steps: Json, scope: &str| json!({ "read": "query", "plan": { "scope": scope, "start": start, "steps": steps, "terminal": { "answer": "ids" } } });
+    for t in ["Task", "Note"] {
+        let start = json!({ "from": "types", "types": [t] });
+        out.push((format!("{t} live"), ids(start.clone(), json!([]), "live")));
+        out.push((format!("{t} trashed"), ids(start.clone(), json!([]), "trashed")));
+        out.push((format!("{t} with trashed"), ids(start.clone(), json!([]), "withTrashed")));
+        out.push((
+            format!("{t} count"),
+            json!({ "read": "query", "plan": { "start": start, "terminal": { "answer": "count" } } }),
+        ));
+        for probe in probes() {
+            for field in ["a", "b"] {
+                let label = format!(
+                    "{t} where {field} {}",
+                    if probe.is_string() {
+                        format!("long {}", &probe.as_str().unwrap()[..1])
+                    } else {
+                        probe.to_string()
+                    }
+                );
+                out.push((
+                    label,
+                    ids(start.clone(), json!([{ "step": "where", "field": field, "value": probe }]), "live"),
+                ));
+            }
+        }
+        for role in ROLES {
+            out.push((
+                format!("{t} role {role}"),
+                ids(start.clone(), json!([{ "step": "withRole", "role": role }]), "live"),
+            ));
+        }
+    }
+    for id in IDS {
+        for kind in KINDS {
+            for step in ["out", "in"] {
+                out.push((
+                    format!("{id} {step} {kind}"),
+                    ids(json!({ "from": "ids", "ids": [id] }), json!([{ "step": step, "kinds": [kind] }]), "live"),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The engine's answers to every derived read, in one call; far ends sorted, since the model doesn't keep link order
+fn plans_of(db: &Database) -> BTreeMap<String, Json> {
+    let reads = derived_reads();
+    let request = crate::engine::plan::Reads {
+        reads: reads.iter().map(|(_, r)| serde_json::from_value(r.clone()).unwrap()).collect(),
+    };
+    let answers: Json =
+        serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&request).unwrap()[..]).unwrap()).unwrap();
+    reads
+        .into_iter()
+        .zip(answers.as_array().unwrap())
+        .map(|((label, _), answer)| {
+            let mut value = if answer["kind"] == "count" { answer["n"].clone() } else { answer["ids"].clone() };
+            if (label.contains(" out ") || label.contains(" in "))
+                && let Json::Array(items) = &mut value
+            {
+                items.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            }
+            (label, value)
+        })
+        .collect()
+}
+
+/// What the derived reads should answer, from the model
+fn plans_from(m: &Model) -> BTreeMap<String, Json> {
+    let mut by_seq: Vec<(&String, &Entity)> = m.entities.iter().collect();
+    by_seq.sort_by_key(|(_, e)| e.seq);
+    let live = |id: &str| m.entities.get(id).is_some_and(|e| !e.trashed);
+    let holds = |stored: Option<&Json>, probe: &Json| match stored {
+        None => false,
+        Some(Json::Array(items)) => items.iter().any(|v| v == probe),
+        Some(v) => v == probe,
+    };
+    let mut out = BTreeMap::new();
+    for (label, _) in derived_reads() {
+        let words: Vec<&str> = label.split(' ').collect();
+        let value = if IDS.contains(&words[0]) {
+            let (id, step, kind) = (words[0], words[1], words[2]);
+            let mut far: Vec<&String> = if !live(id) {
+                vec![]
+            } else {
+                let all = m.edges.keys();
+                let mut ends: Vec<&String> = if step == "out" {
+                    all.filter(|(s, k, t)| s == id && k == kind && t != id).map(|(_, _, t)| t).collect()
+                } else {
+                    all.filter(|(s, k, t)| t == id && k == kind && s != id).map(|(s, _, _)| s).collect()
+                };
+                ends.retain(|e| live(e));
+                ends
+            };
+            far.sort();
+            far.dedup();
+            json!(far)
+        } else {
+            let t = words[0];
+            let of_type = || by_seq.iter().filter(move |(id, _)| crate::engine::ids::type_of(id) == t);
+            match &words[1..] {
+                ["live"] => json!(of_type().filter(|(_, e)| !e.trashed).map(|(id, _)| id).collect::<Vec<_>>()),
+                ["trashed"] => json!(of_type().filter(|(_, e)| e.trashed).map(|(id, _)| id).collect::<Vec<_>>()),
+                ["with", "trashed"] => json!(of_type().map(|(id, _)| id).collect::<Vec<_>>()),
+                ["count"] => json!(of_type().filter(|(_, e)| !e.trashed).count()),
+                ["role", role] => json!(
+                    of_type()
+                        .filter(|(_, e)| !e.trashed && e.roles.iter().any(|r| r == role))
+                        .map(|(id, _)| id)
+                        .collect::<Vec<_>>()
+                ),
+                ["where", field, rest @ ..] => {
+                    let probe = match rest {
+                        ["long", digit] => Json::from(digit.repeat(2100)),
+                        [n] => Json::from(n.parse::<i64>().unwrap()),
+                        _ => unreachable!(),
+                    };
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && holds(e.fields.get(*field), &probe))
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
+                other => unreachable!("{other:?}"),
+            }
+        };
+        out.insert(label, value);
+    }
+    out
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
@@ -737,6 +882,7 @@ proptest! {
             prop_assert_eq!(got.is_ok(), expected.is_ok(), "step {}: {:?}: the engine said {:?}, the model {:?}", i, step, got, expected);
             prop_assert_eq!(state_of(&db), model_state(&model), "step {}: {:?}", i, step);
             prop_assert_eq!(sorted_far_ends(derived_of(&db)), derived_from(&model), "step {}: {:?}", i, step);
+            prop_assert_eq!(plans_of(&db), plans_from(&model), "step {}: {:?}", i, step);
         }
         *crate::store::FAIL_COMMIT_AT.lock().unwrap() = None;
     }

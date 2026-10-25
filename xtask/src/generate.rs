@@ -24,6 +24,7 @@ pub fn write(dir: &Path) -> Result<(), String> {
     elmdb::Batch::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::BatchResult::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::ChangeSet::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::engine::plan::Reads::export_all(&config).map_err(|e| e.to_string())?;
     // The JSON Schema a schema's `$schema` names, for editors and for checking a schema before opening a database
     let json_schema = schemars::schema_for!(elmdb::schema::Schema);
     let text = serde_json::to_string_pretty(&json_schema).map_err(|e| e.to_string())? + "\n";

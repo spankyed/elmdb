@@ -30,6 +30,13 @@ export declare class Database {
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
+   * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
+   * answer per read
+   */
+  readSync(reads: Buffer): Buffer
+  /** `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop */
+  read(reads: Buffer): Promise<Buffer>
+  /**
    * Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
    * (`UNIT_OPEN`), and writes go through the unit
    */
@@ -47,6 +54,8 @@ export declare class Unit {
    * bytes of `{ results: OpResult[] }`
    */
   write(batch: Buffer): Buffer
+  /** Answers reads from the unit's transaction, which sees the unit's own writes */
+  read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */
   savepoint(): number
   /** Undoes everything since the savepoint at `depth`, closing it */

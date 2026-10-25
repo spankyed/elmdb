@@ -33,25 +33,38 @@ compared at open. A type, field, relation kind or role the schema doesn't declar
 
 ## Reads: plans
 
-A plan is a start, steps and a terminal:
+A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
+envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
+whether it is present), a relation's row, `findRelations` by kind and ends, and `wouldCreateCycle`.
 
-- **Starts:** a type or types, ids, every entity, the trash.
-- **Filters:** a field's value, has or lacks a field, a role, a type, within ids, linked to or from (an entity, or
-  any), not linked, linked either way.
-- **Walks:** out and in along relation kinds, descendants and ancestors (each entity once, so a cycle ends the walk),
-  edges as relation rows.
-- **Search:** `search`, `near`, `hybrid` (`search.md`).
-- **Shaping:** order by a field (the engine's collation), reverse, distinct, limit, a cursor after a position, group by.
-- **Terminals:** ids, count, exists, first, last, rows (chosen fields, or all), edges, scores and highlights for a
-  search.
+A plan is a scope, a start, steps and a terminal:
 
-`db.readSync(plan)` runs on the calling thread. `db.read(plan)` runs on a reader thread in its own snapshot and
-resolves with the same result, so a large plan doesn't block the event loop.
+- **Scope:** `live` reaches no entity in the trash, not as a start and not at a far end; `withTrashed` reaches the
+  trash too; `trashed` starts from the trashed entities only.
+- **Starts:** types (in creation order), ids (in the order given), or every entity. A type the schema doesn't declare is
+  refused (`UNKNOWN_TYPE`), as a kind or role a read names is.
+- **Filters:** `ofType`, `within`, `where` (a value, or a list holding it; a `null` matches a field that is null or
+  missing), `has`, `lacks`, `withRole`, `linkedWith`, `linkedTo`, `linkedFrom`, `unlinkedTo`, `unlinkedFrom`.
+- **Walks:** `out` and `in` (each far end once, of the types when given), `descendants` and `ancestors` (nearest first,
+  each entity once, so a cycle ends the walk).
+- **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
+  then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`.
+- **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
+  `edges` (relation rows), `groupBy`.
+
+A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
+their answer, and a live type's `count` is read off its counter. A `where` or `withRole` straight after a type start
+reads a value index whose first field it names, a compound one's included.
+
+`db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
+own, and resolves with the same answer, so a large read doesn't block the event loop.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
-**Results** are owned bytes in one envelope: ids as strings, each row's values as the value bytes the caller wrote,
-counts and scores as numbers. The caller decodes values.
+**Answers** are owned bytes: ids as strings, each row as a map of `id`, `entityType` and the fields' stored msgpack
+bytes spliced in unchanged, counts as numbers. An answer holding rows says whether any map in it may hold a key
+`__proto__` (`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode for
+the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 

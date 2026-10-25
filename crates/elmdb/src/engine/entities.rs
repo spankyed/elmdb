@@ -75,7 +75,6 @@ fn add_count(t: &mut Txn<'_, '_>, entity_type: &str, by: i64) -> Result<()> {
     if now > 0 { t.put(&key, &values::encode(&now.into())) } else { t.del(&key) }
 }
 
-#[cfg(test)]
 pub fn count(t: &impl Read, entity_type: &str) -> Result<u64> {
     Ok(match t.get(&keys::count(entity_type))? {
         Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),

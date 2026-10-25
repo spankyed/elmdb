@@ -38,7 +38,7 @@ pub struct OpenOptions {
 /// An open database: one directory holding one LMDB environment
 #[napi]
 pub struct Database {
-    inner: elmdb::Database,
+    inner: std::sync::Arc<elmdb::Database>,
 }
 
 #[napi]
@@ -68,7 +68,7 @@ impl Database {
             sync_interval_ms: options.sync_interval_ms.map_or(defaults.sync_interval_ms, u64::from),
             map_size_bytes: options.map_size_bytes.map(|n| n as usize),
         };
-        elmdb::Database::open(path, options).map(|inner| Self { inner }).map_err(to_js)
+        elmdb::Database::open(path, options).map(|inner| Self { inner: std::sync::Arc::new(inner) }).map_err(to_js)
     }
 
     #[napi(getter)]
@@ -111,6 +111,19 @@ impl Database {
         self.inner.write_bytes(&batch, durable.unwrap_or(false)).map(Buffer::from).map_err(to_js)
     }
 
+    /// Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
+    /// answer per read
+    #[napi]
+    pub fn read_sync(&self, reads: Buffer) -> Result<Buffer, Code> {
+        self.inner.read_bytes(&reads).map(Buffer::from).map_err(to_js)
+    }
+
+    /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn read(&self, reads: Buffer) -> AsyncTask<ReadTask> {
+        AsyncTask::new(ReadTask { db: std::sync::Arc::clone(&self.inner), reads: reads.to_vec(), failed: None })
+    }
+
     /// Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
     /// (`UNIT_OPEN`), and writes go through the unit
     #[napi]
@@ -129,6 +142,37 @@ impl Database {
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
         self.inner.close().map_err(to_js)
+    }
+}
+
+/// `read()`'s promise, answered on a thread of the pool; a failure becomes an error with elmdb's code on the JS thread
+pub struct ReadTask {
+    db: std::sync::Arc<elmdb::Database>,
+    reads: Vec<u8>,
+    failed: Option<elmdb::Error>,
+}
+
+impl Task for ReadTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> napi::Result<Vec<u8>> {
+        self.db.read_bytes(&self.reads).map_err(|error| {
+            let reason = error.message.clone();
+            self.failed = Some(error);
+            napi::Error::from_reason(reason)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, answer: Vec<u8>) -> napi::Result<Buffer> {
+        Ok(answer.into())
+    }
+
+    fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<Buffer> {
+        match self.failed.take() {
+            Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
+            None => Err(error),
+        }
     }
 }
 
@@ -183,6 +227,12 @@ impl Unit {
     #[napi]
     pub fn write(&mut self, batch: Buffer) -> Result<Buffer, Code> {
         self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
+    }
+
+    /// Answers reads from the unit's transaction, which sees the unit's own writes
+    #[napi]
+    pub fn read(&mut self, reads: Buffer) -> Result<Buffer, Code> {
+        self.open()?.read_bytes(&reads).map(Buffer::from).map_err(to_js)
     }
 
     /// Opens a savepoint, answering its depth
