@@ -59,27 +59,19 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **elmdb:** `main` at `6dc5e51`, pushed to `github.com/spankyed/elmdb`. Since Phase 8: `Database::set_schema` and
-  `Load::Unset` (`5075d6f`), query `visits` (`9aec6d9`), the streaming walk and one-pass value check (`836f432`), the
-  records dump (`6d337f6`), the read-only `NO_LOCK` retry (`f9a7d81`), POSIX semaphores on macOS (`2cbcc6c`, D24).
-  Rust needs `export PATH="$HOME/.cargo/bin:$PATH"`.
+- **elmdb:** `main`, pushed to `github.com/spankyed/elmdb`; the code apack pins is `2cbcc6c` (POSIX semaphores on
+  macOS, D24). Rust needs `export PATH="$HOME/.cargo/bin:$PATH"`.
 - **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`, from
   `ears-disk-engine` `3e0b280ff` (#273 still open). Committed: the link (`bf9222c1e`), the engine on elmdb
-  (`fe5258646`), the `runs` database with `apack db import-runs`, the manifest's name rules (D25) and the session
-  link fix (`9c7f96003`); `vendor/elmdb.rev` is `2cbcc6c`. Nothing uncommitted.
-- **Proven (on `9c7f96003`):** `npm run chain -- --no-native` passes every step but `test:integration`, which passes
-  747 of 748: the one failure is an lmdb-js spec (`tests/lmdb/close.integration.spec.ts`) meeting a stale System V
-  semaphore set, which Phase 10 deletes with lmdb-js (D24). The differential harness passes (120 runs).
-- **Done:** Phases 0–8; Phases 9 and 11 but for the whole-chain pass and Phase 9's test-speed reading, which come with
-  Phase 10's chain.
-- **Next:** Phase 10: remove lmdb-js and the JavaScript engine (`src/kv/`, `kv.ts`, the store, its conversions and
-  stamps, their specs and scripts), turn `findLmdbImports` into an elmdb rule with a firing case, rewrite
-  `packages/apack-ears/CLAUDE.md` and apack's CLAUDE.md data-layer prose, then the chain, the test-speed reading and
-  D17's re-reading (attributing link-then-destroy's +35%).
+  (`fe5258646`), the `runs` database (`9c7f96003`), lmdb-js removed (`974faa775`). Nothing uncommitted.
+- **Proven (on `974faa775`):** `npm run chain -- --no-native` passes; the model harness passes on elmdb.
+- **Done:** Phases 0–11 (`docs/evidence/phase-0.md` … `phase-10.md`; Phase 11's evidence is in the acceptance row).
+- **Next:** Phase 12, text search: elmdb's index (charabia, default features off, with its Latin camelCase and
+  snake_case segmenters), then apack's adopter.
 - **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
   (`elmdb-data/format4/ears-db`, `elmdb-data/format4.dump`); `phase-1.md` says how they were made.
 - **Unresolved:** 905 stale two-semaphore System V sets that elmdb's runs before `2cbcc6c` left on the user's Mac;
-  removing them is the user's call (the running app uses lmdb-js's). **Evidence:** `docs/evidence/`.
+  removing them is the user's call. **Evidence:** `docs/evidence/`.
 
 ## Decisions
 
@@ -404,9 +396,9 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | Derived data, `check`, `rebuild`, schema changes (P6) | done | `docs/evidence/phase-6.md` | none |
 | Admin, upgrade from format 4, CLI (P7) | done | `docs/evidence/phase-7.md` | none; the 17 duplicate short codes are the user's to resolve when converting the real data (D12) |
 | Crash, failed-sync and fuzz suites (P8) | done, `68f6a96`, `a740ddd` | `docs/evidence/phase-8.md`; full matrix runs 40169607512 and 40170026515 | none |
-| apack parity, differential harness agreeing (P9) | done but the gate, apack `fe5258646`, `9c7f96003` | `docs/evidence/phase-9.md` | the whole chain and the test-speed reading, with Phase 10's chain |
-| apack without lmdb-js (P10) | missing | | all |
-| `runs` database (P11) | done but the gate, apack `9c7f96003`, elmdb `6d337f6` | host `run-history.spec` (20), CLI `db.integration` (70, `import-runs` included), the backup round trip of both databases | the whole chain, with Phase 10's |
+| apack parity, differential harness agreeing (P9) | done, apack `fe5258646`, `9c7f96003` | `docs/evidence/phase-9.md`; the chain and test speed in `phase-10.md` | none |
+| apack without lmdb-js (P10) | done, apack `974faa775` | `docs/evidence/phase-10.md` | none |
+| `runs` database (P11) | done, apack `9c7f96003`, elmdb `6d337f6` | host `run-history.spec` (20), CLI `db.integration` (71, `import-runs` included), the backup round trip of both databases; the chain in `phase-10.md` | none |
 | Text search, in elmdb and in apack (P12) | missing | | all |
 | Vector and hybrid search, library port tested and off (P13) | missing | | all |
 | Change sets and watch, one adopter (P14) | missing | | all |

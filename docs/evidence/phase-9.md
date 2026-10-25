@@ -115,8 +115,5 @@ The causes of the four past +10%:
 
 ## Test speed
 
-Recorded with the first `npm run chain -- --no-native` that passes whole in the worktree: the unit pools' in-chain wall
-times there against the main checkout's (lmdb-js; host 69–84 s, pack 38–53 s across its last two passing chains,
-2026-10-24 and 2026-10-25). Until Phase 10 deletes the lmdb-js specs, the integration pool can meet macOS's System V
-semaphore sets that elmdb's runs before `2cbcc6c` left (905 two-semaphore sets on this machine, beside lmdb-js's
-three-semaphore ones): lmdb-js refuses a colliding key (D24).
+Recorded with Phase 10's chain, the first that passes whole in the worktree: `docs/evidence/phase-10.md`, Test
+speed. link-then-destroy's +35% is attributed there too (D17's re-reading).
