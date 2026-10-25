@@ -9,7 +9,23 @@ value index is read only for a `where` straight after a type start; any other `w
 `limit` sorts the whole set; and a search is one step that collects its matches before the steps after it run. The
 planner makes few choices, which is why apack warns about unindexed walks rather than relying on the planner.
 
-## The idea
+## First, without bitmaps
+
+At apack's scale, about 22,000 entities, most of the win is three small changes and a reading, built before anything
+below:
+
+- **Any `where` in a chain uses its index**, not only one straight after a type start.
+- **`orderBy` with `limit` keeps a heap of the first `limit`** rather than sorting the whole set.
+- **An index lookup visits its matches as it finds them**, rather than collecting and sorting them first: an indexed
+  `where` with a `limit` of 50 read all 13,000 of its matches, 32 ms, in apack on 2026-10-25.
+- **EXPLAIN**, below: cheap, and it would have shown that.
+
+## Later: one algebra over bitmaps
+
+Bitmaps are the industry's tool for intersecting filters, as Lucene and ClickHouse use them, but they give no order:
+`orderBy` with `limit` still needs a heap or an index kept in value order. They are worth it when several filters
+intersect over large sets, which a reading will show.
+
 
 Every set a plan handles is a set of entity places (`seq`) — a roaring bitmap — and every step is an operation on such
 sets: an index lookup yields one, a filter intersects, `OR` unions, a negation subtracts, a walk maps through edges, a

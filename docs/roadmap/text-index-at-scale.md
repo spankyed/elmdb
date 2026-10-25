@@ -9,43 +9,49 @@ bitmap per term, positions per term and entity, a document record per entity and
 rewritten by the write that changes them. Three costs grow with the corpus rather than with the change:
 
 - **Writes.** Adding a document rewrites the whole posting list of every term it holds, so a common word's list — `the`
-  in a chat log — is read, decoded, extended, encoded and written again for every new message, and the statistics key
-  is rewritten by every write.
-- **Fuzzy and prefix terms.** A fuzzy word runs its Levenshtein automaton over every term of the index, and a prefix is
-  a range scan cut to the most-held `MAX_PREFIX_TERMS`.
-- **Ranking.** Every matching document is scored, each term's frequency read from its positions key, before the top
-  results are kept: a common word scores every document holding it.
+  in a chat log — is read, decoded, extended, encoded and written again for every new message. This is the one most
+  likely to show first: a chat log only grows.
+- **Fuzzy terms.** A fuzzy word runs its Levenshtein automaton over every term of the index.
+- **Ranking.** Every matching document is scored before the top results are kept: a common word scores every document
+  holding it.
 
 apack's corpus is small today, and none of these is measured as a problem yet.
 
-## The idea
+## The idea: use the B-tree LMDB already is
 
-The design Lucene and Meilisearch settled on, kept inside the unit that writes the data:
+Lucene's segments and background merges, and a separate FST dictionary, exist for stores without an ordered index.
+LMDB is an ordered B-tree, so each cost has a smaller answer.
 
-- **Segmented postings.** A write appends a small segment — the terms of the documents it changed, with each one's term
-  frequency — and a background merge folds segments together, as the index builder works today, off the write's path.
-  A read unions a term's segments; a deleted or changed document is masked by a per-segment deletion bitmap until a
-  merge drops it. A write's cost is its own documents' terms, whatever the corpus holds.
-- **Term frequencies in the postings**, beside each document's place, so scoring reads no positions; positions are read
-  only for a phrase or a highlight.
-- **An FST dictionary** per segment (the `fst` crate, which charabia already pulls in), intersected with the
-  Levenshtein automaton and walked for a prefix, so a fuzzy word visits the terms the automaton can reach rather than
-  all of them.
-- **Block-max WAND** for ranked top-k: each posting block records its highest possible score, and blocks that can't
-  reach the current k-th score are skipped unscored.
+- **Posting lists in blocks.** A term's postings are one key per term and block of places — `term | seq >> 16` — each
+  holding a roaring bitmap of the places in that block. An entity's place only grows, so a new message touches only its
+  terms' last blocks: a write's rewrite is bounded by the block, and there is nothing to merge. A read decodes a term's
+  few blocks, and intersecting two terms is still a bitmap AND, block by block.
+- **Term frequencies stay where they are.** Positions are already one key per term and entity (`d/fp`); scoring reads a
+  frequency from there, and a phrase or a highlight its positions.
+- **Fuzzy terms by seeking.** The automaton walks the sorted term keys, seeking past every range it can't match, as
+  Lucene's term dictionary is walked — no FST beside the B-tree.
+- **Ranked top-k** keeps a heap of the best k as documents are scored; skipping blocks that can't reach it (block-max
+  WAND) needs a maximum score per block, worth adding only when a common word's search is measured slow.
+
+**The other designs weighed:**
+
+- *One key per term and entity* (`term | seq → frequency`) also removes the rewrite, with an O(log n) insert per term.
+  But a common term's postings become thousands of keys to scan rather than a few bitmaps to decode, intersecting two
+  terms walks both ranges, and every entry repeats the type, index and term in its key. Blocks keep the bounded write
+  and the bitmap reads.
+- *Segments with background merges*, as Lucene and Meilisearch do: bounded writes too, at the cost of a merge policy,
+  a merge thread and derived data that is correct in more than one layout. Not needed where the store is ordered.
 
 ## When
 
-Each part has its own trigger, read off `npm run bench` in apack with a text case added, and off production-shaped data
-(apack's converted copy):
+Each part has its own trigger, read off a text case in apack's `npm run bench` and off production-shaped data:
 
-- segments, when a message write's commit time grows with the corpus;
-- the FST, when a fuzzy search's time grows with the dictionary;
-- WAND, when a common word's search time does.
+- blocks, when a message write's commit time grows with the corpus;
+- seeking for fuzzy terms, when a fuzzy search's time grows with the dictionary;
+- block-max scores, when a common word's search time does.
 
 ## Open questions
 
-- Merge policy: segment sizes, when a merge runs, and its write transaction's length against a unit the app holds open.
-- `check()` and `rebuild()` over segments: derived data that is correct in more than one layout, compared after a
-  canonical merge.
-- The format change: a text index's keys change shape, which `format.md`'s versioning has to carry.
+- The block size: `2^16` places keeps a block's bitmap small and a common term's blocks few; measured before choosing.
+- The format change: a text index's keys change shape, which `../architecture/format.md`'s versioning carries, and an
+  existing index is rebuilt.

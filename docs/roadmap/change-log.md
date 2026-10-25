@@ -20,7 +20,13 @@ features become readers of one stream rather than three mechanisms:
 - **Undo.** A user's action is a range of the log; undoing it writes the inverse of each entry, as a new commit, so
   undo is itself undoable and syncs like any write.
 
-## Open questions
+## In what order
+
+The commit sequence, which tracked reads added, is the log's foundation. **Incremental backup is the first use**: it
+needs only the log and a restore that replays it, and apack already has a backup screen to put it behind. **Sync is a
+product decision before it is an engine one** — which devices, which data, what a conflict looks like to a user — and
+undo follows what apack decides an action is.
+
 
 - The log's size against the database's, and what retention a desktop app can afford.
 - Whether sync belongs in elmdb or in a layer above that reads the log.

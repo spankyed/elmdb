@@ -80,7 +80,8 @@ transaction running its own code between writes needs: `db.begin()` opens one, `
 it, its writes read their own, and `unit.commit({ durable? })` or `unit.abort()` ends it. One unit is open at a time,
 and while it is `db.write` refuses (`UNIT_OPEN`): its writes go through the unit. The unit's write transaction belongs
 to the thread that began it. A unit opening on a map more than half used grows the map first, since an open unit can't
-grow it.
+grow it. A background index build waits for an open unit to end, woken when it does, and goes on from where it
+stopped; so does any other write but the unit's.
 
 A batch is applied in a savepoint of its unit, so a refused operation keeps none of its batch, and the unit goes on.
 

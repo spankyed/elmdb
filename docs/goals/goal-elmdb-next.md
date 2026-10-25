@@ -1,0 +1,214 @@
+# Goal: elmdb after v1, measured and typed
+
+Status: planned, 2026-10-25. Not started; follows `goal-elmdb.md`.
+
+```text
+# Goal: elmdb after v1, measured and typed
+
+Implement elmdb/docs/goals/goal-elmdb-next.md. Read Scope, Current handoff, Decisions, Phases,
+Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished by its own
+document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
+elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 4 is
+AgentBuddy/docs/plans/field-types-from-shapes.md.
+
+Work in two repositories, both under ~/Develop/Projects:
+- elmdb: follow elmdb/CLAUDE.md and this goal's Constraints.
+- AgentBuddy (apack): follow its CLAUDE.md, its docs/AGENTS.md and its user memory, in a
+  worktree (never the main checkout).
+
+Inspect current code before relying on a path or a figure here.
+
+Finished when:
+- Every row of Acceptance is met on current source, with the commits and the evidence recorded.
+- Each design phase leaves its roadmap document designed, with the measurements it rests on.
+- elmdb's docs and apack's reference docs describe what was built.
+- Outcome is written, the goal is archived, and closure is committed.
+
+Commit usable checkpoints as you go. Keep Current handoff current. Do not expand or reduce scope
+without the user's authorization.
+```
+
+## Scope
+
+**Outcome.** elmdb v1 finished, then made faster where a reading of apack's real work says it pays, typed by apack's
+shapes, extended with value compression and substring search, and its larger directions designed well enough that a
+later goal can build them.
+
+**Deliverables:**
+
+1. elmdb v1: `goal-elmdb.md` met and closed.
+2. A reading of what apack's user actions cost in calls to elmdb, and the loops it finds turned into set reads.
+3. The planner's three fixes and EXPLAIN.
+4. Field types from apack's shapes.
+5. Text postings in blocks, built if a reading calls for it.
+6. Fewer reads per field write.
+7. Value compression.
+8. Substring and regex search.
+9. Designs, with measurements, for the directions in `docs/roadmap/` not built here.
+
+**Entry points:** elmdb's `crates/elmdb/src/engine/` (`reads.rs`, `entities.rs`, `text/`, `derive.rs`), `format/`,
+`docs/architecture/` and `docs/roadmap/`; apack's `packages/apack-ears/` (`database.ts`, `query.ts`, `schema.ts`), the
+SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `drive/` for driving the app.
+
+## Current handoff
+
+- **Not started.** Phase 1 is `goal-elmdb.md`, under way in its own session; its Current handoff is the state to read.
+- **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
+  unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
+  row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
+  its matches, 32 ms.
+
+## Decisions
+
+Final unless marked open. Each cites the document that owns it; change the owner and this table together.
+
+| # | Decision | Owner |
+|---|---|---|
+| G1 | Phase 1 comes first. Phases 3 and 4 touch what `goal-elmdb.md`'s Phases 13 and 14 change (`reads.rs`, apack's `schema.ts` and codegen), so no later phase starts before Phase 1 closes | this goal |
+| G2 | A phase marked gated builds only when its reading says so, by the rule the phase states. The reading is recorded either way, and a phase whose gate isn't met is done when its reading is | this goal |
+| G3 | A change to stored data's layout bumps `FORMAT_VERSION` with an `elmdb upgrade` step to it, run on a copy (`docs/architecture/format.md`, Versions). Derived data only (a text or trigram index) may instead be rebuilt by that step. Stored developer data is converted on a copy, never at boot | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
+| G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
+| G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
+| G6 | elmdb's `main` is pushed at each checkpoint, as `goal-elmdb.md`'s D20. apack's work is committed on its worktree's branch and pushed only when the user asks | the user |
+| G7 | apack's work continues on a branch from wherever `goal-elmdb.md` leaves apack: its branch's tip, or `master` if it has landed, in a new worktree (`npm run session:new`) | this goal |
+
+## Phases
+
+### Phase 1: elmdb v1
+
+- **Deliverable:** `goal-elmdb.md`'s remaining phases (13–16) and its closure, by that document.
+- **Done when:** its Outcome is written and it is archived.
+
+### Phase 2: what a user action costs
+
+- **Deliverable:**
+  - A count of a user action's calls to elmdb, in development only: reads, writes outside a unit, units and their
+    writes, and the time spent in each, by call site. Kept at the one place every call crosses
+    (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:eval`.
+  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`.
+  - Each loop of one-entity reads or unit-less writes the readings show costing a measurable share of its action,
+    turned into a set read (`query.ids(list)`, `pickAll`) or grouped (`transact`, `setMany`) where it is.
+- **Done when:**
+  - Both readings, before and after the fixes, are recorded with date and conditions.
+  - The count's spec shows it counting a read, a write and a unit, and nothing when off.
+
+### Phase 3: the planner's three fixes, and EXPLAIN
+
+- **Deliverable (`docs/roadmap/plan-algebra.md`, First, without bitmaps):**
+  - In elmdb:
+    - any `where` in a chain uses a built index of its field, not only one straight after a type start;
+    - `orderBy` followed by `limit` keeps a heap of the first `limit`;
+    - an index lookup visits its matches as it finds them;
+    - EXPLAIN: a read asked to explain answers its plan's stages — the index each read, the entities each visited and
+      kept, and its time — beside its answer.
+  - In apack: the query builder's `explain()` and the Database console showing it.
+- **Dependencies:** Phase 1.
+- **Done when:**
+  - The model harness passes, so answers are unchanged.
+  - Specs show each fix by its visits: an indexed `where` with a `limit` of 50 over 13,000 matches visits about 50.
+  - EXPLAIN's answer is specified and shown on a plan of each kind.
+  - G4's readings are recorded.
+
+### Phase 4: field types from apack's shapes
+
+- **Deliverable:** apack's `docs/plans/field-types-from-shapes.md`, its four steps.
+- **Dependencies:** Phase 1.
+- **Done when:** the plan's steps are done, the audit's findings and their fixes are recorded, and apack's
+  `npm run chain -- --no-native` passes.
+
+### Phase 5: text postings in blocks (gated)
+
+- **Deliverable (`docs/roadmap/text-index-at-scale.md`):**
+  - The reading: a message write's commit time, and a fuzzy search's time, at 1,000, 10,000 and 50,000 messages,
+    added to apack's bench as text cases.
+  - **The gate:** posting lists in blocks are built if the write's time at 50,000 messages is more than twice its time
+    at 1,000; fuzzy terms by seeking, if the fuzzy search's is.
+  - What is built keeps search's specs and the model harness passing, and an upgrade step rebuilds existing text
+    indexes (G3).
+- **Dependencies:** Phase 1.
+- **Done when:** the readings are recorded, and what the gate called for is built, with the readings after it.
+
+### Phase 6: fewer reads per field write
+
+- **Deliverable:** the reads a field write makes (`put_field` and `delete_field`, `entities.rs`: the value before, the
+  other fields of a compound index, the undo record, a text index's refile) counted, and those it doesn't need removed.
+- **Dependencies:** Phase 1.
+- **Done when:** a spec counts a field write's reads before and after, the model harness passes, and G4's readings
+  show the writes' cases.
+
+### Phase 7: value compression
+
+- **Deliverable (`docs/architecture/format.md`, Values):**
+  - A value above a threshold stored compressed with zstd, marked by a tag byte no msgpack value starts with, and
+    decompressed where the engine reads it; the threshold chosen by measuring size and read time on a copy of
+    production-shaped data.
+  - The format bumped with an `elmdb upgrade` step that compresses what is stored (G3).
+  - apack's `docs/plans/ears-value-compression.md`, written for the engine before elmdb, archived with this as its
+    successor.
+- **Dependencies:** Phase 1.
+- **Done when:**
+  - Size on disk and the readings of long reads are recorded before and after, on the copy.
+  - `check()` and `rebuild()` pass over compressed values, and the upgrade step's spec converts a database of the
+    previous format.
+
+### Phase 8: substring and regex search
+
+- **Deliverable (`docs/architecture/search.md`, Methods):**
+  - In elmdb: a trigram index narrowing candidates, then a check of each, for error text, ids and code in messages;
+    how a schema declares it, decided and written into `schema.md`.
+  - In apack: the manifest's declaration and the query builder's step, and default-setup's Message declaring it.
+- **Dependencies:** Phase 1.
+- **Done when:**
+  - Match sets equal a scan's on a fixed corpus and in the model harness, for substrings and for regexes.
+  - `check()` and `rebuild()` cover the index.
+
+### Phase 9: designs
+
+- **Deliverable:** each of these roadmap documents taken from idea to design: the format and API concrete, the
+  measurements that justify building it taken and recorded, the risks named, and the work as phases with done-whens a
+  later goal can run.
+  - `plan-algebra.md` (bitmaps for value indexes, one algebra over them);
+  - `change-log.md` (incremental backup);
+  - `incremental-views.md`;
+  - `javascript-boundary.md` (reads without a decode, units across an `await`);
+  - value compression's per-type dictionaries, in `format.md`'s Values or a roadmap document of its own.
+- **Dependencies:** Phases 2–8, whose readings they use.
+- **Done when:** each document says "Status: designed", with its measurements and phases.
+
+## Acceptance
+
+| Requirement | Implementation / source | Evidence | Remaining work |
+|---|---|---|---|
+| elmdb v1 (P1) | missing | | all |
+| A user action's calls to elmdb, and its loops fixed (P2) | missing | | all |
+| The planner's three fixes and EXPLAIN (P3) | missing | | all |
+| Field types from apack's shapes (P4) | missing | | all |
+| Text postings in blocks, gated (P5) | missing | | all |
+| Fewer reads per field write (P6) | missing | | all |
+| Value compression (P7) | missing | | all |
+| Substring and regex search (P8) | missing | | all |
+| Designs (P9) | missing | | all |
+
+## Constraints
+
+- **Commits:** commit as you go in logical checkpoints, in each repository separately, with conventional messages and
+  no attribution lines. Stage only your own files and read `git diff --cached` first. Never tag, publish or create
+  releases. Pushes are only G6's.
+- **apack's rules apply to apack's work:** its `CLAUDE.md`, `docs/AGENTS.md` and the user's memory. These include:
+  - native and repeated binary execution runs in the Linux container, not on the Mac;
+  - never kill processes by pattern;
+  - never use `git stash`;
+  - never launch the app without an isolated `APACK_USER_DATA_DIR`;
+  - never edit version or release metadata.
+- **Data:** never read or write the live app's data directory. Work on copies, and ask for a copy when none is at
+  hand.
+- **Measurements:** use apack's `npm run measure` on a quiet machine (`npm run check:idle`); on a busy one, alternate
+  the builds being compared and say so. Record date, machine and conditions with every figure. A figure in prose names
+  the record it came from.
+- **Tests:** a test that cannot fail is a gate or an assertion with a named firing edit (apack's `CLAUDE.md`). Do not
+  loosen an assertion, a deadline or a tolerance to get a pass.
+- **Failures:** on a failure, inspect the preserved output and reproduce the specific case. After a fix, run that case
+  and its suite. A failure that recurs without a diagnosis is recorded in Current handoff with its evidence, and work
+  continues on phases that don't depend on it. The goal stops only when everything left depends on it.
+- **Design changes:** G5.
+- **Docker** (OrbStack) must be running for apack's Linux container; start it with `open -a OrbStack` when it isn't.

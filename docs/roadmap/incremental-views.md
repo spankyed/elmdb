@@ -23,7 +23,13 @@ answer.
 - **What apack gains:** its systems broadcast state on every cause (`SEND_STATE`); a surface subscribing to a
   maintained view needs neither the broadcast nor the reread, and two windows on one view share one maintenance.
 
-## Open questions
+## Where it applies
+
+Incremental maintenance is possible over plans only. apack's views are functions — several plans with JavaScript
+between them — which no engine can maintain from a delta; for them tracked reads stay the contract, re-running the
+function when a commit names its token. And a view is worth maintaining only when re-running it is measured to cost:
+most of apack's are cheap to run again. So this follows tracked reads, view by view, where a reading asks for it.
+
 
 - How much of a plan is maintainable in practice: apack's views mix plans with JavaScript between them.
 - Where the maintained answers live and what they cost to hold for a view nobody is looking at.

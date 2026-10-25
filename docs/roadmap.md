@@ -1,8 +1,11 @@
 # Roadmap
 
-The order of work. Each step ships something apack uses. Status: not started.
+The order of work. Each step ships something apack uses. Status: steps 1–4 built (elmdb's goal, Phases 1 and 9–12;
+`docs/evidence/`), 5 and 6 to come.
 
 ## 1. Spike: what the protocol costs
+
+Built (`docs/evidence/phase-1.md`).
 
 Whether to build is decided: apack is moving off lmdb-js, and search needs indexes that commit with the data. The spike
 measures the one cost the design adds, encoding a result and decoding it in JavaScript, against apack today on a copy
@@ -18,6 +21,8 @@ step 2.
 
 ## 2. Parity, and apack off lmdb-js
 
+Built (`docs/evidence/phase-9.md`, `phase-10.md`).
+
 The graph, value indexes, units, savepoints, numbering, refusals and durability, behind apack's unchanged `Ears` API.
 apack's model harness drives its JavaScript engine and elmdb with the same workloads and compares both with the model
 and with each other, and the crash harness runs against elmdb. apack switches when they agree, and drops lmdb-js.
@@ -25,9 +30,13 @@ apack's side is `docs/plans/ears-on-elmdb.md` in apack.
 
 ## 3. The `runs` database
 
+Built (Phase 11, in elmdb's goal).
+
 apack's run history moves from its record store into a second database. `RecordStore` goes away.
 
 ## 4. Text search
+
+Built (`docs/evidence/phase-12.md`).
 
 Ranked full text with filters and highlights, then fuzzy labels for a quick-open (`search.md`).
 
@@ -39,14 +48,28 @@ Live queries in apack's views.
 
 Replacing apack's dormant library index.
 
+## Next, in order
+
+From a review of the engine on 2026-10-25 (the reasons in `roadmap/`):
+
+1. **Count the crossings of a chat turn and a flow run** in apack, as a cold boot's were counted
+   (`roadmap/javascript-boundary.md`), and turn the loops of one-entity reads they show into set reads.
+2. **The planner's three small fixes and EXPLAIN** (`roadmap/plan-algebra.md`, First, without bitmaps).
+3. **Posting lists in blocks**, if a message write's time is measured to grow with the corpus
+   (`roadmap/text-index-at-scale.md`).
+4. **Field types from apack's shapes** (`roadmap/typed-schema.md`; planned in apack's
+   `docs/plans/field-types-from-shapes.md`).
+
+Bitmaps, reads without a decode, units that span an `await` and the change log follow, each when a measurement or a
+feature calls for it.
+
 ## Later, each its own decision
 
 Directions past these, each a design to argue for before it is built, are in `roadmap/` (`roadmap/README.md`).
-
 
 - Value compression with per-type dictionaries.
 - `elmdb-cli`.
 - LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
 - Substring and regex search.
-- `orderBy` with `limit` as a top-k heap, or an ordered index scan, rather than a sort of the whole set.
-- Fewer reads per field write, and no global sequence key rewritten by every insert.
+- Fewer reads per field write. The global sequence key every insert rewrites costs little: LMDB has one writer, and
+  the key's page is dirty in the commit anyway.
