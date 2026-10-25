@@ -38,11 +38,11 @@ EARS engine running on it underneath an unchanged pack-facing API, with lmdb-js 
 1. The elmdb repository: a Cargo workspace (`crates/elmdb`, `crates/elmdb-node`, `crates/elmdb-cli`), its own
    `CLAUDE.md`, local checks, and generated TypeScript types and JSON Schema.
 2. The engine: schema, format, storage, durability, writes, reads, value indexes, derived-data maintenance, admin,
-   change sets and watch, text search, vector and hybrid search.
+   change sets, tracked reads and watch, text search, vector and hybrid search.
 3. The test suites in `testing.md`: the model harness, the crash and failed-sync harnesses, `check()` after every case,
    binding fuzzing.
 4. apack on elmdb: `@apackdev/ears` compiling to plans and batches, the schema from codegen, the `runs` database,
-   text search, watch and vector search exposed to packs, packaging, and lmdb-js, the memory backend, the record store
+   text search and vector search exposed to packs, `engine.watch` on elmdb under live-queries' contract, packaging, and lmdb-js, the memory backend, the record store
    and the format conversions removed.
 5. The documentation updated to the implemented contract in both repositories.
 
@@ -105,6 +105,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | D27 | charabia is built with its default features off and only `latin-camelcase` and `latin-snakecase` on: the defaults embed segmentation dictionaries for Chinese, Japanese and Korean (jieba, lindera) that make the binding many megabytes larger for text apack doesn't hold today. Latin, Cyrillic, Greek and the rest still segment and normalize; turning on a language's feature is the change when a user's text needs it | `crates/elmdb/Cargo.toml` (workspace) |
 | D28 | Document's text index reads its `name` (weight 3) and `tags`, not its `content`: a section is an object holding its text under `text`, `items` or `fields[].value` beside a `type` such as `markdown`, so reading every string of the field would match each section's type. Indexing content needs a declared projection of a field's text (a path, or a writer-kept text field), which is a design change of its own and not this goal's | `docs/evidence/phase-12.md` |
 | D29 | Vector indexes are hannoy's graphs, which measure cosine and euclidean distance over f32 vectors, so a vector index's `metric` is `cosine` or `l2` and its `precision` `f32`; `dot`, `f16` and `i8` are refused at schema time, saying why. A normalized embedding, which every model apack runs produces, ranks by dot product as by cosine. A text index's rule on `any` fields (D26) holds for a vector index's `from` too | `docs/architecture/schema.md`, Indexes; `docs/evidence/phase-13.md` |
+| D30 | **Watch is live-queries' contract, and the views are live-queries'.** apack's live-queries work (branch `live-queries`, plan `docs/plans/live-queries.md`) built `engine.watch` on the JavaScript engine (`517900b52`) and views over it in the SDK, host, API and renderer (its Step 2), and asked elmdb for tracked reads and a commit sequence (`78f9fb0`). So Phase 14 builds elmdb's side and `engine.watch` on it under that contract, with live-queries' specs as acceptance, and builds no watched query or adopting system of its own: views, and the features moved onto them, are live-queries' Steps 2–5. **Landing order:** this goal's branch lands on `master` first; then the live-queries session commits its Step 2, rebases `live-queries` onto it, drops `517900b52` (its contract and specs landed here) and keeps its plan and Step 2, whose views use only `watch` and `lastCommit`. Neither goal edits live-queries' plan or its views | the user, 2026-10-25 |
 | D21 | apack pins the elmdb commit it builds against in a committed `vendor/elmdb.rev`. Locally the `vendor/elmdb` symlink stays live, and a check refuses when that checkout doesn't contain the pinned commit. In apack's CI, a step clones elmdb at that commit into `vendor/elmdb` and builds the binding, with the Cargo target directory cached | this goal |
 
 ## Phases
@@ -346,16 +347,28 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
   - The library port passes its specs: indexing a folder's documents, searching it, and an edited document going
     pending. The feature stays off (D15).
 
-### Phase 14: change sets and watch
+### Phase 14: change sets, tracked reads and `engine.watch`
 
-- **Deliverable (`engine.md`, Change sets and watch):**
-  - **In elmdb:** `changes` and `watch`, re-running only plans whose footprint a commit touched.
-  - **In apack:** the SDK exposes a watched query to systems, and one system that today broadcasts a view's data after
-    its writes uses it instead, chosen for having the most such broadcasts.
+- **Deliverable (`engine.md`, Change sets and watch; apack's `docs/plans/live-queries.md`, The contract and The move
+  to elmdb), D30:**
+  - **In elmdb:** change sets with the commit sequence on every change set and batch result; tracked reads — a read
+    call tracked under a token records the key ranges it touched, held in an interval index in Rust, a commit's result
+    and change set naming the tokens it wrote into (`touched`), and `untrack`; `watch(plan)` as a convenience over them.
+  - **In apack:** `@apackdev/ears`' `engine.watch(read, observer)`, `lastCommit()`, `watchesSettled()` and
+    `watchStats()`, keeping live-queries' contract exactly, implemented over tracked reads: a watch runs its read
+    tracked under a token of its own, a commit's `touched` tokens mark watches to run again, and the re-runs are
+    coalesced, asynchronous, compared for equality and delivered with the commit they reflect.
+  - **The acceptance is live-queries' own,** ported from branch `live-queries` (`517900b52`): `watch.spec.ts`, the
+    model harness's watch property (each watch's last delivered result equals its read run afresh, after every op), and
+    the bench's watch cases. Its read recorder, write log and read-set index are the JavaScript engine's and are not
+    ported; elmdb's interval index gets its own spec against a brute-force scan.
 - **Dependencies:** Phases 5, 10.
 - **Done when:**
-  - A spec shows a watched plan re-run by a touching commit and not by an unrelated one.
-  - The adopting system's surface stays current in an E2E driving script.
+  - A spec in elmdb shows a tracked read's token named by a commit that wrote into what it read, and not by an
+    unrelated one; the interval index agrees with a brute-force scan.
+  - live-queries' ported specs and harness property pass on elmdb, and their mutation checks — a write not reported,
+    a range recorded short, a refused unit notifying — each fail one.
+  - The bench's watch readings are recorded: a create's commit cost with 0, 10, 100 and 1,000 watches open stays flat.
 
 ### Phase 15: platforms, packaging and final validation
 
@@ -403,7 +416,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | `runs` database (P11) | done, apack `9c7f96003`, elmdb `6d337f6` | host `run-history.spec` (20), CLI `db.integration` (71, `import-runs` included), the backup round trip of both databases; the chain in `phase-10.md` | none |
 | Text search, in elmdb and in apack (P12) | done, elmdb `c1a1cb1`; apack `a402744fb`, `ea09dbf84` | `docs/evidence/phase-12.md`; apack's whole `chain --no-native` passed cold on `d21514bdb` (elmdb `a0da984`) | none; PR #148 is reported to the user as superseded |
 | Vector and hybrid search, library port tested and off (P13) | missing | | all |
-| Change sets and watch, one adopter (P14) | missing | | all |
+| Change sets, tracked reads and `engine.watch` (P14) | missing | | all |
 | Platforms in elmdb's CI, packaged app, apack's full chain, draft PR, strict chain (P15) | missing | | all |
 | Docs and closure (P16) | missing | | all |
 
@@ -417,8 +430,8 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 - **Substring and regex search:** if text search leaves a gap.
 - **Converting the user's real data:** D12.
 - **Enabling the library search index:** D15.
-- **Moving every system's view broadcasts onto watch:** Phase 14 proves the mechanism on one; the rest is a follow-up
-  goal in apack.
+- **Views, and moving systems' data broadcasts onto them:** apack's live-queries plan (`docs/plans/live-queries.md`),
+  on its own branch, rebased onto elmdb once this goal's branch lands (D30).
 
 ## Constraints
 
