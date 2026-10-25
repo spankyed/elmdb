@@ -53,6 +53,7 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 ## Current handoff
 
 - **Not started.** Phase 1 is `goal-elmdb.md`, under way in its own session; its Current handoff is the state to read.
+- **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
   row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
@@ -69,8 +70,13 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | G3 | A change to stored data's layout bumps `FORMAT_VERSION` with an `elmdb upgrade` step to it, run on a copy (`docs/architecture/format.md`, Versions). Derived data only (a text or trigram index) may instead be rebuilt by that step. Stored developer data is converted on a copy, never at boot | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
-| G6 | elmdb's `main` is pushed at each checkpoint, as `goal-elmdb.md`'s D20. apack's work is committed on its worktree's branch and pushed only when the user asks | the user |
+| G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's branch pushed and a PR opened for each phase's apack work. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
 | G7 | apack's work continues on a branch from wherever `goal-elmdb.md` leaves apack: its branch's tip, or `master` if it has landed, in a new worktree (`npm run session:new`) | this goal |
+| G8 | **Production-shaped data** is a copy made from the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/full-db/agentbuddy-backup-2026-10-17T23-06-18-232Z`, format 1), by `docs/evidence/phase-1.md`'s recipe: converted to format 4 by apack's `scripts/ears-convert.ts`, run from a detached worktree at a commit that still has it (`3e0b280ff`), dumped by `tools/lmdb-js-export` and read by `elmdb upgrade`. The copy lives in a scratch directory outside both repositories and is never committed; the backup is only read. What the upgrade refuses on the copy (its duplicate short codes) is resolved on the copy and recorded | the user's backup; `phase-1.md` |
+| G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 2 measures flow runs and records why the chat turn is missing | this goal |
+| G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
+| G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
+| G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data with `elmdb upgrade` is the user's step | this goal |
 
 ## Phases
 
