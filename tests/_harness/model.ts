@@ -252,6 +252,41 @@ export function derivedOf(engine: HarnessEngine, model: Model): Derived {
   return out;
 }
 
+/**
+ * The reads the watches are checked over, each a pure read of the engine, so a watch's last delivery must equal it run
+ * afresh: the whole state, and every derived read for every id the workload creates — a trashed or destroyed one's
+ * walks included, which answer empty
+ */
+export function watchedReads(engine: HarnessEngine, ops: readonly Op[]): Record<string, () => unknown> {
+  const ids = new Set<string>();
+  const collect = (list: readonly Op[]) => {
+    for (const op of list) {
+      if (op.op === 'create') ids.add(op.id);
+      else if (op.op === 'unit') collect(op.ops);
+    }
+  };
+  collect(ops);
+  const reads: Record<string, () => unknown> = { state: () => stateOf(engine) };
+  for (const type of TYPES) {
+    reads[`${type} ids`] = () => engine.query(type).ids();
+    reads[`${type} count`] = () => engine.query(type).count();
+    reads[`${type} first`] = () => engine.query(type).first();
+    reads[`${type} trashed`] = () => engine.query.trashed(type).ids();
+    for (const role of ROLES) reads[`${type} withRole ${role}`] = () => engine.query(type).withRole(role as never).ids();
+    for (const field of [INDEXED, UNINDEXED]) {
+      for (const probe of PROBES) reads[`${type} where ${field} ${String(probe).slice(0, 8)}`] = () => engine.query(type).where(field, probe as never).ids();
+    }
+  }
+  for (const id of ids) {
+    reads[`${id} row`] = () => engine.getRow(id as never);
+    for (const kind of KINDS) {
+      reads[`${id} out ${kind}`] = () => engine.query.ids(id as never).out(kind as never).ids();
+      reads[`${id} in ${kind}`] = () => engine.query.ids(id as never).in(kind as never).ids();
+    }
+  }
+  return reads;
+}
+
 /** Applies one op to an engine; whether it was refused (it threw) */
 export function applyTo(engine: HarnessEngine, op: Op): boolean {
   const write = (inner: Op, nested: boolean): void => {

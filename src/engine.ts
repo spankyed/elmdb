@@ -10,6 +10,7 @@ import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
 import { idSuffix } from './utils.ts';
+import { createWatches, type WatchObserver, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /** An entity as a read gives it: its id and type, and every attribute it holds */
@@ -100,12 +101,26 @@ export interface Ears {
    * answered is not stored, its chunk still pending under its new hash, and counted `stale`
    */
   embed(embeddings: readonly Embedding[]): { stored: number; stale: number };
+  /**
+   * Runs `read` and hands `observer` its result, then runs it again after every commit that wrote into what it read,
+   * handing over each result that differs from the last, with the number of the commit it reflects. Never inside a
+   * write: deliveries come once the writing code has returned, a burst of commits as one. `read` must be a pure read of
+   * the engine; what it reads anywhere else isn't tracked, and its result goes stale when that changes
+   */
+  watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
+  /** The number of the last commit the engine's database made, or 0: what a watch's delivery is compared against */
+  lastCommit(): number;
 }
 
 /** An engine's data lifecycle and direct writes: for the code that created it (the app's composition root, tests, tooling) */
 export interface EarsAdmin {
   /** Empties the engine's database, keeping its schema */
   clear(): void;
+  /**
+   * Replaces every entry with another elmdb database's primary data, the derived data rebuilt under this one's schema,
+   * the database staying open (elmdb's `replaceWith`); refused while a unit is open
+   */
+  replaceWith(source: string): void;
   /** Every entity's id, those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, those in the trash included, whether or not the schema declares the type: a raw listing */
@@ -138,6 +153,10 @@ export interface EarsAdmin {
    * registration changes nothing another pack declared. Answers the changes as `setSchema` does
    */
   declare(schema: EngineSchema): SchemaChange[];
+  /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
+  watchesSettled(): Promise<void>;
+  /** How many watches are open, and how many keys and ranges their read sets hold */
+  watchStats(): { watches: number; keys: number; ranges: number };
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -228,6 +247,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     };
   };
 
+  const watches = createWatches(connection);
+
   const operations: Ears = {
     query, create, upsert, write, isEntityType, isRelationKind, isRole,
     transact: connection.transact,
@@ -247,6 +268,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       const stale = results.filter((result) => result.kind === 'stale').length;
       return { stored: results.length - stale, stale };
     },
+    watch: watches.watch,
+    lastCommit: connection.lastCommit,
     getRow,
     getAttr,
     getRoles: (id) => (getAttr(id, 'role' as EARS.AttrKind) as string[] | undefined) ?? [],
@@ -270,6 +293,12 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     clear() {
       if (connection.inUnit) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
       database.reset();
+      connection.committedEverything();
+    },
+    replaceWith(source) {
+      if (connection.inUnit) throw new Error('replaceWith() inside transact(): replacing the engine is not a write a unit can undo');
+      database.replaceWith(source);
+      connection.committedEverything();
     },
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
@@ -310,13 +339,17 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     setSchema(schema) {
       const changes = database.setSchema(toElmdbSchema(schema));
       declared = declaredNames(database.schema);
+      connection.committedEverything();
       return changes;
     },
     declare(schema) {
       const changes = database.setSchema(withDeclarations(database.schema, toElmdbSchema(schema)));
       declared = declaredNames(database.schema);
+      connection.committedEverything();
       return changes;
     },
+    watchesSettled: watches.settled,
+    watchStats: watches.stats,
   };
 
   return { ...operations, admin };

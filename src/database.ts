@@ -52,6 +52,12 @@ export interface EarsDatabase {
   replaceWith(source: string): void;
   stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
   bulkLoad(loads: Uint8Array): void;
+  /** The last commit's sequence, or 0: a number that only increases for as long as the database exists */
+  readonly sequence: number;
+  /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`) */
+  untrack(token: number): void;
+  /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
+  trackStats(): { owners: number; keys: number; ranges: number };
   durable(): Promise<void>;
   close(): void;
 }
@@ -153,6 +159,15 @@ export type Op = { op: string } & Record<string, unknown>;
 export type OpResult = { kind: 'done' } | { kind: 'entity'; id: string; shortCode: string | null; created: boolean }
   | { kind: 'relation'; id: string; linked: boolean } | { kind: 'label'; label: string } | { kind: 'stale' };
 
+/**
+ * A commit, as a commit listener hears it: its sequence, and the tokens whose tracked reads it wrote into, or `all` for
+ * one whose writes aren't known key by key (an emptied or replaced database, a schema change, a load)
+ */
+export interface Commit {
+  readonly sequence: number;
+  readonly touched: ReadonlySet<number> | 'all';
+}
+
 /** The engine's crossing to its database: reads and writes, in the unit `transact` holds open or each its own */
 export interface Connection {
   read(reads: ReadonlyArray<Record<string, unknown>>): Answer[];
@@ -163,6 +178,19 @@ export interface Connection {
   /** Whether `transact` holds a unit open */
   readonly inUnit: boolean;
   readonly database: EarsDatabase;
+  /** Runs `fn` with every read it makes tracked under `token`, adding what they touch to what the token holds */
+  track<T>(token: number, fn: () => T): T;
+  untrack(token: number): void;
+  trackStats(): { keys: number; ranges: number };
+  /**
+   * Calls `listener` after each commit, outside the call that made it, with what it touched. Returns the
+   * unregistration
+   */
+  onCommit(listener: (commit: Commit) => void): () => void;
+  /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
+  committedEverything(): void;
+  /** The last commit's sequence, or 0 */
+  lastCommit(): number;
 }
 
 export function createConnection(database: EarsDatabase, { freeze = false }: { freeze?: boolean } = {}): Connection {
@@ -173,6 +201,22 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
    */
   const levels: Array<{ savepoint?: number }> = [];
   let unit: EarsUnit | undefined;
+  /** The token the reads being made are tracked under, while `track` runs */
+  let tracking: number | undefined;
+  const listeners = new Set<(commit: Commit) => void>();
+  /** Calls every commit listener; a listener's throw is reported, not handed to the writer */
+  const committed = (commit: Commit) => {
+    for (const listener of listeners) {
+      try {
+        listener(commit);
+      } catch (error) {
+        queueMicrotask(() => { throw error; });
+      }
+    }
+  };
+  const heard = (changes: { sequence: number; touched: number[] }) => {
+    if (listeners.size > 0) committed({ sequence: changes.sequence, touched: new Set(changes.touched) });
+  };
 
   /** The open unit, opened now for a write when none is */
   const writable = (): EarsUnit => {
@@ -222,7 +266,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     if (!held) return value;
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
-      crossing(() => held.commit(options?.durable ?? false));
+      heard(unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))) as { sequence: number; touched: number[] });
     } catch (error) {
       if (held.isOpen) held.abort();
       throw error;
@@ -232,7 +276,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
 
   return {
     read(reads) {
-      const bytes = pack({ reads });
+      const bytes = pack(tracking === undefined ? { reads } : { reads, track: tracking });
       const held = unit;
       const answers = unpackAnswers(crossing(() => (held ? held.read(bytes) : database.readSync(bytes))));
       return freeze ? answers.map(freezeValues) : answers;
@@ -241,13 +285,36 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       const bytes = pack({ ops, now });
       const target = levels.length ? writable() : undefined;
       const answer = crossing(() => (target ? target.write(bytes) : database.write(bytes, false)));
-      return (unpackr.unpack(answer) as { results: OpResult[] }).results;
+      const written = unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
+      if (written.changes) heard(written.changes);
+      return written.results;
     },
     load(loads) {
       crossing(() => database.bulkLoad(pack(loads)));
+      committed({ sequence: database.sequence, touched: 'all' });
     },
     transact,
     get inUnit() { return levels.length > 0; },
     database,
+    track(token, fn) {
+      const outer = tracking;
+      tracking = token;
+      try {
+        return fn();
+      } finally {
+        tracking = outer;
+      }
+    },
+    untrack: (token) => database.untrack(token),
+    trackStats: () => {
+      const { keys, ranges } = database.trackStats();
+      return { keys, ranges };
+    },
+    onCommit(listener) {
+      listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    committedEverything: () => committed({ sequence: database.sequence, touched: 'all' }),
+    lastCommit: () => database.sequence,
   };
 }

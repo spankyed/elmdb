@@ -112,6 +112,7 @@ export interface Ears {
     isEntityType(name: string): boolean;
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
+    lastCommit(): number;
     nextLabel(type: EARS.Entity, base: string): string;
     pendingEmbeddings(type: EARS.Entity, options?: {
         limit?: number;
@@ -125,6 +126,7 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
+    watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
     wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
@@ -142,12 +144,19 @@ export interface EarsAdmin {
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
     updateRelation(relId: EARS.RelationId, patch: {
         source?: EARS.EntityId;
         target?: EARS.EntityId;
         info?: unknown;
     }): void;
+    watchesSettled(): Promise<void>;
+    watchStats(): {
+        watches: number;
+        keys: number;
+        ranges: number;
+    };
 }
 
 // @public
@@ -172,6 +181,7 @@ export interface EarsDatabase {
     replaceWith(source: string): void;
     reset(): void;
     readonly schema: unknown;
+    readonly sequence: number;
     // (undocumented)
     setSchema(schema: object): SchemaChange[];
     // (undocumented)
@@ -183,6 +193,12 @@ export interface EarsDatabase {
         relations: Record<string, number>;
         fileBytes: number;
     };
+    trackStats(): {
+        owners: number;
+        keys: number;
+        ranges: number;
+    };
+    untrack(token: number): void;
     // (undocumented)
     write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
 }
@@ -693,6 +709,17 @@ export interface Upsert {
     <E extends string>(type: TypeName<E>, row: Record<string, unknown> & RowIdentity & {
         id: EARS.EntityId;
     }): WriteBuilder<E>;
+}
+
+// @public
+export interface Watching {
+    stop(): void;
+}
+
+// @public
+export interface WatchObserver<T> {
+    error?(error: unknown, commit: number): void;
+    next(value: T, commit: number): void;
 }
 
 // @public

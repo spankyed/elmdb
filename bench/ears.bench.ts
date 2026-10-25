@@ -155,3 +155,33 @@ describe('writes', () => {
     });
   }, { iterations: 50, time: 0 });
 });
+
+// What a watch costs a write: each commit's keys found in elmdb's interval index of the tracked reads, which here read
+// other rows, so the cost is the lookup's and no read runs again. It should stay flat as the watches grow, which is
+// what the index is for. Then the same creates with watches on a page of the type written, which each run again
+// (once for the burst)
+describe('watches', () => {
+  let open: Array<{ stop(): void }> = [];
+  const watching = (count: number, read: (i: number) => () => unknown) => ({
+    async setup() {
+      for (let i = 0; i < count; i++) open.push(engine.watch(read(i), () => {}));
+      await admin.watchesSettled();
+    },
+    teardown() {
+      for (const w of open) w.stop();
+      open = [];
+    },
+  });
+  const creates = () => {
+    for (let i = 0; i < 1000; i++) engine.create('Note').set('title', `Note ${i}`).set('status', 'open');
+  };
+  for (const count of [0, 10, 100, 1000]) {
+    bench(`1,000 creates, ${count.toLocaleString('en')} watches open on other rows`, creates, {
+      iterations: 20, time: 0, ...watching(count, (i) => () => engine.getRow(project(i))),
+    });
+  }
+  bench('1,000 creates, then 100 watches on a page of the type run again', async () => {
+    creates();
+    await admin.watchesSettled();
+  }, { iterations: 20, time: 0, ...watching(100, () => () => engine.query('Note').limit(50).ids()) });
+});
