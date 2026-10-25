@@ -52,16 +52,36 @@ test('an open database holds the two semaphores its lock file names, and a close
   assert.deepEqual(names.map(exists), [false, false]);
 });
 
-test('a process that exits with a database open leaves none of its lock semaphores', { skip: process.platform !== 'darwin' }, (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const child = [
+/** A child that opens the database at `dir`, reads from it so both semaphores are in use, then ends as `ends` says */
+const endings = {
+  'calls process.exit': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    // A read registers a reader, so both semaphores are in use as the process leaves
     `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
     'process.exit(0);',
-  ].join('\n');
-  execFileSync(process.execPath, ['-e', child]);
-  assert.deepEqual(semaphoresOf(dir).filter(exists), []);
-});
+  ].join('\n'),
+  'runs out of work': (dir) => [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
+    `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+  ].join('\n'),
+  'is a worker thread its parent terminates': (dir) => [
+    `const { Worker } = require('node:worker_threads');`,
+    `const worker = new Worker(${JSON.stringify([
+      `const { Database } = require(${JSON.stringify(binding)});`,
+      `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
+      `require('node:worker_threads').parentPort.postMessage('open');`,
+      'setInterval(() => {}, 1000);',
+    ].join('\n'))}, { eval: true });`,
+    `worker.once('message', () => worker.terminate());`,
+  ].join('\n'),
+};
+
+for (const [ends, child] of Object.entries(endings)) {
+  test(`a database left open where Node ${ends} leaves none of its lock semaphores`, { skip: process.platform !== 'darwin' }, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    execFileSync(process.execPath, ['-e', child(dir)]);
+    assert.deepEqual(semaphoresOf(dir).filter(exists), []);
+  });
+}

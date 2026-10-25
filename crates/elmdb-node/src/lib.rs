@@ -4,6 +4,7 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+mod exit;
 mod process;
 
 /// An elmdb code as the status of a JavaScript error, which N-API hands JavaScript as `error.code`
@@ -79,17 +80,7 @@ impl Database {
             map_size_bytes: options.map_size_bytes.map(|n| n as usize),
         };
         let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
-        // Node runs no destructor as it exits, so a database still open then would never close: LMDB removes its
-        // lock's named semaphores (macOS) as the last process closes, and a database left open at a path no one opens
-        // again keeps them until the machine restarts, where a bounded table of them fills. The environment's teardown
-        // closes what is still open — at exit, at `process.exit` and when a worker thread ends
-        let open = std::sync::Arc::downgrade(&inner);
-        env.add_env_cleanup_hook(open, |open| {
-            if let Some(db) = open.upgrade() {
-                let _ = db.close_within(Some(std::time::Duration::from_secs(1)));
-            }
-        })
-        .map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
+        exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
         Ok(Self { inner })
     }
 
