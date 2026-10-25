@@ -1,6 +1,8 @@
-# plain-lmdb
+# elmdb
 
-Plain LMDB for Node: a thin, synchronous N-API binding over stock upstream LMDB, written in Rust with napi-rs.
+LMDB for ECMAScript: a thin, synchronous N-API binding over stock upstream LMDB, written in Rust with napi-rs.
+
+The name is E (ECMAScript) and LMDB, and it's how "LMDB" sounds said out loud.
 
 It binds LMDB as OpenLDAP ships it, vendored and unmodified, and adds nothing to the database itself. No custom
 allocator, no caching, no async write queue. A bug in the storage engine is then LMDB's, with LMDB's review history
