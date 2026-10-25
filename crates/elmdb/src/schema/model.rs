@@ -1,4 +1,4 @@
-//! The schema's types: what a database declares (`docs/schema.md`). These are the definition; the TypeScript and the
+//! The schema's types: what a database declares (`docs/architecture/schema.md`). These are the definition; the TypeScript and the
 //! JSON Schema are generated from them. Every default is a written value, so the canonical form (`Schema::canonical`)
 //! writes every key.
 

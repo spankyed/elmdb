@@ -1,4 +1,4 @@
-//! The model harness (`docs/testing.md`), ported from apack's `tests/_harness/`: random writes over a small pool of ids,
+//! The model harness (`docs/architecture/testing.md`), ported from apack's `tests/_harness/`: random writes over a small pool of ids,
 //! so they collide, refer to each other and are refused, checked after every operation against a reference model kept
 //! as plainly as a model can be. The engine must hold what the model holds, refuse what it refuses, and keep every
 //! derived key in step: a type's live and trashed entities in creation order, its count, each value index's entries,
@@ -916,7 +916,7 @@ proptest! {
     }
 }
 
-/// The crash harness (`docs/testing.md`): a child process runs a workload over a database, acknowledging each step as it
+/// The crash harness (`docs/architecture/testing.md`): a child process runs a workload over a database, acknowledging each step as it
 /// commits, and is killed with `SIGKILL` at a random point; the reopened files must hold the model's state after the
 /// acknowledged steps, or after one more, the step in flight having committed before its acknowledgement. The child
 /// regenerates the workload from its seed, so nothing but the seed crosses.

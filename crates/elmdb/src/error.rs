@@ -34,7 +34,7 @@ pub enum ErrorCode {
     NotADatabase,
     /// The database is in a format this version doesn't read
     WrongFormat,
-    /// A value isn't in the value spec (`docs/format.md`, Values)
+    /// A value isn't in the value spec (`docs/architecture/format.md`, Values)
     ValueInvalid,
     /// A batch or plan doesn't decode, or holds an operation this version doesn't know
     BatchInvalid,

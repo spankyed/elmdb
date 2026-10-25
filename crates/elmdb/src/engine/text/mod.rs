@@ -1,5 +1,5 @@
-//! Text indexes (`docs/search.md`): a type's text fields as terms, kept by every write that changes one, in the same
-//! unit. Under a type and an index (`docs/format.md`, Keys):
+//! Text indexes (`docs/architecture/search.md`): a type's text fields as terms, kept by every write that changes one, in the same
+//! unit. Under a type and an index (`docs/architecture/format.md`, Keys):
 //!
 //! - `d/ft term` → the term's posting list, the places (`seq`) of the entities holding it, as a roaring bitmap
 //! - `d/fp term seq` → where the entity holds it: each field's index among the index's fields, and its positions

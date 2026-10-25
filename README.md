@@ -11,12 +11,12 @@ first user is apack, whose EARS engine it replaces underneath an unchanged API.
 
 ## Docs
 
-- [design.md](docs/design.md): principles, packages, vocabulary, conventions, the boundary with apack
-- [schema.md](docs/schema.md): types, fields, relations, indexes, and how a schema changes
-- [engine.md](docs/engine.md): the operations and the protocol
-- [search.md](docs/search.md): text and vector indexes, and search as plan steps
-- [format.md](docs/format.md): the key layout, values, versions and LMDB
-- [testing.md](docs/testing.md): what proves it correct
+- [design.md](docs/architecture/design.md): principles, packages, vocabulary, conventions, the boundary with apack
+- [schema.md](docs/architecture/schema.md): types, fields, relations, indexes, and how a schema changes
+- [engine.md](docs/architecture/engine.md): the operations and the protocol
+- [search.md](docs/architecture/search.md): text and vector indexes, and search as plan steps
+- [format.md](docs/architecture/format.md): the key layout, values, versions and LMDB
+- [testing.md](docs/architecture/testing.md): what proves it correct
 - [roadmap.md](docs/roadmap.md): the order of work
 - [background.md](docs/background.md): why elmdb exists
 

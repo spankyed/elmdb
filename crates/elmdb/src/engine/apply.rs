@@ -1,4 +1,4 @@
-//! Applying a batch's operations: each one's rules, then its writes (`docs/engine.md`, Writes). An operation refused
+//! Applying a batch's operations: each one's rules, then its writes (`docs/architecture/engine.md`, Writes). An operation refused
 //! writes nothing; a batch is applied in a savepoint, so a refusal part way through keeps none of it.
 
 use std::collections::BTreeMap;

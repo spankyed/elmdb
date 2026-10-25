@@ -1,4 +1,4 @@
-//! The value spec: what a stored value may be (`docs/format.md`, Values). A value is msgpack bytes, stored as the caller
+//! The value spec: what a stored value may be (`docs/architecture/format.md`, Values). A value is msgpack bytes, stored as the caller
 //! wrote them; the engine checks them once, as a write brings them, and decodes them only where it must.
 
 use crate::error::{Error, ErrorCode, Result};

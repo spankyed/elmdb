@@ -1,4 +1,4 @@
-//! What a commit changed (`docs/engine.md`, Change sets and watch): the events a unit logs as it writes, gathered into
+//! What a commit changed (`docs/architecture/engine.md`, Change sets and watch): the events a unit logs as it writes, gathered into
 //! one change set when it commits. A savepoint rolled back takes its events with it.
 
 use std::collections::{BTreeMap, BTreeSet};

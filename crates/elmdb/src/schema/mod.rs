@@ -1,4 +1,4 @@
-//! The schema: what a database holds and the rules it keeps, declared as data (`docs/schema.md`).
+//! The schema: what a database holds and the rules it keeps, declared as data (`docs/architecture/schema.md`).
 
 mod diff;
 mod model;

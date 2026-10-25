@@ -1,4 +1,4 @@
-//! The admin operations a migration runs over stored data (`docs/schema.md`, Changing a schema): deleting what a removed
+//! The admin operations a migration runs over stored data (`docs/architecture/schema.md`, Changing a schema): deleting what a removed
 //! declaration left (`purge`), and renaming, which a schema change never infers. Each runs in one unit.
 
 use rmpv::Value;

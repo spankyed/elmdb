@@ -1,5 +1,5 @@
 //! The engine: entities, attributes and relations held to a schema, written in batches inside units
-//! (`docs/engine.md`).
+//! (`docs/architecture/engine.md`).
 //!
 //! A batch written on its own is a unit of its own (`Database::write`). A unit can also stay open across calls
 //! (`Database::begin`), as a caller's transaction that runs its own code between writes needs: its writes read their
@@ -271,7 +271,7 @@ impl Database {
         })
     }
 
-    /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/engine.md`, Reads)
+    /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/architecture/engine.md`, Reads)
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
         let schema = self.engine_schema();

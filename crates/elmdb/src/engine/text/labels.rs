@@ -1,4 +1,4 @@
-//! Fuzzy labels (`docs/search.md`, Methods): a quick-open across types, matching a query's characters in order
+//! Fuzzy labels (`docs/architecture/search.md`, Methods): a quick-open across types, matching a query's characters in order
 //! anywhere in a label, as editors' file pickers do. A match scores more where its characters start words — after a
 //! space or punctuation, or at a lower-to-upper case change — and run together, and less for the characters it skips
 //! and for a longer label.

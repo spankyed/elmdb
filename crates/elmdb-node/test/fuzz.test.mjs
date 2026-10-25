@@ -1,4 +1,4 @@
-// Fuzzing the binding (docs/testing.md): wrong argument types, random bytes and random msgpack where a batch or a read
+// Fuzzing the binding (docs/architecture/testing.md): wrong argument types, random bytes and random msgpack where a batch or a read
 // goes, valid batches with bytes flipped, and a closed database and an ended unit. Each must throw a JavaScript error,
 // one carrying an elmdb code where the payload reached elmdb, and leave the database working.
 import { test } from 'node:test';

@@ -1,4 +1,4 @@
-//! Group commit (`docs/engine.md`, Durability): a unit commits without a sync, and a worker thread syncs once writes
+//! Group commit (`docs/architecture/engine.md`, Durability): a unit commits without a sync, and a worker thread syncs once writes
 //! pause for the idle time, and at the latest the cap after the first unsynced commit, so a steady stream of writes
 //! can't hold a sync off. `durable()` waits for a sync that began after the last commit, and fails when that sync does,
 //! leaving its commits owed.

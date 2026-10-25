@@ -1,4 +1,4 @@
-//! The write protocol (`docs/engine.md`, Writes): a batch of operations applied in order in one unit, and what it did.
+//! The write protocol (`docs/architecture/engine.md`, Writes): a batch of operations applied in order in one unit, and what it did.
 //! A batch crosses the binding as one msgpack buffer; a field's value is msgpack inside it, held as `rmpv::Value`.
 
 use std::collections::BTreeMap;

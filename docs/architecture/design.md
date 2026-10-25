@@ -14,8 +14,8 @@ This document is what every "should elmdb do X?" is checked against. The others:
 - [search.md](search.md): text and vector indexes, and search as plan steps.
 - [format.md](format.md): the key layout, values, format versions and upgrades.
 - [testing.md](testing.md): what proves it correct.
-- [roadmap.md](roadmap.md): the order of work, starting with apack's move off lmdb-js.
-- [background.md](background.md): why elmdb exists.
+- [roadmap.md](../roadmap.md): the order of work, starting with apack's move off lmdb-js.
+- [background.md](../background.md): why elmdb exists.
 
 ## Principles
 

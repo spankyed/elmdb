@@ -1,7 +1,7 @@
 # CLAUDE.md
 
 elmdb is an embedded graph database for JavaScript, written in Rust on LMDB (through heed). The design is in `docs/`:
-read `docs/design.md` before changing anything, and the document that owns the area you are changing (`schema.md`,
+read `docs/architecture/design.md` before changing anything, and the document that owns the area you are changing (`schema.md`,
 `engine.md`, `search.md`, `format.md`, `testing.md`). Active work is in `docs/goals/`.
 
 ## Layout

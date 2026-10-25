@@ -1,5 +1,5 @@
 //! The store: one LMDB environment, its one database (`format::DB_NAME`), the format stamp, reads, and writes with
-//! group commit and map growth (`docs/engine.md`, Durability; `docs/format.md`).
+//! group commit and map growth (`docs/architecture/engine.md`, Durability; `docs/architecture/format.md`).
 //!
 //! Every transaction holds `gate` for reading, and growing the map holds it for writing, since LMDB grows a map only
 //! while its process has no transaction open. So `read` and `write` never call each other: a write reads through its

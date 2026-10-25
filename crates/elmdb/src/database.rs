@@ -1,5 +1,5 @@
 //! A database: one directory holding one LMDB environment, opened at most once per process, with its schema
-//! (`docs/engine.md`, Opening).
+//! (`docs/architecture/engine.md`, Opening).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -19,7 +19,7 @@ pub struct OpenOptions {
     /// Open existing files without writing: every write is refused, and the stored schema is used
     pub read_only: bool,
     /// The schema to hold the database to. Opening with one that differs from the stored schema changes it
-    /// (`docs/schema.md`, Changing a schema); `None` keeps the stored one
+    /// (`docs/architecture/schema.md`, Changing a schema); `None` keeps the stored one
     pub schema: Option<Schema>,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once, for a test's temporary directory
     pub syncs: bool,
@@ -138,7 +138,7 @@ impl Database {
         self.schema.read().clone()
     }
 
-    /// Changes the schema of the open database as opening with `schema` would (`docs/schema.md`, Changing a schema),
+    /// Changes the schema of the open database as opening with `schema` would (`docs/architecture/schema.md`, Changing a schema),
     /// answering the changes and what was done about each. Refused while a unit is open (`UNIT_OPEN`), in a
     /// read-only database, and for a change opening refuses, which leaves the schema as it was
     pub fn set_schema(&self, schema: Schema) -> Result<Vec<SchemaChange>> {

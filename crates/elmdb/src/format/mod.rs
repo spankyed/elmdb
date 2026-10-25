@@ -1,4 +1,4 @@
-//! How a database lays out its data (`docs/format.md`): one LMDB database, `DB_NAME`, of keys in the codec of `key`,
+//! How a database lays out its data (`docs/architecture/format.md`): one LMDB database, `DB_NAME`, of keys in the codec of `key`,
 //! each beginning with one of the prefixes `Prefix` declares, and values in the spec `value` checks.
 
 pub mod key;

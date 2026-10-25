@@ -1,4 +1,4 @@
-//! Relations in the store's keys (`docs/format.md`, Keys):
+//! Relations in the store's keys (`docs/architecture/format.md`, Keys):
 //!
 //! - `p/r relation` → `{ kind, source, target, info, seq }`: the relation's row and its place
 //! - `d/o source kind seq` → `[relation, target]` and `d/n target kind seq` → `[relation, source]`: each entity's edges

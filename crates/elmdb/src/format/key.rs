@@ -1,4 +1,4 @@
-//! The key codec: a tuple of parts as bytes whose order is the tuples' order, part by part (`docs/format.md`, Keys).
+//! The key codec: a tuple of parts as bytes whose order is the tuples' order, part by part (`docs/architecture/format.md`, Keys).
 //!
 //! Each part is a tag and its bytes: `null`, `false`, `true`, a number (its float64 big-endian, the sign bit flipped for
 //! a positive number and every bit inverted for a negative one, so byte order is numeric order), a string or bytes

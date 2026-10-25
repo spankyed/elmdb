@@ -1,5 +1,5 @@
 //! Derived data and schema changes: `check()` and `rebuild()`, an index built in the background, and each row of
-//! `docs/schema.md`'s change table as an open applies it, with the admin operations a migration runs.
+//! `docs/architecture/schema.md`'s change table as an open applies it, with the admin operations a migration runs.
 
 use serde_json::{Value as Json, json};
 

@@ -1,4 +1,4 @@
-//! Searching a text index (`docs/search.md`, Methods): a query's clauses, each clause's words expanded to the index's
+//! Searching a text index (`docs/architecture/search.md`, Methods): a query's clauses, each clause's words expanded to the index's
 //! terms — the word itself, the terms it starts for search as you type, and those an edit or two away — matched
 //! through the posting lists, checked against positions where a phrase or a field asks it, and ranked by BM25F, each
 //! field's term frequency and length counted at its weight.

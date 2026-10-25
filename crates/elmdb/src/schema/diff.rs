@@ -1,4 +1,4 @@
-//! What opening a database with a new schema does, change by change (`docs/schema.md`, Changing a schema). A change is
+//! What opening a database with a new schema does, change by change (`docs/architecture/schema.md`, Changing a schema). A change is
 //! applied, builds or drops derived data, keeps the data of a declaration that went, enforces a tightened rule on
 //! writes from then on, or is refused.
 

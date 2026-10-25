@@ -305,7 +305,7 @@ fn a_wait_given_up_on_keeps_no_outcome() {
     h.close();
 }
 
-/// The failed-sync harness (`docs/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
+/// The failed-sync harness (`docs/architecture/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
 /// what a wait promises rather than against a copy of the implementation. A wait that resolved had a sync covering its
 /// commits finish successfully after it began; a wait that rejected had a sync fail after it began; and once every sync
 /// is let through, every wait has settled and a new one resolves.

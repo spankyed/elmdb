@@ -1,4 +1,4 @@
-//! A database's maintenance (`docs/engine.md`, Admin): backups, replacing or emptying its data, what it holds, and
+//! A database's maintenance (`docs/architecture/engine.md`, Admin): backups, replacing or emptying its data, what it holds, and
 //! loading data unchecked, as an import or an upgrade does.
 
 use std::collections::BTreeMap;

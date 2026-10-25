@@ -1,4 +1,4 @@
-//! Entities and their attributes in the store's keys (`docs/format.md`, Keys):
+//! Entities and their attributes in the store's keys (`docs/architecture/format.md`, Keys):
 //!
 //! - `p/i id` → `[seq, trashed]`: that the entity exists, its place in the store's sequence, and the trash
 //! - `p/v id field` → the field's value, so an entity's fields are one range and a row is one read

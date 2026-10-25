@@ -24,7 +24,7 @@ fn to_js(error: elmdb::Error) -> napi::Error<Code> {
 pub struct OpenOptions {
     /// Open existing files without writing: every write is refused, and the stored schema is used
     pub read_only: Option<bool>,
-    /// The schema, as the canonical JSON `docs/schema.md` describes; a schema that differs from the stored one
+    /// The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
     /// changes it
     #[napi(ts_type = "Schema")]
     pub schema: Option<serde_json::Value>,

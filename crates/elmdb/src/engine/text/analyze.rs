@@ -1,4 +1,4 @@
-//! A text field's value as terms (`docs/search.md`, Declaring). The standard analyzer is charabia's tokenizing and
+//! A text field's value as terms (`docs/architecture/search.md`, Declaring). The standard analyzer is charabia's tokenizing and
 //! normalizing — words, an identifier split on its case and underscores, case and accents folded — with a code such as
 //! `THR-12` kept whole beside its parts, and a stem in place of each word when the index names a language. The exact
 //! analyzer is the whole value, case folded.

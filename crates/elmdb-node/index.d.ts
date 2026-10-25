@@ -104,7 +104,7 @@ export interface OpenOptions {
   /** Open existing files without writing: every write is refused, and the stored schema is used */
   readOnly?: boolean
   /**
-   * The schema, as the canonical JSON `docs/schema.md` describes; a schema that differs from the stored one
+   * The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
    * changes it
    */
   schema?: Schema

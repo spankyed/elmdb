@@ -1,4 +1,4 @@
-//! `elmdb upgrade`: an apack format 4 database, dumped by `tools/lmdb-js-export`, as an elmdb database (`docs/format.md`,
+//! `elmdb upgrade`: an apack format 4 database, dumped by `tools/lmdb-js-export`, as an elmdb database (`docs/architecture/format.md`,
 //! Moving apack's data). Format 4's keys are tuples in the same codec, its strings holding no NUL; its primary keys map
 //! onto elmdb's prefixes, its sequences carry over, and derived data is rebuilt rather than copied.
 

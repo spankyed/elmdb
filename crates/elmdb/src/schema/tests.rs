@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use super::*;
 
-/// `docs/schema.md`'s complete example
+/// `docs/architecture/schema.md`'s complete example
 fn example() -> Value {
     json!({
       "$schema": "https://elmdb.dev/schema/1.json",

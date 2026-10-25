@@ -1,4 +1,4 @@
-//! Derived data from primary data alone (`docs/format.md`, Keys): what every derived key should hold, which `check()`
+//! Derived data from primary data alone (`docs/architecture/format.md`, Keys): what every derived key should hold, which `check()`
 //! compares with what is stored and `rebuild()` writes in its place. An index is read only once built (its `d/xb`
 //! marker); writes keep every index whether built or not, so building one fills in what predates it.
 

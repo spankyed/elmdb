@@ -1,4 +1,4 @@
-//! Reading a schema from JSON: every problem found, by its path, before any is reported (`docs/schema.md`, Errors).
+//! Reading a schema from JSON: every problem found, by its path, before any is reported (`docs/architecture/schema.md`, Errors).
 //!
 //! The JSON is walked by hand rather than through serde's derive, because a derive stops at the first problem and can't
 //! refuse unknown keys beside a flattened field.

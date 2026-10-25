@@ -1,4 +1,4 @@
-//! The read protocol (`docs/engine.md`, Reads): reads sent as data, several in one call, each a query plan or a direct
+//! The read protocol (`docs/architecture/engine.md`, Reads): reads sent as data, several in one call, each a query plan or a direct
 //! read, answered in one envelope. A caller's own function can't cross, so a caller with one runs the plan up to it and
 //! goes on from the ids.
 
@@ -200,7 +200,7 @@ pub enum Step {
     After {
         id: String,
     },
-    /// The entities a type's text index matches to `query`, most relevant first (`docs/search.md`). `index` names
+    /// The entities a type's text index matches to `query`, most relevant first (`docs/architecture/search.md`). `index` names
     /// the index on a type with more than one
     Search {
         query: String,
