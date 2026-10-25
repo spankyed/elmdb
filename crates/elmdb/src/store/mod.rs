@@ -9,6 +9,7 @@ pub mod sync;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -90,6 +91,8 @@ pub struct Store {
     unit_ended: Condvar,
     /// Read transactions a read finished with, for the next read to take while it is still current
     idle: Mutex<Vec<RoTxn<'static, WithoutTls>>>,
+    /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
+    sequence: AtomicU64,
 }
 
 /// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
@@ -181,6 +184,11 @@ impl Store {
                 Box::new(SystemClock),
             )
         });
+        let sequence = {
+            let txn = env.read_txn()?;
+            let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
+            held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
+        };
         registration.0 = None;
         Ok(Self {
             path: canonical,
@@ -192,6 +200,7 @@ impl Store {
             unit: Mutex::new(false),
             unit_ended: Condvar::new(),
             idle: Mutex::new(Vec::new()),
+            sequence: AtomicU64::new(sequence),
         })
     }
 
@@ -345,7 +354,16 @@ impl Store {
 
     /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
     /// aborted, the map grown and `f` run again, so `f` must do nothing but write through its transaction
-    pub fn write<T>(&self, mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
+    pub fn write<T>(&self, f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
+        self.write_sequenced(f, durable).map(|(t, _)| t)
+    }
+
+    /// `write`, answering also the sequence of the commit it made
+    pub fn write_sequenced<T>(
+        &self,
+        mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
+        durable: bool,
+    ) -> Result<(T, u64)> {
         self.check_writable()?;
         if self.unit_is_open() {
             return Err(Error::new(
@@ -365,7 +383,7 @@ impl Store {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|()| t));
+            let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
                 Ok(t) => {
@@ -391,14 +409,24 @@ impl Store {
         Ok(())
     }
 
-    /// Commits a write transaction, which a test may refuse as a full disk would (`FAIL_COMMIT_AT`)
-    pub fn commit_txn(&self, txn: RwTxn<'_>) -> Result<()> {
+    /// Commits a write transaction with the next sequence, answering it; a test may refuse it as a full disk would
+    /// (`FAIL_COMMIT_AT`). Only the environment's one write transaction commits, so the sequence read here is the last
+    pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
+        let next = self.sequence.load(Ordering::Acquire) + 1;
+        self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
         #[cfg(test)]
         if FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some() {
             drop(txn);
             return Err(Error::new(ErrorCode::Io, "No space left on device"));
         }
-        txn.commit().map_err(Into::into)
+        txn.commit()?;
+        self.sequence.store(next, Ordering::Release);
+        Ok(next)
+    }
+
+    /// The last commit's sequence, or 0 before the first
+    pub fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
     }
 
     /// What follows a commit: group commit hears of it, and a durable one waits for its sync

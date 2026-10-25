@@ -124,7 +124,7 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet }`. `durable` commits it with a sync
+    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
     #[napi]
     pub fn write(&self, batch: Buffer, durable: Option<bool>) -> Result<Buffer, Code> {
         self.inner.write_bytes(&batch, durable.unwrap_or(false)).map(Buffer::from).map_err(to_js)
@@ -141,6 +141,26 @@ impl Database {
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read(&self, reads: Buffer) -> AsyncTask<ReadTask> {
         AsyncTask::new(ReadTask { db: std::sync::Arc::clone(&self.inner), reads: reads.to_vec(), failed: None })
+    }
+
+    /// Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after
+    #[napi]
+    pub fn untrack(&self, token: u32) {
+        self.inner.untrack(token);
+    }
+
+    /// How many tokens have tracked reads filed, and how many keys and ranges they hold
+    #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
+    pub fn track_stats(&self) -> serde_json::Value {
+        let (owners, keys, ranges) = self.inner.track_stats();
+        serde_json::json!({ "owners": owners, "keys": keys, "ranges": ranges })
+    }
+
+    /// The last commit's sequence, or 0 before the first: a number that only increases for as long as the database
+    /// exists
+    #[napi(getter)]
+    pub fn sequence(&self) -> Result<f64, Code> {
+        self.inner.sequence().map(|n| n as f64).map_err(to_js)
     }
 
     /// Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses

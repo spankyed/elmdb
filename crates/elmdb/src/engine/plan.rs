@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 pub struct Reads {
     pub reads: Vec<ReadOp>,
+    /// Tracks the reads under this token: what they touch is added to what the token holds, and a commit writing into
+    /// it names the token (`touched`) until `untrack` drops it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    pub track: Option<u32>,
 }
 
 /// One read

@@ -31,6 +31,11 @@ pub struct ChangeSet {
     pub types: BTreeSet<String>,
     /// The relation kinds whose edges changed
     pub kinds: BTreeSet<String>,
+    /// The commit's sequence: a number that only increases for as long as the database exists
+    #[cfg_attr(feature = "codegen", ts(type = "number"))]
+    pub sequence: u64,
+    /// The tokens of the tracked reads whose keys and ranges the commit wrote into
+    pub touched: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -4,4 +4,9 @@ import type { ReadOp } from "./ReadOp.js";
 /**
  * Reads answered together, from one snapshot
  */
-export type Reads = { reads: Array<ReadOp>, };
+export type Reads = { reads: Array<ReadOp>, 
+/**
+ * Tracks the reads under this token: what they touch is added to what the token holds, and a commit writing into
+ * it names the token (`touched`) until `untrack` drops it
+ */
+track?: number, };

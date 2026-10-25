@@ -636,6 +636,9 @@ pub fn nearest(
             ),
         ));
     }
+    // The graph is read through hannoy, outside what a tracked read records: what it answers changes with the index's
+    // items, every one of which a commit adding or removing a vector writes
+    r.note(&keys::vector_index_range(Prefix::VectorItem, entity_type, &index.name));
     let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok(Vec::new()) };
     let (txn, db) = r.raw();
     // Several chunks of one entity may come first: asking for more items than entities finds the k entities

@@ -21,4 +21,12 @@ types: Array<string>,
 /**
  * The relation kinds whose edges changed
  */
-kinds: Array<string>, };
+kinds: Array<string>, 
+/**
+ * The commit's sequence: a number that only increases for as long as the database exists
+ */
+sequence: number, 
+/**
+ * The tokens of the tracked reads whose keys and ranges the commit wrote into
+ */
+touched: Array<number>, };

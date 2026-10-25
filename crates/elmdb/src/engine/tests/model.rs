@@ -794,6 +794,7 @@ fn plans_of(db: &Database) -> BTreeMap<String, Json> {
     let reads = derived_reads();
     let request = crate::engine::plan::Reads {
         reads: reads.iter().map(|(_, r)| serde_json::from_value(r.clone()).unwrap()).collect(),
+        track: None,
     };
     let answers: Json =
         serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&request).unwrap()[..]).unwrap()).unwrap();

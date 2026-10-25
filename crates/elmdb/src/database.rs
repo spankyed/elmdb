@@ -62,6 +62,8 @@ pub struct Database {
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
     builder: Mutex<Option<crate::engine::Builder>>,
+    /// The tracked reads' read sets, and the database's watches
+    pub(crate) tracks: crate::engine::watch::SharedTracks,
 }
 
 /// The schema of a database that has none: nothing declared
@@ -117,6 +119,7 @@ impl Database {
             schema: RwLock::new(schema),
             report,
             builder: Mutex::new(builder),
+            tracks: Default::default(),
         })
     }
 
@@ -160,7 +163,10 @@ impl Database {
             builder.queue(unbuilt);
             *self.builder() = Some(builder);
         }
-        applied.map(|(_, report)| report.schema_changes)
+        drop(current);
+        let changes = applied.map(|(_, report)| report.schema_changes)?;
+        self.touched_everything()?;
+        Ok(changes)
     }
 
     /// What opening did

@@ -48,7 +48,7 @@ fn decode(bytes: &[u8]) -> Json {
 }
 
 fn read(db: &Database, op: Json) -> crate::Result<Json> {
-    let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()] };
+    let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None };
     db.read(&reads).map(|b| decode(&b)[0].clone())
 }
 

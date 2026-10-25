@@ -166,6 +166,8 @@ pub mod meta {
     pub const KIND: &str = "kind";
     pub const SCHEMA: &str = "schema";
     pub const SCHEMA_HASH: &str = "schemaHash";
+    /// The last commit's sequence, a big-endian u64: a number that only increases for as long as the database exists
+    pub const SEQUENCE: &str = "sequence";
 }
 
 #[cfg(test)]

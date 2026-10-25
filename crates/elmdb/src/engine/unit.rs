@@ -36,9 +36,18 @@ pub struct UnitState {
     levels: Vec<Level>,
     pub(super) checks: Vec<Check>,
     pub(super) events: Vec<Event>,
+    /// Every key the unit wrote, while tracked reads are filed for a commit to be matched against; `None` when none
+    /// were as the unit began, and its commit is then heard as writing everything. A savepoint rolled back keeps its
+    /// keys, which can only name a token that didn't need to be, never miss one
+    pub(super) written: Option<HashSet<Vec<u8>>>,
 }
 
 impl UnitState {
+    /// A unit's state, logging the keys it writes when `logging`
+    pub fn new(logging: bool) -> Self {
+        UnitState { written: logging.then(Default::default), ..Default::default() }
+    }
+
     /// Opens a savepoint, returning its depth
     pub fn savepoint(&mut self) -> usize {
         self.levels.push(Level { events: self.events.len(), checks: self.checks.len(), ..Default::default() });
@@ -61,6 +70,9 @@ pub trait Read {
     fn schema(&self) -> &Schema;
     /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);
+    /// Says that what was read depends on every key under `prefix`, though nothing here read them: what a read through
+    /// `raw` does, which a tracked read records (`tracking::Recording`)
+    fn note(&self, _prefix: &[u8]) {}
 
     fn contains(&self, key: &[u8]) -> Result<bool> {
         Ok(self.get(key)?.is_some())
@@ -194,14 +206,22 @@ impl Txn<'_, '_> {
         Ok(())
     }
 
+    fn log(&mut self, key: &[u8]) {
+        if let Some(written) = &mut self.state.written {
+            written.insert(key.to_vec());
+        }
+    }
+
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
         self.record(key)?;
+        self.log(key);
         self.db.put(self.txn, key, value)?;
         Ok(())
     }
 
     pub fn del(&mut self, key: &[u8]) -> Result<()> {
         self.record(key)?;
+        self.log(key);
         self.db.delete(self.txn, key)?;
         Ok(())
     }

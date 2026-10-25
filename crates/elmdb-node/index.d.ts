@@ -34,7 +34,7 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet }`. `durable` commits it with a sync
+   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
@@ -44,6 +44,15 @@ export declare class Database {
   readSync(reads: Buffer): Buffer
   /** `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop */
   read(reads: Buffer): Promise<Buffer>
+  /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
+  untrack(token: number): void
+  /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
+  trackStats(): { owners: number; keys: number; ranges: number }
+  /**
+   * The last commit's sequence, or 0 before the first: a number that only increases for as long as the database
+   * exists
+   */
+  get sequence(): number
   /**
    * Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
    * (`UNIT_OPEN`), and writes go through the unit

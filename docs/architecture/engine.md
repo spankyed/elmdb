@@ -116,21 +116,26 @@ write commits with a sync. `close()` syncs what is owed.
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
-database exists. A batch's result carries the same sequence, so a caller can tell whether a result it was handed
+database exists (`m/sequence`, raised by every commit, a reset's and a replace's included). A batch's result carries
+the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
-in either order.
+in either order. `db.sequence` is the last commit's.
 
-- `db.changes(listener)` hears every change set after its commit.
-- **Tracked reads.** A read call may ask to be tracked under a token (`{ track: token }`). elmdb records the key ranges
-  those reads touched — each key a read got and each range it scanned, as far as the scan went — and files them under
-  the token in an interval index held in Rust, replacing what the token held before. A commit's result and its change
-  set name the tokens whose ranges it wrote into (`touched`), found through that index in O(log N + matches) a key,
-  so a commit's cost doesn't grow with the reads being tracked. `db.untrack(token)` drops one. Nothing larger than a
-  token crosses the boundary, and a view is told about exactly the commits that wrote into what it read.
-- **Delivery is after the commit**, never inside a batch or a unit: a listener runs once the call that committed has
-  returned.
-- `db.watch(plan, listener)` is a convenience over tracked reads: it runs the plan tracked, and runs it again after each
-  commit that names its token, handing the listener the new result when it differs from the last.
+- **Tracked reads.** A read call may ask to be tracked under a token (`{ reads, track: token }`). elmdb records the key
+  ranges those reads touched — each key a read got, present or not, and each range it scanned, as far as the scan went
+  (to just past the last key a stopped scan was shown) — and adds them to what the token holds, in an interval index
+  held in Rust (`engine/tracking.rs`: a map of keys and an interval treap over ranges). A read through hannoy, which
+  elmdb can't see into, records the index's items instead, which every vector added or removed writes. A commit's
+  change set names the tokens whose keys and ranges it wrote into (`touched`), found through that index in
+  O(log N + matches) a key, so a commit's cost doesn't grow with the reads being tracked; a unit logs the keys it
+  writes only while some token is tracked. `db.untrack(token)` drops what a token holds, and a caller re-running its
+  reads drops it first. Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
+  that wrote into what it read. A commit whose writes aren't logged key by key — `reset`, `replaceWith`, `setSchema`,
+  `bulkLoad` and the admin changes — is one the caller hears as writing everything.
+- `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
+  token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
+  differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
+  after the commit, outside its transaction, on the thread that committed.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a

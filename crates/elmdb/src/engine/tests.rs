@@ -5,6 +5,7 @@ mod derived;
 mod maintenance;
 mod model;
 mod reads;
+mod tracked;
 
 use serde_json::{Value as Json, json};
 
@@ -81,7 +82,7 @@ fn write_changes(db: &Database, ops: Vec<Json>) -> ChangeSet {
     db.write(&batch(ops), false).unwrap().1
 }
 
-fn refused(db: &Database, ops: Vec<Json>) -> crate::Error {
+pub(super) fn refused(db: &Database, ops: Vec<Json>) -> crate::Error {
     write(db, ops).expect_err("the batch was refused")
 }
 

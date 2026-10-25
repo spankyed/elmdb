@@ -20,9 +20,11 @@ pub mod plan;
 mod reads;
 mod relations;
 mod text;
+pub mod tracking;
 mod unit;
 mod values;
 mod vector;
+pub mod watch;
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -202,6 +204,8 @@ pub(crate) use builder::Builder;
 pub struct Written<'a> {
     pub results: &'a [batch::OpResult],
     pub changes: &'a ChangeSet,
+    /// The commit's sequence, as its change set says
+    pub sequence: u64,
 }
 
 impl Database {
@@ -209,8 +213,12 @@ impl Database {
     pub fn write_bytes(&self, batch: &[u8], durable: bool) -> Result<Vec<u8>> {
         let batch = decode_batch(batch)?;
         let (results, changes) = self.write(&batch, durable)?;
-        Ok(rmp_serde::to_vec_named(&Written { results: &results.results, changes: &changes })
-            .expect("an answer serializes"))
+        Ok(rmp_serde::to_vec_named(&Written {
+            results: &results.results,
+            changes: &changes,
+            sequence: changes.sequence,
+        })
+        .expect("an answer serializes"))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
@@ -266,7 +274,9 @@ impl Database {
                 vector::flush(&mut t)
             },
             true,
-        )
+        )?;
+        drop(schema);
+        self.touched_everything()
     }
 
     /// Blocks until every index waiting to be built is built or has failed
@@ -303,7 +313,49 @@ impl Database {
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
         let schema = self.engine_schema();
-        store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads))
+        let Some(token) = reads.track else {
+            return store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads));
+        };
+        let (answer, read) = watch::run_tracked(&store, &schema, reads)?;
+        // Filed whether or not the reads failed: what they read before failing decides when they'd answer otherwise
+        self.tracks.lock().file(token, read);
+        answer
+    }
+
+    /// Drops what the reads tracked under `token` touched: no commit names it after
+    pub fn untrack(&self, token: u32) {
+        self.tracks.lock().untrack(token);
+    }
+
+    /// How many owners have tracked reads filed, and how many keys and ranges they hold: `(owners, keys, ranges)`
+    pub fn track_stats(&self) -> (usize, usize, usize) {
+        self.tracks.lock().stats()
+    }
+
+    /// The last commit's sequence, or 0 before the first
+    pub fn sequence(&self) -> Result<u64> {
+        Ok(self.store()?.sequence())
+    }
+
+    /// Runs `reads` and hands `listener` the answer, then runs them again after each commit that writes into what they
+    /// read, handing over each answer that differs from the one before. A listener is called after the commit, outside
+    /// its transaction, on the thread that committed
+    pub fn watch(&self, reads: plan::Reads, listener: watch::Listener) -> Result<u64> {
+        let store = self.store()?;
+        watch::watch(&self.tracks, &store, &self.engine_schema(), reads, listener)
+    }
+
+    /// Ends a watch
+    pub fn unwatch(&self, id: u64) {
+        watch::unwatch(&self.tracks, id);
+    }
+
+    /// After a commit whose writes aren't logged key by key (an admin change, a reset, a load): every tracked read and
+    /// watch is touched
+    pub(crate) fn touched_everything(&self) -> Result<()> {
+        let store = self.store()?;
+        let ids = self.tracks.lock().all_watches();
+        watch::deliver(&self.tracks, &store, &self.engine_schema(), &ids)
     }
 
     /// `read` with the reads as msgpack bytes, as the binding takes them
@@ -316,17 +368,24 @@ impl Database {
         let schema = self.writing_schema();
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
-        store.write(
+        let logging = !self.tracks.lock().is_empty();
+        let ((results, mut changes, written), sequence) = store.write_sequenced(
             |txn, db| {
-                let mut state = UnitState::default();
+                let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
-                Ok((results, ChangeSet::of(&state.events)))
+                Ok((results, ChangeSet::of(&state.events), state.written.take()))
             },
             durable,
-        )
+        )?;
+        drop(schema);
+        let touched = self.tracks.lock().touched(written.as_ref());
+        changes.sequence = sequence;
+        changes.touched = touched.tokens;
+        watch::deliver(&self.tracks, &store, &self.engine_schema(), &touched.watches)?;
+        Ok((results, changes))
     }
 
     /// Runs `f` on a read snapshot of the last commit
@@ -349,9 +408,11 @@ impl Database {
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
+        let logging = !self.tracks.lock().is_empty();
         Ok(Unit {
             txn: Some(txn),
-            state: UnitState::default(),
+            state: UnitState::new(logging),
+            tracks: Arc::clone(&self.tracks),
             poisoned: None,
             _gate: gate,
             schema,
@@ -372,6 +433,7 @@ pub struct Unit {
     _gate: ArcRwLockReadGuard<RawRwLock, ()>,
     schema: Arc<Schema>,
     store: Arc<Store>,
+    tracks: watch::SharedTracks,
     _thread: PhantomData<*const ()>,
 }
 
@@ -423,8 +485,13 @@ impl Unit {
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes
     pub fn read(&mut self, reads: &plan::Reads) -> Result<Vec<u8>> {
+        let tracks = Arc::clone(&self.tracks);
         let t = self.view(0.0)?;
-        reads::run(&t, &reads.reads)
+        let Some(token) = reads.track else { return reads::run(&t, &reads.reads) };
+        let recording = tracking::Recording::new(&t);
+        let answer = reads::run(&recording, &reads.reads);
+        tracks.lock().file(token, recording.into_reads());
+        answer
     }
 
     /// `read` with the reads as msgpack bytes
@@ -460,12 +527,15 @@ impl Unit {
             self.abort();
             return Err(error);
         }
-        let changes = ChangeSet::of(&self.state.events);
+        let mut changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         let committed = self.store.commit_txn(txn);
         self.store.end_unit();
-        committed?;
+        changes.sequence = committed?;
         self.store.committed(durable)?;
+        let touched = self.tracks.lock().touched(self.state.written.as_ref());
+        changes.touched = touched.tokens;
+        watch::deliver(&self.tracks, &self.store, &self.schema, &touched.watches)?;
         Ok(changes)
     }
 

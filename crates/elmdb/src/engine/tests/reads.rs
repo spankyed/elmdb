@@ -74,7 +74,8 @@ fn decode(bytes: &[u8]) -> Json {
 
 /// Runs reads, each given as JSON, and answers their envelope
 fn reads(db: &Database, ops: Vec<Json>) -> crate::Result<Json> {
-    let reads = Reads { reads: ops.into_iter().map(|o| serde_json::from_value::<ReadOp>(o).unwrap()).collect() };
+    let reads =
+        Reads { reads: ops.into_iter().map(|o| serde_json::from_value::<ReadOp>(o).unwrap()).collect(), track: None };
     db.read(&reads).map(|b| decode(&b))
 }
 
@@ -438,10 +439,12 @@ fn a_unit_reads_its_own_writes() {
     ]))
     .unwrap();
     let plan: Plan = serde_json::from_value(json!({ "start": types(&["Task"]), "steps": [{ "step": "where", "field": "status", "value": "open" }], "terminal": { "answer": "ids" } })).unwrap();
-    let inside =
-        decode(&unit.read(&Reads { reads: vec![ReadOp::Query { plan: plan.clone(), visits: false }] }).unwrap());
+    let inside = decode(
+        &unit.read(&Reads { reads: vec![ReadOp::Query { plan: plan.clone(), visits: false }], track: None }).unwrap(),
+    );
     assert_eq!(inside[0]["ids"], json!([A, C, D, "Task-e"]));
-    let outside = decode(&f.db.read(&Reads { reads: vec![ReadOp::Query { plan, visits: false }] }).unwrap());
+    let outside =
+        decode(&f.db.read(&Reads { reads: vec![ReadOp::Query { plan, visits: false }], track: None }).unwrap());
     assert_eq!(outside[0]["ids"], json!([A, C, D]), "a reader sees none of an open unit");
     unit.abort();
 }
