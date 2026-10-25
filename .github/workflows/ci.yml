@@ -59,14 +59,23 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      # On Windows, @napi-rs/cli 3.10.9's build times out on its own filesystem-reconciliation lock, so the binding
+      # is built by cargo and named as napi's loader expects; everywhere else napi builds it
       - name: binding
         working-directory: crates/elmdb-node
         shell: bash
         run: |
           npm ci
-          npm run build
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo build -p elmdb-node --release
+            cp ../../target/release/elmdb_node.dll elmdb.win32-x64-msvc.node
+          else
+            npm run build
+          fi
           npm test
 
+  # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
+  # and run every suite in a node:23-alpine container of the runner's own architecture
   musl:
     name: ${{ matrix.target }}
     if: github.event_name != 'push'
@@ -77,21 +86,19 @@ jobs:
           - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
           - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
     runs-on: ${{ matrix.runner }}
-    container: node:23-alpine
     steps:
-      - run: apk add --no-cache bash curl git build-base
       - uses: actions/checkout@v4
-      - name: rustup
-        shell: bash
+      - name: every suite, in Alpine
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-      - run: rustup show active-toolchain
-      - run: cargo test --workspace
-      - name: binding
-        working-directory: crates/elmdb-node
-        shell: bash
-        run: |
-          npm ci
-          npm run build
-          npm test
+          docker run --rm -v "$PWD:/w" -w /w node:23-alpine sh -euc '
+            apk add --no-cache bash curl git build-base
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            git config --global --add safe.directory /w
+            rustup show active-toolchain
+            cargo test --workspace
+            cd crates/elmdb-node
+            npm ci
+            npm run build
+            npm test
+          '
