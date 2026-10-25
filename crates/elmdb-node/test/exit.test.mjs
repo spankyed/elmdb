@@ -1,7 +1,7 @@
 // A process that exits with a database still open leaves no lock behind: Node runs no destructor as it exits, so the
 // binding closes what is open as its environment tears down. On macOS LMDB locks with named POSIX semaphores, which
 // outlive the process unless the last one out removes them, and a table of them that fills refuses every later open on
-// the machine (`ENOSPC`) until it restarts. The names are in the lock file; `sem_open` says whether one still exists.
+// the machine (`ENOSPC`) until it restarts. The lock file holds what the names are made of; `sem_open` says whether one still exists.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -9,11 +9,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const binding = fileURLToPath(new URL('../index.js', import.meta.url));
+const { Database } = createRequire(import.meta.url)('../index.js');
 
-/** The named semaphores the lock file of the database at `dir` names */
-const semaphoresOf = (dir) => [...readFileSync(join(dir, 'lock.mdb')).toString('latin1').matchAll(/\/MDB[rw][!-~]+/g)].map(([name]) => name);
+/** LMDB's base-85 digits (`mdb_a85`, liblmdb's mdb.c) */
+const A85 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
+
+/**
+ * The named semaphores of the database at `dir`. LMDB keeps no names in its lock file, only the hash they are made from
+ * (`mtb_mutexid`, a 64-bit word after the magic, the format, the last transaction and the reader count), and names the
+ * reader and writer semaphores `/MDBr` and `/MDBw` followed by its base-85 digits, least significant first
+ * (`mdb_env_mname_init`)
+ */
+function semaphoresOf(dir) {
+  let id = readFileSync(join(dir, 'lock.mdb')).readBigUInt64LE(24);
+  let digits = '';
+  while (id > 0n && digits.length < 10) {
+    digits += A85[Number(id % 85n)];
+    id /= 85n;
+  }
+  return ['r', 'w'].map((kind) => `/MDB${kind}${digits}`);
+}
 
 /** Whether a named semaphore exists, asked of the C library through Python, which macOS ships */
 const exists = (name) => execFileSync('python3', ['-c', [
@@ -23,6 +41,16 @@ const exists = (name) => execFileSync('python3', ['-c', [
   'handle = libc.sem_open(sys.argv[1].encode(), 0)',
   'print("yes" if handle not in (None, ctypes.c_void_p(-1).value) else "no")',
 ].join('\n'), name], { encoding: 'utf8' }).trim() === 'yes';
+
+test('an open database holds the two semaphores its lock file names, and a close removes them', { skip: process.platform !== 'darwin' }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-sem-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const db = Database.open(dir, { syncs: false });
+  const names = semaphoresOf(dir);
+  assert.deepEqual(names.map(exists), [true, true], `while open: ${names}`);
+  db.close();
+  assert.deepEqual(names.map(exists), [false, false]);
+});
 
 test('a process that exits with a database open leaves none of its lock semaphores', { skip: process.platform !== 'darwin' }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
@@ -35,7 +63,5 @@ test('a process that exits with a database open leaves none of its lock semaphor
     'process.exit(0);',
   ].join('\n');
   execFileSync(process.execPath, ['-e', child]);
-  const names = semaphoresOf(dir);
-  assert.equal(names.length, 2, `the lock file names a reader and a writer semaphore: ${names}`);
-  assert.deepEqual(names.filter(exists), []);
+  assert.deepEqual(semaphoresOf(dir).filter(exists), []);
 });
