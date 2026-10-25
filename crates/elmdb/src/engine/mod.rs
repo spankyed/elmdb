@@ -5,9 +5,12 @@
 //! (`Database::begin`), as a caller's transaction that runs its own code between writes needs: its writes read their
 //! own, a savepoint inside it rolls back alone, and its deferred checks run as it commits.
 
+pub mod admin;
 mod apply;
 pub mod batch;
+mod builder;
 pub mod changes;
+pub mod derive;
 mod entities;
 mod ids;
 mod keys;
@@ -31,7 +34,7 @@ use crate::schema::Schema;
 use crate::store::Store;
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
-use unit::{Check, Txn, UnitState};
+use unit::{Check, Read as _, Txn, UnitState};
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
 fn now_ms() -> f64 {
@@ -72,6 +75,81 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch> {
         .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The batch doesn't decode: {e}")))
 }
 
+/// One value index's state
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexStatus {
+    #[serde(rename = "type")]
+    pub entity_type: String,
+    pub index: String,
+    pub built: bool,
+    /// Why its build failed, such as a unique index over rows holding the same values
+    pub failure: Option<String>,
+}
+
+/// Deletes the data of every index a schema change drops or rebuilds, with its marker, in the unit that stores the
+/// schema
+pub(crate) fn drop_index_data(
+    db: crate::store::Db,
+    txn: &mut RwTxn<'_>,
+    changes: &[crate::schema::SchemaChange],
+) -> Result<()> {
+    use crate::schema::Effect;
+    for change in changes.iter().filter(|c| matches!(c.effect, Effect::Drops | Effect::Rebuilds)) {
+        let parts: Vec<&str> = change.path.split('.').collect();
+        if let ["types", entity_type, "indexes", index] = parts.as_slice() {
+            let (low, high) = crate::format::key::prefix_range(&keys::index_range(entity_type, index, &[]));
+            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+            let doomed: Vec<Vec<u8>> =
+                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+            for key in doomed {
+                db.delete(txn, &key)?;
+            }
+            db.delete(txn, &keys::index_built(entity_type, index))?;
+        }
+    }
+    Ok(())
+}
+
+/// Marks built every unbuilt index of a type that has no entities, and answers the rest, which need a build
+pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(String, String)>> {
+    let (empty, unbuilt) = store.read(|txn, db| {
+        let s = unit::Snapshot { txn, db, schema };
+        let mut empty = Vec::new();
+        let mut unbuilt = Vec::new();
+        for entity_type in schema.types.keys() {
+            let mut has_entities = false;
+            for trashed in [false, true] {
+                s.visit(&keys::type_range(trashed, entity_type), |_, _| {
+                    has_entities = true;
+                    false
+                })?;
+            }
+            for index in entities::value_indexes(schema, entity_type) {
+                if !derive::is_built(&s, entity_type, &index.name)? {
+                    if has_entities { &mut unbuilt } else { &mut empty }
+                        .push((entity_type.clone(), index.name.clone()));
+                }
+            }
+        }
+        Ok((empty, unbuilt))
+    })?;
+    if !empty.is_empty() && !store.is_read_only() {
+        store.write(
+            |txn, db| {
+                for (entity_type, index) in &empty {
+                    db.put(txn, &keys::index_built(entity_type, index), &values::encode(&true.into()))?;
+                }
+                Ok(())
+            },
+            false,
+        )?;
+    }
+    Ok(unbuilt)
+}
+
+pub(crate) use builder::Builder;
+
 /// What a write's caller gets back across the binding: each operation's answer, and the commit's change set
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -87,6 +165,83 @@ impl Database {
         let (results, changes) = self.write(&batch, durable)?;
         Ok(rmp_serde::to_vec_named(&Written { results: &results.results, changes: &changes })
             .expect("an answer serializes"))
+    }
+
+    /// Compares every derived key with what primary data derives, and every row with the schema's rules
+    pub fn check(&self) -> Result<derive::CheckReport> {
+        let store = self.store()?;
+        let schema = self.engine_schema();
+        store.read(|txn, db| derive::check(&unit::Snapshot { txn, db, schema: &schema }))
+    }
+
+    /// Deletes derived data and writes what primary data derives, for every index or, with one, that index, in one
+    /// durable unit
+    pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
+        self.admin_unit(|t| derive::rebuild(t, index))
+    }
+
+    /// Deletes what a removed declaration left, in one durable unit; refuses a name the schema still declares
+    pub fn purge(&self, what: &admin::Purge) -> Result<()> {
+        self.admin_unit(|t| admin::purge(t, what))
+    }
+
+    /// Moves a field's values, on every entity of a type, to another name the type declares
+    pub fn rename_field(&self, entity_type: &str, from: &str, to: &str) -> Result<()> {
+        self.admin_unit(|t| admin::rename_field(t, entity_type, from, to))
+    }
+
+    /// Moves every relation of a kind to another kind the schema declares
+    pub fn rename_relation(&self, from: &str, to: &str) -> Result<()> {
+        self.admin_unit(|t| admin::rename_relation(t, from, to))
+    }
+
+    /// Renames a type, rewriting its entities' ids, the relations and declared `ref` fields naming them, and its
+    /// sequences
+    pub fn rename_type(&self, from: &str, to: &str) -> Result<()> {
+        self.admin_unit(|t| admin::rename_type(t, from, to))
+    }
+
+    fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
+        let store = self.store()?;
+        let schema = self.engine_schema();
+        let now = now_ms();
+        store.write(
+            |txn, db| {
+                let mut state = UnitState::default();
+                f(&mut Txn { txn, db, state: &mut state, schema: &schema, now })
+            },
+            true,
+        )
+    }
+
+    /// Blocks until every index waiting to be built is built or has failed
+    pub fn wait_for_index_builds(&self) {
+        if let Some(builder) = self.builder().as_ref() {
+            builder.wait();
+        }
+    }
+
+    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
+        let store = self.store()?;
+        let schema = self.engine_schema();
+        let failures = self.builder().as_ref().map(|b| b.failures()).unwrap_or_default();
+        store.read(|txn, db| {
+            let s = unit::Snapshot { txn, db, schema: &schema };
+            let mut out = Vec::new();
+            for entity_type in schema.types.keys() {
+                for index in entities::value_indexes(&schema, entity_type) {
+                    let failure = failures.iter().find(|f| f.entity_type == *entity_type && f.index == index.name);
+                    out.push(IndexStatus {
+                        entity_type: entity_type.clone(),
+                        index: index.name.clone(),
+                        built: derive::is_built(&s, entity_type, &index.name)?,
+                        failure: failure.map(|f| f.message.clone()),
+                    });
+                }
+            }
+            Ok(out)
+        })
     }
 
     /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/engine.md`, Reads)

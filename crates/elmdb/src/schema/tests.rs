@@ -472,7 +472,7 @@ mod changes {
     }
 
     #[test]
-    fn a_new_collation_rebuilds_the_value_indexes() {
-        assert_eq!(changes(|j| j["collation"] = json!("en")), one("collation", Change::Changed, Effect::Rebuilds));
+    fn a_new_collation_is_applied_since_indexes_hold_values_as_written() {
+        assert_eq!(changes(|j| j["collation"] = json!("en")), one("collation", Change::Changed, Effect::Applied));
     }
 }

@@ -885,5 +885,7 @@ proptest! {
             prop_assert_eq!(plans_of(&db), plans_from(&model), "step {}: {:?}", i, step);
         }
         *crate::store::FAIL_COMMIT_AT.lock().unwrap() = None;
+        let report = db.check().unwrap();
+        prop_assert!(report.is_clean(), "check() after the workload: {:?}", report);
     }
 }

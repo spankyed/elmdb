@@ -55,6 +55,10 @@ pub trait Read {
     fn visit(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     fn schema(&self) -> &Schema;
 
+    fn contains(&self, key: &[u8]) -> Result<bool> {
+        Ok(self.get(key)?.is_some())
+    }
+
     /// Every entry under `prefix`, in key order, collected so the caller may write while it goes through them
     fn scan(&self, prefix: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         let mut out = Vec::new();

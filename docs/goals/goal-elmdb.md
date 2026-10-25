@@ -66,10 +66,10 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
   `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, based on `master` once #273 has merged into it, otherwise on
   `ears-disk-engine`. The main checkout is left alone.
 - **Done:** Phase 0 (`aff9050`; CI's Linux job passed), Phase 1 (readings in `docs/evidence/phase-1.md`; D4 stands;
-  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`), Phase 4 (`docs/evidence/phase-4.md`), Phase 5 (`docs/evidence/phase-5.md`).
-- **Next:** Phase 6: index builds in the background with built markers (`d/xb`; until then every declared index is
-  maintained by every write from the database's start and read as built), `check()`, `rebuild()`, the schema change
-  table applied at open (`database.rs`, `apply_schema`), and the admin renames and purge.
+  the spike deleted), Phase 2 (`9300b19`), Phase 3 (`docs/evidence/phase-3.md`), Phase 4 (`docs/evidence/phase-4.md`), Phase 5 (`docs/evidence/phase-5.md`), Phase 6 (`docs/evidence/phase-6.md`).
+- **Next:** Phase 7: `backup` (compacted, heed's `copy_to_path` with `CompactionOption::Enabled`), `replaceWith`,
+  `reset`, `stats`, `bulkLoad` and raw writes; `elmdb upgrade` from a format 4 dump (`tools/lmdb-js-export`); the CLI.
+  The binding gets the admin operations then too (check, rebuild, purge, renames, index status).
 - **apack:** its main checkout has work of its own in progress on `ears-disk-engine`; Phase 9's worktree branches from
   `master` once #273 merges, or from `ears-disk-engine` as it stands then.
 - **Data for later phases:** the format 4 copy and its dump are in this session's scratchpad
@@ -394,7 +394,7 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | Format, storage, durability per D5–D7 (P3) | done | `docs/evidence/phase-3.md` | none |
 | Writes and model harness (P4) | done | `docs/evidence/phase-4.md` | none |
 | Reads and value indexes (P5) | done | `docs/evidence/phase-5.md` | none |
-| Derived data, `check`, `rebuild`, schema changes (P6) | missing | | all |
+| Derived data, `check`, `rebuild`, schema changes (P6) | done | `docs/evidence/phase-6.md` | none |
 | Admin, upgrade from format 4, CLI (P7) | missing | | all |
 | Crash, failed-sync and fuzz suites (P8) | missing | | all |
 | apack parity, differential harness agreeing (P9) | missing | | all |

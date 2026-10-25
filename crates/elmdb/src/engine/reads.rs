@@ -699,21 +699,21 @@ fn of_types(id: &str, types: Option<&[String]>) -> bool {
     })
 }
 
-/// The value index of the type a lookup of `name` reads: the built-in one for roles and short codes, or a declared
-/// one whose first field it is, a compound one's included, since its leading part is a prefix of its entries
+/// The built value index of the type a lookup of `name` reads: the built-in one for roles and short codes, or a
+/// declared one whose first field it is, a compound one's included, since its leading part is a prefix of its entries.
+/// An index not yet built isn't read: the lookup walks the type's rows
 fn index_on(r: &impl Read, entity_type: &str, name: &str) -> Option<String> {
-    match name {
-        field::ROLE => return Some(ROLE_INDEX.to_owned()),
-        field::SHORT_CODE => return Some(SHORT_CODE_INDEX.to_owned()),
-        _ => {}
-    }
-    let def = r.schema().types.get(entity_type)?;
-    def.indexes.iter().find_map(|(index_name, index)| match index {
-        crate::schema::IndexDef::Value { fields, .. } if fields.first().is_some_and(|f| f == name) => {
-            Some(index_name.clone())
-        }
-        _ => None,
-    })
+    let found = match name {
+        field::ROLE => Some(ROLE_INDEX.to_owned()),
+        field::SHORT_CODE => Some(SHORT_CODE_INDEX.to_owned()),
+        _ => r.schema().types.get(entity_type)?.indexes.iter().find_map(|(index_name, index)| match index {
+            crate::schema::IndexDef::Value { fields, .. } if fields.first().is_some_and(|f| f == name) => {
+                Some(index_name.clone())
+            }
+            _ => None,
+        }),
+    }?;
+    super::derive::is_built(r, entity_type, &found).ok()?.then_some(found)
 }
 
 /// A value's place in an order: its rank, then within it a number, a time, a string, or JSON text

@@ -224,6 +224,7 @@ stored one.
 |---|---|
 | A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built |
 | An index's definition changed | rebuilt in the background under its name |
+| The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic`, `unique` added) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |

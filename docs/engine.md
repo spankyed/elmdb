@@ -120,9 +120,21 @@ fields and relation kinds touched.
 - `replaceWith(dir)`: every entry replaced by another database's, in one durable unit, the database staying open.
 - `reset()`: every entry removed, in one durable unit.
 - `stats()`: entries and bytes per type, field and index, index build progress, pending embeddings.
-- `check()`: walks LMDB's pages and free list, rebuilds every derived structure in a scratch transaction and compares
-  it with what is stored, and reports each difference.
-- `rebuild(index?)`: drops derived data and rebuilds it from the primary data.
+- `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
+  included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
+  row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
+  doesn't declare, a `ref` naming no entity, a relation with a missing end or past its kind's cardinality. heed exposes
+  no walk of LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
+- `rebuild(index?)`: deletes derived data, every index's or one index's, and writes what primary data derives, in one
+  durable unit.
+- Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
+  the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
+  index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
+  unbuilt, and `indexStatus()` names them. Closing stops a build between chunks, and the next open finishes it.
+- `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
+  relations, a role. It refuses a name the schema still declares.
+- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
+  Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them.
 - `bulkLoad(rows, relations)`: one unit without per-write checks, for imports and upgrades.
 - Raw writes for tests that need data the checks would refuse.
 

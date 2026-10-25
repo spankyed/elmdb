@@ -56,6 +56,8 @@ pub struct Database {
     /// The schema the engine holds writes to: the database's, or one declaring nothing
     engine_schema: Arc<Schema>,
     report: OpenReport,
+    /// Builds the indexes that wait for it; none in a read-only database
+    builder: Mutex<Option<crate::engine::Builder>>,
 }
 
 /// The schema of a database that has none: nothing declared
@@ -89,13 +91,28 @@ impl Database {
                 return Err(error);
             }
         };
+        let engine_schema = Arc::new(schema.clone().unwrap_or_else(empty_schema));
+        let unbuilt = match crate::engine::settle_indexes(&store, &engine_schema) {
+            Ok(unbuilt) => unbuilt,
+            Err(error) => {
+                let _ = store.close();
+                return Err(error);
+            }
+        };
+        let store = Arc::new(store);
+        let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
+            let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&engine_schema));
+            builder.queue(unbuilt);
+            builder
+        });
         Ok(Self {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
-            store: Mutex::new(Some(Arc::new(store))),
-            engine_schema: Arc::new(schema.clone().unwrap_or_else(empty_schema)),
+            store: Mutex::new(Some(store)),
+            engine_schema,
             schema,
             report,
+            builder: Mutex::new(builder),
         })
     }
 
@@ -120,6 +137,10 @@ impl Database {
     /// What opening did
     pub fn open_report(&self) -> &OpenReport {
         &self.report
+    }
+
+    pub(crate) fn builder(&self) -> std::sync::MutexGuard<'_, Option<crate::engine::Builder>> {
+        self.builder.lock().expect("the builder slot's lock is never poisoned")
     }
 
     pub(crate) fn engine_schema(&self) -> Arc<Schema> {
@@ -152,6 +173,10 @@ impl Database {
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing
     pub fn close(&self) -> Result<()> {
+        // A build in progress stops between chunks, for the next open to finish
+        if let Some(mut builder) = self.builder().take() {
+            builder.stop();
+        }
         let Some(mut store) = self.store.lock().expect("the store slot's lock is never poisoned").take() else {
             return Ok(());
         };
@@ -202,6 +227,7 @@ fn apply_schema(store: &Store, given: Option<Schema>) -> Result<(Option<Schema>,
     let hash = given.hash();
     store.write(
         |txn, db| {
+            crate::engine::drop_index_data(db, txn, &changes)?;
             put_meta(txn, db, meta::SCHEMA, canonical.as_bytes())?;
             put_meta(txn, db, meta::SCHEMA_HASH, hash.as_bytes())
         },

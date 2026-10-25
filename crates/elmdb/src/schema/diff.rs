@@ -51,8 +51,8 @@ pub enum Effect {
 pub fn diff(stored: &Schema, given: &Schema) -> Vec<SchemaChange> {
     let mut out = Changes(Vec::new());
     if stored.collation != given.collation {
-        // Every string a value index holds sorts by the collation
-        out.push("collation", Change::Changed, Effect::Rebuilds);
+        // A value index holds its values as written; the collation orders `orderBy` as a query runs
+        out.push("collation", Change::Changed, Effect::Applied);
     }
     keyed(&stored.roles, &given.roles, "roles", &mut out, |_, _, _, _| {});
     keyed(&stored.relations, &given.relations, "relations", &mut out, |at, old, new, out| {

@@ -211,6 +211,19 @@ pub fn link(
     Ok((relation, true))
 }
 
+/// Stores a relation under its own id, as it was, and files its edges: a relation an admin operation moves
+pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<()> {
+    put(t, relation, stored)?;
+    file(t, relation, stored)?;
+    t.event(Event::Linked {
+        relation: relation.to_owned(),
+        kind: stored.kind.clone(),
+        source: stored.source.clone(),
+        target: stored.target.clone(),
+    });
+    Ok(())
+}
+
 /// Removes the relation; an id no relation has is ignored
 pub fn remove(t: &mut Txn<'_, '_>, relation: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };

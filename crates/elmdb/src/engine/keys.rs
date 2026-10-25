@@ -92,6 +92,13 @@ pub fn index_range(entity_type: &str, index: &str, parts: &[crate::format::key::
     })
 }
 
+/// That an index of a type is built
+pub fn index_built(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::IndexBuilt, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
 /// An edge out of `entity` (`outward`) or into it, of a kind, at the relation's place
 pub fn edge(outward: bool, entity: &str, kind: &str, seq: u64) -> Vec<u8> {
     with(if outward { Prefix::Out } else { Prefix::In }, |w| {
