@@ -187,6 +187,25 @@ it('compacts an environment in place, without the pages its deletes freed, and k
   }
 });
 
+it('refuses to compact an environment that is open, and leaves its file as it was', async () => {
+  const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-compact-')), 'ears-db');
+  dirs.push(path.dirname(dir));
+  const store = openLmdbStore({ path: dir });
+  try {
+    const engine = createEarsEngine({ kv: store.kv, isEntityType: () => true, isRelationKind: () => true, isRole: () => true });
+    engine.create('Note', { id: 'Note-0' as EARS.EntityId, text: 'kept' });
+    engine.query('Note').ids();
+    await store.durable();
+    const contents = fs.readFileSync(path.join(dir, 'data.mdb'));
+
+    await expect(compactEnvironment(dir)).rejects.toThrow(`(reader pids: ${process.pid}`);
+    expect(fs.readFileSync(path.join(dir, 'data.mdb')).equals(contents)).toBe(true);
+    expect(fs.readdirSync(path.dirname(dir)), 'nothing is left beside it').toEqual(['ears-db']);
+  } finally {
+    store.close();
+  }
+});
+
 it('refuses a record store, whose format is its own, and leaves it as it was', () => {
   const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'ears-records-')), 'records');
   dirs.push(path.dirname(dir));

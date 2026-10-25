@@ -245,32 +245,59 @@ export function convertToCurrentFormat(basePath: string): FormatSteps {
   return steps;
 }
 
-/** What compacting an environment did: its file's size before and after, in bytes */
+/** What compacting an environment did */
 export interface Compaction {
+  /** The size of its `data.mdb` before, in bytes */
   before: number;
+  /** The size of its `data.mdb` after, in bytes: the pages in use, and none its deletes freed */
   after: number;
+}
+
+/** Makes a file's contents, or a directory's entries, durable; Windows can't open a directory to sync it */
+function syncPath(target: string, directory: boolean): void {
+  if (directory && process.platform === 'win32') return;
+  const fd = fs.openSync(target, 'r');
+  try {
+    fs.fsyncSync(fd);
+  } catch (error) {
+    // File systems that can't sync a directory
+    const code = (error as NodeJS.ErrnoException).code;
+    if (!directory || (code !== 'EINVAL' && code !== 'ENOTSUP')) throw error;
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /**
  * Rewrites the environment at `basePath` without the pages its deletes freed, in place: LMDB never shrinks a file,
  * and a conversion writes the new format beside the old tables before it empties them, so a converted file holds
- * both. A compacting copy is written beside it and its `data.mdb` renamed over the original's, so the file is the
- * old one or the new one whatever happens part way. Run on a closed environment, as a conversion is.
+ * both. A compacting copy is written beside it, synced, and its `data.mdb` renamed over the original's, so the file
+ * is the old one or the new one whatever happens part way, a power cut included.
+ *
+ * Refuses an environment anything has open, this process included: a process holding it would go on writing the
+ * file the rename replaced, and lose those writes. What holds it is read off LMDB's reader table, where every
+ * process that has read the environment keeps a slot until it closes it, after clearing the slots of processes
+ * that have exited.
  */
 export async function compactEnvironment(basePath: string): Promise<Compaction> {
   const file = path.join(basePath, 'data.mdb');
   if (!fs.existsSync(file)) throw new Error(`No LMDB database at ${basePath}`);
   const before = fs.statSync(file).size;
+  const root = open({ path: basePath, maxDbs: 8, readOnly: true });
   const beside = fs.mkdtempSync(`${basePath}.compacting-`);
   try {
-    const root = open({ path: basePath, maxDbs: 8, readOnly: true });
-    try {
-      await root.backup(beside, true);
-    } finally {
-      root.close();
+    root.readerCheck();
+    // The table's header line, and a line per slot; none is this handle's, which has read nothing yet
+    const holders = root.readerList().split('\n').slice(1).filter((line) => line.trim() !== '');
+    if (holders.length > 0) {
+      throw new Error(`The LMDB database at ${basePath} is open (reader pids: ${holders.map((line) => line.trim().split(/\s+/)[0]).join(', ')}); close it before compacting`);
     }
+    await root.backup(beside, true);
+    syncPath(path.join(beside, 'data.mdb'), false);
     fs.renameSync(path.join(beside, 'data.mdb'), file);
+    syncPath(basePath, true);
   } finally {
+    root.close();
     fs.rmSync(beside, { recursive: true, force: true });
   }
   return { before, after: fs.statSync(file).size };

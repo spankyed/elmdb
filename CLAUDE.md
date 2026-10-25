@@ -143,7 +143,8 @@ Held by the types and the engine specs, which say more than a rule over names co
   ids, numbering rows as sequences) — each recording its own format, and only `scripts/ears-convert.ts` calls it, on
   a copy. The script then compacts the file (`compactEnvironment`): LMDB never shrinks one, and a conversion writes
   the new format beside the old tables before emptying them, so the file holds both until a compacting copy takes
-  its place (the production copy of 2026-10-17: 369 to 258 MB).
+  its place (what it saves on the production copy: `docs/plans/ears-storage-layout.md`, Step 5). It refuses an
+  environment any process has open, read off LMDB's reader table.
 - The api's composition (`openAppStore()`, `packages/api/src/runtime/index.ts`) is the one production caller: it
   opens the store through `openDatabaseStore` (`@apackdev/host/database`), creates the engine on `store.kv` and binds
   the app. Host code (`@apackdev/host/services`, `/backup`) takes the store as an argument.

@@ -12,9 +12,7 @@ export function compactEnvironment(basePath: string): Promise<Compaction>;
 
 // @public
 export interface Compaction {
-    // (undocumented)
     after: number;
-    // (undocumented)
     before: number;
 }
 
