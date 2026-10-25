@@ -11,7 +11,7 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     // A worker exits when its vitest does, rather than running on orphaned
-    setupFiles: ['../../scripts/lib/vitest-exit-with-parent.ts'],
+    setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts'],
     // Test files run in parallel: each worker's tests create their own EARS engines
     fileParallelism: true,
     benchmark: { include: ['bench/**/*.bench.ts'] },

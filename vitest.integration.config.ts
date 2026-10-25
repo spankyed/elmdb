@@ -9,7 +9,7 @@ export default defineConfig({
   ssr: { resolve: { conditions } },
   test: {
     // A worker exits when its vitest does, rather than running on orphaned
-    setupFiles: ['../../scripts/lib/vitest-exit-with-parent.ts'],
+    setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts'],
     // Large (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts): the harness's halves that open real LMDB
     // environments and kill child processes, and the engine's contract once more with every engine on an LMDB store
     // (`tests/engine/engine-under-test.ts`): what holds on memory, where the unit half runs it, holds on the app's
