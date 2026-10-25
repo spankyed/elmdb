@@ -24,21 +24,6 @@ export interface BaseEntity {
 }
 
 // @public
-export interface ByteReader {
-    get(key: Uint8Array): Uint8Array | undefined;
-    scan(low: Uint8Array, high: Uint8Array | undefined, reverse: boolean, values: boolean, visit: (key: Uint8Array, value: Uint8Array | undefined) => boolean): void;
-}
-
-// @public
-export interface ByteWriter extends ByteReader {
-    clear(): void;
-    // (undocumented)
-    del(key: Uint8Array): void;
-    // (undocumented)
-    put(key: Uint8Array, value: Uint8Array): void;
-}
-
-// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -55,18 +40,6 @@ E
 } & {
     [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
-
-// @public
-export function _createKvEngine(input: KvEngineDeps): EarsEngine_2;
-
-// @public
-export function createMemoryKV(options?: OrderedKVOptions): OrderedKV;
-
-// @public
-export function createMemoryKVBackend(): KvBackend;
-
-// @public
-export function createOrderedKV(backend: KvBackend, input?: OrderedKVOptions): OrderedKV;
 
 // @public
 export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
@@ -335,35 +308,6 @@ E
 export function getTimestamp(): number;
 
 // @public
-export type Key = readonly KeyPart[];
-
-// @public
-export type KeyPart = string | number | boolean | null;
-
-// @public
-export interface KvBackend {
-    durable(): Promise<void>;
-    // (undocumented)
-    read<T>(fn: (reader: ByteReader) => T): T;
-    // (undocumented)
-    write<T>(fn: (writer: ByteWriter) => T, options?: UnitOptions): T;
-}
-
-// @public
-export interface KvReader {
-    get(key: Key): unknown;
-    range(options: RangeOptions, visit: Visit): void;
-}
-
-// @public
-export interface KvWriter extends KvReader {
-    clear(): void;
-    del(key: Key): void;
-    // (undocumented)
-    put(key: Key, value: unknown): void;
-}
-
-// @public
 export interface LinkOptions {
     info?: unknown;
 }
@@ -377,19 +321,6 @@ E
 ] extends [keyof S] ? Extract<{
     [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
 }[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
-
-// @public
-export interface OrderedKV {
-    durable(): Promise<void>;
-    read<T>(fn: (reader: KvReader) => T): T;
-    write<T>(fn: (writer: KvWriter) => T, options?: UnitOptions): T;
-    readonly writing: boolean;
-}
-
-// @public
-export interface OrderedKVOptions {
-    freeze?: boolean;
-}
 
 // @public
 export interface Query extends QueryEntries {
@@ -461,16 +392,6 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
     // (undocumented)
     withRole(r: D['roles']): QueryBuilder<E, D>;
-}
-
-// @public
-export interface RangeOptions {
-    end?: Key;
-    limit?: number;
-    prefix?: Key;
-    reverse?: boolean;
-    start?: Key;
-    values?: boolean;
 }
 
 // @public
@@ -666,9 +587,6 @@ export interface Upsert {
         id: EARS.EntityId;
     }): WriteBuilder<E>;
 }
-
-// @public
-export type Visit = (key: Key, value: unknown) => boolean | void;
 
 // @public
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);

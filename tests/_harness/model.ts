@@ -1,11 +1,11 @@
-// The correctness harness's reference model (tests/engine/model-based.spec.ts, tests/lmdb/crash.integration.spec.ts):
-// what the engine's data should be after a sequence of writes, kept as plainly as a model can be, so the engine and its
-// files are each compared against something with no cleverness in it. It answers the derived reads too — a type's
+// The correctness harness's reference model (tests/engine/model-based.spec.ts): what the engine's data should be after
+// a sequence of writes, kept as plainly as a model can be, so the engine is compared against something with no
+// cleverness in it. It answers the derived reads too — a type's
 // entities, its count and its trash, an index lookup, a role, an edge's far ends — since those are what the engine
 // keeps in keys of their own, which can go stale while every row still reads right
 import type { Ears, EarsAdmin } from '../../src/index.ts';
 
-/** What the harness reads and writes an engine through: both the elmdb engine and the JavaScript one have it */
+/** What the harness reads and writes an engine through */
 export type HarnessEngine = Ears & { admin: Pick<EarsAdmin, 'getAllEntities'> };
 
 export type Value = string | number | number[];
@@ -28,8 +28,7 @@ export type Op =
    * unit inside another is caught there, so its refusal rolls back its own writes and the outer one goes on
    */
   | { op: 'unit'; ops: Op[]; throws: boolean; durable: boolean }
-  /** The store refuses the next unit it is asked to commit, as a full disk would */
-  | { op: 'refuseNext' };
+
 
 /** One entity as the model holds it */
 interface Entity {
@@ -73,13 +72,6 @@ export class Model {
   entities = new Map<string, Entity>();
   /** In the order they were linked, which is the order an edge's far ends are read in */
   edges = new Set<string>();
-  /** Set by `refuseNext`: the next write that reaches the store is refused */
-  refusing = false;
-  /**
-   * Whether the writes applied since it was last cleared reached the store: a write that succeeded, inside a unit
-   * that rolled back included, since a unit writes through and undoes what it wrote
-   */
-  private touched = false;
 
   clone(): Model {
     const next = new Model();
@@ -87,7 +79,6 @@ export class Model {
       next.entities.set(id, { type: e.type, fields: new Map([...e.fields].map(([k, v]) => [k, copy(v)])), trashed: e.trashed, roles: [...e.roles] });
     }
     next.edges = new Set(this.edges);
-    next.refusing = this.refusing;
     return next;
   }
 
@@ -99,17 +90,9 @@ export class Model {
 
   /** Applies one op outside any unit; returns whether the engine must refuse it, leaving the model as it was */
   apply(op: Op): Refusal {
-    if (op.op === 'refuseNext') {
-      this.refusing = true;
-      return undefined;
-    }
     const draft = this.clone();
     const refusal = op.op === 'unit' ? draft.unit(op, true) : draft.write(op, false);
-    // A write that reaches no store (an edge linked again, a role granted twice) cannot be refused by one
-    const reached = !refusal && draft.touched;
-    const refusedByStore = reached && this.refusing;
-    if (reached) this.refusing = false;
-    if (refusal || refusedByStore) return refusal ?? 'the store refused it';
+    if (refusal) return refusal;
     this.adopt(draft);
     return undefined;
   }
@@ -120,11 +103,9 @@ export class Model {
    */
   private unit(op: Extract<Op, { op: 'unit' }>, outermost: boolean): Refusal {
     for (const inner of op.ops) {
-      if (inner.op === 'refuseNext') continue;
       if (inner.op === 'unit') {
         const nested = this.clone();
         const refused = nested.unit(inner, false);
-        if (nested.touched) this.touched = true;
         if (!refused) this.adopt(nested);
         continue;
       }
@@ -142,11 +123,10 @@ export class Model {
   }
 
   private write(op: Op, inUnit: boolean): Refusal {
-    if (op.op === 'unit' || op.op === 'refuseNext') return undefined;
+    if (op.op === 'unit') return undefined;
     if (op.op === 'create') {
       if (this.entities.has(op.id)) return `${op.id} is in use`;
       this.entities.set(op.id, { type: typeOf(op.id), fields: new Map(Object.entries(op.fields).map(([k, v]) => [k, copy(v)])), trashed: false, roles: [] });
-      this.touched = true;
       return undefined;
     }
     const entity = this.entities.get(op.id);
@@ -160,7 +140,6 @@ export class Model {
           if (current !== undefined && !Array.isArray(current)) return `${op.key} is not a list`;
           entity.fields.set(op.key, [...(current ?? []), op.value]);
         }
-        this.touched = true;
         return undefined;
       }
       case 'link': {
@@ -168,35 +147,31 @@ export class Model {
         // Outside a unit the target must exist now; inside one, when the unit commits
         if (!inUnit && !this.entities.has(op.target)) return `no entity has ${op.target}`;
         const added = edge(op.id, op.kind, op.target);
-        if (!this.edges.has(added)) this.touched = true;
         this.edges.add(added);
         return undefined;
       }
       case 'unlink': {
-        if (this.edges.delete(edge(op.id, op.kind, op.target))) this.touched = true;
+        this.edges.delete(edge(op.id, op.kind, op.target));
         return undefined;
       }
       case 'destroy': {
         this.entities.delete(op.id);
-        this.touched = true;
         for (const e of this.edges) {
           const [source, , target] = e.split('|');
           if (source === op.id || target === op.id) this.edges.delete(e);
         }
         return undefined;
       }
-      // Each writes nothing when it would change nothing, so the store is not reached
       case 'trash': case 'restore': {
-        const trashed = op.op === 'trash';
-        if (entity.trashed !== trashed) { entity.trashed = trashed; this.touched = true; }
+        entity.trashed = op.op === 'trash';
         return undefined;
       }
       case 'grant': {
-        if (!entity.roles.includes(op.role)) { entity.roles.push(op.role); this.touched = true; }
+        if (!entity.roles.includes(op.role)) entity.roles.push(op.role);
         return undefined;
       }
       case 'revoke': {
-        if (entity.roles.includes(op.role)) { entity.roles = entity.roles.filter((r) => r !== op.role); this.touched = true; }
+        entity.roles = entity.roles.filter((r) => r !== op.role);
         return undefined;
       }
     }
@@ -277,7 +252,7 @@ export function derivedOf(engine: HarnessEngine, model: Model): Derived {
   return out;
 }
 
-/** Applies one op to an engine; whether it was refused (it threw). A store's refusal is the backend's to arm */
+/** Applies one op to an engine; whether it was refused (it threw) */
 export function applyTo(engine: HarnessEngine, op: Op): boolean {
   const write = (inner: Op, nested: boolean): void => {
     switch (inner.op) {
@@ -303,7 +278,6 @@ export function applyTo(engine: HarnessEngine, op: Op): boolean {
         } else run();
         return;
       }
-      case 'refuseNext': return;
     }
   };
   try {

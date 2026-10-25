@@ -15,15 +15,6 @@ export type {
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, getTimestamp } from './ids.ts';
-// The ordered key-value seam the engine is written on (`createEarsEngine({ kv })`): in memory for tests and tooling,
-// and on disk through `@apackdev/ears/lmdb`
-/** @internal The JavaScript engine over an ordered key-value store: the format conversions' (`scripts/`), until they retire */
-export { createKvEngine as _createKvEngine } from './kv/engine.ts';
-export {
-  createMemoryKV, createMemoryKVBackend, createOrderedKV,
-  type OrderedKV, type OrderedKVOptions, type KvReader, type KvWriter, type Key, type KeyPart, type RangeOptions, type Visit,
-  type KvBackend, type ByteReader, type ByteWriter,
-} from './kv.ts';
 export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {

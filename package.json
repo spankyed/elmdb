@@ -20,7 +20,6 @@
     "build:package": "tsx ../../scripts/build-package.ts .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts",
     "bench": "npm run build:package && vitest bench --run",
     "bench:heap": "npm run build:package && node --expose-gc bench/heap.ts",
     "api:build": "node -e \"require('fs').rmSync('.temp/api-types', { recursive: true, force: true })\" && tsc -p tsconfig.api-extractor.json",
@@ -40,18 +39,9 @@
       "default": "./dist/lmdb/index.js"
     }
   },
-  "peerDependencies": {
-    "lmdb": "^3.5.9"
-  },
-  "peerDependenciesMeta": {
-    "lmdb": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@microsoft/api-extractor": "^7.59.1",
     "fast-check": "^3.23.2",
-    "lmdb": "^3.5.9",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   },

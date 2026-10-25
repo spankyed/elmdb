@@ -41,11 +41,10 @@ const unitOf = (ops: fc.Arbitrary<Op>) =>
 /** A unit's writes, one of them sometimes a unit of its own: a savepoint, which rolls back alone */
 const unitWrite: fc.Arbitrary<Op> = fc.oneof({ weight: 4, arbitrary: write }, { weight: 1, arbitrary: unitOf(write) });
 
-/** Any op: a write, a unit of writes that returns or throws, or the store refusing the next commit */
+/** Any op: a write, or a unit of writes that returns or throws */
 export const op: fc.Arbitrary<Op> = fc.oneof(
   { weight: 8, arbitrary: write },
   { weight: 2, arbitrary: unitOf(unitWrite) },
-  { weight: 1, arbitrary: fc.constant({ op: 'refuseNext' } as Op) },
 );
 
 /**
@@ -72,10 +71,6 @@ const ops = (minLength: number, maxLength: number, each: fc.Arbitrary<Op>) =>
   fc.array(fc.oneof({ weight: 9, arbitrary: each.map((one) => [one]) }, { weight: 1, arbitrary: relink }), { minLength, maxLength })
     .map((chunks) => chunks.flat());
 
-export const workload = (maxLength = 60) =>
-  fc.tuple(prelude, ops(10, maxLength, op)).map(([first, rest]) => [...first, ...rest]);
-
-/** A workload for a process that will be killed: no store refusals, which only a refusing backend can inject */
-export const crashWorkload = (length: number) =>
-  fc.tuple(prelude, ops(length, length, op.filter((each) => each.op !== 'refuseNext')))
-    .map(([first, rest]) => [...first, ...rest].slice(0, length));
+/** A workload of `length` ops, the prelude's first */
+export const workload = (length: number) =>
+  fc.tuple(prelude, ops(length, length, op)).map(([first, rest]) => [...first, ...rest].slice(0, length));

@@ -1,4 +1,4 @@
-// The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/engine.md`, Reads), which a
+// The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
 import type { QueryBuilder, RelationEdge } from './runtime.ts';

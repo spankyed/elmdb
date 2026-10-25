@@ -1,6 +1,6 @@
-// The engine's writes: each builder call one of elmdb's batch operations (`elmdb/docs/engine.md`, Writes), sent as a
-// batch of its own, in the unit `transact` holds open or as a unit of its own. elmdb holds each to its rules and
-// refuses it whole; the builder checks only what can't cross, a value of `undefined`.
+// The engine's writes: each builder call one of elmdb's batch operations (`elmdb/docs/engine.md`, Writes: batches and
+// units), sent as a batch of its own, in the unit `transact` holds open or as a unit of its own. elmdb holds each to
+// its rules and refuses it whole; the builder checks only what can't cross, a value of `undefined`.
 import type { EARS } from './entities.ts';
 import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
