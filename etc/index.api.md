@@ -230,7 +230,11 @@ export type EarsErrorCode =
 /** `link` would close a cycle through a relation kind its declaration makes acyclic */
 | 'CYCLE'
 /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
-| 'VALUE_INVALID';
+| 'VALUE_INVALID'
+/** `search` was on a type with no text index (no `search` in its manifest entry) */
+| 'UNKNOWN_INDEX'
+/** `hits()` was asked of a query with no `search`, or with a `where` given a function after it */
+| 'NO_SEARCH';
 
 // @public
 export interface EARSRuntimeDeps {
@@ -332,6 +336,7 @@ export interface Query extends QueryEntries {
 
 // @public
 export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+    after(id: EARS.EntityId): QueryBuilder<E, D>;
     ancestors<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
     ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
@@ -349,6 +354,18 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, D>;
     groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
     has<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
+    hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(options: {
+        fields: A;
+        highlights?: boolean;
+    }): Array<SearchHit<E> & {
+        row: {
+            id: EARS.EntityId<E>;
+        } & Pick<ShapeOf<D['shapes'], E>, A[number]>;
+    }>;
+    // (undocumented)
+    hits(options?: {
+        highlights?: boolean;
+    }): SearchHit<E>[];
     // (undocumented)
     ids(): EARS.EntityId<E>[];
     in<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
@@ -386,6 +403,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
     reverse(): QueryBuilder<E, D>;
+    search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
     unlinkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
     unlinkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
     where<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K, v: WhereValue<D['shapes'], E, K>): QueryBuilder<E, D>;
@@ -458,6 +476,7 @@ export interface RowIdentity {
 export interface RowRules {
     indexes?: readonly string[];
     required: readonly string[];
+    search?: SearchDeclaration;
     shortCode?: string;
 }
 
@@ -480,6 +499,39 @@ export interface SchemaStats {
     entities: Record<string, number>;
     relations: Record<string, RelationStats>;
     roles: Record<string, number>;
+}
+
+// @public
+export interface SearchDeclaration {
+    readonly fields: Readonly<Record<string, number>>;
+    readonly stem?: string;
+}
+
+// @public
+export type SearchHighlights = Record<string, ReadonlyArray<readonly [element: number, start: number, end: number]>>;
+
+// @public
+export interface SearchHit<E extends string = string> {
+    highlights?: SearchHighlights;
+    // (undocumented)
+    id: EARS.EntityId<E>;
+    score: number;
+    terms: string[];
+}
+
+// @public
+export interface SearchOptions<F extends string = string> {
+    any?: boolean;
+    // (undocumented)
+    fields?: readonly F[];
+    fuzzy?: boolean;
+    prefix?: boolean;
+    // (undocumented)
+    recency?: {
+        field: F;
+        halfLife: number;
+        now?: number;
+    };
 }
 
 // @public

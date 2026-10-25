@@ -63,6 +63,45 @@ export interface RowRules {
    * every type; a `where` on any other field filters the type's rows, finding the same matches
    */
   indexes?: readonly string[];
+  /** The fields its text index reads, each at its weight, and the language its words are stemmed in: what `search` matches */
+  search?: SearchDeclaration;
+}
+
+/** A type's text index, as its manifest entry declares it (`search`) */
+export interface SearchDeclaration {
+  /** Each field the index reads, with its weight: a field of weight 3 counts each of its words three times */
+  readonly fields: Readonly<Record<string, number>>;
+  /** The language whose stems a word is matched by (`en`, `de`, …), when the index stems */
+  readonly stem?: string;
+}
+
+/**
+ * How `search` matches and ranks. `fields` names the index's fields a match may be in, and `recency` a field holding a
+ * time, by which a score is halved for every `halfLife` milliseconds before `now` (the read's clock unless given)
+ */
+export interface SearchOptions<F extends string = string> {
+  /** The query's last word matches the words it starts, as a search box does while it is typed in */
+  prefix?: boolean;
+  /** A word of five letters or more also matches one an edit away, nine or more two; on unless false */
+  fuzzy?: boolean;
+  /** Any of the query's clauses matching is enough, rather than every one */
+  any?: boolean;
+  fields?: readonly F[];
+  recency?: { field: F; halfLife: number; now?: number };
+}
+
+/** Where a search's terms are in one field: each `[element, start, end]`, the element a list field's, in UTF-16 units */
+export type SearchHighlights = Record<string, ReadonlyArray<readonly [element: number, start: number, end: number]>>;
+
+/** What a search found in one entity */
+export interface SearchHit<E extends string = string> {
+  id: EARS.EntityId<E>;
+  /** Its relevance: BM25 over the index's fields at their weights, decayed by recency when asked */
+  score: number;
+  /** The index's words it matched: the query's, and those its prefixes and edits reached */
+  terms: string[];
+  /** With `highlights`, where the matched words are in each field */
+  highlights?: SearchHighlights;
 }
 
 /**
@@ -194,6 +233,22 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
   distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
   /** The ids reached, by their value of `field`, each group in query order; `query.ids(ids)` queries a group on */
   groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
+  /**
+   * The entities the type's text index (its manifest entry's `search`) matches to `query`, most relevant first: words,
+   * every one of which matches; `"a phrase"`; `-word`, which no match holds; `field:word`; `a OR b`. After other
+   * steps it searches among the entities they reached
+   */
+  search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
+  /** The entities after `id` in the order so far: the page after one that ended at `id` */
+  after(id: EARS.EntityId): QueryBuilder<E, D>;
+  /**
+   * What the query's `search` found in each entity it reaches: its score and matched words, with `highlights` where
+   * they are, and with `fields` its row's fields picked (`pick`'s)
+   */
+  hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    options: { fields: A; highlights?: boolean },
+  ): Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>;
+  hits(options?: { highlights?: boolean }): SearchHit<E>[];
   ids(): EARS.EntityId<E>[];
   count(): number;
   /** The first entity's id, or undefined when the query reaches none */

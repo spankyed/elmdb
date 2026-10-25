@@ -129,6 +129,7 @@ const CODES: Record<string, EarsErrorCode> = {
   SELF_LINK: 'SELF_LINK',
   CYCLE: 'CYCLE',
   VALUE_INVALID: 'VALUE_INVALID',
+  UNKNOWN_INDEX: 'UNKNOWN_INDEX',
 };
 
 /**

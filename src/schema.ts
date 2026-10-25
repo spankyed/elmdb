@@ -50,6 +50,16 @@ export function toElmdbSchema(schema: EngineSchema): object {
     for (const field of rules.required) {
       if (!isEngineField(field)) setField(fields, field, { type: 'any', nullable: true });
     }
+    // The text index (`search`), its fields declared as any field a rule hasn't: elmdb reads a string or a list of
+    // strings in one, and no text in any other value
+    if (rules.search) {
+      const textFields: Record<string, object> = {};
+      for (const [field, weight] of Object.entries(rules.search.fields)) {
+        if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+        setField(textFields, field, { weight });
+      }
+      setField(indexes, 'search', { kind: 'text', fields: textFields, ...(rules.search.stem !== undefined && { stem: rules.search.stem }) });
+    }
     setField(types, type, {
       ...(rules.shortCode !== undefined && { shortCode: { prefix: rules.shortCode } }),
       fields,

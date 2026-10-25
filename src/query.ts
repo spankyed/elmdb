@@ -257,6 +257,22 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       distinct: (field?: string) => next({ step: 'distinct', ...(field !== undefined && { field }) }),
       groupBy: (field: string) => new Map(run(recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>),
 
+      search: (text: string, options: Record<string, unknown> = {}) => next({ step: 'search', query: text, options }),
+      after: (id: EARS.EntityId) => next({ step: 'after', id }),
+      hits: ({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean } = {}) => {
+        // The search must be in the plan the terminal ends, after every function a `where` was given
+        const lastWhere = (test: (p: Pending) => boolean) => recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
+        const searched = lastWhere((p) => 'step' in p && p.step.step === 'search');
+        const split = lastWhere((p) => !('step' in p));
+        if (searched < 0 || split > searched) {
+          throw new EarsError('NO_SEARCH', searched < 0
+            ? 'hits() answers what a search found: the query has no search(...)'
+            : 'hits() answers what a search found, and a where(...) given a function follows the search: put the search after it');
+        }
+        const answer = run(recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
+        return answer.hits;
+      },
+
       ids,
       count: () => run(recipe, { answer: 'count' }).n as number,
       first: () => (run(recipe, { answer: 'first' }).id as EARS.EntityId | null) ?? undefined,

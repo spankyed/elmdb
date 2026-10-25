@@ -36,7 +36,11 @@ export type EarsErrorCode =
   /** `link` would close a cycle through a relation kind its declaration makes acyclic */
   | 'CYCLE'
   /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
-  | 'VALUE_INVALID';
+  | 'VALUE_INVALID'
+  /** `search` was on a type with no text index (no `search` in its manifest entry) */
+  | 'UNKNOWN_INDEX'
+  /** `hits()` was asked of a query with no `search`, or with a `where` given a function after it */
+  | 'NO_SEARCH';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {
