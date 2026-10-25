@@ -213,18 +213,30 @@ impl Database {
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing
     pub fn close(&self) -> Result<()> {
+        self.close_within(None).map(|_| ())
+    }
+
+    /// `close`, giving up after `wait` when something still holds the store — a unit left open, which a process
+    /// exiting inside a transaction does — and answering whether it closed. A database left open keeps its store
+    pub fn close_within(&self, wait: Option<Duration>) -> Result<bool> {
         // A build in progress stops between chunks, for the next open to finish
         if let Some(mut builder) = self.builder().take() {
             builder.stop();
         }
-        let Some(mut store) = self.store.lock().expect("the store slot's lock is never poisoned").take() else {
-            return Ok(());
+        let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
+        let Some(mut store) = slot.take() else {
+            return Ok(true);
         };
         // An operation that took the store before the close finishes first; none keeps it for long
+        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
-                Ok(store) => return store.close(),
+                Ok(store) => return store.close().map(|()| true),
                 Err(shared) => {
+                    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                        *slot = Some(shared);
+                        return Ok(false);
+                    }
                     store = shared;
                     std::thread::sleep(Duration::from_millis(1));
                 }
