@@ -90,6 +90,17 @@ impl Harness {
         panic!("the worker never ended the sync");
     }
 
+    /// Waits for the worker to finish ending the sync with this id
+    fn ended(&self, id: u64) {
+        for _ in 0..400 {
+            if self.commit.shared.lock().finished_through >= id {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("the worker never ended sync {id}");
+    }
+
     fn advance(&self, by: Duration) {
         *self.elapsed.lock().unwrap() += by;
         self.commit.wake();
@@ -292,4 +303,129 @@ fn a_wait_given_up_on_keeps_no_outcome() {
     assert!(h.started.recv_timeout(Duration::from_millis(50)).is_err());
     assert!(h.commit.shared.lock().waiting.is_empty(), "the dropped wait's attempt is forgotten");
     h.close();
+}
+
+/// The failed-sync harness (`docs/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
+/// what a wait promises rather than against a copy of the implementation. A wait that resolved had a sync covering its
+/// commits finish successfully after it began; a wait that rejected had a sync fail after it began; and once every sync
+/// is let through, every wait has settled and a new one resolves.
+mod failed_syncs {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    #[derive(Debug, Clone)]
+    enum Event {
+        Commit,
+        Wait,
+        Finish(bool),
+        Advance(u64),
+    }
+
+    fn event() -> impl Strategy<Value = Event> {
+        prop_oneof![
+            3 => Just(Event::Commit),
+            2 => Just(Event::Wait),
+            // Successes outnumber failures, so waits resolve as well as reject
+            2 => Just(Event::Finish(true)),
+            1 => Just(Event::Finish(false)),
+            1 => (1u64..300).prop_map(Event::Advance),
+        ]
+    }
+
+    struct Attempt {
+        id: u64,
+        mark: u64,
+        started: u64,
+        finished: Option<(u64, bool)>,
+    }
+
+    struct Waiting {
+        target: u64,
+        created: u64,
+        handle: Durable,
+        settled: Option<(u64, bool)>,
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 48, failure_persistence: None, ..ProptestConfig::default() })]
+
+        #[test]
+        fn a_wait_resolves_only_on_a_covering_sync_and_rejects_only_on_a_failed_one(events in prop::collection::vec(event(), 1..30)) {
+            let h = Harness::new();
+            let mut clock = 0u64;
+            let mut commits = 0u64;
+            let mut attempts: Vec<Attempt> = Vec::new();
+            let mut waits: Vec<Waiting> = Vec::new();
+            // Records each sync the worker starts, with the commits it covers
+            let pump = |h: &Harness, attempts: &mut Vec<Attempt>, clock: u64| {
+                while h.started.recv_timeout(Duration::from_millis(15)).is_ok() {
+                    let running = h.commit.shared.lock().running.expect("a started sync is running");
+                    attempts.push(Attempt { id: running.id, mark: running.mark, started: clock, finished: None });
+                }
+            };
+            let observe = |waits: &mut Vec<Waiting>, clock: u64| {
+                for w in waits.iter_mut().filter(|w| w.settled.is_none()) {
+                    if let Some(outcome) = w.handle.try_result() {
+                        w.settled = Some((clock, outcome.is_ok()));
+                    }
+                }
+            };
+            for event in &events {
+                clock += 1;
+                match event {
+                    Event::Commit => {
+                        h.commit.on_commit();
+                        commits += 1;
+                    }
+                    Event::Wait => waits.push(Waiting { target: commits, created: clock, handle: h.commit.durable(), settled: None }),
+                    Event::Finish(ok) => {
+                        if let Some(a) = attempts.last_mut().filter(|a| a.finished.is_none()) {
+                            h.finish(if *ok { Ok(()) } else { Err(eio()) });
+                            h.ended(a.id);
+                            a.finished = Some((clock, *ok));
+                        }
+                    }
+                    Event::Advance(ms) => h.advance(Duration::from_millis(*ms)),
+                }
+                pump(&h, &mut attempts, clock);
+                observe(&mut waits, clock);
+            }
+            // Let every sync through
+            for _ in 0..64 {
+                clock += 1;
+                if let Some(a) = attempts.last_mut().filter(|a| a.finished.is_none()) {
+                    h.finish(Ok(()));
+                    h.ended(a.id);
+                    a.finished = Some((clock, true));
+                }
+                pump(&h, &mut attempts, clock);
+                observe(&mut waits, clock);
+                if waits.iter().all(|w| w.settled.is_some()) && attempts.iter().all(|a| a.finished.is_some()) {
+                    break;
+                }
+            }
+            for w in &waits {
+                let (at, ok) = w.settled.expect("every wait settles once syncs are let through");
+                if ok {
+                    // Already synced when it began, or a covering sync succeeded while it waited
+                    let covered = attempts.iter().any(|a| a.mark >= w.target && a.finished.is_some_and(|(f, good)| good && f >= w.created && f <= at));
+                    let already = !attempts.iter().any(|a| a.mark < w.target && a.started <= w.created && a.finished.is_none_or(|(f, _)| f > w.created))
+                        && attempts.iter().filter(|a| a.finished.is_some_and(|(f, good)| good && f <= w.created)).any(|a| a.mark >= w.target);
+                    prop_assert!(covered || already || w.target == 0, "a wait for {} resolved with no sync covering it", w.target);
+                } else {
+                    let failed = attempts.iter().any(|a| a.finished.is_some_and(|(f, good)| !good && f >= w.created && f <= at));
+                    prop_assert!(failed, "a wait for {} rejected with no sync failing while it waited", w.target);
+                }
+            }
+            let last = h.commit.durable();
+            for _ in 0..8 {
+                if h.started.recv_timeout(Duration::from_millis(15)).is_ok() {
+                    h.finish(Ok(()));
+                }
+            }
+            prop_assert_eq!(outcome(&last), "resolved");
+            h.close();
+        }
+    }
 }
