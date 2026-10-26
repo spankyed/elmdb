@@ -63,6 +63,37 @@ fn index_entries(
     Ok(out)
 }
 
+/// Refuses what would keep a build of a value index from finishing: an entry whose key LMDB can't store
+/// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`)
+fn buildable(entity_type: &str, index: &ValueIndex, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
+    let mut holders: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+    for (key, id) in entries {
+        let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
+        entities::key_fits(key, &id, entity_type, &index.name)?;
+        if !index.unique {
+            continue;
+        }
+        let mut parts = decode_key(key)?;
+        parts.drain(..3);
+        parts.pop();
+        match holders.get(&crate::format::key::encode(&parts)) {
+            Some(other) if *other != id => return Err(unbuildable(entity_type, &index.name, other, &id)),
+            Some(_) => {}
+            None => {
+                holders.insert(crate::format::key::encode(&parts), id);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn unbuildable(entity_type: &str, name: &str, one: &str, other: &str) -> Error {
+    Error::new(
+        ErrorCode::Unique,
+        format!("The unique index {entity_type}.{name} can't be built: {one} and {other} hold the same values"),
+    )
+}
+
 /// Whether an index of a type is built: its marker is there
 pub fn is_built(r: &impl Read, entity_type: &str, index: &str) -> Result<bool> {
     r.contains(&keys::index_built(entity_type, index))
@@ -366,10 +397,24 @@ fn violations(r: &impl Read) -> Result<Vec<Violation>> {
 }
 
 /// Deletes every compared derived key, and with `index` only that index's entries, then writes what primary data
-/// derives, marking the indexes it built
+/// derives, marking the indexes it built. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or
+/// a build of it couldn't finish (`buildable`); a rebuild of everything, which a rename and a replace run, leaves such
+/// a value index unbuilt instead, holding the entries that fit, as a build that failed does
 pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
     match index {
         Some((entity_type, name)) => {
+            if !t.schema.types.contains_key(entity_type) {
+                return Err(Error::new(
+                    ErrorCode::UnknownType,
+                    format!("rebuild: \"{entity_type}\" isn't a type the schema declares"),
+                ));
+            }
+            if !index_names(t.schema, entity_type).iter().any(|i| i == name) {
+                return Err(Error::new(
+                    ErrorCode::UnknownIndex,
+                    format!("rebuild: {entity_type} has no index \"{name}\""),
+                ));
+            }
             for (key, _) in t.scan(&keys::index_range(entity_type, name, &[]))? {
                 t.del(&key)?;
             }
@@ -379,7 +424,9 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             let of: Vec<&Entity> = all.iter().filter(|e| ids::type_of(&e.id) == entity_type).collect();
             let found = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name);
             if let Some(found) = found {
-                for (key, value) in index_entries(t, entity_type, &found, &of)? {
+                let entries = index_entries(t, entity_type, &found, &of)?;
+                buildable(entity_type, &found, &entries)?;
+                for (key, value) in entries {
                     t.put(&key, &value)?;
                 }
             }
@@ -404,12 +451,32 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     t.del(&key)?;
                 }
             }
-            // Every declared index of every type with entities is built by a full rebuild
-            let types: std::collections::BTreeSet<String> =
-                entities_of(t)?.iter().map(|e| ids::type_of(&e.id).to_owned()).collect();
-            for ty in &types {
+            // Every declared index of every type with entities is built by a full rebuild, but a value index a build
+            // couldn't finish, which keeps the entries that fit unmarked, as writes keep an unbuilt index's
+            let all = entities_of(t)?;
+            let mut by_type: BTreeMap<String, Vec<&Entity>> = BTreeMap::new();
+            for e in &all {
+                by_type.entry(ids::type_of(&e.id).to_owned()).or_default().push(e);
+            }
+            for (ty, of) in &by_type {
+                let value: Vec<ValueIndex> = value_indexes(t.schema, ty);
                 for index in index_names(t.schema, ty) {
-                    t.put(&keys::index_built(ty, &index), &values::encode(&true.into()))?;
+                    let marker = keys::index_built(ty, &index);
+                    let Some(found) = value.iter().find(|i| i.name == index) else {
+                        t.put(&marker, &values::encode(&true.into()))?;
+                        continue;
+                    };
+                    let entries = index_entries(t, ty, found, of)?;
+                    match buildable(ty, found, &entries) {
+                        Ok(()) => t.put(&marker, &values::encode(&true.into()))?,
+                        Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
+                            t.del(&marker)?;
+                            for (key, value) in entries.into_iter().filter(|(k, _)| k.len() <= values::MAX_KEY_BYTES) {
+                                t.put(&key, &value)?;
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             for (key, value) in derive(t)? {
@@ -483,15 +550,12 @@ pub fn build_chunk(
                     holder.as_deref() == Some(id.as_str())
                 })?;
                 if let Some(other) = holder.filter(|h| h != id) {
-                    return Err(Error::new(
-                        ErrorCode::Unique,
-                        format!(
-                            "The unique index {entity_type}.{name} can't be built: {other} and {id} hold the same values"
-                        ),
-                    ));
+                    return Err(unbuildable(entity_type, name, &other, id));
                 }
             }
-            t.put(&keys::index_entry(entity_type, name, &parts, *seq), &values::encode(&id.as_str().into()))?;
+            let key = keys::index_entry(entity_type, name, &parts, *seq);
+            entities::key_fits(&key, id, entity_type, name)?;
+            t.put(&key, &values::encode(&id.as_str().into()))?;
         }
         last = *seq;
     }

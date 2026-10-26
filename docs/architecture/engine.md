@@ -177,7 +177,9 @@ unit is open.
   doesn't declare, a `ref` naming no entity, a relation with a missing end or past its kind's cardinality. heed exposes
   no walk of LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
 - `rebuild(index?)`: deletes derived data, every index's or one index's, and writes what primary data derives, in one
-  durable unit.
+  durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
+  finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
+  everything leaves such an index unbuilt, as a build does.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left

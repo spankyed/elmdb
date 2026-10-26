@@ -218,6 +218,22 @@ pub fn entries_of(fields: &[Option<Value>]) -> Vec<Vec<Part>> {
     vec![tuple]
 }
 
+/// Refuses an index entry whose key is longer than LMDB stores (`VALUE_INVALID`), naming the entity and the index
+pub fn key_fits(key: &[u8], id: &str, entity_type: &str, index: &str) -> Result<()> {
+    if key.len() <= values::MAX_KEY_BYTES {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::ValueInvalid,
+        format!(
+            "{id}'s entry in index {entity_type}.{index} would be a {}-byte key, and a key is at most {} bytes: \
+             shorten the values the index holds",
+            key.len(),
+            values::MAX_KEY_BYTES
+        ),
+    ))
+}
+
 /// What a unique index holds an entity to, given each of the index's fields' values: what `entries_of` files, as values,
 /// and with it what the index can't file (a string past `MAX_INDEXED_STRING`, a map, a timestamp), which only a walk of
 /// the type's rows finds. A single field's value or each element of its list; a compound index's fields together, when
@@ -352,18 +368,7 @@ fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, a
         }
         for parts in now.iter().filter(|p| !was.contains(p)) {
             let key = keys::index_entry(&entity_type, &index.name, parts, seq);
-            if key.len() > values::MAX_KEY_BYTES {
-                return Err(Error::new(
-                    ErrorCode::ValueInvalid,
-                    format!(
-                        "{id}'s entry in index {entity_type}.{} would be a {}-byte key, and a key is at most {} bytes: \
-                         shorten the values the index holds",
-                        index.name,
-                        key.len(),
-                        values::MAX_KEY_BYTES
-                    ),
-                ));
-            }
+            key_fits(&key, id, &entity_type, &index.name)?;
             t.put(&key, &values::encode(&id.into()))?;
         }
     }

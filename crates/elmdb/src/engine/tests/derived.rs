@@ -231,6 +231,68 @@ fn a_unique_index_is_enforced_while_it_is_still_being_built() {
 }
 
 #[test]
+fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "a" } })]).unwrap();
+    assert_eq!(db.rebuild(Some(("Note", "later"))).unwrap_err().code, ErrorCode::UnknownIndex);
+    assert_eq!(db.rebuild(Some(("Nope", "later"))).unwrap_err().code, ErrorCode::UnknownType);
+    // Declared later, the index is built over the rows, not read as built and empty
+    db.set_schema(
+        Schema::from_json(&notes(base_fields(), json!({ "later": { "kind": "value", "fields": ["kind"] } }))).unwrap(),
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(ids_where(&db, "kind", json!("a")).0, json!(["Note-1"]));
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["other"] = json!({ "type": "string", "optional": true });
+    let indexes = json!({
+        "one": { "kind": "value", "fields": ["kind"], "unique": true },
+        "pair": { "kind": "value", "fields": ["title", "other"] }
+    });
+    let db = with_schema(&dir, notes(fields.clone(), json!({}))).unwrap();
+    // Each value within what an index holds, the pair past LMDB's key, and a value two rows hold
+    let long = "x".repeat(256);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "same", "title": long, "other": long } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "kind": "same" } }),
+        ],
+    )
+    .unwrap();
+    db.set_schema(Schema::from_json(&notes(fields, indexes)).unwrap()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let status = db.index_status().unwrap();
+    let pair = status.iter().find(|s| s.index == "pair").unwrap();
+    assert!(!pair.built);
+    assert!(pair.failure.as_deref().is_some_and(|f| f.contains("511 bytes")), "the build says why: {pair:?}");
+
+    let one = db.rebuild(Some(("Note", "one"))).unwrap_err();
+    assert_eq!(one.code, ErrorCode::Unique, "{}", one.message);
+    let pair = db.rebuild(Some(("Note", "pair"))).unwrap_err();
+    assert_eq!(pair.code, ErrorCode::ValueInvalid, "{}", pair.message);
+    // A rebuild of everything, which a rename or a replace runs, goes on and leaves both unbuilt
+    db.rebuild(None).unwrap();
+    let status = db.index_status().unwrap();
+    assert!(status.iter().filter(|s| s.index == "one" || s.index == "pair").all(|s| !s.built), "{status:?}");
+    let report = db.check().unwrap();
+    assert!(report.differences.is_empty(), "{report:?}");
+    assert!(report.violations.iter().any(|v| v.subject == "Note-1, Note-2"), "the duplicates are reported: {report:?}");
+    assert_eq!(
+        ids_where(&db, "kind", json!("same")).0,
+        json!(["Note-1", "Note-2"]),
+        "an unbuilt index's rows are walked"
+    );
+}
+
+#[test]
 fn a_unique_index_over_rows_holding_the_same_values_isnt_built_and_says_why() {
     let dir = tempfile::tempdir().unwrap();
     {
