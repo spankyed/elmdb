@@ -147,6 +147,10 @@ impl Database {
     pub fn set_schema(&self, schema: Schema) -> Result<Vec<SchemaChange>> {
         let mut current = self.engine_schema.write();
         let store = self.store()?;
+        // Refused before the builder stops: a unit holding the write transaction would keep a build from finishing
+        if store.unit_is_open() {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
+        }
         // The builder works to the schema it was started with, so it stops first and starts again on the one held
         // after, whichever that is
         if let Some(mut builder) = self.builder().take() {
@@ -165,7 +169,7 @@ impl Database {
         }
         drop(current);
         let changes = applied.map(|(_, report)| report.schema_changes)?;
-        self.touched_everything()?;
+        self.touched_everything(&store)?;
         Ok(changes)
     }
 
@@ -211,30 +215,47 @@ impl Database {
         Ok(self.store()?.map_size())
     }
 
-    /// Syncs what is owed and releases the environment; closing a closed database does nothing
+    /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a unit
+    /// is open (`UNIT_OPEN`): the unit holds the environment's write transaction, so commit or abort it first
     pub fn close(&self) -> Result<()> {
-        self.close_within(None).map(|_| ())
+        if self.close_within(None)? {
+            return Ok(());
+        }
+        Err(Error::new(
+            ErrorCode::UnitOpen,
+            "A unit is open on this database: commit or abort it, then close the database",
+        ))
     }
 
-    /// `close`, giving up after `wait` when something still holds the store — a unit left open, which a process
-    /// exiting inside a transaction does — and answering whether it closed. A database left open keeps its store
+    /// `close`, answering false rather than closing while a unit is open, and giving up after `wait` when an operation
+    /// still holds the store. A database left open keeps its store, and closes later
     pub fn close_within(&self, wait: Option<Duration>) -> Result<bool> {
-        // A build in progress stops between chunks, for the next open to finish
-        if let Some(mut builder) = self.builder().take() {
-            builder.stop();
-        }
-        let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
-        let Some(mut store) = slot.take() else {
-            return Ok(true);
+        let taken = {
+            // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
+            // released before the wait, which an operation finishing may need it for
+            let _schema = self.engine_schema.write();
+            let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
+            match slot.as_ref() {
+                None => return Ok(true),
+                Some(store) if store.unit_is_open() => return Ok(false),
+                Some(_) => {}
+            }
+            // A build in progress stops between chunks, for the next open to finish
+            if let Some(mut builder) = self.builder().take() {
+                builder.stop();
+            }
+            slot.take()
         };
-        // An operation that took the store before the close finishes first; none keeps it for long
+        let Some(mut store) = taken else { return Ok(true) };
+        // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
+        // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
         let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
                 Ok(store) => return store.close().map(|()| true),
                 Err(shared) => {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                        *slot = Some(shared);
+                        *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         return Ok(false);
                     }
                     store = shared;

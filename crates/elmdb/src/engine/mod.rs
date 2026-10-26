@@ -46,6 +46,14 @@ pub(crate) fn encode_value(value: &rmpv::Value) -> Vec<u8> {
     values::encode(value)
 }
 
+/// A sync that failed after its commit: the data is committed, as the sequence says, and not yet known to be on disk
+fn not_durable(error: Error, sequence: u64) -> Error {
+    Error::new(
+        ErrorCode::NotDurable,
+        format!("The batch committed (sequence {sequence}), but its sync failed: {}", error.message),
+    )
+}
+
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
 fn now_ms() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
@@ -276,7 +284,7 @@ impl Database {
             true,
         )?;
         drop(schema);
-        self.touched_everything()
+        self.touched_everything(&store)
     }
 
     /// Blocks until every index waiting to be built is built or has failed
@@ -316,10 +324,8 @@ impl Database {
         let Some(token) = reads.track else {
             return store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads));
         };
-        let (answer, read) = watch::run_tracked(&store, &schema, reads)?;
         // Filed whether or not the reads failed: what they read before failing decides when they'd answer otherwise
-        self.tracks.lock().file(token, read);
-        answer
+        watch::read_tracked(&self.tracks, &store, &schema, reads, token)
     }
 
     /// Drops what the reads tracked under `token` touched: no commit names it after
@@ -352,10 +358,10 @@ impl Database {
 
     /// After a commit whose writes aren't logged key by key (an admin change, a reset, a load): every tracked read and
     /// watch is touched
-    pub(crate) fn touched_everything(&self) -> Result<()> {
-        let store = self.store()?;
+    pub(crate) fn touched_everything(&self, store: &Store) -> Result<()> {
         let ids = self.tracks.lock().all_watches();
-        watch::deliver(&self.tracks, &store, &self.engine_schema(), &ids)
+        watch::deliver(&self.tracks, store, &self.engine_schema(), &ids);
+        Ok(())
     }
 
     /// `read` with the reads as msgpack bytes, as the binding takes them
@@ -369,7 +375,7 @@ impl Database {
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
-        let ((results, mut changes, written), sequence) = store.write_sequenced(
+        let ((results, mut changes, written), sequence, synced) = store.write_committed(
             |txn, db| {
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
@@ -384,7 +390,8 @@ impl Database {
         let touched = self.tracks.lock().touched(written.as_ref());
         changes.sequence = sequence;
         changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &store, &self.engine_schema(), &touched.watches)?;
+        watch::deliver(&self.tracks, &store, &self.engine_schema(), &touched.watches);
+        synced.map_err(|e| not_durable(e, sequence))?;
         Ok((results, changes))
     }
 
@@ -414,7 +421,7 @@ impl Database {
             state: UnitState::new(logging),
             tracks: Arc::clone(&self.tracks),
             poisoned: None,
-            _gate: gate,
+            gate: Some(gate),
             schema,
             store,
             _thread: PhantomData,
@@ -430,7 +437,8 @@ pub struct Unit {
     state: UnitState,
     /// Why the unit can't commit: LMDB can't go on with a transaction a write filled the map in
     poisoned: Option<Error>,
-    _gate: ArcRwLockReadGuard<RawRwLock, ()>,
+    /// The store's gate, held while the transaction is: a map growth waits for the unit to end
+    gate: Option<ArcRwLockReadGuard<RawRwLock, ()>>,
     schema: Arc<Schema>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
@@ -460,8 +468,9 @@ impl Unit {
                 Ok(results)
             }
             Err(error) => {
-                t.rollback_to(depth)?;
-                if error.code == ErrorCode::MapFull {
+                // LMDB can't go on with a transaction a write filled the map in, and the rollback itself fails then
+                let rolled_back = t.rollback_to(depth);
+                if error.code == ErrorCode::MapFull || rolled_back.is_err() {
                     self.poisoned = Some(error.clone());
                 }
                 Err(error)
@@ -530,18 +539,21 @@ impl Unit {
         let mut changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         let committed = self.store.commit_txn(txn);
+        self.gate = None;
         self.store.end_unit();
         changes.sequence = committed?;
-        self.store.committed(durable)?;
+        let synced = self.store.committed(durable);
         let touched = self.tracks.lock().touched(self.state.written.as_ref());
         changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &self.store, &self.schema, &touched.watches)?;
+        watch::deliver(&self.tracks, &self.store, &self.schema, &touched.watches);
+        synced.map_err(|e| not_durable(e, changes.sequence))?;
         Ok(changes)
     }
 
     /// Ends the unit, keeping nothing of it
     pub fn abort(&mut self) {
         if self.txn.take().is_some() {
+            self.gate = None;
             self.store.end_unit();
         }
     }

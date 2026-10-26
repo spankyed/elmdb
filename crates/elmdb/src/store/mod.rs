@@ -361,9 +361,19 @@ impl Store {
     /// `write`, answering also the sequence of the commit it made
     pub fn write_sequenced<T>(
         &self,
-        mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
+        f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
     ) -> Result<(T, u64)> {
+        let (t, sequence, synced) = self.write_committed(f, durable)?;
+        synced.map(|()| (t, sequence))
+    }
+
+    /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
+    pub fn write_committed<T>(
+        &self,
+        mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
+        durable: bool,
+    ) -> Result<(T, u64, Result<()>)> {
         self.check_writable()?;
         if self.unit_is_open() {
             return Err(Error::new(
@@ -386,9 +396,9 @@ impl Store {
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
-                Ok(t) => {
-                    self.committed(durable)?;
-                    return Ok(t);
+                Ok((t, sequence)) => {
+                    let synced = self.committed(durable);
+                    return Ok((t, sequence, synced));
                 }
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
                     growths += 1;
@@ -410,9 +420,12 @@ impl Store {
     }
 
     /// Commits a write transaction with the next sequence, answering it; a test may refuse it as a full disk would
-    /// (`FAIL_COMMIT_AT`). Only the environment's one write transaction commits, so the sequence read here is the last
+    /// (`FAIL_COMMIT_AT`). The sequence is read in the transaction, which holds the environment's one write lock, so
+    /// it is the last any process committed
     pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
-        let next = self.sequence.load(Ordering::Acquire) + 1;
+        let stored = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
+        let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+        let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
         #[cfg(test)]
         if FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some() {
@@ -420,13 +433,20 @@ impl Store {
             return Err(Error::new(ErrorCode::Io, "No space left on device"));
         }
         txn.commit()?;
-        self.sequence.store(next, Ordering::Release);
+        self.sequence.fetch_max(next, Ordering::AcqRel);
         Ok(next)
     }
 
-    /// The last commit's sequence, or 0 before the first
+    /// The last commit's sequence, or 0 before the first: the stored one, which another process's commit may have
+    /// raised
     pub fn sequence(&self) -> u64 {
-        self.sequence.load(Ordering::Acquire)
+        let stored = self
+            .read(|txn, db| Ok(db.get(txn, &meta_key(meta::SEQUENCE))?.map(<[u8]>::to_vec)))
+            .ok()
+            .flatten()
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes.as_slice()).ok())
+            .map_or(0, u64::from_be_bytes);
+        stored.max(self.sequence.load(Ordering::Acquire))
     }
 
     /// What follows a commit: group commit hears of it, and a durable one waits for its sync
@@ -459,15 +479,19 @@ impl Store {
             if (info.last_page_number + 1) * page * 2 > info.map_size {
                 self.grow()?;
             }
-            let guard = self.gate.read_arc();
-            let txn = loop {
+            loop {
+                let guard = self.gate.read_arc();
                 match self.env.write_txn() {
-                    Ok(txn) => break txn,
-                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => self.adopt_map_size()?,
+                    Ok(txn) => return Ok((txn, guard)),
+                    // Another process grew the file: adopting its size takes the gate for writing, so this
+                    // transaction's hold on it goes first
+                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                        drop(guard);
+                        self.adopt_map_size()?;
+                    }
                     Err(e) => return Err(e.into()),
                 }
-            };
-            Ok((txn, guard))
+            }
         })();
         if begun.is_err() {
             self.end_unit();
@@ -481,7 +505,7 @@ impl Store {
         self.unit_ended.notify_all();
     }
 
-    fn unit_is_open(&self) -> bool {
+    pub fn unit_is_open(&self) -> bool {
         *self.unit.lock().expect("the unit's lock is never poisoned")
     }
 
@@ -558,6 +582,8 @@ impl Store {
     /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed
     pub fn copy_to(&self, target: &Path) -> Result<()> {
         std::fs::create_dir_all(target)?;
+        // The copy reads through the map in a transaction of its own, so a growth must wait for it to finish
+        let _gate = self.gate();
         self.env.copy_to_path(target.join("data.mdb"), heed::CompactionOption::Enabled)?;
         Ok(())
     }

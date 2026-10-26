@@ -29,7 +29,10 @@ struct Watching {
     reads: Reads,
     /// The last answer delivered
     last: Option<Vec<u8>>,
-    listener: Listener,
+    /// Out while its listener runs
+    listener: Option<Listener>,
+    /// A commit named it while it was being delivered, so it runs again before it is put back
+    again: bool,
 }
 
 /// The read sets filed, and the watches
@@ -37,8 +40,6 @@ struct Watching {
 pub struct Tracks {
     index: TrackIndex<Owner>,
     watches: BTreeMap<u64, Watching>,
-    /// Watches ended while their reads ran, so the run doesn't put them back
-    ended: HashSet<u64>,
     next: u64,
 }
 
@@ -109,52 +110,87 @@ pub fn watch(tracks: &SharedTracks, store: &Store, schema: &Schema, reads: Reads
         let mut held = tracks.lock();
         let id = held.next;
         held.next += 1;
-        held.watches.insert(id, Watching { reads, last: None, listener });
+        held.watches.insert(id, Watching { reads, last: None, listener: Some(listener), again: false });
         id
     };
-    deliver(tracks, store, schema, &[id])?;
+    deliver(tracks, store, schema, &[id]);
     Ok(id)
 }
 
 /// Ends a watch: nothing is delivered to it after
 pub fn unwatch(tracks: &SharedTracks, id: u64) {
     let mut held = tracks.lock();
-    if held.watches.remove(&id).is_none() {
-        held.ended.insert(id);
-    }
+    held.watches.remove(&id);
     held.index.remove(&Owner::Watch(id));
 }
 
-/// Runs each watch again and hands its listener the answer when it differs from the last, outside the lock, so a
-/// listener may read, write or end a watch itself
-pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64]) -> Result<()> {
+/// Runs each watch again and hands its listener the answer when it differs from the last. The read runs and its
+/// read set is filed under the lock commits name tokens under, so a commit either is in what the read saw or names
+/// the watch; the listener runs outside it, so it may read, write or end a watch itself. A watch a commit names while
+/// its listener runs is run again once the listener returns. A read that fails is handed to the listener as such
+pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64]) {
     for &id in ids {
-        let Some(mut watching) = tracks.lock().watches.remove(&id) else { continue };
-        let (answer, reads) = run_tracked(store, schema, &watching.reads)?;
-        let changed = match &answer {
-            Ok(bytes) => watching.last.as_ref() != Some(bytes),
-            Err(_) => true,
-        };
-        if let Ok(bytes) = &answer {
-            watching.last = Some(bytes.clone());
-        }
-        {
+        let mut listener = {
             let mut held = tracks.lock();
-            if held.ended.remove(&id) {
-                continue;
+            let Some(watching) = held.watches.get_mut(&id) else { continue };
+            match watching.listener.take() {
+                Some(listener) => listener,
+                None => {
+                    watching.again = true;
+                    continue;
+                }
             }
-            held.index.remove(&Owner::Watch(id));
-            held.index.add(&Owner::Watch(id), reads);
-        }
-        if changed {
-            (watching.listener)(&answer);
-        }
-        let mut held = tracks.lock();
-        if held.ended.remove(&id) {
-            held.index.remove(&Owner::Watch(id));
-        } else {
-            held.watches.insert(id, watching);
+        };
+        loop {
+            let (answer, changed) = {
+                let mut held = tracks.lock();
+                let Some(watching) = held.watches.get(&id) else { break };
+                let reads = watching.reads.clone();
+                let (answer, read) = match run_tracked(store, schema, &reads) {
+                    Ok(ran) => ran,
+                    Err(error) => (Err(error), ReadSet::default()),
+                };
+                held.index.remove(&Owner::Watch(id));
+                held.index.add(&Owner::Watch(id), read);
+                let watching = held.watches.get_mut(&id).expect("held under the lock");
+                watching.again = false;
+                let changed = match &answer {
+                    Ok(bytes) => watching.last.as_ref() != Some(bytes),
+                    Err(_) => true,
+                };
+                if let Ok(bytes) = &answer {
+                    watching.last = Some(bytes.clone());
+                }
+                (answer, changed)
+            };
+            if changed {
+                listener(&answer);
+            }
+            let mut held = tracks.lock();
+            // Ended while its listener ran: its read set went with it
+            let Some(watching) = held.watches.get_mut(&id) else {
+                held.index.remove(&Owner::Watch(id));
+                break;
+            };
+            if !watching.again {
+                watching.listener = Some(listener);
+                break;
+            }
         }
     }
-    Ok(())
+}
+
+/// Runs `reads` tracked under `token`, filing what they read before any commit can name what they read: the snapshot
+/// is taken and the read set filed under the lock commits name tokens under
+pub fn read_tracked(
+    tracks: &SharedTracks,
+    store: &Store,
+    schema: &Schema,
+    reads: &Reads,
+    token: u32,
+) -> Result<Vec<u8>> {
+    let mut held = tracks.lock();
+    let (answer, read) = run_tracked(store, schema, reads)?;
+    held.file(token, read);
+    answer
 }

@@ -295,6 +295,11 @@ fn run(shared: &Shared) {
         state.syncs += 1;
         if outcome.is_ok() {
             state.synced = state.synced.max(attempt.mark);
+        } else if state.committed > state.synced {
+            // What it owed is still owed: the timers start again, so a later sync retries it without waiting for
+            // the next commit
+            let now = shared.clock.now();
+            state.policy.on_commit(now);
         }
         if let Some((_, slot)) = state.waiting.get_mut(&attempt.id) {
             *slot = Some(outcome);

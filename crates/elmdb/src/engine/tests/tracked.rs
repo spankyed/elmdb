@@ -149,3 +149,31 @@ fn a_watch_delivers_each_answer_that_changed_after_a_commit_into_what_it_read() 
     assert!(heard().is_empty());
     assert_eq!(db.track_stats(), (0, 0, 0));
 }
+
+#[test]
+fn a_watch_whose_listener_writes_into_what_it_reads_hears_that_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open(&dir));
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": 1 } })]).unwrap();
+    let heard: Arc<Mutex<Vec<Json>>> = Arc::default();
+    let into = Arc::clone(&heard);
+    let writer = Arc::downgrade(&db);
+    db.watch(
+        reads(vec![row("Task-1")], None),
+        Box::new(move |answer| {
+            let bytes = answer.as_ref().unwrap();
+            let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+            let a = answer[0]["row"]["a"].clone();
+            into.lock().unwrap().push(a.clone());
+            // On seeing 2, the listener writes 3 into the row it reads
+            if a == json!(2)
+                && let Some(db) = writer.upgrade()
+            {
+                write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 3 } })]).unwrap();
+            }
+        }),
+    )
+    .unwrap();
+    write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 2 } })]).unwrap();
+    assert_eq!(*heard.lock().unwrap(), [json!(1), json!(2), json!(3)]);
+}

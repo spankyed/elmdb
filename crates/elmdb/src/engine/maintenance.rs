@@ -200,7 +200,7 @@ impl Database {
             true,
         )?;
         super::settle_indexes(&store, &self.engine_schema())?;
-        self.touched_everything()
+        self.touched_everything(&store)
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
@@ -269,7 +269,7 @@ impl Database {
             },
             true,
         )?;
-        self.touched_everything()
+        self.touched_everything(&store)
     }
 
     /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes

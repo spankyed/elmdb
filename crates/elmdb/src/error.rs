@@ -82,6 +82,12 @@ pub enum ErrorCode {
     UnitOpen,
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several
     UnknownIndex,
+    /// A durable write whose batch committed and whose sync then failed: the data is committed, and not yet known to
+    /// be on disk. Retrying the batch would apply it twice
+    NotDurable,
+    /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
+    /// locks
+    AlreadyLoaded,
 }
 
 impl ErrorCode {
@@ -125,6 +131,8 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::NotDurable => "NOT_DURABLE",
+            Self::AlreadyLoaded => "ALREADY_LOADED",
         }
     }
 }
