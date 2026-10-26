@@ -212,10 +212,13 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
         })
         .collect();
     // The renamed type's own entities are under their new ids now, which the type's listing, derived and rebuilt last,
-    // doesn't hold yet
+    // doesn't hold yet; it holds the entities `to` had before, whose refs may name the renamed ones too
     let new_ids: Vec<String> = moved.iter().map(|(_, new)| new.clone()).collect();
     for (ty, name) in refs {
-        let ids = if ty == to { new_ids.clone() } else { ids_of_type(t, &ty)? };
+        let mut ids = ids_of_type(t, &ty)?;
+        if ty == to {
+            ids.extend(new_ids.iter().cloned());
+        }
         for id in ids {
             let Some(value) = entities::get(t, &id, &name)? else { continue };
             let rewrite = |v: &Value| v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone());
@@ -236,7 +239,15 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
                 .map(|_| format!("shortCode:{to}"))
                 .or_else(|| name.strip_prefix(&format!("label:{from}:")).map(|base| format!("label:{to}:{base}")));
             if let Some(next) = next {
-                t.put(&keys::sequence(&next), &bytes)?;
+                // `to` may number entities of its own already: its sequence goes on from the later of the two, so no
+                // number either handed out is handed out again
+                let held = t.get(&keys::sequence(&next))?.map(|b| values::decode(&b)).transpose()?;
+                let moving = values::decode(&bytes)?;
+                let later = match held.as_ref().and_then(Value::as_u64) {
+                    Some(held) => held.max(moving.as_u64().unwrap_or(0)).into(),
+                    None => moving,
+                };
+                t.put(&keys::sequence(&next), &values::encode(&later))?;
                 t.del(&key)?;
             }
         }

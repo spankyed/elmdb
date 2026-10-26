@@ -374,6 +374,47 @@ fn rename_type_rewrites_a_type_s_refs_to_itself_and_moves_its_embeddings() {
 }
 
 #[test]
+fn rename_type_into_a_type_with_entities_rewrites_their_refs_and_keeps_its_numbering() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = |prefix: &str| {
+        json!({ "shortCode": { "prefix": prefix }, "fields": {
+            "parent": { "type": "ref", "to": ["Folder", "Dir"], "optional": true }
+        } })
+    };
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": { "Folder": folder("FLD"), "Dir": folder("DIR") }
+    });
+    let db = with_schema(&dir, schema).unwrap();
+    let take = |n: usize| (0..n).map(|_| json!({ "op": "takeLabel", "type": "Dir", "base": "Untitled" }));
+    let mut ops = vec![
+        json!({ "op": "create", "type": "Folder", "id": "Folder-1" }),
+        json!({ "op": "create", "type": "Dir", "id": "Dir-x", "fields": { "parent": "Folder-1" } }),
+        json!({ "op": "create", "type": "Dir", "id": "Dir-y" }),
+        json!({ "op": "create", "type": "Dir", "id": "Dir-z" }),
+        json!({ "op": "takeLabel", "type": "Folder", "base": "Untitled" }),
+    ];
+    ops.extend(take(3));
+    write(&db, ops).unwrap();
+    // DIR-3 and the labels handed out are Dir's numbers for good, though nothing holds them now
+    write(&db, vec![json!({ "op": "destroy", "id": "Dir-z" })]).unwrap();
+
+    db.rename_type("Folder", "Dir").unwrap();
+    assert_eq!(row(&db, "Dir-x").unwrap()["parent"], "Dir-1", "a ref Dir held before the rename follows it");
+    let results = write(
+        &db,
+        vec![json!({ "op": "create", "type": "Dir" }), json!({ "op": "takeLabel", "type": "Dir", "base": "Untitled" })],
+    )
+    .unwrap();
+    let crate::engine::batch::OpResult::Entity { short_code, .. } = &results[0] else { panic!("{results:?}") };
+    assert_eq!(short_code.as_deref(), Some("DIR-4"), "a number Dir handed out isn't handed out again");
+    let crate::engine::batch::OpResult::Label { label } = &results[1] else { panic!("{results:?}") };
+    assert_eq!(label, "Untitled 4");
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
 fn an_indexed_string_is_held_to_bytes_and_a_key_past_lmdb_s_limit_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
