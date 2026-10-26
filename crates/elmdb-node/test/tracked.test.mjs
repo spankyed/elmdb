@@ -33,6 +33,11 @@ test('reads tracked under a token cross the binding, and a commit names the toke
   const committed = packr.unpack(unit.commit());
   assert.deepEqual([committed.touched, committed.sequence], [[4], before + 3]);
 
+  // A number that isn't a token's is refused, never wrapped onto one
+  for (const bad of [4 + 2 ** 32, -1, 4.5, Number.NaN]) {
+    assert.throws(() => db.untrack(bad), { code: 'BATCH_INVALID' }, String(bad));
+  }
+  assert.equal(db.trackStats().owners, 1);
   db.untrack(4);
   assert.deepEqual(db.trackStats(), { owners: 0, keys: 0, ranges: 0 });
   assert.deepEqual(write([{ op: 'create', type: 'Task', id: 'Task-3' }]).changes.touched, []);

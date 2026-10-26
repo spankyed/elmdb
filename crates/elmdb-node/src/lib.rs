@@ -162,8 +162,16 @@ impl Database {
 
     /// Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after
     #[napi]
-    pub fn untrack(&self, token: u32) {
-        self.inner.untrack(token);
+    pub fn untrack(&self, token: f64) -> Result<(), Code> {
+        // A token is a u32, which a JS number holds exactly; any other number names no token
+        if !(token.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&token)) {
+            return Err(napi::Error::new(
+                Code("BATCH_INVALID"),
+                format!("A tracking token is a whole number from 0 to {}, which {token} isn't", u32::MAX),
+            ));
+        }
+        self.inner.untrack(token as u32);
+        Ok(())
     }
 
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
@@ -197,7 +205,16 @@ impl Database {
     /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's
     #[napi]
     pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
-        let one = entity_type.as_deref().zip(index.as_deref());
+        let one = match (entity_type.as_deref(), index.as_deref()) {
+            (Some(entity_type), Some(index)) => Some((entity_type, index)),
+            (None, None) => None,
+            _ => {
+                return Err(napi::Error::new(
+                    Code("BATCH_INVALID"),
+                    "rebuild takes both a type and an index, or neither for every index".to_owned(),
+                ));
+            }
+        };
         self.inner.rebuild(one).map_err(to_js)
     }
 
@@ -281,11 +298,15 @@ impl Database {
         self.inner.bulk_load(&loads).map_err(to_js)
     }
 
-    /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails
+    /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
+    /// the database is closed
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn durable(&self) -> Result<AsyncTask<DurableTask>, Code> {
-        let durable = self.inner.durable().map_err(to_js)?;
-        Ok(AsyncTask::new(DurableTask { durable: Some(durable), failed: None }))
+    pub fn durable(&self) -> AsyncTask<DurableTask> {
+        let task = match self.inner.durable() {
+            Ok(durable) => DurableTask { durable: Some(durable), failed: None },
+            Err(error) => DurableTask { durable: None, failed: Some(error) },
+        };
+        AsyncTask::new(task)
     }
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing
@@ -338,6 +359,9 @@ impl Task for DurableTask {
     type JsValue = ();
 
     fn compute(&mut self) -> napi::Result<()> {
+        if let Some(failed) = &self.failed {
+            return Err(napi::Error::from_reason(failed.message.clone()));
+        }
         let Some(durable) = self.durable.take() else { return Ok(()) };
         durable.wait().map_err(|error| {
             let reason = error.message.clone();

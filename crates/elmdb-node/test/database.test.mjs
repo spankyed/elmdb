@@ -91,6 +91,15 @@ test('durable() resolves once what was committed is on disk', async (t) => {
   db.close();
 });
 
+test('rebuild() takes a type and an index, or neither', (t) => {
+  const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
+  t.after(() => db.close());
+  for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
+    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
+  }
+  db.rebuild();
+});
+
 test('another elmdb binary in the process is refused at open, naming both files', (t) => {
   const dir = tempDir(t);
   // The first open claims the process for the binary index.js loaded

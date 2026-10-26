@@ -81,7 +81,10 @@ export declare class Database {
   stats(): Stats
   /** Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does */
   bulkLoad(loads: Buffer): void
-  /** Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails */
+  /**
+   * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
+   * the database is closed
+   */
   durable(): Promise<void>
   /** Syncs what is owed and releases the environment; closing a closed database does nothing */
   close(): void

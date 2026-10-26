@@ -125,7 +125,7 @@ test('arguments of the wrong type to every method throw rather than crash', (t) 
   db.write(valid);
 });
 
-test('a closed database and an ended unit refuse every call', (t) => {
+test('a closed database and an ended unit refuse every call', async (t) => {
   const db = open(t);
   const unit = db.begin();
   unit.abort();
@@ -136,4 +136,6 @@ test('a closed database and an ended unit refuse every call', (t) => {
   for (const call of [() => db.write(valid), () => db.readSync(validRead), () => db.begin(), () => db.check(), () => db.stats(), () => db.syncs]) {
     assert.throws(call, { code: 'CLOSED' });
   }
+  // A call answering a promise refuses by rejecting it
+  await assert.rejects(db.durable(), { code: 'CLOSED' });
 });
