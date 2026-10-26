@@ -80,6 +80,26 @@ pub fn initial_map_size(file_bytes: u64) -> usize {
     wanted.div_ceil(MAP_STEP) * MAP_STEP
 }
 
+/// A transaction that committed, with its sync outcome kept apart until in-memory state and observers are finalized.
+pub(crate) struct Commit {
+    pub sequence: u64,
+    pub synced: Result<()>,
+}
+
+impl Commit {
+    pub fn finish(self) -> Result<()> {
+        self.synced.map_err(|error| {
+            Error::new(
+                ErrorCode::NotDurable,
+                format!(
+                    "The operation committed (sequence {}), but its sync failed: {}. Do not retry the operation",
+                    self.sequence, error.message
+                ),
+            )
+        })
+    }
+}
+
 pub struct Store {
     path: PathBuf,
     read_only: bool,
@@ -124,6 +144,11 @@ pub(crate) static FAIL_STAMP_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// A test's stand-in for a disk that fills: the next commit of the environment at this path fails, once
 #[cfg(test)]
 pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_NEXT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 impl Store {
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self> {
@@ -183,7 +208,11 @@ impl Store {
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer(env.clone())),
+                Box::new(EnvSyncer {
+                    env: env.clone(),
+                    #[cfg(test)]
+                    path: canonical.clone(),
+                }),
                 Box::new(SystemClock),
             )
         });
@@ -368,16 +397,18 @@ impl Store {
         f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
     ) -> Result<(T, u64)> {
-        let (t, sequence, synced) = self.write_committed(f, durable)?;
-        synced.map(|()| (t, sequence))
+        let (t, commit) = self.write_committed(f, durable)?;
+        let sequence = commit.sequence;
+        commit.finish()?;
+        Ok((t, sequence))
     }
 
     /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
-    pub fn write_committed<T>(
+    pub(crate) fn write_committed<T>(
         &self,
         mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
-    ) -> Result<(T, u64, Result<()>)> {
+    ) -> Result<(T, Commit)> {
         self.check_writable()?;
         if self.unit_is_open() {
             return Err(Error::new(
@@ -402,7 +433,7 @@ impl Store {
             match outcome {
                 Ok((t, sequence)) => {
                     let synced = self.committed(durable);
-                    return Ok((t, sequence, synced));
+                    return Ok((t, Commit { sequence, synced }));
                 }
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
                     growths += 1;
@@ -432,7 +463,9 @@ impl Store {
         let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
         #[cfg(test)]
-        if FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some() {
+        if FAIL_NEXT_COMMIT.with(|flag| flag.replace(false))
+            || FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some()
+        {
             drop(txn);
             return Err(Error::new(ErrorCode::Io, "No space left on device"));
         }
@@ -657,11 +690,22 @@ impl Drop for Store {
     }
 }
 
-struct EnvSyncer(Env<WithoutTls>);
+#[cfg(test)]
+pub(crate) static FAIL_SYNC_AT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct EnvSyncer {
+    env: Env<WithoutTls>,
+    #[cfg(test)]
+    path: PathBuf,
+}
 
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
-        self.0.force_sync().map_err(Into::into)
+        #[cfg(test)]
+        if FAIL_SYNC_AT.lock().unwrap().contains(&self.path) {
+            return Err(Error::new(ErrorCode::Io, "Injected sync failure"));
+        }
+        self.env.force_sync().map_err(Into::into)
     }
 }
 

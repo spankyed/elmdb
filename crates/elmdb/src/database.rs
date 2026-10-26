@@ -90,21 +90,20 @@ impl Database {
                 map_size_bytes: options.map_size_bytes,
             },
         )?;
-        let (schema, report) = match apply_schema(&store, options.schema) {
+        let AppliedSchema { schema, report, unbuilt, commit } = match apply_schema(&store, options.schema) {
             Ok(applied) => applied,
             Err(error) => {
                 let _ = store.close();
                 return Err(error);
             }
         };
+        if let Some(commit) = commit
+            && let Err(error) = commit.finish()
+        {
+            let _ = store.close();
+            return Err(error);
+        }
         let engine_schema = Arc::new(schema.clone().unwrap_or_else(empty_schema));
-        let unbuilt = match crate::engine::settle_indexes(&store, &engine_schema) {
-            Ok(unbuilt) => unbuilt,
-            Err(error) => {
-                let _ = store.close();
-                return Err(error);
-            }
-        };
         let store = Arc::new(store);
         let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
             let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&engine_schema));
@@ -157,20 +156,25 @@ impl Database {
             builder.stop();
         }
         let applied = apply_schema(&store, Some(schema));
-        if let Ok((stored, _)) = &applied {
-            *current = Arc::new(stored.clone().unwrap_or_else(empty_schema));
-            *self.schema.write() = stored.clone();
+        if let Ok(applied) = &applied {
+            *current = Arc::new(applied.schema.clone().unwrap_or_else(empty_schema));
+            *self.schema.write() = applied.schema.clone();
         }
-        let unbuilt = crate::engine::settle_indexes(&store, &current)?;
+        let unbuilt = match &applied {
+            Ok(applied) => applied.unbuilt.clone(),
+            Err(_) => crate::engine::settle_indexes(&store, &current)?,
+        };
         if !unbuilt.is_empty() {
             let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&current));
             builder.queue(unbuilt);
             *self.builder() = Some(builder);
         }
         drop(current);
-        let changes = applied.map(|(_, report)| report.schema_changes)?;
-        self.touched_everything(&store)?;
-        Ok(changes)
+        let AppliedSchema { report, commit, .. } = applied?;
+        if let Some(commit) = commit {
+            self.finish_admin_commit(&store, commit)?;
+        }
+        Ok(report.schema_changes)
     }
 
     /// What opening did
@@ -290,15 +294,28 @@ impl Drop for Database {
     }
 }
 
-/// Compares the given schema with the stored one, refuses a change opening can't make, and stores the given one
-fn apply_schema(store: &Store, given: Option<Schema>) -> Result<(Option<Schema>, OpenReport)> {
+/// The installed declaration and pending builds, with a completed transaction's sync outcome kept separate.
+struct AppliedSchema {
+    schema: Option<Schema>,
+    report: OpenReport,
+    unbuilt: Vec<(String, String)>,
+    commit: Option<crate::store::Commit>,
+}
+
+fn unchanged_schema(store: &Store, schema: Option<Schema>) -> Result<AppliedSchema> {
+    let unbuilt = crate::engine::settle_indexes(store, schema.as_ref().unwrap_or(&empty_schema()))?;
+    Ok(AppliedSchema { schema, report: OpenReport::default(), unbuilt, commit: None })
+}
+
+/// Compares declarations and atomically installs the schema, index removals and empty-index markers.
+fn apply_schema(store: &Store, given: Option<Schema>) -> Result<AppliedSchema> {
     let stored = match store.meta(meta::SCHEMA)? {
         Some(bytes) => Some(Schema::from_canonical(&String::from_utf8_lossy(&bytes))?),
         None => None,
     };
-    let Some(given) = given else { return Ok((stored, OpenReport::default())) };
+    let Some(given) = given else { return unchanged_schema(store, stored) };
     if stored.as_ref().is_some_and(|s| s.hash() == given.hash()) {
-        return Ok((stored, OpenReport::default()));
+        return unchanged_schema(store, stored);
     }
     let stored_or_empty = stored.clone().unwrap_or_else(empty_schema);
     let held = crate::engine::held(store, &stored_or_empty, &given)?;
@@ -318,15 +335,28 @@ fn apply_schema(store: &Store, given: Option<Schema>) -> Result<(Option<Schema>,
     }
     let canonical = given.canonical();
     let hash = given.hash();
-    store.write(
+    let (unbuilt, commit) = store.write_committed(
         |txn, db| {
             crate::engine::drop_index_data(db, txn, &changes)?;
             put_meta(txn, db.main, meta::SCHEMA, canonical.as_bytes())?;
-            put_meta(txn, db.main, meta::SCHEMA_HASH, hash.as_bytes())
+            put_meta(txn, db.main, meta::SCHEMA_HASH, hash.as_bytes())?;
+            let mut state = crate::engine::unit::UnitState::default();
+            crate::engine::settle_indexes_in(&mut crate::engine::unit::Txn {
+                txn,
+                db,
+                state: &mut state,
+                schema: &given,
+                now: 0.0,
+            })
         },
         true,
     )?;
-    Ok((Some(given), OpenReport { schema_changes: changes }))
+    Ok(AppliedSchema {
+        schema: Some(given),
+        report: OpenReport { schema_changes: changes },
+        unbuilt,
+        commit: Some(commit),
+    })
 }
 
 #[cfg(test)]

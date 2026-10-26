@@ -21,7 +21,7 @@ mod reads;
 mod relations;
 mod text;
 pub mod tracking;
-mod unit;
+pub(crate) mod unit;
 mod values;
 mod vector;
 pub mod watch;
@@ -36,18 +36,28 @@ use parking_lot::lock_api::ArcRwLockReadGuard;
 use crate::database::Database;
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
-use crate::store::Store;
+use crate::store::{Commit, Store};
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
 pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
-/// A sync that failed after its commit: the data is committed, as the sequence says, and not yet known to be on disk
-fn not_durable(error: Error, sequence: u64) -> Error {
-    Error::new(
-        ErrorCode::NotDurable,
-        format!("The batch committed (sequence {sequence}), but its sync failed: {}", error.message),
-    )
+/// Finalizes every user-visible commit before reporting its sync outcome. `None` invalidates every owner for
+/// operations whose writes were not logged key by key.
+fn finish_commit(
+    tracks: &watch::SharedTracks,
+    store: &Store,
+    schema: &Schema,
+    mut changes: ChangeSet,
+    written: Option<&std::collections::HashSet<Vec<u8>>>,
+    commit: Commit,
+) -> Result<ChangeSet> {
+    let touched = tracks.lock().touched(written);
+    changes.sequence = commit.sequence;
+    changes.touched = touched.tokens;
+    watch::deliver(tracks, store, schema, &touched.watches);
+    commit.finish()?;
+    Ok(changes)
 }
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
@@ -216,37 +226,46 @@ pub(crate) fn held(store: &Store, stored: &Schema, given: &Schema) -> Result<cra
     })
 }
 
-/// Marks built every unbuilt index of a type that has no entities, and answers the rest, which need a build
-pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(String, String)>> {
-    let (empty, unbuilt) = store.read(|txn, db| {
-        let s = unit::Snapshot { txn, db, schema };
-        let mut empty = Vec::new();
-        let mut unbuilt = Vec::new();
-        for entity_type in schema.types.keys() {
-            let mut has_entities = false;
-            for trashed in [false, true] {
-                s.visit(&keys::type_range(trashed, entity_type), |_, _| {
-                    has_entities = true;
-                    false
-                })?;
-            }
-            for index in derive::index_names(schema, entity_type) {
-                if !derive::is_built(&s, entity_type, &index)? {
-                    if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
-                }
+type IndexList = Vec<(String, String)>;
+
+fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
+    let mut empty = Vec::new();
+    let mut unbuilt = Vec::new();
+    for entity_type in r.schema().types.keys() {
+        let mut has_entities = false;
+        for trashed in [false, true] {
+            r.visit(&keys::type_range(trashed, entity_type), |_, _| {
+                has_entities = true;
+                false
+            })?;
+        }
+        for index in derive::index_names(r.schema(), entity_type) {
+            if !derive::is_built(r, entity_type, &index)? {
+                if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
             }
         }
-        Ok((empty, unbuilt))
-    })?;
+    }
+    Ok((empty, unbuilt))
+}
+
+/// Marks empty types' indexes built inside the mutation that changes their contents or declaration.
+pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
+    let (empty, unbuilt) = unbuilt_indexes(t)?;
+    for (entity_type, index) in empty {
+        t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+    }
+    Ok(unbuilt)
+}
+
+/// Settles an existing schema at open; a read-only database only reports what still needs building.
+pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<IndexList> {
+    let (empty, unbuilt) = store.read(|txn, db| unbuilt_indexes(&unit::Snapshot { txn, db, schema }))?;
     if !empty.is_empty() && !store.is_read_only() {
         store.write(
             |txn, db| {
-                for (entity_type, index) in &empty {
-                    db.put(txn, &keys::index_built(entity_type, index), &values::encode(&true.into()))?;
-                }
-                Ok(())
+                let mut state = UnitState::default();
+                settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 }).map(|_| ())
             },
-            // Opening leaves nothing owed, as the schema's write doesn't
             true,
         )?;
     }
@@ -319,11 +338,11 @@ impl Database {
         })
     }
 
-    fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
+    pub(crate) fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
         let schema = self.writing_schema();
         let store = self.store()?;
         let now = now_ms();
-        store.write(
+        let ((), commit) = store.write_committed(
             |txn, db| {
                 let mut state = UnitState::default();
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
@@ -333,7 +352,11 @@ impl Database {
             true,
         )?;
         drop(schema);
-        self.touched_everything(&store)
+        self.finish_admin_commit(&store, commit)
+    }
+
+    pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
+        finish_commit(&self.tracks, store, &self.engine_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
@@ -413,14 +436,6 @@ impl Database {
         watch::unwatch(&self.tracks, id);
     }
 
-    /// After a commit whose writes aren't logged key by key (an admin change, a reset, a load): every tracked read and
-    /// watch is touched
-    pub(crate) fn touched_everything(&self, store: &Store) -> Result<()> {
-        let ids = self.tracks.lock().all_watches();
-        watch::deliver(&self.tracks, store, &self.engine_schema(), &ids);
-        Ok(())
-    }
-
     /// `read` with the reads as msgpack bytes, as the binding takes them
     pub fn read_bytes(&self, reads: &[u8]) -> Result<Vec<u8>> {
         self.read(&decode_reads(reads)?)
@@ -432,7 +447,7 @@ impl Database {
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
-        let ((results, mut changes, written), sequence, synced) = store.write_committed(
+        let ((results, changes, written), commit) = store.write_committed(
             |txn, db| {
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
@@ -444,11 +459,7 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let touched = self.tracks.lock().touched(written.as_ref());
-        changes.sequence = sequence;
-        changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &store, &self.engine_schema(), &touched.watches);
-        synced.map_err(|e| not_durable(e, sequence))?;
+        let changes = finish_commit(&self.tracks, &store, &self.engine_schema(), changes, written.as_ref(), commit)?;
         Ok((results, changes))
     }
 
@@ -593,18 +604,21 @@ impl Unit {
             self.abort();
             return Err(error);
         }
-        let mut changes = ChangeSet::of(&self.state.events);
+        let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.store.end_unit();
-        changes.sequence = committed?;
+        let sequence = committed?;
         let synced = self.store.committed(durable);
-        let touched = self.tracks.lock().touched(self.state.written.as_ref());
-        changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &self.store, &self.schema, &touched.watches);
-        synced.map_err(|e| not_durable(e, changes.sequence))?;
-        Ok(changes)
+        finish_commit(
+            &self.tracks,
+            &self.store,
+            &self.schema,
+            changes,
+            self.state.written.as_ref(),
+            Commit { sequence, synced },
+        )
     }
 
     /// Ends the unit, keeping nothing of it

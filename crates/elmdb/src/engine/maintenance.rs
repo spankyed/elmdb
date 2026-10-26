@@ -14,7 +14,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
 use crate::format::{self, Prefix, PrefixKind, meta};
 
-use super::unit::{Read, Txn, UnitState};
+use super::unit::{Read, Txn};
 use super::{derive, entities, ids, keys, relations, values};
 
 /// One unchecked load: an entity with its fields as they were, a relation under its own id, a sequence, an embedding, or
@@ -237,33 +237,21 @@ impl Database {
     /// Every entry removed but the database's own (its format and schema), in one durable unit, the database staying
     /// open
     pub fn reset(&self) -> Result<()> {
-        let store = self.store()?;
-        store.write(
-            |txn, db| {
-                let kept: Vec<(Vec<u8>, Vec<u8>)> = {
-                    let (low, high) = format::key::prefix_range(&Prefix::Meta.key().to_vec());
-                    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
-                    db.range(txn, &range)?
-                        .map(|e| e.map(|(k, v)| (k.to_vec(), v.to_vec())))
-                        .collect::<heed::Result<_>>()?
-                };
-                db.clear(txn)?;
-                // The vector graphs go with the keys they are derived from
-                if let Some(cosine) = db.cosine {
-                    cosine.clear(txn)?;
-                }
-                if let Some(euclidean) = db.euclidean {
-                    euclidean.clear(txn)?;
-                }
-                for (k, v) in kept {
-                    db.put(txn, &k, &v)?;
-                }
-                Ok(())
-            },
-            true,
-        )?;
-        super::settle_indexes(&store, &self.engine_schema())?;
-        self.touched_everything(&store)
+        self.admin_unit(|t| {
+            let kept = t.scan(&Prefix::Meta.key().to_vec())?;
+            t.db.clear(t.txn)?;
+            if let Some(cosine) = t.db.cosine {
+                cosine.clear(t.txn)?;
+            }
+            if let Some(euclidean) = t.db.euclidean {
+                euclidean.clear(t.txn)?;
+            }
+            for (key, value) in kept {
+                t.put(&key, &value)?;
+            }
+            super::settle_indexes_in(t)?;
+            Ok(())
+        })
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
@@ -313,31 +301,16 @@ impl Database {
             .collect();
         drop(rtxn);
         env.prepare_for_closing().wait();
-        // Held for the replace, so a schema change waits rather than changing the schema the data is rebuilt under
-        let schema = self.writing_schema();
-        let store = self.store()?;
-        store.write(
-            |txn, db| {
-                let kept: Vec<(Vec<u8>, Vec<u8>)> = {
-                    let (low, high) = format::key::prefix_range(&Prefix::Meta.key().to_vec());
-                    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
-                    db.range(txn, &range)?
-                        .map(|e| e.map(|(k, v)| (k.to_vec(), v.to_vec())))
-                        .collect::<heed::Result<_>>()?
-                };
-                db.clear(txn)?;
-                for (k, v) in kept.iter().chain(primary.iter()) {
-                    db.put(txn, k, v)?;
-                }
-                let mut state = UnitState::default();
-                derive::rebuild(&mut Txn { txn, db, state: &mut state, schema: &schema, now: 0.0 }, None)
-            },
-            true,
-        )?;
-        // As a reset does: an index of a type the data left empty is built, there being nothing to build
-        super::settle_indexes(&store, &schema)?;
-        drop(schema);
-        self.touched_everything(&store)
+        self.admin_unit(|t| {
+            let kept = t.scan(&Prefix::Meta.key().to_vec())?;
+            t.db.clear(t.txn)?;
+            for (key, value) in kept.iter().chain(primary.iter()) {
+                t.put(key, value)?;
+            }
+            derive::rebuild(t, None)?;
+            super::settle_indexes_in(t)?;
+            Ok(())
+        })
     }
 
     /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes

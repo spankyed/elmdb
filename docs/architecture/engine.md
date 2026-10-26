@@ -130,7 +130,11 @@ on disk, and rejects if the sync it waits on fails. A failed sync is final until
 mark the pages it couldn't write clean and drop them (PostgreSQL's "fsyncgate"), so a later sync that succeeds proves
 nothing about them, and every later commit is built on them; every wait after it rejects, naming it. A write or a
 commit passed `durable` commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made
-and its change set delivered. `close()` syncs what is owed, and reports a sync that failed.
+and its change set delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after
+notifying watches, with committed data and in-memory schema already installed. Empty-index markers are settled inside
+the schema/reset/replace transaction, not by a second commit. A caller must not retry the mutation as though it had been
+refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
+`close()` syncs what is owed, and reports a sync that failed.
 
 ## Change sets and watch
 
