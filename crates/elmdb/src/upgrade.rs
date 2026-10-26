@@ -252,7 +252,7 @@ pub fn upgrade_format(dir: &Path) -> Result<FormatReport> {
     // them, so the copy it hands back is ready to search
     if !report.rebuilt.is_empty() {
         let db = Database::open(dir, OpenOptions::default())?;
-        db.wait_for_index_builds();
+        db.wait_for_index_builds()?;
         db.close()?;
     }
     Ok(report)
