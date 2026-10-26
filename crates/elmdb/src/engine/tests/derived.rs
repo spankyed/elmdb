@@ -132,13 +132,36 @@ fn an_index_added_over_data_builds_in_the_background_and_reads_walk_until_it_has
     // Answers are the same whether the build has reached them or not
     let (before, _) = ids_where(&db, "kind", json!("odd"));
     assert_eq!(before.as_array().unwrap().len(), 1250);
-    db.wait_for_index_builds();
+    db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
     assert!(status.iter().any(|s| s.entity_type == "Note" && s.index == "byKind" && s.built), "{status:?}");
     let (after, visited) = ids_where(&db, "kind", json!("odd"));
     assert_eq!(after, before);
     assert_eq!(visited, 1250, "once built, the index's matches are read, not the type's 2,500 rows");
     assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn waiting_for_index_builds_with_a_unit_open_is_refused_rather_than_waiting_for_good() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+        let ops: Vec<Json> = (0..20_000)
+            .map(|i| json!({ "op": "create", "type": "Note", "fields": { "kind": format!("k{i}") } }))
+            .collect();
+        write(&db, ops).unwrap();
+        db.close().unwrap();
+    }
+    let db =
+        with_schema(&dir, notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }))).unwrap();
+    // The build waits for the unit to end, and the unit is this thread's: a wait here would never end
+    let unit = db.begin().unwrap();
+    let built = |db: &Database| db.index_status().unwrap().iter().any(|s| s.index == "byKind" && s.built);
+    assert!(!built(&db), "the build is still under way while the unit is open");
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::UnitOpen);
+    drop(unit);
+    db.wait_for_index_builds().unwrap();
+    assert!(built(&db));
 }
 
 #[test]
@@ -159,7 +182,7 @@ fn a_changed_index_is_rebuilt_and_a_removed_one_dropped() {
         let db =
             with_schema(&dir, notes(base_fields(), json!({ "ix": { "kind": "value", "fields": ["title"] } }))).unwrap();
         assert_eq!(db.open_report().schema_changes[0].effect, crate::schema::Effect::Rebuilds);
-        db.wait_for_index_builds();
+        db.wait_for_index_builds().unwrap();
         assert_eq!(ids_where(&db, "title", json!("t")).1, 1, "read from the rebuilt index");
         assert!(db.check().unwrap().is_clean());
         db.close().unwrap();
@@ -195,7 +218,7 @@ fn a_unique_index_over_rows_holding_the_same_values_isnt_built_and_says_why() {
         notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } })),
     )
     .unwrap();
-    db.wait_for_index_builds();
+    db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
     let one = status.iter().find(|s| s.index == "one").unwrap();
     assert!(!one.built);
@@ -322,7 +345,7 @@ fn an_index_declared_on_an_open_database_is_built_and_read_and_writes_go_on_to_t
         )
         .unwrap();
     assert_eq!(changes[0].effect, crate::schema::Effect::Builds);
-    db.wait_for_index_builds();
+    db.wait_for_index_builds().unwrap();
     assert_eq!(ids_where(&db, "kind", json!("even")).1, 1250, "read from the index built after the change");
     // A write after the change keeps the index
     write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-x", "fields": { "kind": "even" } })]).unwrap();

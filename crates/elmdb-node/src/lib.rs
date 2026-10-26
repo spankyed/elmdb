@@ -210,8 +210,8 @@ impl Database {
 
     /// Blocks until every index waiting to be built is built or has failed
     #[napi]
-    pub fn wait_for_index_builds(&self) {
-        self.inner.wait_for_index_builds();
+    pub fn wait_for_index_builds(&self) -> Result<(), Code> {
+        self.inner.wait_for_index_builds().map_err(to_js)
     }
 
     /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`

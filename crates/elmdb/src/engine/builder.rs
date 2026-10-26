@@ -65,13 +65,10 @@ impl Builder {
         changed.notify_all();
     }
 
-    /// Blocks until every queued index is built or has failed
-    pub fn wait(&self) {
-        let (lock, changed) = &*self.shared;
-        let mut state = lock.lock().expect("the builder's lock is never poisoned");
-        while !state.queue.is_empty() || state.busy {
-            state = changed.wait(state).expect("the builder's lock is never poisoned");
-        }
+    /// What `wait` needs, held apart from the builder so a caller can wait without holding the slot the builder is
+    /// kept in, which a schema change and a close take to stop it
+    pub fn waiter(&self) -> Waiter {
+        Waiter(Arc::clone(&self.shared))
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
@@ -88,6 +85,20 @@ impl Builder {
         self.store.wake_unit_waiters();
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the index thread doesn't panic");
+        }
+    }
+}
+
+/// A handle on a builder's progress that outlives the builder: a builder stopped meanwhile ends the wait
+pub struct Waiter(Arc<(Mutex<State>, Condvar)>);
+
+impl Waiter {
+    /// Blocks until every queued index is built or has failed, or the builder stops
+    pub fn wait(&self) {
+        let (lock, changed) = &*self.0;
+        let mut state = lock.lock().expect("the builder's lock is never poisoned");
+        while (!state.queue.is_empty() || state.busy) && !state.stopping {
+            state = changed.wait(state).expect("the builder's lock is never poisoned");
         }
     }
 }

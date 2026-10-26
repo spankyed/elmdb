@@ -477,7 +477,7 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
     let db = Database::open(dir.path(), options(json!({}))).unwrap();
     corpus(&db);
     db.set_schema(schema_with(message_text())).unwrap();
-    db.wait_for_index_builds();
+    db.wait_for_index_builds().unwrap();
     assert_eq!(search(&db, "Message", "lmdb", json!({})), json!(["Message-3", "Message-1"]));
     assert!(db.check().unwrap().is_clean());
     db.set_schema(schema_with(json!({}))).unwrap();

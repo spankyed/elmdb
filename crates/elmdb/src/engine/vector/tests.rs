@@ -308,7 +308,7 @@ fn an_index_declared_over_existing_data_queues_its_chunks_and_a_dropped_one_take
     let db = Database::open(dir.path(), options(json!({}))).unwrap();
     corpus(&db);
     db.set_schema(schema_with(indexes())).unwrap();
-    db.wait_for_index_builds();
+    db.wait_for_index_builds().unwrap();
     assert_eq!(pending(&db)["count"], 6);
     embed_pending(&db, topic);
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());

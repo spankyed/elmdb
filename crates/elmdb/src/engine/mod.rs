@@ -287,11 +287,19 @@ impl Database {
         self.touched_everything(&store)
     }
 
-    /// Blocks until every index waiting to be built is built or has failed
-    pub fn wait_for_index_builds(&self) {
-        if let Some(builder) = self.builder().as_ref() {
-            builder.wait();
+    /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
+    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would
+    pub fn wait_for_index_builds(&self) -> Result<()> {
+        // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
+        let Some(waiter) = self.builder().as_ref().map(Builder::waiter) else { return Ok(()) };
+        if self.store()?.unit_is_open() {
+            return Err(Error::new(
+                ErrorCode::UnitOpen,
+                "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
+            ));
         }
+        waiter.wait();
+        Ok(())
     }
 
     /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
