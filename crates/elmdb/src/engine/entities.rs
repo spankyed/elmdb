@@ -265,7 +265,20 @@ fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, a
                     ));
                 }
             }
-            t.put(&keys::index_entry(&entity_type, &index.name, parts, seq), &values::encode(&id.into()))?;
+            let key = keys::index_entry(&entity_type, &index.name, parts, seq);
+            if key.len() > values::MAX_KEY_BYTES {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!(
+                        "{id}'s entry in index {entity_type}.{} would be a {}-byte key, and a key is at most {} bytes: \
+                         shorten the values the index holds",
+                        index.name,
+                        key.len(),
+                        values::MAX_KEY_BYTES
+                    ),
+                ));
+            }
+            t.put(&key, &values::encode(&id.into()))?;
         }
     }
     Ok(())

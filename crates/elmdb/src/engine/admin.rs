@@ -165,12 +165,24 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
         if entities::record(t, new)?.is_some() {
             return Err(Error::new(ErrorCode::IdInUse, format!("renameType: {new} exists already")));
         }
-        let record = t.get(&keys::entity(old))?.expect("the entity exists");
+        let record = t.get(&keys::entity(old))?.ok_or_else(|| {
+            Error::new(ErrorCode::Corrupted, format!("renameType: {old} is listed and has no record"))
+        })?;
         t.put(&keys::entity(new), &record)?;
         t.del(&keys::entity(old))?;
         for (name, bytes) in entities::fields(t, old)? {
             t.put(&keys::value(new, &name), &bytes)?;
             t.del(&keys::value(old, &name))?;
+        }
+        // Its embeddings are primary data, keyed by type and id, under each vector index the type keeps
+        for index in super::vector::vector_indexes(t.schema, to) {
+            for (key, bytes) in t.scan(&keys::vectors_of(from, &index.name, old))? {
+                let Some(Part::Number(chunk)) = decode_key(&key)?.pop() else {
+                    return Err(Error::new(ErrorCode::Corrupted, format!("renameType: an embedding key of {old}")));
+                };
+                t.put(&keys::vector(to, &index.name, new, chunk as u32), &bytes)?;
+                t.del(&key)?;
+            }
         }
     }
     for (id, stored) in all_relations(t)? {
@@ -199,8 +211,12 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
             })
         })
         .collect();
+    // The renamed type's own entities are under their new ids now, which the type's listing, derived and rebuilt last,
+    // doesn't hold yet
+    let new_ids: Vec<String> = moved.iter().map(|(_, new)| new.clone()).collect();
     for (ty, name) in refs {
-        for id in ids_of_type(t, &ty)? {
+        let ids = if ty == to { new_ids.clone() } else { ids_of_type(t, &ty)? };
+        for id in ids {
             let Some(value) = entities::get(t, &id, &name)? else { continue };
             let rewrite = |v: &Value| v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone());
             let next = match &value {

@@ -8,8 +8,12 @@ use crate::format::key::Part;
 use crate::format::value::{MAX_DEPTH, TIMESTAMP_EXTENSION};
 use crate::schema::{FieldDef, ValueType};
 
-/// The longest string, in characters, an index holds; a longer one is found by walking the type's rows
+/// The longest string, in UTF-8 bytes, an index holds; a longer one is found by walking the type's rows. A key is
+/// at most 511 bytes (LMDB's limit), which this leaves room in for the type, the index's name and the sequence
 pub const MAX_INDEXED_STRING: usize = 256;
+
+/// The longest key LMDB stores, in bytes: a write whose key would be longer is refused rather than failing in LMDB
+pub const MAX_KEY_BYTES: usize = 511;
 
 pub fn encode(value: &Value) -> Vec<u8> {
     let mut out = Vec::new();
@@ -71,14 +75,14 @@ pub fn holds(stored: &Value, probe: &Value) -> bool {
 }
 
 /// The key part an index files a scalar under, or `None` for a value no index holds (a map, a list, bytes, a
-/// timestamp, a string longer than `MAX_INDEXED_STRING`)
+/// timestamp, a string of more than `MAX_INDEXED_STRING` bytes)
 pub fn index_part(value: &Value) -> Option<Part> {
     match value {
         Value::Nil => Some(Part::Null),
         Value::Boolean(b) => Some(Part::Bool(*b)),
         Value::String(s) => {
             let s = s.as_str()?;
-            (s.chars().count() <= MAX_INDEXED_STRING).then(|| Part::String(s.to_owned()))
+            (s.len() <= MAX_INDEXED_STRING).then(|| Part::String(s.to_owned()))
         }
         other => as_number(other).filter(|n| n.is_finite()).map(Part::Number),
     }

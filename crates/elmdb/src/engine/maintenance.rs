@@ -110,7 +110,10 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 relations::restore(t, id, &stored)?;
             }
             Load::Sequence { name, next } => {
-                t.put(&keys::sequence(name), &values::encode(&(*next).into()))?;
+                // A numbering never goes back: the entities loaded before it took numbers from it already
+                let held = t.get(&keys::sequence(name))?.and_then(|b| values::decode(&b).ok()).and_then(|v| v.as_u64());
+                let next = held.map_or(*next, |held| held.max(*next));
+                t.put(&keys::sequence(name), &values::encode(&next.into()))?;
             }
             Load::Unset { id, field } => {
                 if entities::record(t, id)?.is_some() {
@@ -235,7 +238,8 @@ impl Database {
         }
         let primary: Vec<(Vec<u8>, Vec<u8>)> = from
             .iter(&rtxn)?
-            .filter_map(|e| e.ok())
+            .collect::<heed::Result<Vec<_>>>()?
+            .into_iter()
             .filter(|(k, _)| {
                 decode_key(k)
                     .ok()
@@ -249,8 +253,9 @@ impl Database {
             .collect();
         drop(rtxn);
         env.prepare_for_closing().wait();
+        // Held for the replace, so a schema change waits rather than changing the schema the data is rebuilt under
+        let schema = self.writing_schema();
         let store = self.store()?;
-        let schema = self.engine_schema();
         store.write(
             |txn, db| {
                 let kept: Vec<(Vec<u8>, Vec<u8>)> = {
@@ -269,6 +274,9 @@ impl Database {
             },
             true,
         )?;
+        // As a reset does: an index of a type the data left empty is built, there being nothing to build
+        super::settle_indexes(&store, &schema)?;
+        drop(schema);
         self.touched_everything(&store)
     }
 

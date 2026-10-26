@@ -169,7 +169,7 @@ pub fn link(
         && let Some(relation) = existing.first()
     {
         if let Some(info) = info {
-            let mut stored = get(t, relation)?.expect("an edge's relation exists");
+            let mut stored = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
             if stored.info.as_ref().is_none_or(|i| !values::same(i, &info)) {
                 stored.info = Some(info);
                 put(t, relation, &stored)?;
@@ -184,7 +184,7 @@ pub fn link(
         return Ok((relation.clone(), false));
     }
     for relation in &existing {
-        let held = get(t, relation)?.expect("an edge's relation exists");
+        let held = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
         let matches = match (&info, &held.info) {
             (None, _) => true,
             (Some(a), Some(b)) => values::same(a, b),
@@ -330,4 +330,9 @@ pub fn check_ends(t: &impl Read, relation: &str, via: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// An edge whose relation row is gone: damage `check()` reports, answered as such rather than as a panic
+fn missing_relation(relation: &str) -> Error {
+    Error::new(ErrorCode::Corrupted, format!("An edge names relation {relation}, which has no row"))
 }

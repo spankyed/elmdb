@@ -187,7 +187,7 @@ search step names its text or vector index only when the type has more than one.
   range on the next: `where('sender', 'user').orderBy('timestamp')`. A field of any type but `bytes` and `object`: of
   an `any` field the index holds the scalar values, and a lookup for another walks the type's rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`).
-- A `list` field is indexed per element. A string longer than 256 characters isn't indexed: the type's rows are walked
+- A `list` field is indexed per element. A string longer than 256 bytes (UTF-8) isn't indexed: the type's rows are walked
   for it instead.
 - Every type has a unique value index on `shortCode` and one on `role`, without declaring them.
 

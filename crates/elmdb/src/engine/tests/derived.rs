@@ -329,3 +329,66 @@ fn an_index_declared_on_an_open_database_is_built_and_read_and_writes_go_on_to_t
     assert_eq!(ids_where(&db, "kind", json!("even")).1, 1251);
     assert!(db.check().unwrap().is_clean());
 }
+
+#[test]
+fn rename_type_rewrites_a_type_s_refs_to_itself_and_moves_its_embeddings() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = |indexes: Json| {
+        json!({ "fields": {
+            "parent": { "type": "ref", "to": ["Folder", "Dir"], "optional": true },
+            "text": { "type": "string", "optional": true }
+        }, "indexes": indexes })
+    };
+    let meaning = json!({ "meaning": { "kind": "vector", "from": ["text"], "dims": 2, "model": "m" } });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": { "Folder": folder(meaning.clone()), "Dir": folder(meaning) }
+    });
+    let db = with_schema(&dir, schema).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Folder", "id": "Folder-1", "fields": { "text": "root" } }),
+            json!({ "op": "create", "type": "Folder", "id": "Folder-2", "fields": { "parent": "Folder-1" } }),
+        ],
+    )
+    .unwrap();
+    let pending: crate::engine::plan::Reads =
+        serde_json::from_value(json!({ "reads": [{ "read": "pendingEmbeddings", "type": "Folder" }] })).unwrap();
+    let answer: Json =
+        serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&pending).unwrap()[..]).unwrap()).unwrap();
+    let chunk = &answer[0]["chunks"][0];
+    write(&db, vec![json!({ "op": "embed", "id": "Folder-1", "chunk": chunk["chunk"], "hash": chunk["hash"], "model": "m", "vector": [1.0, 0.0] })]).unwrap();
+
+    db.rename_type("Folder", "Dir").unwrap();
+    assert_eq!(row(&db, "Dir-2").unwrap()["parent"], "Dir-1", "a ref to its own type follows the rename");
+    let near: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Dir"] }, "steps": [{ "step": "near", "vector": [1.0, 0.0], "k": 1 }],
+        "terminal": { "answer": "ids" } } }] }))
+    .unwrap();
+    let found: Json =
+        serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&near).unwrap()[..]).unwrap()).unwrap();
+    assert_eq!(found[0]["ids"], json!(["Dir-1"]), "its embedding moved with it");
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
+fn an_indexed_string_is_held_to_bytes_and_a_key_past_lmdb_s_limit_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["other"] = json!({ "type": "string", "optional": true });
+    let indexes = json!({ "kind": { "kind": "value", "fields": ["kind"] }, "pair": { "kind": "value", "fields": ["title", "other"] } });
+    let db = with_schema(&dir, notes(fields, indexes)).unwrap();
+    // 200 characters, 600 bytes: past what an index holds, so it is stored and found by walking the rows
+    let wide = "中".repeat(200);
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-w", "fields": { "kind": wide } })]).unwrap();
+    assert_eq!(ids_where(&db, "kind", json!(wide)).0, json!(["Note-w"]));
+    // Each half within the limit, the pair past LMDB's key: refused, saying why
+    let long = "x".repeat(256);
+    let refused =
+        write(&db, vec![json!({ "op": "create", "type": "Note", "fields": { "title": long, "other": long } })])
+            .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::ValueInvalid, "{}", refused.message);
+    assert!(refused.message.contains("pair"), "{}", refused.message);
+}
