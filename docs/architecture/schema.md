@@ -160,11 +160,13 @@ such as a chunk's `indexId`.
 ```
 
 - `cardinality`, from the source's side: `one-to-one`, `one-to-many` (a target has at most one source: a child has one
-  parent), `many-to-one` (a source has at most one target), `many-to-many`. A link past it is refused (`CARDINALITY`);
+  parent), `many-to-one` (a source has at most one target), `many-to-many`. It counts far ends, not edges: a second
+  edge between the same two ends is no second source. A link past it is refused (`CARDINALITY`);
   moving a child is an unlink and a link in one batch.
 - `acyclic: true`: a link that would close a cycle through this kind is refused (`CYCLE`). Today's per-call
   `acyclicIn` becomes this.
-- `unique: true`: at most one edge of this kind between two entities, so linking a pair again updates the edge's info.
+- `unique: true`: at most one edge of this kind between two entities, so linking a pair again updates the edge's info,
+  and moving an edge onto a pair another edge joins is refused (`DUPLICATE_EDGE`).
   Today's per-call `replace` becomes this.
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.

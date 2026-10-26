@@ -88,6 +88,8 @@ pub enum ErrorCode {
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
+    /// A relation of a `unique` kind moved onto two ends another edge of its kind already joins
+    DuplicateEdge,
 }
 
 impl ErrorCode {
@@ -133,6 +135,7 @@ impl ErrorCode {
             Self::UnknownIndex => "UNKNOWN_INDEX",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
+            Self::DuplicateEdge => "DUPLICATE_EDGE",
         }
     }
 }

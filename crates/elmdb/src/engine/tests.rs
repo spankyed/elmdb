@@ -588,6 +588,67 @@ fn a_unique_kind_keeps_one_edge_per_pair_whose_info_a_link_replaces() {
 }
 
 #[test]
+fn a_unique_kind_refuses_moving_an_edge_onto_a_pair_another_joins() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let ids = ["Task-1", "Task-2", "Task-3"];
+    write(&db, ids.iter().map(|id| json!({ "op": "create", "type": "Task", "id": id })).collect()).unwrap();
+    let results = write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-2" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-3" }),
+        ],
+    )
+    .unwrap();
+    let OpResult::Relation { id: second, .. } = &results[1] else { panic!("{results:?}") };
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": second, "target": "Task-2" })]);
+    assert_eq!(e.code, ErrorCode::DuplicateEdge, "{}", e.message);
+    assert_eq!(edges(&db), ["Task-1|tags|Task-2", "Task-1|tags|Task-3"]);
+    // Its own pair is no other edge's: a move away and an info change on it are allowed
+    write(&db, vec![json!({ "op": "updateRelation", "relation": second, "source": "Task-2", "target": "Task-1" })])
+        .unwrap();
+    assert_eq!(edges(&db), ["Task-1|tags|Task-2", "Task-2|tags|Task-1"]);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn cardinality_counts_far_ends_so_check_agrees_with_the_writes_it_allowed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let ids = ["Task-1", "Task-2", "Task-3"];
+    write(&db, ids.iter().map(|id| json!({ "op": "create", "type": "Task", "id": id })).collect()).unwrap();
+    // A one-to-many kind that isn't unique: a second edge to the same child leaves it one parent
+    write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-1", "kind": "parent_of", "target": "Task-2", "info": 1 }),
+            json!({ "op": "link", "source": "Task-1", "kind": "parent_of", "target": "Task-2", "info": 2 }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(edges(&db), ["Task-1|parent_of|Task-2", "Task-1|parent_of|Task-2"]);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    // A second parent is past it, at a write and in the report of rows loaded without the write's checks
+    let e = refused(&db, vec![json!({ "op": "link", "source": "Task-3", "kind": "parent_of", "target": "Task-2" })]);
+    assert_eq!(e.code, ErrorCode::Cardinality);
+    db.admin_load(&[crate::engine::maintenance::Load::Relation {
+        id: "Relation-loaded".into(),
+        kind: "parent_of".into(),
+        source: "Task-3".into(),
+        target: "Task-2".into(),
+        info: None,
+    }])
+    .unwrap();
+    let report = db.check().unwrap();
+    assert!(
+        report.violations.iter().any(|v| v.subject == "Task-2" && v.message.contains("2 parent_of sources")),
+        "{report:?}"
+    );
+}
+
+#[test]
 fn unlink_and_remove_relation_remove_edges_and_their_keys_update_relation_moves_one() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

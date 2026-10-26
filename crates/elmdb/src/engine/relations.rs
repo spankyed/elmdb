@@ -288,6 +288,18 @@ pub fn update(
     }
     let moved = next.source != before.source || next.target != before.target;
     if moved {
+        // A unique kind keeps one edge per pair: a link to a joined pair updates that edge, and a move onto one would
+        // leave two, which no single edge's id could stand for
+        if def.unique && between(t, &next.source, &next.kind, &next.target)?.iter().any(|r| r != relation) {
+            return Err(Error::new(
+                ErrorCode::DuplicateEdge,
+                format!(
+                    "updateRelation({relation:?}): a {} edge already joins {} to {}, and a {} kind keeps one per pair; \
+                     remove one of them first",
+                    next.kind, next.source, next.target, next.kind
+                ),
+            ));
+        }
         check_rules(t, &def, &next.kind, &next.source, &next.target, Some(relation))?;
         unfile(t, &before)?;
         next.seq = entities::next_seq(t)?;

@@ -324,8 +324,10 @@ fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             }
         }
     }
-    let mut targets_of: BTreeMap<(String, String), usize> = BTreeMap::new();
-    let mut sources_of: BTreeMap<(String, String), usize> = BTreeMap::new();
+    // Cardinality counts far ends, not edges (`schema.md`, Relations): a second edge of a kind that isn't unique, to
+    // the same far end, leaves a target one source, as the write that allowed it found
+    let mut targets_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut sources_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
     for (key, bytes) in r.scan(&keys::all_relations())? {
         let relation = key_text(&key);
         let s: relations::Stored = rmp_serde::from_slice(&bytes)
@@ -335,22 +337,24 @@ fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 out.push(Violation { subject: relation.clone(), message: format!("joins {end}, which no entity has") });
             }
         }
-        *targets_of.entry((s.source.clone(), s.kind.clone())).or_default() += 1;
-        *sources_of.entry((s.target.clone(), s.kind.clone())).or_default() += 1;
+        targets_of.entry((s.source.clone(), s.kind.clone())).or_default().insert(s.target.clone());
+        sources_of.entry((s.target.clone(), s.kind.clone())).or_default().insert(s.source.clone());
     }
     for (kind, def) in &schema.relations {
         let one_source = matches!(def.cardinality, Cardinality::OneToMany | Cardinality::OneToOne);
         let one_target = matches!(def.cardinality, Cardinality::ManyToOne | Cardinality::OneToOne);
-        for ((end, k), n) in &sources_of {
-            if k == kind && one_source && *n > 1 {
+        for ((end, k), far) in &sources_of {
+            let n = far.len();
+            if k == kind && one_source && n > 1 {
                 out.push(Violation {
                     subject: end.clone(),
                     message: format!("has {n} {kind} sources, and a {kind} target has one"),
                 });
             }
         }
-        for ((end, k), n) in &targets_of {
-            if k == kind && one_target && *n > 1 {
+        for ((end, k), far) in &targets_of {
+            let n = far.len();
+            if k == kind && one_target && n > 1 {
                 out.push(Violation {
                     subject: end.clone(),
                     message: format!("has {n} {kind} targets, and a {kind} source has one"),

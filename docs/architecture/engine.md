@@ -106,8 +106,9 @@ The operations:
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code, a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
-  counts every edge, a trashed entity's included, since restoring it would close the cycle). A relation's ends are
-  checked at commit, so a unit may link to an entity it creates later.
+  counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
+  moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
+  to an entity it creates later.
 - **The result** carries what the batch created (ids, codes), the rows asked for back, and the commit's change set.
 
 A batch is data, so the engine can retry it (after growing the map, `design.md`) without involving the caller.
