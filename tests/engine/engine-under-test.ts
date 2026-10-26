@@ -15,18 +15,20 @@ export interface EngineUnderTestOptions {
   warn?: EARSRuntimeDeps['warn'];
   /** Wraps the database the engine is handed, to watch what it is asked */
   wrap?: (database: EarsDatabase) => EarsDatabase;
+  /** Freezes the values reads give back, as the SDK's test runtime does */
+  freeze?: boolean;
 }
 
 const databases = createTemporaryDatabases();
 afterAll(() => databases.disposeAll());
 
-export function freshEngine({ types, relationKinds, roles, rowRules = {}, relationRules = {}, warn, wrap }: EngineUnderTestOptions): EarsEngine {
+export function freshEngine({ types, relationKinds, roles, rowRules = {}, relationRules = {}, warn, wrap, freeze }: EngineUnderTestOptions): EarsEngine {
   const { database } = databases.open({
     types: Object.fromEntries([...types].map((type) => [type, rowRules[type] ?? { required: [] }])),
     relations: Object.fromEntries([...relationKinds].map((kind) => [kind, relationRules[kind] ?? {}])),
     roles: [...roles],
   });
-  return createEarsEngine({ database: wrap ? wrap(database) : database, warn });
+  return createEarsEngine({ database: wrap ? wrap(database) : database, warn, freeze });
 }
 
 export type EngineUnderTest = EarsEngine;

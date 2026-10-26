@@ -7,7 +7,8 @@ import { freshEngine } from './engine-under-test.ts';
 
 type Id = EARS.EntityId;
 
-const engine = () => freshEngine({
+const engine = ({ freeze = false } = {}) => freshEngine({
+  freeze,
   types: ['Message', 'Thread', 'Plain'],
   relationKinds: ['in'],
   roles: [],
@@ -60,6 +61,13 @@ describe('search', () => {
       id, score: expect.any(Number), terms: ['database'], highlights: { text: [[0, 3, 11]] }, row: { id, sender: 'ada' },
     });
     expect(e.query('Message').search('database').hits()[0]).not.toHaveProperty('highlights');
+  });
+
+  it("freezes a hit's picked field values where reads are frozen, as a row's are", () => {
+    const e = engine({ freeze: true });
+    e.create('Message', { text: 'database', sender: 'ada', meta: { n: 1 } });
+    const [hit] = e.query('Message').search('database').hits({ fields: ['meta'] });
+    expect(Object.isFrozen(hit!.row!.meta)).toBe(true);
   });
 
   it('refuses a type with no text index, and hits for a query with none or a function after it', () => {

@@ -289,11 +289,14 @@ describe('attribute writes', () => {
     expect(e.getRow(id)).toEqual(before);
   });
 
-  it('null is a value, undefined leaves an attribute alone in setMany and is refused by set', () => {
+  it('null is a value, undefined leaves an attribute alone in setMany and is refused by every other attribute write', () => {
     const id = e.create('Task').setMany({ title: 'A', gone: 1 }).id();
     e.write(id).setMany({ title: null, gone: undefined, list: [3] });
     expect(e.getRow(id)).toMatchObject({ title: null, gone: 1, list: [3] });
     expect(() => e.write(id).set('title', undefined)).toThrow(expect.objectContaining({ code: 'NO_VALUE' }));
+    for (const write of [() => e.write(id).append('tags', undefined), () => e.write(id).merge('meta', undefined as never), () => e.write(id).removeValue('tags', undefined)]) {
+      expect(write).toThrow(expect.objectContaining({ code: 'NO_VALUE' }));
+    }
     e.write(id).delete('gone');
     expect(e.getRow(id)).not.toHaveProperty('gone');
   });

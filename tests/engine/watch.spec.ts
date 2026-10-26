@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
+import type { EarsDatabase } from '../../src/database.ts';
 
 let e: EngineUnderTest;
 beforeEach(() => { e = engine(); });
@@ -87,6 +88,53 @@ describe('watch', () => {
     await settled();
     expect(w.runs(), 'a title was written, so it ran').toBe(2);
     expect(w.seen, 'to the titles it had').toHaveLength(1);
+  });
+
+  it('delivers a map or a set whose contents changed, and not one rebuilt with the same contents', async () => {
+    const task = e.create('Task', { title: 'a' }).id();
+    const byTitle = watched(() => new Map(titles().map((title) => [title, String(title).length])));
+    const titleSet = watched(() => new Set(titles()));
+    await settled();
+    e.write(task).set('title', 'a');
+    await settled();
+    expect(byTitle.seen, 'the same entries').toHaveLength(1);
+    expect(titleSet.seen, 'the same members').toHaveLength(1);
+    e.write(task).set('title', 'b');
+    await settled();
+    expect(byTitle.last()).toEqual(new Map([['b', 1]]));
+    expect(titleSet.last()).toEqual(new Set(['b']));
+  });
+
+  it('hears a durable unit that committed and then failed to sync', async () => {
+    // A database whose units commit and then report the sync failing, as elmdb's NOT_DURABLE does. A native method
+    // needs its own object as `this`
+    const bound = (target: object, key: PropertyKey) => {
+      const value: unknown = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    };
+    const failingSync = (database: EarsDatabase): EarsDatabase => new Proxy(database, {
+      get(target, key) {
+        if (key !== 'begin') return bound(target, key);
+        return () => {
+          const unit = target.begin();
+          return new Proxy(unit, {
+            get(held, member) {
+              if (member !== 'commit') return bound(held, member);
+              return () => {
+                held.commit(false);
+                throw Object.assign(new Error('the sync failed'), { code: 'NOT_DURABLE' });
+              };
+            },
+          });
+        };
+      },
+    });
+    e = engine({ wrap: failingSync });
+    const w = watched(() => titles());
+    await settled();
+    expect(() => e.transact(() => { e.create('Task', { title: 'kept' }); }, { durable: true })).toThrow(/sync failed/);
+    await settled();
+    expect(w.last(), 'the commit stands, and the watch heard it').toEqual(['kept']);
   });
 
   it('hears nothing of a unit that threw, and the unit inside one that rolled back', async () => {

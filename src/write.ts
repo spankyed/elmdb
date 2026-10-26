@@ -65,6 +65,10 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
       one({ ...op, id, touch }, stampAt);
       return self;
     };
+    /** `undefined` can't cross to the engine, which would read it as `null`, so a write of one refuses */
+    const valued = (verb: string, k: string, v: unknown) => {
+      if (v === undefined) throw new EarsError('NO_VALUE', `${verb}('${k}'): no value given`);
+    };
     const self: WriteBuilder = {
       set(k, v) {
         if (v === undefined) throw new EarsError('NO_VALUE', `set('${k}'): no value to store. delete('${k}') removes the attribute`);
@@ -74,11 +78,11 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
         const fields = definedFields(attrs as Record<string, unknown>, 'setMany');
         return Object.keys(fields).length ? attribute({ op: 'set', fields }) : self;
       },
-      append: (k, v) => attribute({ op: 'append', field: k, value: v }),
-      merge: (k, v) => attribute({ op: 'merge', field: k, value: v }),
+      append: (k, v) => (valued('append', k, v), attribute({ op: 'append', field: k, value: v })),
+      merge: (k, v) => (valued('merge', k, v), attribute({ op: 'merge', field: k, value: v })),
       delete: (k) => attribute({ op: 'delete', field: k }),
       removeAt: (k, index) => attribute({ op: 'removeAt', field: k, index }),
-      removeValue: (k, v) => attribute({ op: 'removeValue', field: k, value: v }),
+      removeValue: (k, v) => (valued('removeValue', k, v), attribute({ op: 'removeValue', field: k, value: v })),
 
       link(kind, target, options: LinkOptions = {}) {
         // An edge's info is `{ info }`: an object with other keys is info passed where the options go

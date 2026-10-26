@@ -263,4 +263,19 @@ describe('what transact refuses', () => {
     expect(() => e.transact(() => e.admin.clear())).toThrow(/clear\(\) inside transact/);
     expect(e.query.ids(task).pickOne()).toBeDefined();
   });
+
+  it('an admin call that commits on its own, inside it, and the unit rolls back what it wrote', () => {
+    const calls: Array<[string, () => unknown]> = [
+      ['putAttr', () => e.admin.putAttr(task, 'title', 'loaded')],
+      ['bulkLoadAttr', () => e.admin.bulkLoadAttr(task, 'title', 'loaded')],
+      ['deleteAttr', () => e.admin.deleteAttr(task, 'title')],
+      ['addRelation', () => e.admin.addRelation(task, 'refers', other)],
+      ['bulkLoad', () => e.admin.bulkLoad(() => undefined)],
+    ];
+    for (const [name, call] of calls) {
+      expect(() => e.transact(() => { e.write(task).set('title', 'in the unit'); call(); }), name).toThrow(/inside transact/);
+      expect(e.getAttr(task, 'title'), name).toBe('a');
+    }
+    expect(e.findRelations({ source: task, target: other })).toEqual([]);
+  });
 });

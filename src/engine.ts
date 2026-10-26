@@ -280,9 +280,15 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     removeRelation,
   };
 
+  /** Refuses `what` inside `transact`: it commits as a unit of its own, which the transact's rollback could not undo */
+  const outsideUnit = (what: string) => {
+    if (connection.inUnit) throw new Error(`${what} inside transact(): it commits on its own, so a unit could not undo it`);
+  };
+
   // Unchecked loads: sent together when `bulkLoad`'s function returns, and each on its own outside one
   let loading: Array<Record<string, unknown>> | undefined;
   const load = (item: Record<string, unknown>) => {
+    outsideUnit('An unchecked load');
     if (loading) loading.push(item);
     else connection.load([item]);
   };
@@ -291,12 +297,12 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
 
   const admin: EarsAdmin = {
     clear() {
-      if (connection.inUnit) throw new Error('clear() inside transact(): emptying the engine is not a write a unit can undo');
+      outsideUnit('clear()');
       database.reset();
       connection.committedEverything();
     },
     replaceWith(source) {
-      if (connection.inUnit) throw new Error('replaceWith() inside transact(): replacing the engine is not a write a unit can undo');
+      outsideUnit('replaceWith()');
       database.replaceWith(source);
       connection.committedEverything();
     },
@@ -327,6 +333,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     bulkLoadRelation: (relId, kind, source, target, info) => load({ load: 'relation', id: relId, kind, source, target, info }),
     bulkLoad<T>(fn: () => T): T {
       if (loading) return fn();
+      outsideUnit('bulkLoad()');
       loading = [];
       try {
         const value = fn();
@@ -337,12 +344,14 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       }
     },
     setSchema(schema) {
+      outsideUnit('setSchema()');
       const changes = database.setSchema(toElmdbSchema(schema));
       declared = declaredNames(database.schema);
       connection.committedEverything();
       return changes;
     },
     declare(schema) {
+      outsideUnit('declare()');
       const changes = database.setSchema(withDeclarations(database.schema, toElmdbSchema(schema)));
       declared = declaredNames(database.schema);
       connection.committedEverything();

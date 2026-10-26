@@ -61,6 +61,16 @@ describe('vector search', () => {
     expect(e.pendingEmbeddings('Note').chunks.map(({ text }) => text)).toEqual(['x\n\npears']);
   });
 
+  it('counts a vector for an entity deleted since it was pending as stale, and stores the rest of the batch', () => {
+    const e = engine();
+    const gone = e.create('Note', { title: 'x', body: 'pears' }).id();
+    e.create('Note', { title: 'y', body: 'boats' });
+    const { model, chunks } = e.pendingEmbeddings('Note');
+    e.write(gone).destroy();
+    expect(e.embed(chunks.map((chunk) => ({ ...chunk, model, vector: vectorOf(chunk.text) })))).toEqual({ stored: 1, stale: 1 });
+    expect(e.pendingEmbeddings('Note').count).toBe(0);
+  });
+
   it('ranks the nearest first, combines with the steps before it, and finds more like an entity', () => {
     const e = engine();
     const [apples, pears, boats, ships] = ['apples', 'pears', 'boats', 'ships'].map((body) => e.create('Note', { title: 'a note', body }).id());

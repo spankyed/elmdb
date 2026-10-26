@@ -58,6 +58,7 @@ export function toElmdbSchema(schema: EngineSchema): object {
         if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
         setField(textFields, field, { weight });
       }
+      if (Object.prototype.hasOwnProperty.call(indexes, 'search')) throw new Error(`${type}: a field named "search" is indexed, and the text index has that name`);
       setField(indexes, 'search', { kind: 'text', fields: textFields, ...(rules.search.stem !== undefined && { stem: rules.search.stem }) });
     }
     // The vector index (`embed`), over the fields its text is made of, read as the text index reads them
@@ -66,6 +67,7 @@ export function toElmdbSchema(schema: EngineSchema): object {
         if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
       }
       const { from, chunk = 'whole', model, dims } = rules.embed;
+      if (Object.prototype.hasOwnProperty.call(indexes, 'embedding')) throw new Error(`${type}: a field named "embedding" is indexed, and the vector index has that name`);
       setField(indexes, 'embedding', { kind: 'vector', from: [...from], chunk, dims, metric: 'cosine', precision: 'f32', model });
     }
     setField(types, type, {

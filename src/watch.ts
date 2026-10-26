@@ -162,7 +162,7 @@ export function createWatches(connection: Connection): Watches {
   };
 }
 
-/** Whether two results are the same data: primitives, lists, plain objects, bytes and dates, compared through */
+/** Whether two results are the same data: primitives, lists, plain objects, maps, sets, bytes and dates, compared through */
 export function sameValue(a: unknown, b: unknown): boolean {
   if (Object.is(a, b)) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
@@ -181,6 +181,17 @@ export function sameValue(a: unknown, b: unknown): boolean {
     return true;
   }
   if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
+  // Keys of a map and members of a set are compared as the collection itself finds them, by identity
+  if (a instanceof Map && b instanceof Map) {
+    if (a.size !== b.size) return false;
+    for (const [key, value] of a) if (!b.has(key) || !sameValue(value, b.get(key))) return false;
+    return true;
+  }
+  if (a instanceof Set && b instanceof Set) {
+    if (a.size !== b.size) return false;
+    for (const member of a) if (!b.has(member)) return false;
+    return true;
+  }
   const keys = Object.keys(a);
   if (keys.length !== Object.keys(b).length) return false;
   for (const key of keys) {

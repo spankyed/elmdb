@@ -111,6 +111,7 @@ function freezeValues(answer: Answer): Answer {
   if (answer.kind === 'visited') freezeValues(answer.answer as Answer);
   if (answer.kind === 'row') row(answer.row);
   if (answer.kind === 'rows') (answer.rows as unknown[]).forEach(row);
+  if (answer.kind === 'hits') for (const hit of answer.hits as Array<{ row?: unknown }>) row(hit.row);
   if (answer.kind === 'field') deepFreeze(answer.value);
   if (answer.kind === 'relation' && answer.relation) deepFreeze((answer.relation as { info?: unknown }).info);
   if (answer.kind === 'relations') for (const relation of answer.relations as Array<{ info?: unknown }>) deepFreeze(relation.info);
@@ -269,6 +270,8 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       heard(unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))) as { sequence: number; touched: number[] });
     } catch (error) {
       if (held.isOpen) held.abort();
+      // A durable commit whose sync failed was made all the same, and its change set didn't cross with the error
+      else if ((error as { code?: unknown })?.code === 'NOT_DURABLE') committed({ sequence: database.sequence, touched: 'all' });
       throw error;
     }
     return value;
