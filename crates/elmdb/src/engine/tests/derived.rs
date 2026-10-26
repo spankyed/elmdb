@@ -581,3 +581,52 @@ fn a_plan_past_the_step_limit_is_refused_rather_than_overflowing_the_stack() {
     .unwrap();
     assert_eq!(db.read(&reads).unwrap_err().code, ErrorCode::BatchInvalid);
 }
+
+/// The paths and effects an open reported
+fn reported(db: &Database) -> Vec<(String, crate::schema::Effect)> {
+    db.open_report().schema_changes.iter().map(|c| (c.path.clone(), c.effect)).collect()
+}
+
+#[test]
+fn a_declaration_added_over_rows_it_breaks_is_enforced() {
+    use crate::schema::Effect;
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+        write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1" })]).unwrap();
+        write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-2" })]).unwrap();
+        write(&db, vec![json!({ "op": "link", "kind": "cites", "source": "Note-1", "target": "Note-2" })]).unwrap();
+        db.close().unwrap();
+    }
+    // A required field on a type with rows, which none of them holds; one on a type with none breaks nothing
+    let mut schema = notes(base_fields(), json!({}));
+    schema["types"]["Note"]["fields"]["due"] = json!({ "type": "string" });
+    schema["types"]["Note"]["fields"]["later"] = json!({ "type": "string", "optional": true });
+    schema["types"]["Tag"]["fields"]["name"] = json!({ "type": "string" });
+    let db = with_schema(&dir, schema).unwrap();
+    assert_eq!(
+        reported(&db),
+        [
+            ("types.Note.fields.due".to_owned(), Effect::Enforced),
+            ("types.Note.fields.later".to_owned(), Effect::Applied),
+            ("types.Tag.fields.name".to_owned(), Effect::Applied),
+        ]
+    );
+    assert!(!db.check().unwrap().violations.is_empty(), "check() reports the rows the change enforces a rule on");
+    db.close().unwrap();
+    // A kind and a type removed keep their data, and declared again hold it to their rules
+    let mut without = notes(base_fields(), json!({}));
+    without["relations"].as_object_mut().unwrap().remove("cites");
+    without["types"].as_object_mut().unwrap().remove("Note");
+    without["types"]["Tag"]["fields"]["of"]["to"] = json!(["Tag"]);
+    with_schema(&dir, without).unwrap().close().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    assert_eq!(
+        reported(&db),
+        [
+            ("relations.cites".to_owned(), Effect::Enforced),
+            ("types.Note".to_owned(), Effect::Enforced),
+            ("types.Tag.fields.of".to_owned(), Effect::Enforced),
+        ]
+    );
+}

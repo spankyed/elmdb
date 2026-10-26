@@ -5,7 +5,7 @@ mod model;
 mod parse;
 mod validate;
 
-pub use diff::{Change, Effect, SchemaChange, diff};
+pub use diff::{Change, Effect, Held, SchemaChange, diff};
 pub use model::*;
 pub use parse::{Problem, parse};
 

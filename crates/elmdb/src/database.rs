@@ -301,7 +301,9 @@ fn apply_schema(store: &Store, given: Option<Schema>) -> Result<(Option<Schema>,
     if stored.as_ref().is_some_and(|s| s.hash() == given.hash()) {
         return Ok((stored, OpenReport::default()));
     }
-    let changes = diff(stored.as_ref().unwrap_or(&empty_schema()), &given);
+    let stored_or_empty = stored.clone().unwrap_or_else(empty_schema);
+    let held = crate::engine::held(store, &stored_or_empty, &given)?;
+    let changes = diff(&stored_or_empty, &given, &held);
     if store.is_read_only() {
         return Err(Error::new(
             ErrorCode::SchemaChangeRefused,

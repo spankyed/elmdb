@@ -168,6 +168,59 @@ pub(crate) fn drop_index_data(
     Ok(())
 }
 
+/// What the stored data holds that changing the schema from `stored` to `given` answers to (`schema::Held`): one seek
+/// per type with entities, one per type for its codes' prefix, and a walk of the relations only when `given` adds a
+/// relation kind, stopping once each added kind is found
+pub(crate) fn held(store: &Store, stored: &Schema, given: &Schema) -> Result<crate::schema::Held> {
+    use crate::format::key::{Part, decode, prefix_range};
+    use std::ops::Bound;
+    store.read(|txn, db| {
+        let mut held = crate::schema::Held::default();
+        for trashed in [false, true] {
+            let (mut low, high) = prefix_range(&keys::all_of_types(trashed));
+            loop {
+                let range = (Bound::Included(low.as_slice()), Bound::Excluded(high.as_slice()));
+                let Some(entry) = db.range(txn, &range)?.next() else { break };
+                let (key, _) = entry?;
+                let Some(Part::String(entity_type)) = decode(key)?.into_iter().nth(1) else { break };
+                low = prefix_range(&keys::type_range(trashed, &entity_type)).1;
+                held.types.insert(entity_type);
+            }
+        }
+        for entity_type in &held.types {
+            let range = prefix_range(&keys::index_range(entity_type, keys::SHORT_CODE_INDEX, &[]));
+            let range = (Bound::Included(range.0.as_slice()), Bound::Excluded(range.1.as_slice()));
+            if let Some(entry) = db.range(txn, &range)?.next()
+                && let Some(Part::String(code)) = decode(entry?.0)?.into_iter().nth(3)
+                && let Some((prefix, _)) = code.rsplit_once('-')
+            {
+                held.short_codes.insert(entity_type.clone(), prefix.to_owned());
+            }
+        }
+        let mut sought: std::collections::BTreeSet<&String> =
+            given.relations.keys().filter(|kind| !stored.relations.contains_key(*kind)).collect();
+        if !sought.is_empty() {
+            let s = unit::Snapshot { txn, db, schema: stored };
+            let mut failed = None;
+            s.visit(&keys::all_relations(), |_, bytes| {
+                match rmp_serde::from_slice::<relations::Stored>(bytes) {
+                    Ok(relation) => {
+                        if let Some(kind) = sought.take(&relation.kind) {
+                            held.kinds.insert(kind.clone());
+                        }
+                    }
+                    Err(e) => failed = Some(e),
+                }
+                failed.is_none() && !sought.is_empty()
+            })?;
+            if let Some(e) = failed {
+                return Err(Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")));
+            }
+        }
+        Ok(held)
+    })
+}
+
 /// Marks built every unbuilt index of a type that has no entities, and answers the rest, which need a build
 pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(String, String)>> {
     let (empty, unbuilt) = store.read(|txn, db| {

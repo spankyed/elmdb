@@ -2,7 +2,7 @@
 //! applied, builds or drops derived data, keeps the data of a declaration that went, enforces a tightened rule on
 //! writes from then on, or is refused.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -47,15 +47,30 @@ pub enum Effect {
     Refused,
 }
 
-/// Every change from `stored` to `given`, in path order
-pub fn diff(stored: &Schema, given: &Schema) -> Vec<SchemaChange> {
+/// What the stored data holds that a change answers to and neither schema says: rows a declaration now applies to,
+/// and what a removed declaration left, which stays until it is purged
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Held {
+    /// The types with entities, live or trashed
+    pub types: BTreeSet<String>,
+    /// The short code prefix of each type whose entities hold codes
+    pub short_codes: BTreeMap<String, String>,
+    /// Of the relation kinds the given schema declares and the stored one doesn't, those with relations stored
+    pub kinds: BTreeSet<String>,
+}
+
+/// Every change from `stored` to `given`, over the data `held`, in path order
+pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
     let mut out = Changes(Vec::new());
     if stored.collation != given.collation {
         // A value index holds its values as written; the collation orders `orderBy` as a query runs
         out.push("collation", Change::Changed, Effect::Applied);
     }
-    keyed(&stored.roles, &given.roles, "roles", &mut out, |_, _, _, _| {});
-    keyed(&stored.relations, &given.relations, "relations", &mut out, |at, old, new, out| {
+    // A declaration added over data a removed one left holds that data to its rules from then on
+    let over = |data: bool| if data { Effect::Enforced } else { Effect::Applied };
+    keyed(&stored.roles, &given.roles, "roles", &mut out, |_, _| Effect::Applied, |_, _, _, _| {});
+    let added_kind = |name: &str, _: &RelationDef| over(held.kinds.contains(name));
+    keyed(&stored.relations, &given.relations, "relations", &mut out, added_kind, |at, old, new, out| {
         let tightened = !widens_cardinality(old.cardinality, new.cardinality)
             || (new.acyclic && !old.acyclic)
             || (new.unique && !old.unique)
@@ -63,7 +78,9 @@ pub fn diff(stored: &Schema, given: &Schema) -> Vec<SchemaChange> {
             || !widens_field(&old.info, &new.info);
         out.push(at, Change::Changed, if tightened { Effect::Enforced } else { Effect::Applied });
     });
-    keyed(&stored.types, &given.types, "types", &mut out, |at, old, new, out| {
+    let added_type = |name: &str, _: &TypeDef| over(held.types.contains(name));
+    keyed(&stored.types, &given.types, "types", &mut out, added_type, |at, old, new, out| {
+        let has_rows = held.types.contains(at.strip_prefix("types.").unwrap_or(at));
         match (&old.short_code, &new.short_code) {
             (Some(a), Some(b)) if a != b => {
                 out.push(&format!("{at}.shortCode.prefix"), Change::Changed, Effect::Refused)
@@ -80,7 +97,14 @@ pub fn diff(stored: &Schema, given: &Schema) -> Vec<SchemaChange> {
         if old.declared_by != new.declared_by {
             out.push(&format!("{at}.declaredBy"), Change::Changed, Effect::Applied);
         }
-        keyed(&old.fields, &new.fields, &format!("{at}.fields"), out, |at, old, new, out| {
+        // A row holds no value of a field its type refused, which breaks a field only when it's required, and anything
+        // in a field its type allowed
+        let breaks_rows = |field: &FieldDef| match old.additional_fields {
+            AdditionalFields::Refuse => !field.optional,
+            AdditionalFields::Allow => !widens_field(&any_info(), field),
+        };
+        let added_field = |_: &str, field: &FieldDef| over(has_rows && breaks_rows(field));
+        keyed(&old.fields, &new.fields, &format!("{at}.fields"), out, added_field, |at, old, new, out| {
             let effect = if widens_field(old, new) { Effect::Applied } else { Effect::Enforced };
             out.push(at, Change::Changed, effect);
         });
@@ -136,12 +160,14 @@ impl Changes {
     }
 }
 
-/// Added and removed entries of a keyed map, and `changed` called for each kept one that differs
+/// Added and removed entries of a keyed map, `added` saying what adding each does, and `changed` called for each kept
+/// one that differs
 fn keyed<T: PartialEq>(
     old: &BTreeMap<String, T>,
     new: &BTreeMap<String, T>,
     at: &str,
     out: &mut Changes,
+    added: impl Fn(&str, &T) -> Effect,
     mut changed: impl FnMut(&str, &T, &T, &mut Changes),
 ) {
     for (name, old_def) in old {
@@ -152,9 +178,9 @@ fn keyed<T: PartialEq>(
             Some(_) => {}
         }
     }
-    for name in new.keys() {
+    for (name, new_def) in new {
         if !old.contains_key(name) {
-            out.push(&format!("{at}.{name}"), Change::Added, Effect::Applied);
+            out.push(&format!("{at}.{name}"), Change::Added, added(name, new_def));
         }
     }
 }

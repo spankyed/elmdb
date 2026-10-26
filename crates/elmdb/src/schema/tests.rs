@@ -321,7 +321,7 @@ mod changes {
     fn changes(edit: impl FnOnce(&mut Value)) -> Vec<(String, Change, Effect)> {
         let stored = parse(&example()).unwrap();
         let given = parse(&edited(edit)).unwrap();
-        diff(&stored, &given).into_iter().map(|c| (c.path, c.change, c.effect)).collect()
+        diff(&stored, &given, &Held::default()).into_iter().map(|c| (c.path, c.change, c.effect)).collect()
     }
 
     fn one(path: &str, change: Change, effect: Effect) -> Vec<(String, Change, Effect)> {
@@ -476,6 +476,26 @@ mod changes {
         assert_eq!(
             changes(|j| j["types"]["Note"]["shortCode"] = json!({ "prefix": "NTE" })),
             one("types.Note.shortCode", Change::Added, Effect::Applied)
+        );
+    }
+
+    #[test]
+    fn a_field_added_to_a_type_allowing_any_holds_its_rows_to_its_type() {
+        let mut stored = example();
+        stored["types"]["Note"]["additionalFields"] = json!("allow");
+        let mut given = stored.clone();
+        given["types"]["Note"]["fields"]["loose"] = json!({ "type": "any", "optional": true, "nullable": true });
+        given["types"]["Note"]["fields"]["strict"] = json!({ "type": "string", "optional": true });
+        let (stored, given) = (parse(&stored).unwrap(), parse(&given).unwrap());
+        let held = Held { types: ["Note".to_owned()].into(), ..Held::default() };
+        let effects: Vec<(String, Effect)> =
+            diff(&stored, &given, &held).into_iter().map(|c| (c.path, c.effect)).collect();
+        assert_eq!(
+            effects,
+            [
+                ("types.Note.fields.loose".to_owned(), Effect::Applied),
+                ("types.Note.fields.strict".to_owned(), Effect::Enforced)
+            ]
         );
     }
 

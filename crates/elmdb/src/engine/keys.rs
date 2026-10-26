@@ -64,6 +64,11 @@ pub fn of_type(trashed: bool, entity_type: &str, seq: u64) -> Vec<u8> {
     })
 }
 
+/// Every type's live entities (`trashed` false) or trashed ones
+pub fn all_of_types(trashed: bool) -> Vec<u8> {
+    with(if trashed { Prefix::Trashed } else { Prefix::Live }, |_| {})
+}
+
 pub fn type_range(trashed: bool, entity_type: &str) -> Vec<u8> {
     with(if trashed { Prefix::Trashed } else { Prefix::Live }, |w| {
         w.string(entity_type);
