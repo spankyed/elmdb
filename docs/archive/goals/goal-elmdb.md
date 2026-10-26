@@ -59,24 +59,39 @@ replication, value compression, LMDB 1.0 (`heed3`), substring and regex search. 
 
 ## Current handoff
 
-- **The semaphore leak is fixed (D33)**: elmdb `main` has the binding's close at exit; the Mac was restarted and opens
-  work again. apack's test workers exit through `process.exit` on SIGTERM (`cee3cd229`).
-- **apack:** worktree `~/Develop/Projects/AgentBuddy-worktrees/ears-on-elmdb`, branch `session/ears-on-elmdb`,
-  committed through `b22412320` (Phase 15's packaging, the bookmark fix, the stale E2E case, the facade report). Not
-  pushed. **After the binding fix:** `npm run chain -- --e2e`. The last runs before the table filled passed every step
-  but `test:integration`: one `pack build` in `dependency-graph.integration.spec.ts` passed its 60s operation deadline
-  while `test:native` ran beside it (46s alone); the run after it failed on the full table.
-- **Then Phase 15's rest:** push apack's branch, open a draft PR, dispatch `strict_chain` and `compiler_macos` (D16);
-  `docs/evidence/phase-15.md` (drafted, uncommitted) gets their runs. Then Phase 16.
-- **Proven:** elmdb's full CI matrix passed at `2bfe5e9` (run 40202507275); the packaged preview holds elmdb as real
-  files, loads it, and boots to `connected` against isolated data (E2E smoke 5/5).
-- **Done:** Phases 0–14.
-- **Never edit `crates/elmdb-node` while an apack chain runs:** the pack compiler captures the linked package whole.
-- **Unresolved:** a pack disable under the full chain's load once ended the API silently; it did not recur. lmdb-js,
-  which the main checkout still runs, leaks System V sets the same way and collides on `ftok` keys (`EINVAL`,
-  "Attempting to setup locks"); the 905 two-semaphore sets elmdb left before `2cbcc6c` are gone (492 three- and
-  twenty-semaphore sets remain, 2026-10-25 17:58). The exit-with-parent guard still SIGKILLs an orphaned worker,
-  since vitest's `process.exit` throws during a test.
+Closed 2026-10-25: every Acceptance row is met, and Outcome below says what was built and what remains. Nothing is in
+flight. apack's branch `session/ears-on-elmdb` is pushed as draft PR #276, for the user to review and merge; elmdb's
+`main` is pushed.
+
+## Outcome
+
+**Built.** elmdb, an embedded graph database in Rust on LMDB with a Node binding, is built to its design and runs apack:
+the schema and its changes, the format and its upgrade from apack's format 4, durability with group commit, writes in
+batches and units with savepoints, reads as plans, value, text and vector indexes kept in the same transaction, derived
+data with `check()` and `rebuild()`, admin operations and the CLI, a second database for the run history, change sets
+with a commit sequence, and tracked reads. It is proven by a model harness, a crash harness, a failed-sync harness and
+binding fuzzing, in CI on macOS, Linux (glibc and musl) and Windows. apack's `@apackdev/ears` runs on it underneath an
+unchanged pack-facing API, with lmdb-js removed; packs gained text search (the threads panel's message search), vector
+and hybrid search (`embedPending` through `services.inference`; the library index ported onto it and left off, D15),
+and `engine.watch` under live-queries' contract. The packaged app ships elmdb as real files. Every phase's evidence is
+in `docs/evidence/`.
+
+**What the run changed from the plan.** The decisions table records each: the protocol cost measured before building
+(D4), the lock mode on macOS (D24) and closing what Node leaves open (D33), the manifest names (D25), text indexes over
+`any` fields (D26, D28), vector metrics (D29), one embedding model for the library (D31), watch as live-queries'
+contract (D30) and tracked reads that add to a token (D32).
+
+**Left, each the user's or a later goal's:**
+- **Merging PR #276**, and publishing elmdb (Deferred).
+- **The 17 duplicate short codes** in the user's real data, to resolve when it is converted (D12).
+- **One benchmark case past D17's +10%**: "link 10k tasks to one project, then destroy it", 813 ms against lmdb-js's
+  737 ms, because each `link` outside a unit commits a unit of its own (`docs/evidence/phase-10.md`); code linking in a
+  loop runs it in a `transact`.
+- **A SIGKILLed process still leaves its LMDB semaphores** (the exit-with-parent guard's orphan case, a spec's
+  deliberate kill); a reopen at the same path clears them, a temporary path's stay until a restart (D33).
+- **lmdb-js's System V sets** on the user's Mac, left by the main checkout, which still runs it until #276 merges.
+- **The once-seen silent API exit** after a pack disable under the full chain's load; it never recurred.
+- **Views, and the work after v1**: `goal-elmdb-next.md` and apack's live-queries branch (D30).
 
 ## Decisions
 
@@ -427,8 +442,8 @@ follow its `CLAUDE.md` (`npm run spec` while working, `npm run chain -- --no-nat
 | Text search, in elmdb and in apack (P12) | done, elmdb `c1a1cb1`; apack `a402744fb`, `ea09dbf84` | `docs/evidence/phase-12.md`; apack's whole `chain --no-native` passed cold on `d21514bdb` (elmdb `a0da984`) | none; PR #148 is reported to the user as superseded |
 | Vector and hybrid search, library port tested and off (P13) | done, elmdb `90207fd`; apack `794249720` | `docs/evidence/phase-13.md`; apack's `chain --no-native` passed on it | none |
 | Change sets, tracked reads and `engine.watch` (P14) | done, elmdb `fd0c0d7`; apack `cf810c91d` | `docs/evidence/phase-14.md`; apack's `chain --no-native` passed on it | none |
-| Platforms in elmdb's CI, packaged app, apack's full chain, draft PR, strict chain (P15) | missing | | all |
-| Docs and closure (P16) | missing | | all |
+| Platforms in elmdb's CI, packaged app, apack's full chain, draft PR, strict chain (P15) | done, elmdb `907af80`; apack `e35176874`, `63bad6b9e` | `docs/evidence/phase-15.md`; elmdb runs 40202507275, 40240131963; apack's `chain --e2e` on `6100f8d64`; PR #276; strict chain 40247866928, macOS compiler 40244728980 | none |
+| Docs and closure (P16) | done, elmdb `0062e93` and this closure; apack `55cb18256`, `16fb19661` | elmdb's `docs/architecture/` and roadmap say what was built; apack's reference guides describe the engine on elmdb; links repaired in both | none |
 
 ## Deferred
 
