@@ -131,6 +131,26 @@ pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
             }
         }
     });
+    // A code is an entity's identity, so the codes stored entities hold keep their prefix: a type declared again keeps
+    // its own, and no other type takes it, whose numbering would start again at 1
+    for (name, def) in &given.types {
+        let at = format!("types.{name}.shortCode");
+        let holds = held.short_codes.get(name);
+        if !stored.types.contains_key(name) {
+            match (holds, &def.short_code) {
+                (Some(held), Some(code)) if *held != code.prefix => {
+                    out.push(&format!("{at}.prefix"), Change::Changed, Effect::Refused)
+                }
+                (Some(_), None) => out.push(&at, Change::Removed, Effect::Refused),
+                _ => {}
+            }
+        }
+        if let Some(code) = &def.short_code
+            && held.short_codes.iter().any(|(other, prefix)| other != name && *prefix == code.prefix)
+        {
+            out.push(&format!("{at}.prefix"), Change::Added, Effect::Refused);
+        }
+    }
     // An added type's indexes are built too
     for (name, def) in &given.types {
         if !stored.types.contains_key(name) {

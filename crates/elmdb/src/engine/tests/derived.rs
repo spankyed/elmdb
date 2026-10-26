@@ -630,3 +630,27 @@ fn a_declaration_added_over_rows_it_breaks_is_enforced() {
         ]
     );
 }
+
+#[test]
+fn a_short_code_prefix_stored_codes_hold_stays_with_their_type() {
+    let schema = |types: Json| json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": types });
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = with_schema(&dir, schema(json!({ "Note": { "shortCode": { "prefix": "NTE" } } }))).unwrap();
+        write(&db, vec![json!({ "op": "create", "type": "Note" })]).unwrap();
+        db.close().unwrap();
+    }
+    // The type removed keeps its entities and their codes
+    with_schema(&dir, schema(json!({}))).unwrap().close().unwrap();
+    for (types, path) in [
+        (json!({ "Note": { "shortCode": { "prefix": "NOT" } } }), "types.Note.shortCode.prefix"),
+        (json!({ "Note": {} }), "types.Note.shortCode"),
+        (json!({ "Memo": { "shortCode": { "prefix": "NTE" } } }), "types.Memo.shortCode.prefix"),
+    ] {
+        let error = with_schema(&dir, schema(types)).err().unwrap();
+        assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{path}");
+        assert!(error.message.contains(path), "{path}: {}", error.message);
+    }
+    // Declared again as it was, it takes its codes back
+    with_schema(&dir, schema(json!({ "Note": { "shortCode": { "prefix": "NTE" } } }))).unwrap().close().unwrap();
+}

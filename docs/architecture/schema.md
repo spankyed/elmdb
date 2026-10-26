@@ -235,7 +235,7 @@ stored one.
 | An index removed | dropped |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic`, `unique` added) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
-| A short code prefix changed | refused: a code is an entity's identity |
+| A short code prefix changed, a type declared again with another prefix than its stored codes hold, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
 | Anything renamed | not inferred. `admin.renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |
 
 Rows that predate a tightened rule are reported, not rewritten: fixing them is a migration's job, which knows what the
