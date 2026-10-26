@@ -1,7 +1,7 @@
 // The engine's benchmark: loading an app-sized graph, then queries, relation walks and write batches on it.
 // Run with `npm run bench -w @apackdev/ears`, which builds the package first: it times the engine in `dist`, the build
 // that ships, since a dev loader compiles with its own options. It runs on an elmdb database in a temp directory,
-// synced as the app's is. The readings are in docs/plans/ears-storage-layout.md and elmdb's
+// synced as the app's is. The readings are in docs/archive/plans/ears-storage-layout.md and elmdb's
 // docs/evidence/phase-9.md; the tolerance is +10% median per case.
 import * as fs from 'node:fs';
 import * as os from 'node:os';

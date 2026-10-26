@@ -1,7 +1,7 @@
 // The engine's heap with the benchmark's graph loaded (50k entities, 200k attributes, 100k relations), in the
 // built engine: `npm run bench:heap -w @apackdev/ears`. It runs on an elmdb database in a temp dir, as the app does,
 // and then reads what opening that database again costs, which is the app's boot. The readings are in
-// docs/plans/ears-storage-layout.md and elmdb's docs/evidence/phase-9.md.
+// docs/archive/plans/ears-storage-layout.md and elmdb's docs/evidence/phase-9.md.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
