@@ -60,6 +60,9 @@ impl Validator<'_> {
         });
         if c != "root" && !locale {
             self.problem("collation".into(), format!("\"{c}\" is neither \"root\" nor a locale such as \"en\""), None);
+        } else if let Err(e) = crate::engine::collator(c) {
+            // The collator `orderBy` sorts with, so a collation that passes here sorts there
+            self.problem("collation".into(), e.message, None);
         }
     }
 

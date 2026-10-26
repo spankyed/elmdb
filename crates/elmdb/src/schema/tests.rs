@@ -486,6 +486,14 @@ mod changes {
 }
 
 #[test]
+fn a_collation_is_a_locale_the_collator_reads() {
+    // Each part has a subtag's shape, and "1a" is no subtag a locale has
+    assert_eq!(problems(edited(|j| j["collation"] = json!("en-1a"))), ["collation: \"en-1a\" isn't a locale"]);
+    assert_eq!(problems(edited(|j| j["collation"] = json!("de-AT"))), Vec::<String>::new());
+    assert_eq!(problems(edited(|j| j["collation"] = json!("root"))), Vec::<String>::new());
+}
+
+#[test]
 fn an_index_may_not_take_the_name_of_the_engine_s_own() {
     for name in ["role", "shortCode"] {
         let mut schema = example();

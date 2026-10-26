@@ -39,6 +39,7 @@ use crate::schema::Schema;
 use crate::store::Store;
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
+pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
 /// A value's msgpack bytes
