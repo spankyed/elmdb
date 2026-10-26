@@ -64,12 +64,16 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
     API can't finish shows the API's own error (`4fd8c17d4`); a pack toggle on a busy pack waits for its teardown or
     is refused out loud (`272c7b3d9`); the external-pack E2E waits for installs' and toggles' outcomes, not clocks.
     `npm run chain -- --no-native` passed on `dacf05e33` (2026-10-26).
-- **Phase 3 next**, on G7's branch, which isn't cut yet.
+- **Phase 3 next.** G7's branches are cut, both from their default branch's tip and pushed: apack's `session/elmdb-next`
+  at `fc2586112`, in `~/Develop/Projects/AgentBuddy-worktrees.noindex/elmdb-next` (dependencies installed, elmdb
+  linked, packages built), and elmdb's `session/elmdb-next` at `f7bc8a5`, in elmdb's own checkout. apack's PR is
+  opened with its first checkpoint.
 - **Databases:** the development machine's elmdb and lmdb-js databases (the development profile and every
   `apack-cli` profile) were wiped on 2026-10-26, so each next open makes a format 1 database; the installed app's
   data is the user's to convert, after a release.
 - **Data:** G8's dump was made on 2026-10-26 from the backup, through the lmdb-js move path, which was then deleted:
-  `~/Develop/backups/abuddy-backups/elmdb-dumps/`, its README beside it. No phase's copy has been loaded from it yet.
+  `~/Develop/backups/abuddy-backups/elmdb-dumps/`, its README beside it. A copy is loaded at
+  `~/Develop/elmdb-next-scratch/prod` (22,816 entities, 45,798 relations, at elmdb `f7bc8a5`).
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
   row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
@@ -91,8 +95,8 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | G3 | The format is 1 until a release has users: a change to stored data's layout edits format 1 in place, with no bump and no upgrade step, and a change to derived data (a text or trigram index) needs nothing, `rebuild()` building it. Our databases are reset or converted once on a copy, never at boot. From the first release with users, format 1 is locked and each later change bumps it with its upgrade step (`docs/architecture/format.md`, Versions; apack's `docs/archive/plans/storage-format-one.md`) | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
-| G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's work on G7's branch, pushed at each checkpoint, under the one PR opened for it against `master`, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
-| G7 | **One branch for the rest.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in a new worktree (`npm run session:new -- elmdb-next`), under one PR against `master`. `master`'s later commits come in by merging `master` | the user, 2026-10-25 and 2026-10-26 |
+| G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's work on G7's elmdb branch, pushed at each checkpoint, apack's work on G7's branch, pushed at each checkpoint, under the one PR opened for it against `master`, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
+| G7 | **One branch for the rest, in each repository.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in a new worktree (`npm run session:new -- elmdb-next`), under one PR against `master`; `master`'s later commits come in by merging `master`. elmdb's is on `session/elmdb-next` cut from `main`, in elmdb's own checkout: no elmdb worktree, since each holds a cold `target/` of up to 11 GB. Every apack checkout links that one checkout (`vendor/elmdb`), so its binding is rebuilt only between runs, never under a chain or an app run. apack's pin names commits on elmdb's branch, which is merged into `main` (fast-forward, so the pinned commits keep their hashes) before apack's PR lands | the user, 2026-10-25 and 2026-10-26 |
 | G8 | **Production-shaped data** is loaded from the dump of the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/elmdb-dumps/agentbuddy-backup-2026-10-17T23-06-18-232Z.elmdb-dump`) by `elmdb load`, into a scratch directory outside both repositories, and is never committed; the dump and the backup are only read. It holds the backup's data in its own contract, with no schema (the README beside it). What a phase's schema refuses on its copy (the 17 duplicate short codes `docs/evidence/phase-7.md` found) is resolved on the copy and recorded | the dump's README; `format.md`, Dumps |
 | G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 3 measures flow runs and records why the chat turn is missing | this goal |
 | G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
@@ -247,7 +251,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
-| One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990; `drive/message-search.ts`, `drive/notes-view.ts` | |
+| One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
 | A user action's calls to elmdb, and its loops fixed (P3) | missing | | all |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
