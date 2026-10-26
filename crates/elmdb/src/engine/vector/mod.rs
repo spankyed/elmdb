@@ -630,7 +630,9 @@ fn check_vector(what: &str, index: &VectorIndex, vector: &[f32]) -> Result<()> {
 }
 
 /// The nearest chunks to `vector` in an index's graph, among `among`'s items when given, best `k` entities first, each
-/// once with its nearest chunk's distance
+/// once with its nearest chunk's distance; and whether the graph held nothing more to ask for, which it did not when it
+/// answered fewer items than it was asked for. Several chunks of one entity collapse into one answer, so fewer than `k`
+/// entities does not by itself say the graph is exhausted
 pub fn nearest(
     r: &impl Read,
     entity_type: &str,
@@ -638,7 +640,7 @@ pub fn nearest(
     vector: &[f32],
     k: usize,
     among: Option<&RoaringBitmap>,
-) -> Result<Vec<(String, f32)>> {
+) -> Result<(Vec<(String, f32)>, bool)> {
     if vector.len() != index.dims {
         return Err(Error::new(
             ErrorCode::ValueInvalid,
@@ -656,16 +658,16 @@ pub fn nearest(
     // writes in place
     r.note(&keys::vector_index_range(Prefix::VectorItem, entity_type, &index.name));
     r.note(&keys::vector_index_range(Prefix::Vector, entity_type, &index.name));
-    let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok(Vec::new()) };
+    let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok((Vec::new(), true)) };
     let (txn, db) = r.raw();
     // Several chunks of one entity may come first: asking for more items than entities finds the k entities
     let wanted = (k * 4).max(16);
     macro_rules! search {
         ($db:expr, $d:ty) => {{
-            let Some(db) = $db else { return Ok(Vec::new()) };
+            let Some(db) = $db else { return Ok((Vec::new(), true)) };
             let reader = match Reader::<$d>::open(txn, number, db) {
                 Ok(reader) => reader,
-                Err(hannoy::Error::MissingMetadata(_)) => return Ok(Vec::new()),
+                Err(hannoy::Error::MissingMetadata(_)) => return Ok((Vec::new(), true)),
                 Err(e) => return Err(graph_error(e)),
             };
             let mut query = reader.nns(wanted);
@@ -680,6 +682,9 @@ pub fn nearest(
         Metric::L2 => search!(db.euclidean, Euclidean),
         _ => search!(db.cosine, Cosine),
     };
+    // The graph held nothing past what it answered when it answered fewer items than asked, and only then is the
+    // answer the last there is: unless `k` entities were found first, which leaves what it answered after unread
+    let exhausted = found.len() < wanted;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (item, distance) in found {
@@ -691,11 +696,11 @@ pub fn nearest(
         if seen.insert(id.to_owned()) {
             out.push((id.to_owned(), distance));
             if out.len() == k {
-                break;
+                return Ok((out, false));
             }
         }
     }
-    Ok(out)
+    Ok((out, exhausted))
 }
 
 /// The items of an index's graph that are chunks of these entities

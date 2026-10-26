@@ -780,8 +780,8 @@ impl<R: Read> Query<'_, R> {
             // and asked again for more while what it gave was not enough and it held more
             let mut ask = k + 8;
             loop {
-                let nearest = super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
-                let exhausted = nearest.len() < ask;
+                let (nearest, exhausted) =
+                    super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
                 let mut admitted = Vec::new();
                 for (id, distance) in nearest {
                     self.visited.set(self.visited.get() + 1);

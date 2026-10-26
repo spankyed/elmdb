@@ -365,6 +365,28 @@ fn near_answers_k_live_entities_when_trashed_ones_sit_closer() {
 }
 
 #[test]
+fn near_asks_again_when_one_trashed_entity_s_chunks_fill_what_the_graph_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // One entity of 60 paragraphs, every one nearer the query than either live entity: the first answers the graph
+    // gives are all its chunks, which collapse to one entity, and the graph still holds more
+    let body = vec!["a cat"; 60].join("\n\n");
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Doc", "id": "Doc-many", "fields": { "body": body } }),
+            json!({ "op": "create", "type": "Doc", "id": "Doc-far1", "fields": { "title": "sea" } }),
+            json!({ "op": "create", "type": "Doc", "id": "Doc-far2", "fields": { "title": "car" } }),
+        ],
+    )
+    .unwrap();
+    embed_pending(&db, topic);
+    write(&db, vec![json!({ "op": "trash", "id": "Doc-many" })]).unwrap();
+    let found = ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 2 }]));
+    assert_eq!(found.as_array().unwrap().len(), 2, "{found}");
+}
+
+#[test]
 fn an_embedding_of_an_entity_destroyed_since_is_stale_and_the_rest_of_its_batch_is_stored() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
