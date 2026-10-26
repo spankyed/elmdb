@@ -39,7 +39,8 @@ later goal can build them.
 
 1. elmdb v1: `goal-elmdb.md` met and closed.
 2. One apack branch: elmdb's branch with live-queries merged into it, reconciled and validated, with its PR.
-3. A reading of what apack's user actions cost in calls to elmdb, and the loops it finds turned into set reads.
+3. A reading of what apack's user actions cost in calls to elmdb, and the loops it finds turned into set reads; and
+   watches bounded under any write rate (G14).
 4. The planner's three fixes and EXPLAIN.
 5. Field types from apack's shapes.
 6. Text postings in blocks, built if a reading calls for it.
@@ -103,6 +104,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
 | G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data is the user's step | this goal |
 | G13 | **Live queries stay their session's work.** apack's live queries (views, `useView`, the features moved onto them; the plan is archived at `docs/archive/plans/live-queries.md`) landed on `master` with #277 and #278. This goal changes them only where its own work makes it, and later changes to them reach G7's branch by merging `master`. What this goal changes beneath them keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing | `goal-elmdb.md`'s D30; G7 |
+| G14 | **Watches are bounded by the scheduler, not by writers.** Live queries decided on no minimum re-run interval because the busiest writer it knew, the stream writer, throttles itself to 80 ms (`docs/archive/plans/live-queries.md`, Risks). Nothing holds other writers to that: a flow, an import or a pack can commit on separate turns as fast as it runs, and each such commit re-runs every watch whose read set it touched, in the process that runs chats and flows. So the bound is the watch scheduler's (`createWatches`, `packages/apack-ears/src/watch.ts`), the one place every re-run passes, and holds for any writer: a watch converges (the last commit's result is always delivered), is stale by at most a bounded delay, costs at most a bounded share of the process, and doesn't starve another. Supersedes live queries' decision | the user, 2026-10-26 |
 
 ## Phases
 
@@ -151,17 +153,29 @@ Final unless marked open. Each cites the document that owns it; change the owner
   - A count of a user action's calls to elmdb, in development only: reads, writes outside a unit, units and their
     writes, and the time spent in each, by call site. Kept at the one place every call crosses
     (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:eval`.
-  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`. Views are on
-    `master`, so a reading counts their re-runs too: a streamed message is rewritten every 80 ms, and each view whose
-    read set holds it runs again. Live queries decided on no minimum re-run interval from an lmdb-js-era reading
-    (`docs/archive/plans/live-queries.md`, Risks); this is its reading on elmdb, which reopens that decision if a view's
-    re-run takes longer than its writer's interval.
+  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`, each counting
+    the views' re-runs too: a write re-runs every view whose read set it touched.
+  - **Watches bounded under any write rate (G14)**, in `createWatches` and nowhere a view or a writer has to opt in:
+    - **Latest wins:** a watch has at most one run pending; commits arriving meanwhile mark it dirty, and intermediate
+      states are skipped.
+    - **Cost-proportional delay:** a watch that just ran waits a gap proportional to its last run's time before running
+      again, so a cheap watch stays immediate and an expensive one backs off.
+    - **A budget per flush:** a flush spends at most a fixed slice on re-runs, and the watches left run next, in turn.
+    - **Visible:** per watch, runs a second, time a run and commits skipped, in the count above; and a development
+      warning naming a watch that keeps exceeding its budget.
+    - The two constants (the delay's factor, the flush's slice) set by a stress reading: a writer committing on separate
+      turns as fast as it runs into a hot table, with cheap and expensive views open over it (the indexed `where` with a
+      `limit` among them), recording re-runs a second, the share of a core, event-loop lag and how late a window hears.
   - Each loop of one-entity reads or unit-less writes the readings show costing a measurable share of its action,
     turned into a set read (`query.ids(list)`, `pickAll`) or grouped (`transact`, `setMany`) where it is.
 - **Dependencies:** Phase 2.
 - **Done when:**
   - Both readings, before and after the fixes, are recorded with date and conditions.
   - The count's spec shows it counting a read, a write and a unit, and nothing when off.
+  - Specs on a fake clock show G14's guarantees: a thousand commits on separate turns cost a bounded number of re-runs
+    and deliver the last result; an expensive watch doesn't delay a cheap one; a watch idle when a commit lands runs at
+    once. The model harness's watch property shows each watch's last delivered value equal to a fresh read.
+  - The stress reading is recorded before and after the scheduler, with the constants it set.
 
 ### Phase 4: the planner's three fixes, and EXPLAIN
 
@@ -252,7 +266,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
-| A user action's calls to elmdb, and its loops fixed (P3) | missing | | all |
+| A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | missing | | all |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
 | Text postings in blocks, gated (P6) | missing | | all |
