@@ -123,7 +123,7 @@ fn refuses_another_programs_lmdb_files() {
 }
 
 #[test]
-fn refuses_a_file_in_another_lmdb_data_version_naming_the_export() {
+fn refuses_a_file_in_another_lmdb_data_version_naming_lmdb_js() {
     let dir = tempfile::tempdir().unwrap();
     Store::open(dir.path(), quiet()).unwrap().close().unwrap();
     // LMDB's two meta pages each hold the data version after the magic; lmdb-js writes 2 there
@@ -141,7 +141,7 @@ fn refuses_a_file_in_another_lmdb_data_version_naming_the_export() {
     std::fs::write(&data, bytes).unwrap();
     let error = Store::open(dir.path(), quiet()).err().unwrap();
     assert_eq!(error.code, ErrorCode::NotADatabase);
-    assert!(error.message.contains("tools/lmdb-js-export"), "{}", error.message);
+    assert!(error.message.contains("lmdb-js"), "{}", error.message);
 }
 
 #[test]

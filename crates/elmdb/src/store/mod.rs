@@ -169,8 +169,8 @@ impl Store {
             heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
                 ErrorCode::NotADatabase,
                 format!(
-                    "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version; \
-                     export them with elmdb's tools/lmdb-js-export",
+                    "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version, \
+                     which elmdb doesn't read; re-create the database with elmdb",
                     data.display()
                 ),
             ),
