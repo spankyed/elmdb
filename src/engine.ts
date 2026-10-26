@@ -4,7 +4,7 @@
 // engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
 import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge } from './runtime.ts';
-import { createConnection, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
+import { createConnection, runCommitted, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
@@ -298,13 +298,11 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
   const admin: EarsAdmin = {
     clear() {
       outsideUnit('clear()');
-      database.reset();
-      connection.committedEverything();
+      runCommitted(() => database.reset(), () => connection.committedEverything());
     },
     replaceWith(source) {
       outsideUnit('replaceWith()');
-      database.replaceWith(source);
-      connection.committedEverything();
+      runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
     },
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
@@ -345,17 +343,17 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     },
     setSchema(schema) {
       outsideUnit('setSchema()');
-      const changes = database.setSchema(toElmdbSchema(schema));
-      declared = declaredNames(database.schema);
-      connection.committedEverything();
-      return changes;
+      return runCommitted(() => database.setSchema(toElmdbSchema(schema)), () => {
+        declared = declaredNames(database.schema);
+        connection.committedEverything();
+      });
     },
     declare(schema) {
       outsideUnit('declare()');
-      const changes = database.setSchema(withDeclarations(database.schema, toElmdbSchema(schema)));
-      declared = declaredNames(database.schema);
-      connection.committedEverything();
-      return changes;
+      return runCommitted(() => database.setSchema(withDeclarations(database.schema, toElmdbSchema(schema))), () => {
+        declared = declaredNames(database.schema);
+        connection.committedEverything();
+      });
     },
     watchesSettled: watches.settled,
     watchStats: watches.stats,

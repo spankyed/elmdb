@@ -139,6 +139,10 @@ Held by the types and the engine specs, which say more than a rule over names co
   syncs on group commit, so a commit is on disk within a second; `durable()` resolves once every unit committed before
   it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/architecture/engine.md`, Durability). `syncs:
   false` turns syncing off, for a temporary database a crash can't matter to.
+- **`NOT_DURABLE` means committed.** A durable unit or admin/schema operation whose sync fails leaves its committed
+  data in place. The connection notifies views and refreshes schema declarations before rethrowing this code. A caller
+  must not retry it as an uncommitted refusal; `lastCommit()` reports the current sequence without parsing an error
+  message. A failure before commit leaves data/declarations unchanged and emits no commit notification.
 - **A backup is elmdb's compacted copy** (`backup`), and a restore its `replaceWith`, the database staying open: both
   run through `@apackdev/host/backup`'s `databaseBackupStore`. `DATABASE_FORMAT` (`elmdb/1`) is what a backup records
   of where its files came from; opening them is what decides whether they are readable. The format stays 1, changed in

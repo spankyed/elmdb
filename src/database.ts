@@ -166,6 +166,20 @@ export function crossing<T>(fn: () => T): T {
   }
 }
 
+/** Runs an operation and reports its committed state before returning or rethrowing a failed sync. A refusal
+ * before commit does not call `notify`. Notification failures are outside the operation's catch. */
+export function runCommitted<T>(operation: () => T, notify: () => void): T {
+  let result: T;
+  try {
+    result = operation();
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === 'NOT_DURABLE') notify();
+    throw error;
+  }
+  notify();
+  return result;
+}
+
 /** One batch operation, as elmdb's protocol takes it (`elmdb/protocol/Op.ts`) */
 export type Op = { op: string } & Record<string, unknown>;
 /** One answer of a batch */
@@ -313,8 +327,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       return written.results;
     },
     load(loads) {
-      crossing(() => database.bulkLoad(pack(loads)));
-      committed({ sequence: database.sequence, touched: 'all' });
+      runCommitted(
+        () => crossing(() => database.bulkLoad(pack(loads))),
+        () => committed({ sequence: database.sequence, touched: 'all' }),
+      );
     },
     transact,
     get inUnit() { return levels.length > 0; },
