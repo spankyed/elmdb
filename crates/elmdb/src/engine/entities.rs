@@ -218,8 +218,109 @@ pub fn entries_of(fields: &[Option<Value>]) -> Vec<Vec<Part>> {
     vec![tuple]
 }
 
+/// What a unique index holds an entity to, given each of the index's fields' values: what `entries_of` files, as values,
+/// and with it what the index can't file (a string past `MAX_INDEXED_STRING`, a map, a timestamp), which only a walk of
+/// the type's rows finds. A single field's value or each element of its list; a compound index's fields together, when
+/// each is present and none is a list
+fn unique_keys(fields: &[Option<Value>]) -> Vec<Vec<Value>> {
+    let mut keys: Vec<Vec<Value>> = Vec::new();
+    let mut push = |key: Vec<Value>| {
+        if !keys.iter().any(|k| same_key(k, &key)) {
+            keys.push(key);
+        }
+    };
+    match fields {
+        [None] => {}
+        [Some(Value::Array(items))] => items.iter().for_each(|v| push(vec![v.clone()])),
+        [Some(v)] => push(vec![v.clone()]),
+        _ => {
+            let tuple: Option<Vec<Value>> =
+                fields.iter().map(|v| v.clone().filter(|v| !matches!(v, Value::Array(_)))).collect();
+            if let Some(tuple) = tuple {
+                push(tuple);
+            }
+        }
+    }
+    keys
+}
+
+fn same_key(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
+}
+
+/// The other entity of the type, live or trashed, that a walk of its rows finds holding one of `wanted` in `index`
+fn holder_by_walk(
+    t: &impl Read,
+    entity_type: &str,
+    index: &ValueIndex,
+    id: &str,
+    wanted: &[Vec<Value>],
+) -> Result<Option<String>> {
+    for trashed in [false, true] {
+        for (_, other) in t.scan(&keys::type_range(trashed, entity_type))? {
+            let other = values::decode(&other)?.as_str().unwrap_or_default().to_owned();
+            if other == id {
+                continue;
+            }
+            let fields: Vec<Option<Value>> = index.fields.iter().map(|f| get(t, &other, f)).collect::<Result<_>>()?;
+            if unique_keys(&fields).iter().any(|k| wanted.iter().any(|w| same_key(k, w))) {
+                return Ok(Some(other));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Refuses values of a unique index that another entity of the type holds: read from the index when it is built and
+/// can hold them, and otherwise found by walking the type's rows, so the index is unique from the moment it is
+/// declared and for values it can't file
+fn check_unique(
+    t: &Txn<'_, '_>,
+    entity_type: &str,
+    index: &ValueIndex,
+    id: &str,
+    before: &[Option<Value>],
+    after: &[Option<Value>],
+) -> Result<()> {
+    let was = unique_keys(before);
+    let fresh: Vec<Vec<Value>> =
+        unique_keys(after).into_iter().filter(|k| !was.iter().any(|w| same_key(w, k))).collect();
+    if fresh.is_empty() {
+        return Ok(());
+    }
+    let built = super::derive::is_built(t, entity_type, &index.name)?;
+    let mut walk = Vec::new();
+    let mut holder = None;
+    for key in fresh {
+        let parts: Option<Vec<Part>> = key.iter().map(values::index_part).collect();
+        match parts.filter(|_| built) {
+            Some(parts) => {
+                t.visit(&keys::index_range(entity_type, &index.name, &parts), |_, held| {
+                    holder = values::decode(held).ok().and_then(|v| v.as_str().map(str::to_owned));
+                    holder.as_deref() == Some(id)
+                })?;
+                holder = holder.filter(|h| h != id);
+                if holder.is_some() {
+                    break;
+                }
+            }
+            None => walk.push(key),
+        }
+    }
+    if holder.is_none() && !walk.is_empty() {
+        holder = holder_by_walk(t, entity_type, index, id, &walk)?;
+    }
+    let Some(holder) = holder else { return Ok(()) };
+    let (code, what) = if index.name == SHORT_CODE_INDEX {
+        (ErrorCode::ShortCodeInUse, "short code".to_owned())
+    } else {
+        (ErrorCode::Unique, format!("unique index {entity_type}.{}", index.name))
+    };
+    Err(Error::new(code, format!("{holder} already holds this value of the {what}, so {id} can't")))
+}
+
 /// Refiles the entity in each of its type's value indexes that covers `field`, as its value goes from `before` to
-/// `after`, refusing an entry a unique index holds for another entity (`UNIQUE`, `SHORT_CODE_IN_USE`)
+/// `after`, refusing a value a unique index holds for another entity (`UNIQUE`, `SHORT_CODE_IN_USE`)
 fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, after: Option<&Value>) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     let indexes: Vec<ValueIndex> =
@@ -241,30 +342,15 @@ fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, a
                 values_after.push(other);
             }
         }
+        if index.unique && !t.state.unchecked {
+            check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
+        }
         let was = entries_of(&values_before);
         let now = entries_of(&values_after);
         for parts in was.iter().filter(|p| !now.contains(p)) {
             t.del(&keys::index_entry(&entity_type, &index.name, parts, seq))?;
         }
         for parts in now.iter().filter(|p| !was.contains(p)) {
-            if index.unique && !t.state.unchecked {
-                let mut taken = None;
-                t.visit(&keys::index_range(&entity_type, &index.name, parts), |_, holder| {
-                    taken = values::decode(holder).ok().and_then(|v| v.as_str().map(str::to_owned));
-                    taken.as_deref() == Some(id)
-                })?;
-                if let Some(holder) = taken.filter(|h| h != id) {
-                    let (code, what) = if index.name == SHORT_CODE_INDEX {
-                        (ErrorCode::ShortCodeInUse, "short code".to_owned())
-                    } else {
-                        (ErrorCode::Unique, format!("unique index {}.{}", entity_type, index.name))
-                    };
-                    return Err(Error::new(
-                        code,
-                        format!("{holder} already holds this value of the {what}, so {id} can't"),
-                    ));
-                }
-            }
             let key = keys::index_entry(&entity_type, &index.name, parts, seq);
             if key.len() > values::MAX_KEY_BYTES {
                 return Err(Error::new(

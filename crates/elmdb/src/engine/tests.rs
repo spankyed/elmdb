@@ -799,6 +799,42 @@ fn a_unique_index_refuses_a_second_entity_with_its_value() {
 }
 
 #[test]
+fn a_unique_index_refuses_a_value_it_cant_hold_that_another_entity_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut schema = serde_json::to_value(schema()).unwrap();
+    schema["types"]["Task"]["indexes"]["uniqueA"] = json!({ "kind": "value", "fields": ["a"], "unique": true });
+    let db = Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(Schema::from_json(&schema).unwrap()), syncs: false, ..Default::default() },
+    )
+    .unwrap();
+    // A string past what an index holds, and a map, which no index holds: found by walking the type's rows
+    let long = "x".repeat(300);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "slug": long } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2", "fields": { "a": { "k": 1 } } }),
+        ],
+    )
+    .unwrap();
+    let e = refused(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "slug": long } })]);
+    assert_eq!(e.code, ErrorCode::Unique, "{}", e.message);
+    assert!(e.message.contains("Task-1"), "{}", e.message);
+    let e = refused(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "a": { "k": 1 } } })]);
+    assert_eq!(e.code, ErrorCode::Unique, "{}", e.message);
+    // Another such value, and the holder writing its own again, are allowed
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "fields": { "slug": format!("{long}y"), "a": { "k": 2 } } }),
+            json!({ "op": "set", "id": "Task-2", "fields": { "a": { "k": 1 } } }),
+        ],
+    )
+    .unwrap();
+}
+
+#[test]
 fn a_change_set_says_what_a_commit_changed() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

@@ -199,6 +199,38 @@ fn a_changed_index_is_rebuilt_and_a_removed_one_dropped() {
 }
 
 #[test]
+fn a_unique_index_is_enforced_while_it_is_still_being_built() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+        let ops: Vec<Json> = (0..20_000)
+            .map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i:05}"), "fields": { "kind": format!("k{i}") } }))
+            .collect();
+        write(&db, ops).unwrap();
+        db.close().unwrap();
+    }
+    let db = with_schema(
+        &dir,
+        notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } })),
+    )
+    .unwrap();
+    // The unit holds the build off, so the last entity's value is in no entry yet
+    let mut unit = db.begin().unwrap();
+    assert!(!db.index_status().unwrap().iter().any(|s| s.index == "one" && s.built));
+    let e = unit
+        .write(&super::batch(vec![json!({ "op": "create", "type": "Note", "fields": { "kind": "k19999" } })]))
+        .unwrap_err();
+    assert_eq!(e.code, ErrorCode::Unique, "{}", e.message);
+    assert!(e.message.contains("Note-19999"), "{}", e.message);
+    unit.write(&super::batch(vec![json!({ "op": "create", "type": "Note", "fields": { "kind": "new" } })])).unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let one = db.index_status().unwrap().into_iter().find(|s| s.index == "one").unwrap();
+    assert!(one.built, "{one:?}");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn a_unique_index_over_rows_holding_the_same_values_isnt_built_and_says_why() {
     let dir = tempfile::tempdir().unwrap();
     {
