@@ -369,3 +369,63 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
     assert!(status.success(), "the child's write failed");
     assert_eq!(get(&store, "a").as_deref(), Some(&b"2"[..]));
 }
+
+#[test]
+fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    put(&store, "a", b"1").unwrap();
+    let (txn, gate) = store.begin().unwrap();
+    let grower = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || store.grow())
+    };
+    // The growth waits for the unit's hold on the gate
+    std::thread::sleep(Duration::from_millis(100));
+    let (sent, read) = std::sync::mpsc::channel();
+    {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || sent.send(get(&store, "a")).unwrap());
+    }
+    let value = read.recv_timeout(Duration::from_secs(5)).expect("a read ran while a growth waited for the unit");
+    assert_eq!(value.as_deref(), Some(&b"1"[..]));
+    txn.abort();
+    drop(gate);
+    store.end_unit();
+    grower.join().unwrap().unwrap();
+}
+
+#[test]
+fn a_backup_replaces_an_earlier_one_and_refuses_a_database_open_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let backup = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    store.copy_to(backup.path()).unwrap();
+    put(&store, "a", b"2").unwrap();
+    store.copy_to(backup.path()).unwrap();
+    let files: Vec<_> = std::fs::read_dir(backup.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(files, ["data.mdb"]);
+    let copy = Store::open(backup.path(), quiet()).unwrap();
+    assert_eq!(get(&copy, "a").as_deref(), Some(&b"2"[..]));
+
+    for target in [dir.path(), backup.path()] {
+        assert_eq!(store.copy_to(target).unwrap_err().code, ErrorCode::AlreadyOpen);
+    }
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"2"[..]));
+    assert_eq!(get(&copy, "a").as_deref(), Some(&b"2"[..]));
+}
+
+#[test]
+fn a_close_returns_though_a_wait_for_durability_is_still_held() {
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let durable = store.durable().expect("the store syncs");
+    let (sent, closed) = std::sync::mpsc::channel();
+    std::thread::spawn(move || sent.send(store.close()).unwrap());
+    closed.recv_timeout(Duration::from_secs(5)).expect("the close returned").unwrap();
+    durable.wait().unwrap();
+}

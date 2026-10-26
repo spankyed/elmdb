@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use heed::RwTxn;
-use parking_lot::RawRwLock;
+use parking_lot::RawRwLockRecursive;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 
 use crate::database::Database;
@@ -438,7 +438,7 @@ pub struct Unit {
     /// Why the unit can't commit: LMDB can't go on with a transaction a write filled the map in
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
-    gate: Option<ArcRwLockReadGuard<RawRwLock, ()>>,
+    gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
     schema: Arc<Schema>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,

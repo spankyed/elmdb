@@ -158,6 +158,7 @@ impl From<heed::Error> for Error {
         use heed::MdbError;
         let code = match &error {
             heed::Error::Io(_) => ErrorCode::Io,
+            heed::Error::EnvAlreadyOpened => ErrorCode::AlreadyOpen,
             heed::Error::Mdb(MdbError::MapFull) => ErrorCode::MapFull,
             heed::Error::Mdb(MdbError::ReadersFull) => ErrorCode::ReadersFull,
             heed::Error::Mdb(MdbError::Corrupted | MdbError::PageNotFound | MdbError::Invalid) => ErrorCode::Corrupted,

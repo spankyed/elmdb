@@ -1,7 +1,10 @@
 //! Group commit (`docs/architecture/engine.md`, Durability): a unit commits without a sync, and a worker thread syncs once writes
 //! pause for the idle time, and at the latest the cap after the first unsynced commit, so a steady stream of writes
-//! can't hold a sync off. `durable()` waits for a sync that began after the last commit, and fails when that sync does,
-//! leaving its commits owed.
+//! can't hold a sync off. `durable()` waits for a sync that began after the last commit, and fails when that sync does.
+//!
+//! A failed sync is final for the open database: an OS may mark the pages it couldn't write clean and drop them, so a
+//! later sync that succeeds proves nothing about them, and every later commit is built on them. Every wait after a
+//! failure fails with it, until the database is reopened.
 //!
 //! When a sync is due is `Policy`'s, a pure function of the instants it is told; the clock and the flush are behind
 //! `Clock` and `Syncer`, so a test drives both.
@@ -90,12 +93,15 @@ struct State {
     closing: bool,
     /// Attempts that ran, failed ones included
     syncs: u64,
+    /// The first sync that failed, which every wait after it fails with
+    failed: Option<Error>,
 }
 
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
-    syncer: Box<dyn Syncer>,
+    /// Taken out when the worker stops, so a `Durable` outliving its database holds nothing of the environment
+    syncer: Mutex<Option<Box<dyn Syncer>>>,
     clock: Box<dyn Clock>,
 }
 
@@ -115,6 +121,8 @@ pub struct GroupCommit {
 pub struct Durable {
     shared: Option<Arc<Shared>>,
     id: u64,
+    /// The outcome of a wait settled before it began: an earlier sync's failure
+    settled: Option<Error>,
 }
 
 impl GroupCommit {
@@ -131,9 +139,10 @@ impl GroupCommit {
                 policy,
                 closing: false,
                 syncs: 0,
+                failed: None,
             }),
             changed: Condvar::new(),
-            syncer,
+            syncer: Mutex::new(Some(syncer)),
             clock,
         });
         let worker = {
@@ -158,6 +167,9 @@ impl GroupCommit {
     /// Waits for every unit committed before the call to be on disk; see the module's comment
     pub fn durable(&self) -> Durable {
         let mut state = self.shared.lock();
+        if let Some(failed) = &state.failed {
+            return Durable::failed(failed);
+        }
         let target = state.committed;
         if state.synced >= target {
             return Durable::resolved();
@@ -177,7 +189,7 @@ impl GroupCommit {
         };
         state.waiting.entry(id).or_insert((0, None)).0 += 1;
         self.shared.changed.notify_all();
-        Durable { shared: Some(Arc::clone(&self.shared)), id }
+        Durable { shared: Some(Arc::clone(&self.shared)), id, settled: None }
     }
 
     /// Attempts that ran, failed ones included
@@ -200,6 +212,7 @@ impl GroupCommit {
         if let Some(worker) = self.worker.take() {
             worker.join().expect("the sync thread doesn't panic");
         }
+        self.shared.syncer.lock().expect("the syncer's lock is never poisoned").take();
         result
     }
 }
@@ -216,12 +229,17 @@ impl Drop for GroupCommit {
 impl Durable {
     /// A wait with nothing to wait for
     pub fn resolved() -> Self {
-        Self { shared: None, id: 0 }
+        Self { shared: None, id: 0, settled: None }
+    }
+
+    /// A wait that fails with an earlier sync's failure
+    fn failed(earlier: &Error) -> Self {
+        Self { shared: None, id: 0, settled: Some(after_failure(earlier)) }
     }
 
     /// Blocks until the sync this waits on ends, and gives its outcome
     pub fn wait(mut self) -> Result<()> {
-        let Some(shared) = self.shared.take() else { return Ok(()) };
+        let Some(shared) = self.shared.take() else { return self.settled.take().map_or(Ok(()), Err) };
         let mut state = shared.lock();
         while state.finished_through < self.id {
             state = shared.changed.wait(state).expect("the sync state's lock is never poisoned");
@@ -231,7 +249,7 @@ impl Durable {
 
     /// The outcome if the sync has ended, without blocking or giving up the wait
     pub fn try_result(&self) -> Option<Result<()>> {
-        let Some(shared) = &self.shared else { return Some(Ok(())) };
+        let Some(shared) = &self.shared else { return Some(self.settled.clone().map_or(Ok(()), Err)) };
         let state = shared.lock();
         (state.finished_through >= self.id)
             .then(|| state.waiting.get(&self.id).and_then(|(_, r)| r.clone()).unwrap_or(Ok(())))
@@ -245,6 +263,17 @@ impl Drop for Durable {
             let _ = release(&mut shared.lock(), self.id);
         }
     }
+}
+
+/// What a wait after a failed sync fails with
+fn after_failure(earlier: &Error) -> Error {
+    Error::new(
+        earlier.code,
+        format!(
+            "An earlier sync failed, so nothing committed since is known to be on disk until the database is reopened: {}",
+            earlier.message
+        ),
+    )
 }
 
 /// One waiter's outcome of attempt `id`, forgetting the attempt once its last waiter has gone
@@ -288,19 +317,25 @@ fn run(shared: &Shared) {
                 };
             }
         };
-        let outcome = shared.syncer.sync();
+        let outcome = match &*shared.syncer.lock().expect("the syncer's lock is never poisoned") {
+            Some(syncer) => syncer.sync(),
+            None => Ok(()),
+        };
         let mut state = shared.lock();
         state.running = None;
         state.finished_through = attempt.id;
         state.syncs += 1;
-        if outcome.is_ok() {
-            state.synced = state.synced.max(attempt.mark);
-        } else if state.committed > state.synced {
-            // What it owed is still owed: the timers start again, so a later sync retries it without waiting for
-            // the next commit
-            let now = shared.clock.now();
-            state.policy.on_commit(now);
-        }
+        let outcome = match (outcome, &state.failed) {
+            (Ok(()), None) => {
+                state.synced = state.synced.max(attempt.mark);
+                Ok(())
+            }
+            (Ok(()), Some(failed)) => Err(after_failure(failed)),
+            (Err(e), _) => {
+                state.failed.get_or_insert_with(|| e.clone());
+                Err(e)
+            }
+        };
         if let Some((_, slot)) = state.waiting.get_mut(&attempt.id) {
             *slot = Some(outcome);
         }

@@ -3,7 +3,8 @@
 //!
 //! Every transaction holds `gate` for reading, and growing the map holds it for writing, since LMDB grows a map only
 //! while its process has no transaction open. So `read` and `write` never call each other: a write reads through its
-//! own transaction.
+//! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
+//! never waits on a growth that waits on the unit.
 
 pub mod sync;
 
@@ -16,7 +17,7 @@ use std::time::Duration;
 use heed::types::Bytes;
 use heed::{CommitOrAbort, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use parking_lot::lock_api::ArcRwLockReadGuard;
-use parking_lot::{RawRwLock, RwLock, RwLockReadGuard};
+use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
@@ -84,7 +85,7 @@ pub struct Store {
     read_only: bool,
     env: Env<WithoutTls>,
     db: Db,
-    gate: Arc<RwLock<()>>,
+    gate: Arc<RecursiveRwLock<()>>,
     commit: Option<GroupCommit>,
     /// Whether a unit is open, holding the environment's one write transaction, and the signal that one ended
     unit: Mutex<bool>,
@@ -195,7 +196,7 @@ impl Store {
             read_only: options.read_only,
             env,
             db,
-            gate: Arc::new(RwLock::new(())),
+            gate: Arc::new(RecursiveRwLock::new(())),
             commit,
             unit: Mutex::new(false),
             unit_ended: Condvar::new(),
@@ -297,7 +298,8 @@ impl Store {
         self.read_only
     }
 
-    fn gate(&self) -> RwLockReadGuard<'_, ()> {
+    /// The gate held for a transaction
+    fn gate(&self) -> RecursiveRwLockReadGuard<'_, ()> {
         self.gate.read()
     }
 
@@ -464,7 +466,7 @@ impl Store {
 
     /// The environment's write transaction for a unit held open across calls, with the gate held for it. Refuses a
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
-    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLock, ()>)> {
+    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
         self.check_writable()?;
         {
             let mut open = self.unit.lock().expect("the unit's lock is never poisoned");
@@ -579,12 +581,35 @@ impl Store {
         synced
     }
 
-    /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed
+    /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed. The
+    /// copy is written beside it, synced and renamed into place, so a failed copy leaves an earlier backup whole; a
+    /// target open in this process is refused, the copy's file truncating the one its map reads
     pub fn copy_to(&self, target: &Path) -> Result<()> {
         std::fs::create_dir_all(target)?;
-        // The copy reads through the map in a transaction of its own, so a growth must wait for it to finish
-        let _gate = self.gate();
-        self.env.copy_to_path(target.join("data.mdb"), heed::CompactionOption::Enabled)?;
+        let target = target.canonicalize()?;
+        if open_paths().lock().expect("the open-paths lock is never poisoned").contains(&target) {
+            return Err(Error::new(
+                ErrorCode::AlreadyOpen,
+                format!("The database at {} is open in this process: back up into another directory", target.display()),
+            ));
+        }
+        let partial = target.join("data.mdb.partial");
+        loop {
+            // The copy reads through the map in a transaction of its own, so a growth must wait for it to finish
+            let guard = self.gate();
+            match self.env.copy_to_path(&partial, heed::CompactionOption::Enabled) {
+                Ok(file) => {
+                    file.sync_all()?;
+                    break;
+                }
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    drop(guard);
+                    self.adopt_map_size()?;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+        std::fs::rename(&partial, target.join("data.mdb"))?;
         Ok(())
     }
 

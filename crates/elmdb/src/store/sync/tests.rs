@@ -107,6 +107,15 @@ impl Harness {
     }
 
     fn close(self) {
+        self.closed().unwrap();
+    }
+
+    /// Closes after a sync failed, which the close reports
+    fn close_after_failure(self) {
+        assert!(self.closed().unwrap_err().message.contains("EIO"));
+    }
+
+    fn closed(self) -> Result<()> {
         // Close syncs what is owed: settle each sync that starts until it returns
         let Harness { mut commit, started, finish, .. } = self;
         let closer = std::thread::spawn(move || commit.close());
@@ -115,7 +124,7 @@ impl Harness {
                 finish.send(Ok(())).unwrap();
             }
         }
-        closer.join().unwrap().unwrap();
+        closer.join().unwrap()
     }
 }
 
@@ -184,7 +193,7 @@ fn shares_the_running_sync_with_a_caller_that_committed_nothing_since() {
 }
 
 #[test]
-fn rejects_every_caller_when_its_sync_fails_and_the_next_call_syncs_again() {
+fn rejects_every_caller_when_its_sync_fails_and_every_wait_after_it() {
     let h = Harness::new();
     h.commit.on_commit();
     let asked = h.commit.durable();
@@ -195,16 +204,16 @@ fn rejects_every_caller_when_its_sync_fails_and_the_next_call_syncs_again() {
     assert_eq!(outcome(&joined), "rejected", "a caller sharing the failed sync is told so too");
     assert_eq!(asked.wait().unwrap_err().message, "EIO");
 
-    let retry = h.commit.durable();
-    assert!(h.sync_started(), "a failed sync leaves its commits owed");
-    assert_eq!(outcome(&retry), "pending");
-    h.finish(Ok(()));
-    assert_eq!(outcome(&retry), "resolved");
-    h.close();
+    h.commit.on_commit();
+    let later = h.commit.durable();
+    assert_eq!(outcome(&later), "rejected", "no sync after a failed one can vouch for what it couldn't write");
+    h.no_sync_starts();
+    assert!(later.wait().unwrap_err().message.contains("EIO"));
+    h.close_after_failure();
 }
 
 #[test]
-fn runs_a_sync_queued_behind_a_failed_one_and_its_caller_hears_only_its_own() {
+fn a_sync_queued_behind_a_failed_one_fails_its_caller_though_it_succeeds() {
     let h = Harness::new();
     h.commit.on_commit();
     let first = h.commit.durable();
@@ -213,15 +222,15 @@ fn runs_a_sync_queued_behind_a_failed_one_and_its_caller_hears_only_its_own() {
     let second = h.commit.durable();
     h.finish(Err(eio()));
     assert_eq!(outcome(&first), "rejected");
-    assert_eq!(outcome(&second), "pending", "the first sync's failure is not the second caller's");
-    assert!(h.sync_started(), "the queued sync starts, and takes what the failed one left owed");
+    assert_eq!(outcome(&second), "pending", "the queued sync still runs");
+    assert!(h.sync_started());
     h.finish(Ok(()));
-    assert_eq!(outcome(&second), "resolved");
-    h.close();
+    assert_eq!(outcome(&second), "rejected", "the second caller's commits are built on what the first sync lost");
+    h.close_after_failure();
 }
 
 #[test]
-fn a_failed_background_sync_reaches_nobody_and_leaves_its_commits_owed() {
+fn a_failed_background_sync_fails_every_wait_after_it() {
     let h = Harness::new();
     h.commit.on_commit();
     let asked = h.commit.durable();
@@ -235,11 +244,10 @@ fn a_failed_background_sync_reaches_nobody_and_leaves_its_commits_owed() {
     h.finish(Err(eio()));
     h.settled();
 
-    let retry = h.commit.durable();
-    assert!(h.sync_started(), "the failed sync made nothing durable, so asking starts another");
-    h.finish(Ok(()));
-    assert_eq!(outcome(&retry), "resolved");
-    h.close();
+    let after = h.commit.durable();
+    assert_eq!(outcome(&after), "rejected");
+    h.no_sync_starts();
+    h.close_after_failure();
 }
 
 #[test]
@@ -302,13 +310,13 @@ fn a_wait_given_up_on_keeps_no_outcome() {
     h.finish(Err(eio()));
     assert!(h.started.recv_timeout(Duration::from_millis(50)).is_err());
     assert!(h.commit.shared.lock().waiting.is_empty(), "the dropped wait's attempt is forgotten");
-    h.close();
+    h.close_after_failure();
 }
 
 /// The failed-sync harness (`docs/architecture/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
 /// what a wait promises rather than against a copy of the implementation. A wait that resolved had a sync covering its
-/// commits finish successfully after it began; a wait that rejected had a sync fail after it began; and once every sync
-/// is let through, every wait has settled and a new one resolves.
+/// commits finish successfully, and no sync failed before it settled; a wait that rejected had a sync fail before it
+/// settled; and once every sync is let through, every wait has settled and a new one resolves unless a sync failed.
 mod failed_syncs {
     use proptest::prelude::*;
 
@@ -351,7 +359,7 @@ mod failed_syncs {
         #![proptest_config(ProptestConfig { cases: 48, failure_persistence: None, ..ProptestConfig::default() })]
 
         #[test]
-        fn a_wait_resolves_only_on_a_covering_sync_and_rejects_only_on_a_failed_one(events in prop::collection::vec(event(), 1..30)) {
+        fn a_wait_resolves_only_on_a_covering_sync_before_any_failure_and_rejects_only_after_one(events in prop::collection::vec(event(), 1..30)) {
             let h = Harness::new();
             let mut clock = 0u64;
             let mut commits = 0u64;
@@ -413,9 +421,11 @@ mod failed_syncs {
                     let already = !attempts.iter().any(|a| a.mark < w.target && a.started <= w.created && a.finished.is_none_or(|(f, _)| f > w.created))
                         && attempts.iter().filter(|a| a.finished.is_some_and(|(f, good)| good && f <= w.created)).any(|a| a.mark >= w.target);
                     prop_assert!(covered || already || w.target == 0, "a wait for {} resolved with no sync covering it", w.target);
+                    let failed_before = attempts.iter().any(|a| a.finished.is_some_and(|(f, good)| !good && f <= at));
+                    prop_assert!(!failed_before, "a wait for {} resolved after a sync failed", w.target);
                 } else {
-                    let failed = attempts.iter().any(|a| a.finished.is_some_and(|(f, good)| !good && f >= w.created && f <= at));
-                    prop_assert!(failed, "a wait for {} rejected with no sync failing while it waited", w.target);
+                    let failed = attempts.iter().any(|a| a.finished.is_some_and(|(f, good)| !good && f <= at));
+                    prop_assert!(failed, "a wait for {} rejected with no sync failing before", w.target);
                 }
             }
             let last = h.commit.durable();
@@ -424,8 +434,9 @@ mod failed_syncs {
                     h.finish(Ok(()));
                 }
             }
-            prop_assert_eq!(outcome(&last), "resolved");
-            h.close();
+            let failed = attempts.iter().any(|a| a.finished.is_some_and(|(_, good)| !good));
+            prop_assert_eq!(outcome(&last), if failed { "rejected" } else { "resolved" });
+            if failed { h.close_after_failure() } else { h.close() }
         }
     }
 }
