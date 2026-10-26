@@ -147,9 +147,8 @@ Held by the types and the engine specs, which say more than a rule over names co
   the SDK's `_RUN_HISTORY_SCHEMA`), so no `transact` on the app's engine reaches a run. The api's composition
   (`packages/api/src/runtime/index.ts`) opens both and binds the app; host code (`@apackdev/host/services`,
   `/backup`) takes each database as an argument.
-- **Data from lmdb-js** moves on a copy, never at boot: elmdb's `tools/lmdb-js-export` dumps an lmdb-js database
-  (format 4) and a run history's record store, `elmdb upgrade` reads the first and `apack db import-runs` the second
-  (`elmdb/docs/architecture/format.md`, Moving apack's data).
+- **A database crosses an in-place change to format 1** by `elmdb dump` from the build before it and `elmdb load` by
+  the build after, on a copy (`elmdb/docs/architecture/format.md`, Dumps).
 
 ## Typed contract
 
