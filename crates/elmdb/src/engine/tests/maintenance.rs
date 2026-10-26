@@ -234,3 +234,37 @@ fn upgrade_reads_a_format_4_dump_mapping_its_keys_and_rebuilding_what_derives() 
         "an upgrade writes a new database"
     );
 }
+
+#[test]
+fn upgrade_skips_fields_with_no_entity_refuses_a_damaged_dump_and_leaves_nothing_when_it_fails() {
+    use crate::format::key::Part;
+    use rmpv::Value;
+    let s = |x: &str| Part::from(x);
+    let map = |pairs: Vec<(&str, Value)>| Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect());
+    let task = (vec![s("i"), s("Task-1")], map(vec![("seq", 1.into())]));
+    let work = tempfile::tempdir().unwrap();
+
+    let orphaned = work.path().join("orphaned.dump");
+    std::fs::write(&orphaned, dump(&[task.clone(), (vec![s("v"), s("Task-9"), s("title")], "lost".into())])).unwrap();
+    let report = crate::upgrade::upgrade(&orphaned, &work.path().join("a"), Some(super::schema())).unwrap();
+    assert_eq!(report.attributes, 0);
+    assert_eq!(report.skipped.get("v"), Some(&1), "{report:?}");
+
+    // A length past the end of the dump
+    let mut damaged = dump(std::slice::from_ref(&task));
+    damaged[12..16].copy_from_slice(&(u32::MAX - 1).to_le_bytes());
+    let damaged_path = work.path().join("damaged.dump");
+    std::fs::write(&damaged_path, damaged).unwrap();
+    let error = crate::upgrade::upgrade(&damaged_path, &work.path().join("b"), None).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::WrongFormat, "{error}");
+
+    // An id longer than LMDB's keys can hold fails the load
+    let long_id = format!("Task-{}", "x".repeat(600));
+    let failing = work.path().join("failing.dump");
+    std::fs::write(&failing, dump(&[task.clone(), (vec![s("i"), s(&long_id)], map(vec![("seq", 2.into())]))])).unwrap();
+    let target = work.path().join("c");
+    assert!(crate::upgrade::upgrade(&failing, &target, None).is_err());
+    assert!(!target.join("data.mdb").exists(), "a failed upgrade leaves no database behind");
+    std::fs::write(&failing, dump(&[task])).unwrap();
+    crate::upgrade::upgrade(&failing, &target, None).expect("the target takes a second upgrade");
+}

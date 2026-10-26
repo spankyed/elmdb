@@ -48,11 +48,9 @@ fn entries(path: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         if n == u32::MAX {
             break;
         }
-        let mut key = vec![0u8; n as usize];
-        file.read_exact(&mut key)?;
+        let key = read_bytes(&mut file, n)?;
         file.read_exact(&mut len)?;
-        let mut value = vec![0u8; u32::from_le_bytes(len) as usize];
-        file.read_exact(&mut value)?;
+        let value = read_bytes(&mut file, u32::from_le_bytes(len))?;
         out.push((key, value));
     }
     let mut count = [0u8; 8];
@@ -61,6 +59,17 @@ fn entries(path: &Path) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
         return Err(invalid(format!("it records {} entries and holds {}", u64::from_le_bytes(count), out.len())));
     }
     Ok(out)
+}
+
+/// `n` bytes of the dump, read as they arrive rather than allocated up front, so a damaged length fails as the dump
+/// ending rather than as an allocation of up to 4 GiB
+fn read_bytes(file: &mut impl std::io::Read, n: u32) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    file.take(u64::from(n)).read_to_end(&mut bytes)?;
+    if bytes.len() != n as usize {
+        return Err(invalid(format!("it ends inside an entry {n} bytes long")));
+    }
+    Ok(bytes)
 }
 
 /// Format 4's name for a sequence as elmdb names it: a short code's `<Type>:<PREFIX>` is `shortCode:<Type>`
@@ -155,6 +164,8 @@ pub fn upgrade(dump: &Path, target: &Path, schema: Option<Schema>) -> Result<Upg
             _ => *report.skipped.entry(tag.to_owned()).or_default() += 1,
         }
     }
+    // A failed upgrade removes what it wrote, so it can be run again
+    let written = Written(Some(target.to_owned()));
     let db = Database::open(target, OpenOptions { schema, ..Default::default() })?;
     // Entities in the order they were created, so each keeps its place
     let mut ordered: Vec<(String, (u64, bool))> = records.into_iter().collect();
@@ -166,12 +177,39 @@ pub fn upgrade(dump: &Path, target: &Path, schema: Option<Schema>) -> Result<Upg
             Load::Entity { id, fields: entity_fields, trashed }
         })
         .collect();
+    // Fields of an id with no record have no entity to load into: format 4 left them behind
+    let orphans: u64 = fields.values().map(|f| f.len() as u64).sum();
+    if orphans > 0 {
+        report.attributes -= orphans;
+        *report.skipped.entry("v".to_owned()).or_default() += orphans;
+    }
     relations.sort_by_key(|(seq, _)| *seq);
     loads.extend(relations.into_iter().map(|(_, load)| load));
     // The sequences last, so the store's own takes the place format 4 left it at, past every entity and relation
     loads.extend(sequences);
-    db.bulk_load(&loads)?;
-    db.rebuild(None)?;
-    db.close()?;
+    let loaded = db.bulk_load(&loads).and_then(|_| db.rebuild(None));
+    let closed = db.close();
+    loaded?;
+    closed?;
+    written.keep();
     Ok(report)
+}
+
+/// The files an upgrade writes into its target, removed unless it finishes
+struct Written(Option<std::path::PathBuf>);
+
+impl Written {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for Written {
+    fn drop(&mut self) {
+        if let Some(target) = self.0.take() {
+            for file in ["data.mdb", "lock.mdb"] {
+                let _ = std::fs::remove_file(target.join(file));
+            }
+        }
+    }
 }
