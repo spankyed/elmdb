@@ -113,7 +113,7 @@ Held by the types and the engine specs, which say more than a rule over names co
   and stays watched. **A watched read is a pure read of the engine**: what it reads elsewhere isn't tracked. Writes
   another process makes to the database are not seen. `admin.watchesSettled()` resolves once every commit before it
   has been delivered, and `admin.watchStats()` counts the watches and what elmdb has filed. The contract is
-  live-queries' (`docs/plans/live-queries.md`), which the model-based harness checks: every watch, after every op,
+  live-queries' (`docs/archive/plans/live-queries.md`), which the model-based harness checks: every watch, after every op,
   holds what its read answers afresh.
 - **One row shape.** A row is `{ id, entityType, ...attributes }` (`EntityRow`) wherever a read returns one: `getRow(id)`, which reads through the trash and is `undefined` for an id no entity has, and `pickAll`, `pickOne()` and a write builder's `row()`, which are rows of `getRow`.
 - **One relation shape.** A relation is `{ id, kind, source, target, info }` (`RelationRow`) wherever a read returns one — `findRelations`, `outEdges`, `inEdges` — and `findRelations` and `updateRelation` take its field names (`{ kind?, source?, target? }`, `{ source?, target?, info? }`).
