@@ -82,13 +82,25 @@ function objectsOf(value: unknown): unknown {
   return value;
 }
 
-/** An answer as elmdb writes it: `kind` names it, and `plainObjects` says whether its maps decode straight to objects */
-export type Answer = { kind: string; plainObjects?: boolean } & Record<string, unknown>;
+/** An answer as elmdb writes it: `kind` names it */
+export type Answer = { kind: string } & Record<string, unknown>;
 
+const PROTO = [...'__proto__'].map((char) => char.charCodeAt(0));
+
+/** Whether `bytes` hold the text `__proto__` anywhere: a key of that name, or a value that merely spells it */
+function spellsProto(bytes: Uint8Array): boolean {
+  for (let at = bytes.indexOf(PROTO[0]!); at !== -1 && at + PROTO.length <= bytes.length; at = bytes.indexOf(PROTO[0]!, at + 1)) {
+    if (PROTO.every((byte, offset) => bytes[at + offset] === byte)) return true;
+  }
+  return false;
+}
+
+/**
+ * Every answer decoded alike, whatever its shape: exactly when its bytes could hold a `__proto__` key anywhere — a
+ * row, a field's value, an edge's info, an answer inside another — and straight to objects otherwise
+ */
 function unpackAnswers(bytes: Uint8Array): Answer[] {
-  const answers = unpackr.unpack(bytes) as Answer[];
-  if (answers.every((answer) => answer.plainObjects !== false)) return answers;
-  return objectsOf(exact.unpack(bytes)) as Answer[];
+  return (spellsProto(bytes) ? objectsOf(exact.unpack(bytes)) : unpackr.unpack(bytes)) as Answer[];
 }
 
 /** `value` and everything inside it, frozen */
@@ -198,9 +210,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   /**
    * The units `transact` is inside, outermost first. elmdb's unit opens at the first write, so a unit that writes
    * nothing commits nothing, and a read before it sees what a snapshot would; each level inside the outermost is a
-   * savepoint of it, taken then or as the level begins, whichever is later
+   * savepoint of it, taken then or as the level begins, whichever is later. A level `kept` a write when one landed in
+   * it or a level inside it that returned, so an outermost one that kept none aborts its unit rather than commit it
    */
-  const levels: Array<{ savepoint?: number }> = [];
+  const levels: Array<{ savepoint?: number; kept?: boolean }> = [];
   let unit: EarsUnit | undefined;
   /** The token the reads being made are tracked under, while `track` runs */
   let tracking: number | undefined;
@@ -229,7 +242,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   };
 
   function transact<T>(fn: () => T, options?: UnitOptions): T {
-    const level: { savepoint?: number } = {};
+    const level: { savepoint?: number; kept?: boolean } = {};
     const outermost = levels.length === 0;
     if (!outermost && unit) {
       const held = unit;
@@ -261,10 +274,16 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     if (!outermost) {
       // A unit inside another commits with the outermost
       if (held && level.savepoint !== undefined) crossing(() => held.release(level.savepoint!));
+      if (level.kept) levels.at(-1)!.kept = true;
       return value;
     }
     unit = undefined;
     if (!held) return value;
+    if (!level.kept) {
+      // Every write it held was rolled back with a level that threw
+      held.abort();
+      return value;
+    }
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
       heard(unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))) as { sequence: number; touched: number[] });
@@ -288,6 +307,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       const bytes = pack({ ops, now });
       const target = levels.length ? writable() : undefined;
       const answer = crossing(() => (target ? target.write(bytes) : database.write(bytes, false)));
+      if (target) levels.at(-1)!.kept = true;
       const written = unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
       if (written.changes) heard(written.changes);
       return written.results;

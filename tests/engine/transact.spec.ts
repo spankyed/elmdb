@@ -142,6 +142,20 @@ describe('a unit inside another', () => {
     expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
   });
 
+  it('that throws, having held every write the outer made, leaves the outer nothing to commit', () => {
+    const sequence = e.lastCommit();
+    e.transact(() => {
+      expect(() => e.transact(() => { e.write(task).set('title', 'inner'); throw new Error('stop'); })).toThrow();
+      expect(() => e.transact(() => {
+        e.transact(() => e.write(other).set('title', 'innermost'));
+        throw new Error('stop');
+      })).toThrow();
+    });
+    expect(committed()).toBe(0);
+    expect(e.lastCommit()).toBe(sequence);
+    expect([e.getAttr(task, 'title'), e.getAttr(other, 'title')]).toEqual(['a', 'b']);
+  });
+
   it('that throws after growing a list the outer wrote leaves the outer\'s list, not the grown one', () => {
     e.transact(() => {
       e.write(task).append('tags', 'a');

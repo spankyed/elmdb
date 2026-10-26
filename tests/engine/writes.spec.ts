@@ -1,7 +1,7 @@
 // The engine's contract: create, upsert and write create, change and delete entities, each held to the claim it
 // makes about its argument, with the ids and fields they return
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { engine, type Id } from './helpers.ts';
+import { engine, NAMES, type Id } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 import type { WriteBuilder } from '../../src/index.ts';
 
@@ -440,6 +440,25 @@ describe('rows', () => {
     expect(Object.getPrototypeOf(row)).toBe(Object.prototype);
     e.write(id).delete('__proto__');
     expect(e.getAttr(id, '__proto__')).toBeUndefined();
+  });
+
+  it('a value holding a __proto__ key reads back as stored, whichever read answers it', () => {
+    const value = JSON.parse('{"__proto__": {"x": 1}, "a": 2}') as Record<string, unknown>;
+    const holds = (read: unknown) => {
+      expect(Object.keys(read as object)).toEqual(['__proto__', 'a']);
+      expect(Object.getOwnPropertyDescriptor(read, '__proto__')?.value).toEqual({ x: 1 });
+      expect(Object.getPrototypeOf(read)).toBe(Object.prototype);
+    };
+    const id = e.create('Task').set('meta', value).set('n', 1).id();
+    const other = e.create('Task').id();
+    e.write(id).link('refs', other, { info: value });
+    holds(e.getRow(id)!.meta);
+    holds(e.getAttr(id, 'meta'));
+    holds(e.findRelations({ source: id })[0]!.info);
+    // A warned engine has an unindexed `where` answered inside the count of rows it walked
+    const warned = freshEngine({ ...NAMES, warn: () => {} });
+    warned.create('Task').set('meta', value).set('n', 1);
+    holds(warned.query('Task').where('n', 1).pickAll()[0]!.meta);
   });
 
   it('a schema naming a type __proto__ is refused for that name, which the database holds PascalCase', () => {
