@@ -1,52 +1,95 @@
-//! One elmdb binary per process. Each binary statically links its own LMDB, and two copies of LMDB share no locks, so
-//! a second binary opening a database in a process that already loaded one could corrupt it. The first open claims the
-//! process in its environment (`ELMDB_BINDING`), which every thread and every loaded copy share, and an open from
-//! another binary throws, naming both files. Two binaries' first opens racing on two threads can both pass; one loaded
-//! after the other opened, the case a bundled copy beside an installed one makes, can't.
+//! One elmdb binary per process. Every binary independently opens the same process claim file and takes a
+//! nonblocking exclusive lock before opening LMDB. The winning binary keeps its handle for the process lifetime,
+//! across database closes and worker teardown; another copy cannot acquire it. The file is never unlinked: replacing
+//! its inode while a lock is held would let a second binary lock the replacement. A stale file holds no claim once
+//! the owning process ends, so PID reuse needs no cleanup.
+
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use napi::Result;
 
 use crate::Code;
 
-/// This binary's file
-fn own_file() -> String {
-    process_path::get_dylib_path().map_or_else(|| "(an unknown file)".to_owned(), |p| p.display().to_string())
-}
-
-/// The variable a process's environment names its elmdb binary in
-const VARIABLE: &str = "ELMDB_BINDING";
-
-/// Claims the process for this binary, or refuses when another binary claimed it. The claim names the process, since a
-/// child inherits its parent's environment and may load a binary of its own
-fn claim_process(mine: &str) -> Result<(), Code> {
-    static CLAIMED: std::sync::Once = std::sync::Once::new();
-    let pid = std::process::id().to_string();
-    if let Some(held) = std::env::var(VARIABLE).ok()
-        && let Some((owner, theirs)) = held.split_once(':')
-        && owner == pid
-        && theirs != mine
+fn claim_file() -> PathBuf {
+    // A worker may have a different TMPDIR. Unix's shared temporary directory keeps every copy in this process in
+    // the same namespace. Windows uses the process's native temporary directory, not a worker's JS environment.
+    #[cfg(unix)]
     {
-        return Err(already_loaded(theirs, mine));
+        // SAFETY: getuid has no preconditions; the real user id keeps private stale files of other users out of
+        // this namespace when the OS reuses a PID.
+        let user = unsafe { libc::getuid() };
+        PathBuf::from("/tmp").join(format!("elmdb-binding-{user}-{}.lock", std::process::id()))
     }
-    CLAIMED.call_once(|| {
-        // SAFETY: the variable is set once per binary, on its first open, before any database of this binary exists;
-        // a thread reading the environment at that moment is the hazard `set_var` names, and nothing elmdb runs does
-        unsafe { std::env::set_var(VARIABLE, format!("{pid}:{mine}")) };
-    });
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        std::env::temp_dir().join(format!("elmdb-binding-{}.lock", std::process::id()))
+    }
 }
 
-fn already_loaded(theirs: &str, mine: &str) -> napi::Error<Code> {
-    napi::Error::new(
-        Code("ALREADY_LOADED"),
-        format!(
-            "Another elmdb binary is loaded in this process ({theirs}), so this one ({mine}) can't open a database: two \
-             copies of LMDB in one process share no locks. Load one elmdb package"
-        ),
-    )
+fn acquire(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => {
+            Err(io::Error::new(io::ErrorKind::WouldBlock, "the process is already claimed"))
+        }
+        Err(TryLockError::Error(error)) => Err(error),
+    }
 }
 
-/// Claims the process for this binary on an open, or refuses one from a second binary
+/// Claims the process before this binary opens any database. Each independently loaded binary owns its own `OnceLock`
+/// and independently opened file handle, so only one wins even when first opens race across worker threads.
 pub fn claim() -> Result<(), Code> {
-    claim_process(&own_file())
+    static CLAIMED: OnceLock<io::Result<File>> = OnceLock::new();
+    match CLAIMED.get_or_init(|| acquire(&claim_file())) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            let mine = process_path::get_dylib_path()
+                .map_or_else(|| "an unknown file".to_owned(), |p| p.display().to_string());
+            Err(napi::Error::new(
+                Code("ALREADY_LOADED"),
+                format!(
+                    "Another elmdb binary already claimed this process, so {mine} can't open a database. Load one elmdb package"
+                ),
+            ))
+        }
+        Err(error) => Err(napi::Error::new(
+            Code("IO"),
+            format!(
+                "Cannot claim this process at {}: {error}. Ensure its temporary directory permits file creation and locking",
+                claim_file().display()
+            ),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn independent_handles_conflict_and_an_unowned_file_can_be_reused() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claim");
+        let first = acquire(&path).unwrap();
+        assert_eq!(acquire(&path).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        drop(first);
+        acquire(&path).unwrap();
+    }
+
+    #[test]
+    fn an_io_failure_does_not_grant_a_claim() {
+        let directory = tempfile::tempdir().unwrap();
+        assert!(acquire(directory.path()).is_err());
+    }
 }

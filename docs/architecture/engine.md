@@ -24,7 +24,14 @@ A database is one directory. A program that needs data with its own life cycle o
 and `runs` (its flow run history), which reset and back up independently.
 
 Several processes may open one database: one writes at a time, LMDB's lock serializing them, and a read-only open
-reads while the app writes (apack's `apack db`).
+reads while the app writes (apack's `apack db`). Read-only access still requires writable reader registration in
+LMDB's lock file. A permission failure is refused; it never silently disables locking.
+
+The Node binding takes a nonblocking exclusive file lock before its first database open. One binary owns the process
+claim until process exit, including after its databases close or its first worker ends. Another physical binding copy
+is refused with `ALREADY_LOADED`; a claim-file I/O failure is refused with `IO`. Independent processes have independent
+claims. Claim files are named by real user ID and PID in `/tmp` on Unix, and by PID in the native process temporary directory on Windows. They are not
+removed: a stale unlocked file is reusable, while unlinking a live claim would break exclusion.
 
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a

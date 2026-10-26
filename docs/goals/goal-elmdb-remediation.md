@@ -1,12 +1,15 @@
 # Goal: elmdb safety, consistent commits, and trustworthy recovery
 
-Status: prepared, 2026-10-26. Implementation has not started. Preparation is authorized; this document records the
-proposed implementation scope and does not itself start implementation or grant commit, push, merge, or release permission.
+Status: active, 2026-10-26. Implementation, commits and pushes to the two remediation branches are authorized.
+Those branches may be rebased onto upstream main/master or receive merges from upstream main/master. Merging the
+remediation branches into any other branch, including main/master, is prohibited; releases remain unauthorized.
 
 ```text
 # Goal: elmdb safety, consistent commits, and trustworthy recovery
 
-Implement docs/goals/goal-elmdb-remediation.md when implementation is authorized. Follow elmdb/CLAUDE.md and, for
+Implement docs/goals/goal-elmdb-remediation.md. Commit and push usable checkpoints on the two remediation branches.
+Only rebase onto or merge in upstream main/master; never merge the remediation branches into another branch.
+Follow elmdb/CLAUDE.md and, for
 AgentBuddy, its CLAUDE.md, docs/AGENTS.md and user memory. Read Scope, Current handoff, Decisions, Phases,
 Acceptance and Constraints. The assessment is docs/reviews/elmdb-review-2026-10.md; preparation evidence is
 docs/evidence/elmdb-remediation-preparation.md. Inspect current source before relying on this survey.
@@ -46,10 +49,14 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   resolution point into this isolated elmdb worktree. Build outputs are seeds until source/build agreement is verified.
 - The isolated binding build, `npm run typecheck`, and all 29 binding tests passed; generated declarations/loader
   are unchanged. No full AgentBuddy app build or app validation is claimed.
-- Eight reviewed implementation files match the source checkout. R01–R08 remain relevant; no fix is claimed. The
-  detailed revalidation, mechanism probe, integration trace, and setup results belong in the preparation evidence.
-- Next deliverable after implementation authorization: Phase 0's current-source baseline, then Phase 1's guard and open
-  behavior. Before edits, re-read the latest active goal's handoff and compare its committed inputs with this branch.
+- Phase 0 baseline: isolated EARS package build and 14 watch tests passed; the prepared binding/type checks were
+  already green. Phase 1 implements R01/R02: process claims use nonblocking file locks, and read-only opens retain
+  reader registration. Final binding build/typecheck and all 33 Node tests passed; the full Rust workspace, generated/dependency checks,
+  formatting, and clippy passed. Full Rust/generated/dependency final checks and the platform matrix are recorded in
+  [implementation evidence](../evidence/elmdb-remediation.md). Cross-platform closure is pending, not waived.
+- Regressions were shown failing against the old behavior in disposable copies. No shared checkout was mutated.
+- Next deliverable: finish the Phase 1 checkpoint/platform verification, then Phase 2's committed-error finalization
+  and AgentBuddy declaration-cache/observer behavior. Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
   checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
 
@@ -67,6 +74,7 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 | D8 | H01–H04 are hypotheses, not predetermined fixes. Close each with a deterministic test, measurement, or a documented contract; if it demonstrates a gap in the required guarantees, fix that gap and add its acceptance evidence. |
 | D9 | The active goal retains its own features and roadmap designs. This goal contributes the review's acceptance requirements and verifies the final combined result without rewriting that goal or its code concurrently. |
 | D10 | Preserve format/version policy from format.md and AgentBuddy's current compatibility policy. Prefer API/behavior changes with coordinated in-repo callers over compatibility shims. No live-data conversions. |
+| D11 | The user authorized implementation, commits and pushes on both session/elmdb-remediation branches (2026-10-26). Rebase onto or merge in upstream main/master as needed. Never merge a remediation branch into main/master or another branch; no feature-branch merges are authorized. After an authorized rebase, update only the owned remote remediation branch with --force-with-lease when necessary, never an unconditional force push. Release/tag/publication permission is not granted. |
 
 Registration design requirements: use an independently opened handle for each independently loaded binary; a private
 Rust static or N-API environment data is insufficient across copies and workers. The lock namespace must identify this
@@ -80,7 +88,7 @@ locked-file I/O. Do not introduce polling, environment mutation, or per-database
 ### Phase 0: freeze inputs and establish the baseline
 
 **Deliverable:** source commits, worktree/link/cache verification, and relevant current checks recorded in evidence.
-**Dependencies:** implementation authorization and isolated setup.
+**Dependencies:** isolated setup.
 **Done when:** current findings are mapped to source; the isolated binding build matches source without unintended
 loader/type changes; binding/type tests and focused AgentBuddy EARS build/spec commands can run independently. Record
 existing failures and diagnose relevant ones. Rerun the historical probes only in a disposable copy if source changes
@@ -140,13 +148,16 @@ of the required guarantees; a hypothesis label alone is not closure.
 
 **Deliverable:** one tested combined result, current contracts, and final finding dispositions.
 **Dependencies:** Phases 1–5 and the committed active-goal implementation being combined.
-**Done when:** pin exact inputs in both repositories and validate their combination in isolated integration checkouts.
+**Done when:** incorporate upstream main/master into the remediation branches using D11, pin exact inputs in both
+repositories, and validate the combined result in isolated checkouts. Do not merge other feature branches to construct
+a candidate; work awaiting upstream integration remains pending.
 Run elmdb's required Rust/generated/dependency/binding checks and supported-platform matrix; run AgentBuddy's focused
 EARS/watch/model/backup/schema checks, full typecheck for shared-source edits, and required final strict chain. Follow
 its Linux/native boundary and one-expensive-run constraints. Investigate regressions using the active goal's workload
 and single-row benchmarks with recorded conditions. Confirm planner order/limits/tracking, typed schema validation,
 compressed read/export/recovery paths, and substring/regex candidate correctness on the final feature set. If either
-input advances, re-evaluate affected evidence before integration. Merge/push only when separately authorized.
+input advances, re-evaluate affected evidence. Commit and push validated checkpoints under D11; leave the remediation
+branches unmerged for review.
 
 Update review dispositions with source and evidence, reference docs with implemented contracts, and this goal's Outcome.
 A deferred required repair needs explicit user authorization; moving it to a follow-up does not satisfy acceptance.
@@ -155,8 +166,8 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| Isolated source, build caches and binding resolution | Prepared; branches and paths above | Preparation evidence | Confirm current-source baseline before implementation |
-| R01/R02 opening and process safety | Missing | Registration mechanism spike only | Phase 1 |
+| Isolated source, build caches and binding resolution | Done locally; isolated binding/EARS builds | Preparation and implementation evidence | Final combined-source baseline in Phase 6 |
+| R01/R02 opening and process safety | Implemented locally; checkpoint pending | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
 | R03 committed outcomes and AgentBuddy notifications | Missing | Review E04/E06; integration trace | Phase 2 |
 | R05/R06 lifecycle and H03 contention | Missing | Review E01/E05; static trace | Phase 3 |
 | R04 auditing and R07 bounded construction | Missing | Review E02/E03 and source complexity | Phase 4 |
@@ -166,8 +177,9 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 
 ## Constraints
 
-Follow each repository's standing guidance. Preparation does not authorize implementation, commits, pushes, PRs or
-merges; later user instructions govern those actions. Never share writable dependencies or build outputs, modify live
+Follow each repository's standing guidance. Implementation, commits and pushes to the two remediation branches are
+authorized by D11. Only rebase onto or merge in upstream main/master. Do not merge a remediation branch into any
+other branch, including main/master. PR creation, releases, tags and publication are not authorized by this permission. Never share writable dependencies or build outputs, modify live
 app data, or run the app without an isolated profile. Copied artifacts seed a build; they do not establish freshness.
 Keep goal-next's expensive measurements separate from remediation runs; use idle checks and the repository's measurement
 runner, or report alternating comparisons and load conditions. Do not dispatch CI as a debugging loop.

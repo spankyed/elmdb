@@ -48,7 +48,7 @@ fn a_read_only_store_refuses_a_write_and_reads_what_is_there() {
 
 #[cfg(unix)]
 #[test]
-fn a_read_only_store_reads_files_this_user_cannot_write() {
+fn a_read_only_store_refuses_files_without_reader_registration() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
@@ -58,9 +58,14 @@ fn a_read_only_store_reads_files_this_user_cannot_write() {
     for file in &files {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
     }
-    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
-    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
-    store.close().unwrap();
+    match Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }) {
+        Err(error) => assert_eq!(error.code, ErrorCode::Io),
+        // An elevated user can still write the lock file: it retains ordinary LMDB reader registration.
+        Ok(store) => {
+            assert!(std::fs::OpenOptions::new().write(true).open(dir.path().join("lock.mdb")).is_ok());
+            store.close().unwrap();
+        }
+    }
     for file in &files {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
@@ -428,4 +433,44 @@ fn a_close_returns_though_a_wait_for_durability_is_still_held() {
     std::thread::spawn(move || sent.send(store.close()).unwrap());
     closed.recv_timeout(Duration::from_secs(5)).expect("the close returned").unwrap();
     durable.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn child_read_only_requires_registration() {
+    let Ok(path) = std::env::var("ELMDB_REVIEW_READ_ONLY") else { return };
+    let path = std::path::Path::new(&path);
+    let can_register = std::fs::OpenOptions::new().write(true).open(path.join("lock.mdb")).is_ok();
+    match Store::open(path, StoreOptions { read_only: true, ..quiet() }) {
+        Ok(store) => {
+            assert!(can_register, "a reader without lock-file access must not open beside a writer");
+            store.close().unwrap();
+        }
+        Err(error) => assert_eq!(error.code, ErrorCode::Io),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_process_requires_registration_while_a_writer_is_open() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let lock = directory.path().join("lock.mdb");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "store::tests::child_read_only_requires_registration", "--nocapture"])
+        .env("ELMDB_REVIEW_READ_ONLY", directory.path())
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    store.close().unwrap();
 }

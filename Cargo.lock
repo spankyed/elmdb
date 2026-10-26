@@ -477,12 +477,14 @@ name = "elmdb-node"
 version = "0.0.0"
 dependencies = [
  "elmdb",
+ "libc",
  "napi",
  "napi-build",
  "napi-derive",
  "process_path",
  "rmp-serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -157,25 +157,27 @@ impl Store {
             // LMDB's, written only through LMDB
             unsafe { builder.open(&canonical) }
         };
-        let denied =
-            |e: &heed::Error| matches!(e, heed::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied);
-        let env = match open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }) {
-            // Files this user can't write, which no writer of theirs can be changing either: read without the lock
-            // file a reader registers in, which LMDB would otherwise have to write
-            Err(e) if options.read_only && denied(&e) => open(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK),
-            opened => opened,
-        }
-        .map_err(|e| match e {
-            heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
-                ErrorCode::NotADatabase,
-                format!(
-                    "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version, \
+        let env =
+            open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }).map_err(|e| match e {
+                heed::Error::Io(ref io) if options.read_only && io.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Error::new(
+                        ErrorCode::Io,
+                        format!(
+                            "Cannot open {} with LMDB reader registration: {e}. Grant read access to data.mdb and write access to lock.mdb, or use a writable copy",
+                            canonical.display()
+                        ),
+                    )
+                }
+                heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
+                    ErrorCode::NotADatabase,
+                    format!(
+                        "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version, \
                      which elmdb doesn't read; re-create the database with elmdb",
-                    data.display()
+                        data.display()
+                    ),
                 ),
-            ),
-            e => e.into(),
-        })?;
+                e => e.into(),
+            })?;
 
         let db = Self::open_db(&env, &canonical, options.read_only)?;
         let commit = (!options.read_only && options.syncs).then(|| {
