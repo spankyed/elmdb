@@ -211,7 +211,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             for kind in kinds {
                 relations::definition(r, kind)?;
             }
-            let cycle = would_create_cycle(r, source, target, kinds)?;
+            let cycle = relations::would_cycle(r, source, target, kinds)?;
             let mut w = W(out);
             w.map(2);
             w.kind("bool");
@@ -328,29 +328,6 @@ fn find_relations(
         }
     }
     Ok(rows)
-}
-
-/// Whether `target` already reaches `source` through the kinds, over the entities a live query reaches
-fn would_create_cycle(r: &impl Read, source: &str, target: &str, kinds: &[String]) -> Result<bool> {
-    let mut seen = HashSet::new();
-    let mut stack = vec![target.to_owned()];
-    while let Some(node) = stack.pop() {
-        if node == source {
-            return Ok(true);
-        }
-        for kind in kinds {
-            for (_, far) in relations::edges(r, &node, true, Some(kind))? {
-                if is_live(r, &far)? && seen.insert(far.clone()) {
-                    stack.push(far);
-                }
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn is_live(r: &impl Read, id: &str) -> Result<bool> {
-    Ok(entities::record(r, id)?.is_some_and(|rec| !rec.trashed))
 }
 
 /// A query over one read

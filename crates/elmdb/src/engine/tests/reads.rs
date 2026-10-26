@@ -255,6 +255,14 @@ fn descendants_and_ancestors_reach_each_entity_once_nearest_first() {
         reads(db, vec![json!({ "read": "wouldCreateCycle", "source": C, "target": A, "kinds": ["parent_of"] })])
             .unwrap();
     assert_eq!(cycle[0]["value"], true);
+    // B, between them, in the trash: its edges still count, for the read as for the link it answers about
+    super::write(db, vec![json!({ "op": "trash", "id": B })]).unwrap();
+    let cycle =
+        reads(db, vec![json!({ "read": "wouldCreateCycle", "source": C, "target": A, "kinds": ["parent_of"] })])
+            .unwrap();
+    assert_eq!(cycle[0]["value"], true);
+    let refused = super::write(db, vec![json!({ "op": "link", "source": C, "kind": "parent_of", "target": A })]);
+    assert_eq!(refused.unwrap_err().code, ErrorCode::Cycle);
 }
 
 #[test]

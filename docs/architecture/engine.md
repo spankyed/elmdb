@@ -40,7 +40,8 @@ compared at open. A type, field, relation kind or role the schema doesn't declar
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
 envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
-whether it is present), a relation's row, `findRelations` by kind and ends, `wouldCreateCycle`, and search's
+whether it is present), a relation's row, `findRelations` by kind and ends, `wouldCreateCycle` (the walk a link's
+`CYCLE` check makes, a trashed entity's edges included), and search's
 `suggest` and `findLabels`. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`).
 
