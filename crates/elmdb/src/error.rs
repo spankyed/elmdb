@@ -90,6 +90,8 @@ pub enum ErrorCode {
     AlreadyLoaded,
     /// A relation of a `unique` kind moved onto two ends another edge of its kind already joins
     DuplicateEdge,
+    /// A short code or label numbering whose next number would pass 2^53 - 1, the largest JavaScript holds exactly
+    NumbersExhausted,
 }
 
 impl ErrorCode {
@@ -136,6 +138,7 @@ impl ErrorCode {
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
+            Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
         }
     }
 }

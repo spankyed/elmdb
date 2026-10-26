@@ -236,6 +236,34 @@ fn numbers_labels_per_type_and_base() {
 }
 
 #[test]
+fn a_number_past_javascript_s_largest_is_no_number_and_a_numbering_that_reaches_it_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let label = |r: &OpResult| match r {
+        OpResult::Label { label } => label.clone(),
+        other => panic!("not a label: {other:?}"),
+    };
+    // A label past the largest number is a label, not a numbered one
+    write(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "label": "Untitled 18446744073709551615" } })])
+        .unwrap();
+    let taken = write(&db, vec![json!({ "op": "takeLabel", "type": "Task", "base": "Untitled" })]).unwrap();
+    assert_eq!(label(&taken[0]), "Untitled 1");
+    // The largest number is taken; the one after it isn't handed out
+    write(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "label": "Draft 9007199254740991" } })])
+        .unwrap();
+    let e = refused(&db, vec![json!({ "op": "takeLabel", "type": "Task", "base": "Draft" })]);
+    assert_eq!(e.code, ErrorCode::NumbersExhausted, "{}", e.message);
+    let e = refused(&db, vec![json!({ "op": "create", "type": "Task", "shortCode": "TSK-9007199254740992" })]);
+    assert_eq!(e.code, ErrorCode::InvalidShortCode, "{}", e.message);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "shortCode": "TSK-9007199254740991" })]).unwrap();
+    // A sequence loaded past the largest number
+    db.admin_load(&[crate::engine::maintenance::Load::Sequence { name: "shortCode:Task".into(), next: u64::MAX }])
+        .unwrap();
+    let e = refused(&db, vec![json!({ "op": "create", "type": "Task" })]);
+    assert_eq!(e.code, ErrorCode::NumbersExhausted, "{}", e.message);
+}
+
+#[test]
 fn keeps_a_short_code_once_written_and_an_upsert_may_only_repeat_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

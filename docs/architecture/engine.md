@@ -104,7 +104,8 @@ The operations:
   is an undo log of each key's previous value, so rolling one back costs what it wrote.
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role, a missing required field, an id
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
-  or taken code, a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
+  or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
+  pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
   moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link

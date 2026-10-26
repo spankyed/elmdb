@@ -2,12 +2,16 @@
 //! it is never handed out twice, a destroyed entity's included. A sequence's first use starts after the highest number
 //! the type's entities already hold, and a number an entity took for itself is skipped. The sequence is written in the
 //! unit that takes it, so a unit rolled back gives its numbers back.
+//!
+//! A number is at most `MAX_NUMBER`, the largest JavaScript holds exactly: a code or label numbered past it isn't one
+//! of the numbering's, and a numbering that would hand out a larger one is refused (`NUMBERS_EXHAUSTED`), so no number
+//! from user data or a loaded sequence can overflow.
 
 use std::collections::HashSet;
 
 use rmpv::Value;
 
-use crate::error::Result;
+use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::Part;
 
 use super::entities::{self, field};
@@ -15,10 +19,24 @@ use super::keys::{self, SHORT_CODE_INDEX};
 use super::unit::{Read, Txn};
 use super::values;
 
+/// The largest number a short code or label takes: `Number.MAX_SAFE_INTEGER`
+pub const MAX_NUMBER: u64 = (1 << 53) - 1;
+
 fn number_in(value: &str, head: &str) -> Option<u64> {
     let rest = value.strip_prefix(head)?;
     (!rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) && !rest.starts_with('0'))
-        .then(|| rest.parse().ok())?
+        .then(|| rest.parse().ok().filter(|n| *n <= MAX_NUMBER))?
+}
+
+/// The number, refused when it is past `MAX_NUMBER`
+fn within(next: u64, numbering: &str) -> Result<u64> {
+    if next <= MAX_NUMBER {
+        return Ok(next);
+    }
+    Err(Error::new(
+        ErrorCode::NumbersExhausted,
+        format!("The numbering {numbering} has handed out every number up to {MAX_NUMBER}, the largest it takes"),
+    ))
 }
 
 fn read_sequence(t: &impl Read, name: &str) -> Result<Option<u64>> {
@@ -56,8 +74,9 @@ pub fn next_short_code(t: &mut Txn<'_, '_>, entity_type: &str, prefix: &str) -> 
             highest + 1
         }
     };
+    next = within(next, &name)?;
     while code_taken(t, entity_type, &format!("{head}{next}"))? {
-        next += 1;
+        next = within(next + 1, &name)?;
     }
     write_sequence(t, &name, next + 1)?;
     Ok(format!("{head}{next}"))
@@ -88,8 +107,9 @@ pub fn next_label(t: &mut Txn<'_, '_>, entity_type: &str, base: &str) -> Result<
         Some(next) => next,
         None => held.iter().filter_map(|l| number_in(l, &head)).max().unwrap_or(0) + 1,
     };
+    next = within(next, &name)?;
     while held.contains(&format!("{head}{next}")) {
-        next += 1;
+        next = within(next + 1, &name)?;
     }
     write_sequence(t, &name, next + 1)?;
     Ok(format!("{head}{next}"))
@@ -107,5 +127,8 @@ mod tests {
         assert_eq!(number_in("NTE-3", "THR-"), None);
         assert!(is_short_code_of("THR-1", "THR"));
         assert!(!is_short_code_of("THR-x", "THR"));
+        assert_eq!(number_in("THR-9007199254740991", "THR-"), Some(MAX_NUMBER));
+        assert_eq!(number_in("THR-9007199254740992", "THR-"), None);
+        assert_eq!(number_in("Untitled 18446744073709551615", "Untitled "), None);
     }
 }
