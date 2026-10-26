@@ -146,9 +146,11 @@ pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64
                 let mut held = tracks.lock();
                 let Some(watching) = held.watches.get(&id) else { break };
                 let reads = watching.reads.clone();
+                // A snapshot that could not be taken read nothing to file, so the whole store is filed in its place:
+                // any commit runs the watch again, where an empty read set would leave it on the failure for good
                 let (answer, read) = match run_tracked(store, schema, &reads) {
                     Ok(ran) => ran,
-                    Err(error) => (Err(error), ReadSet::default()),
+                    Err(error) => (Err(error), ReadSet { keys: BTreeSet::new(), ranges: vec![(Vec::new(), None)] }),
                 };
                 held.index.remove(&Owner::Watch(id));
                 held.index.add(&Owner::Watch(id), read);
@@ -158,9 +160,8 @@ pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64
                     Ok(bytes) => watching.last.as_ref() != Some(bytes),
                     Err(_) => true,
                 };
-                if let Ok(bytes) = &answer {
-                    watching.last = Some(bytes.clone());
-                }
+                // A failure is what the listener last heard, so the next answer is delivered whatever it holds
+                watching.last = answer.as_ref().ok().cloned();
                 (answer, changed)
             };
             if changed {

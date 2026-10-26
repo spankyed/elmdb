@@ -177,3 +177,42 @@ fn a_watch_whose_listener_writes_into_what_it_reads_hears_that_write() {
     write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 2 } })]).unwrap();
     assert_eq!(*heard.lock().unwrap(), [json!(1), json!(2), json!(3)]);
 }
+
+#[test]
+fn a_watch_that_failed_delivers_the_next_answer_even_one_equal_to_the_last_before_the_failure() {
+    let with_task = |task: bool| {
+        let mut types = json!({ "Note": { "fields": {} } });
+        if task {
+            types["Task"] = json!({ "fields": {} });
+        }
+        crate::schema::Schema::from_json(&json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": types })).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(
+        dir.path(),
+        crate::OpenOptions { schema: Some(with_task(true)), syncs: false, ..Default::default() },
+    )
+    .unwrap();
+    let heard: Arc<Mutex<Vec<Json>>> = Arc::default();
+    let into = Arc::clone(&heard);
+    db.watch(
+        reads(vec![tasks()], None),
+        Box::new(move |answer| {
+            let heard = match answer {
+                Ok(bytes) => {
+                    let answer: Json =
+                        serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+                    answer[0]["ids"].clone()
+                }
+                Err(e) => json!(e.code),
+            };
+            into.lock().unwrap().push(heard);
+        }),
+    )
+    .unwrap();
+    // Without the type the query fails; with it back, the answer is the one heard before the failure, and is heard
+    db.set_schema(with_task(false)).unwrap();
+    db.set_schema(with_task(true)).unwrap();
+    let unknown = json!(crate::error::ErrorCode::UnknownType);
+    assert_eq!(*heard.lock().unwrap(), [json!([]), unknown, json!([])]);
+}
