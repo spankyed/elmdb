@@ -1,6 +1,6 @@
 [package]
 name = "elmdb-cli"
-description = "inspect, check, backup and upgrade elmdb databases"
+description = "inspect, check, back up, dump and load elmdb databases"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

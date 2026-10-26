@@ -31,7 +31,7 @@ struct Level {
 /// What a unit carries from one call to the next: its savepoints, deferred checks and events
 #[derive(Debug, Default)]
 pub struct UnitState {
-    /// Whether the unit loads data unchecked (`bulkLoad`, an upgrade): a unique index then takes what it is given
+    /// Whether the unit loads data unchecked (`bulkLoad`, a dump's load): a unique index then takes what it is given
     pub unchecked: bool,
     levels: Vec<Level>,
     pub(super) checks: Vec<Check>,

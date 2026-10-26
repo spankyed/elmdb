@@ -399,6 +399,34 @@ pub fn embed(
     add_item(t, &entity_type, name, id, chunk).map(|()| Embedded::Stored)
 }
 
+/// Stores an embedding as it was, unchecked, as a load does (`Load::Embedding`): when the chunk holds the text it embeds
+/// under the index's model, the chunk is no longer pending and takes its place in the graph
+pub fn restore(
+    t: &mut Txn<'_, '_>,
+    id: &str,
+    index: &str,
+    chunk: u32,
+    model: &str,
+    hash: &str,
+    vector: &[f32],
+) -> Result<()> {
+    let entity_type = ids::type_of(id).to_owned();
+    t.put(&keys::vector(&entity_type, index, id, chunk), &encode_vector(model, hash, vector))?;
+    let current = t.get(&keys::vector_chunk_key(Prefix::VectorChunk, &entity_type, index, id, chunk))?;
+    let filed = vector_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);
+    let embeds = match (current, filed) {
+        (Some(current), Some(filed)) => {
+            decode_chunk(&current)?.0 == hash && filed.model == model && filed.dims == vector.len()
+        }
+        _ => false,
+    };
+    if embeds {
+        t.del(&keys::vector_chunk_key(Prefix::VectorPending, &entity_type, index, id, chunk))?;
+        add_item(t, &entity_type, index, id, chunk)?;
+    }
+    Ok(())
+}
+
 /// The graph changes the unit's writes journaled, made in the graphs as it commits, each graph then built once
 pub fn flush(t: &mut Txn<'_, '_>) -> Result<()> {
     let journal = t.scan(&Prefix::VectorJournal.key().to_vec())?;

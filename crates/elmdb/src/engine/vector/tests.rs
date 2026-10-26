@@ -301,6 +301,27 @@ fn a_rebuild_keeps_the_stored_embeddings_and_builds_the_graphs_again() {
 }
 
 #[test]
+fn a_dump_carries_the_embeddings_so_its_load_finds_by_them_with_nothing_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    embed_pending(&db, topic);
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("db.dump");
+    let report = crate::dump::dump(&db, &path).unwrap();
+    assert_eq!(report.embeddings, 6, "a title and a body for each of three: {report:?}");
+    let target = work.path().join("loaded");
+    crate::dump::load(&path, &target).unwrap();
+    let loaded = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert_eq!(pending(&loaded)["count"], 0);
+    assert_eq!(
+        ids(&loaded, docs(), json!([{ "step": "near", "vector": [0.0, 0.0, 1.0], "k": 1 }])),
+        json!(["Doc-sea"])
+    );
+    assert!(loaded.check().unwrap().is_clean(), "{:?}", loaded.check().unwrap());
+}
+
+#[test]
 fn an_index_declared_over_existing_data_queues_its_chunks_and_a_dropped_one_takes_its_embeddings() {
     let dir = tempfile::tempdir().unwrap();
     let options =

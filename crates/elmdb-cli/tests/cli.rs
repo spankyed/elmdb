@@ -14,7 +14,7 @@ fn elmdb(args: &[&str]) -> (i32, String) {
 }
 
 #[test]
-fn inspects_checks_and_backs_up_a_database() {
+fn inspects_checks_backs_up_dumps_and_loads_a_database() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     let schema = elmdb::schema::Schema::from_json(&json!({
@@ -48,6 +48,16 @@ fn inspects_checks_and_backs_up_a_database() {
     let (code, out) = elmdb(&["backup", p, target.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     assert!(target.join("data.mdb").is_file());
+    let dump = dir.path().join("db.dump");
+    let (code, out) = elmdb(&["dump", p, dump.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("\"entities\": 2"), "{out}");
+    let loaded = dir.path().join("loaded");
+    let (code, out) = elmdb(&["load", dump.to_str().unwrap(), loaded.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = elmdb(&["check", loaded.to_str().unwrap()]);
+    assert_eq!(code, 1, "the load holds the row lacking its field too: {out}");
+    assert!(out.contains("lacks title"), "{out}");
     let (code, out) = elmdb(&["check", dir.path().join("nothing").to_str().unwrap()]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("NO_DATABASE"), "{out}");

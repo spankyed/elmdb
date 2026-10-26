@@ -42,11 +42,6 @@ use changes::ChangeSet;
 pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
-/// A value's msgpack bytes
-pub(crate) fn encode_value(value: &rmpv::Value) -> Vec<u8> {
-    values::encode(value)
-}
-
 /// A sync that failed after its commit: the data is committed, as the sequence says, and not yet known to be on disk
 fn not_durable(error: Error, sequence: u64) -> Error {
     Error::new(

@@ -58,33 +58,32 @@ one says to update elmdb, an older one that it is from before the format was fix
 **The format is 1 until a release has users** (apack's `docs/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
 needs nothing, `rebuild()` building it from primary data. The databases that exist are their developers', reset or
-converted once on a copy. The accepted cost is that a build may misread a database from before an in-place change
-rather than refuse it; the answer is the same reset.
+converted once on a copy (Dumps, below). The accepted cost is that a build may misread a database from before an
+in-place change rather than refuse it; the answer is the same reset, or a dump made before the change.
 
 **From the first release with users** (its tag is the condition), format 1 is locked: every later change to the stored
-layout bumps the format and ships an upgrade, a Rust function from one format to the next, run by `elmdb upgrade` on a
-copy and never on open. This section then names the tag.
+layout bumps the format and ships an upgrade, a Rust function from one format to the next, run on a copy and never on
+open. This section then names the tag.
 
-## Moving apack's data
+## Dumps
 
-lmdb-js writes LMDB files in its own data version, 2. Stock LMDB 0.9 (`mdb.master`, the one heed runs) writes and reads
-version 1, and LMDB 1.0 (`mdb.master3`) version 3, so no stock LMDB opens a file lmdb-js wrote: heed refuses one with
-`MDB_INVALID` (`docs/evidence/phase-1.md`). The move therefore has two steps, and only the first needs lmdb-js:
+`elmdb dump <dir> <file>` writes one moment of a database to a new file, and `elmdb load <file> <dir>` makes a new
+database of it (`crates/elmdb/src/dump.rs`). The file names no key or stored value: it holds the schema and the primary
+data as loads (`Load`), so a database crosses a change to format 1's layout by a dump from the build before the change
+and a load by the build after it. That is how our databases are converted once, on a copy, while the format is 1.
 
-1. `tools/lmdb-js-export` (a Node script whose one dependency is lmdb-js, part of neither package) copies an apack
-   format 4 database's `kv` entries, byte for byte and in key order, into a dump: the 8 bytes `ELMDBF4\0`, a u32 dump
-   version (1), each entry as a u32 key length, the key, a u32 value length and the value, then a u32 `0xFFFFFFFF` and
-   a u64 entry count, all little-endian. It opens the source read-only and refuses anything but an EARS database in
-   format 4.
-2. `elmdb upgrade <dump> <dir> [--schema <file>]` reads the dump into a new database: format 4's keys decode with
-   elmdb's codec (its strings hold no NUL), `v`, `i`, `r` and `s` map onto `p/v`, `p/i`, `p/r` and `p/s` (a short
-   code's sequence `<Type>:<PREFIX>` becomes `shortCode:<Type>`, and `m seq` the store's `seq`), attribute values are
-   held to the value spec, format 4's own rows are read with msgpackr's `undefined` (extension type 0) as absent, and
-   its derived keys are left behind and rebuilt. It loads unchecked, so `check()` afterwards reports what the data
-   holds that the schema's rules refuse (`docs/evidence/phase-7.md`).
+- The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
+  none), then each load as a u32 length and its msgpack with named fields, then a u32 `0xFFFFFFFF` and a u64 load
+  count, all little-endian.
+- The loads, in the order a load applies them: each entity in the order it was made, with every field it holds, the
+  engine's own (`shortCode`, `trashedAt`, ...) among them; each relation in the order it was made, under its id; each
+  embedding (`p/q`); each sequence (`p/s`), last, so a numbering goes on where it was.
+- A load opens the new database with the dump's schema, applies the loads unchecked in one unit and rebuilds everything
+  under `d/`, so what the data holds against the schema's rules is `check()`'s to report, as after any unchecked load.
+  A dump, or a load that fails, removes what it wrote.
+- A load of a dump, dumped again, is byte-identical to it.
 
-apack's last release on lmdb-js converts every database to its format 4 first. apack's run history moves from its
-record store into the `runs` database through `bulkLoad`.
+The dump version is the file's, not the stored format's: it moves only when `Load` does.
 
 ## LMDB
 

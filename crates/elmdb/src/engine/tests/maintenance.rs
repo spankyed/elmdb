@@ -1,5 +1,4 @@
-//! A database's maintenance: backups, replacing and emptying its data, what it holds, unchecked loads, and the upgrade
-//! from a format 4 dump.
+//! A database's maintenance: backups, replacing and emptying its data, what it holds, unchecked loads, and dumps.
 
 use std::collections::BTreeMap;
 
@@ -167,104 +166,118 @@ fn an_unset_load_removes_any_field_and_keeps_derived_data_with_it() {
     assert!(db.check().unwrap().differences.is_empty());
 }
 
-/// A format 4 dump of these entries, as `tools/lmdb-js-export` writes one
-fn dump(entries: &[(Vec<crate::format::key::Part>, rmpv::Value)]) -> Vec<u8> {
-    let mut sorted: Vec<(Vec<u8>, Vec<u8>)> =
-        entries.iter().map(|(k, v)| (crate::format::key::encode(k), crate::engine::encode_value(v))).collect();
-    sorted.sort();
-    let mut out = b"ELMDBF4\0".to_vec();
-    out.extend(1u32.to_le_bytes());
-    for (k, v) in &sorted {
-        out.extend((k.len() as u32).to_le_bytes());
-        out.extend(k);
-        out.extend((v.len() as u32).to_le_bytes());
-        out.extend(v);
-    }
-    out.extend(u32::MAX.to_le_bytes());
-    out.extend((sorted.len() as u64).to_le_bytes());
-    out
+/// The live entities of `types`, in the order they were made
+fn made(db: &Database, types: &[&str]) -> serde_json::Value {
+    use crate::engine::plan::{ReadOp, Reads};
+    let op = json!({ "read": "query", "plan": { "start": { "from": "types", "types": types }, "steps": [], "terminal": { "answer": "ids" } } });
+    let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None };
+    let bytes = db.read(&reads).unwrap();
+    serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["ids"].clone()
+}
+
+fn loads_of(db: &Database) -> Vec<Load> {
+    let mut loads = Vec::new();
+    db.primary_loads(|load| {
+        loads.push(load);
+        Ok(())
+    })
+    .unwrap();
+    loads
 }
 
 #[test]
-fn upgrade_reads_a_format_4_dump_mapping_its_keys_and_rebuilding_what_derives() {
-    use crate::format::key::Part;
-    use rmpv::Value;
-    let s = |x: &str| Part::from(x);
-    let map = |pairs: Vec<(&str, Value)>| Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect());
-    let entries = vec![
-        (vec![s("i"), s("Task-1")], map(vec![("seq", 1.into()), ("trashed", false.into())])),
-        (vec![s("i"), s("Task-2")], map(vec![("seq", 2.into()), ("trashed", true.into())])),
-        (vec![s("v"), s("Task-1"), s("title")], "first".into()),
-        (vec![s("v"), s("Task-1"), s("shortCode")], "TSK-1".into()),
-        (vec![s("v"), s("Task-2"), s("trashedAt")], 9.into()),
-        (
-            vec![s("r"), s("Relation-1")],
-            map(vec![
-                ("kind", "refs".into()),
-                ("source", "Task-1".into()),
-                ("target", "Task-2".into()),
-                ("info", Value::Ext(0, vec![0])),
-                ("seq", 3.into()),
-            ]),
-        ),
-        (vec![s("s"), s("Task:TSK")], 2.into()),
-        (vec![s("m"), s("seq")], 3.into()),
-        // Format 4's derived keys, which the upgrade rebuilds rather than copies
-        (vec![s("e"), s("Task"), Part::Number(1.0)], "Task-1".into()),
-        (vec![s("c"), s("Task")], 1.into()),
-    ];
+fn a_dump_loads_into_a_new_database_holding_what_the_first_held_in_the_order_it_was_made() {
     let work = tempfile::tempdir().unwrap();
-    let path = work.path().join("f4.dump");
-    std::fs::write(&path, dump(&entries)).unwrap();
-    let target = work.path().join("db");
-    let report = crate::upgrade::upgrade(&path, &target, Some(super::schema())).unwrap();
-    assert_eq!((report.entities, report.attributes, report.relations, report.sequences), (2, 3, 1, 2));
-    assert_eq!(report.skipped.values().sum::<u64>(), 2);
-    let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
-    assert_eq!(row(&db, "Task-1").unwrap()["title"], "first");
-    assert!(row(&db, "Task-2").unwrap().get("trashedAt").is_some());
-    assert_eq!(edges(&db), ["Task-1|refs|Task-2"]);
-    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
-    // The short code's sequence carried over under elmdb's name
-    let next = write(&db, vec![json!({ "op": "create", "type": "Task" })]).unwrap();
-    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-2"), "{next:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![
+        json!({ "op": "create", "type": "Task", "id": "Task-c", "fields": { "title": "made first" } }),
+        json!({ "op": "create", "type": "Task", "id": "Task-b", "fields": { "title": "made second", "slug": "b" } }),
+        json!({ "op": "create", "type": "Task", "id": "Task-a", "fields": { "title": "made third", "a": [1, { "x": null }] } }),
+        json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "a": "words to find", "status": "open" } }),
+        json!({ "op": "link", "kind": "refs", "source": "Task-b", "target": "Note-1", "info": { "w": 2 } }),
+        json!({ "op": "link", "kind": "refs", "source": "Task-a", "target": "Note-1" }),
+        json!({ "op": "trash", "id": "Task-a" }),
+    ])
+    .unwrap();
+    db.bulk_load(&[Load::Entity {
+        id: "Bag-1".into(),
+        fields: BTreeMap::from([("blob".to_owned(), rmpv::Value::Binary(vec![0, 255, 7]))]),
+        trashed: false,
+    }])
+    .unwrap();
+    let path = work.path().join("db.dump");
+    let dumped = crate::dump::dump(&db, &path).unwrap();
+    assert_eq!((dumped.entities, dumped.relations, dumped.schema), (5, 2, true), "{dumped:?}");
+    let target = work.path().join("loaded");
+    assert_eq!(crate::dump::load(&path, &target).unwrap(), dumped);
+    let loaded = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert_eq!(loaded.schema(), db.schema());
+    assert_eq!(made(&loaded, &["Task"]), json!(["Task-c", "Task-b"]));
     assert_eq!(
-        crate::upgrade::upgrade(&path, &target, None).unwrap_err().code,
-        crate::ErrorCode::IdInUse,
-        "an upgrade writes a new database"
+        loads_of(&loaded),
+        loads_of(&db),
+        "the same entities, fields, relations and sequences, in the same order"
     );
+    assert!(loaded.check().unwrap().is_clean(), "derived data built: {:?}", loaded.check().unwrap());
+    assert_eq!(loaded.stats().unwrap().types["Task"].trashed, 1);
+    // The numbering goes on where it was
+    let next = write(&loaded, vec![json!({ "op": "create", "type": "Task" })]).unwrap();
+    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-4"), "{next:?}");
 }
 
 #[test]
-fn upgrade_skips_fields_with_no_entity_refuses_a_damaged_dump_and_leaves_nothing_when_it_fails() {
-    use crate::format::key::Part;
-    use rmpv::Value;
-    let s = |x: &str| Part::from(x);
-    let map = |pairs: Vec<(&str, Value)>| Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect());
-    let task = (vec![s("i"), s("Task-1")], map(vec![("seq", 1.into())]));
+fn a_dump_and_a_load_each_write_something_new_and_a_damaged_dump_or_a_failed_load_leaves_nothing() {
     let work = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let path = work.path().join("db.dump");
+    crate::dump::dump(&db, &path).unwrap();
+    assert_eq!(crate::dump::dump(&db, &path).unwrap_err().code, crate::ErrorCode::IdInUse, "a dump writes a new file");
+    let target = work.path().join("a");
+    crate::dump::load(&path, &target).unwrap();
+    assert_eq!(crate::dump::load(&path, &target).unwrap_err().code, crate::ErrorCode::IdInUse, "a load a new database");
 
-    let orphaned = work.path().join("orphaned.dump");
-    std::fs::write(&orphaned, dump(&[task.clone(), (vec![s("v"), s("Task-9"), s("title")], "lost".into())])).unwrap();
-    let report = crate::upgrade::upgrade(&orphaned, &work.path().join("a"), Some(super::schema())).unwrap();
-    assert_eq!(report.attributes, 0);
-    assert_eq!(report.skipped.get("v"), Some(&1), "{report:?}");
+    let bytes = std::fs::read(&path).unwrap();
+    let damaged = |at: usize, with: &[u8]| {
+        let mut copy = bytes.clone();
+        copy[at..at + with.len()].copy_from_slice(with);
+        let damaged = work.path().join(format!("damaged-{at}.dump"));
+        std::fs::write(&damaged, copy).unwrap();
+        let target = work.path().join(format!("damaged-{at}"));
+        let error = crate::dump::load(&damaged, &target).unwrap_err();
+        assert!(!target.join("data.mdb").exists(), "nothing written for {error}");
+        error
+    };
+    assert_eq!(damaged(0, b"ELMDBF4\0").code, crate::ErrorCode::WrongFormat);
+    let other_version = damaged(8, &2u32.to_le_bytes());
+    assert!(other_version.message.contains("dump version 2"), "{other_version}");
+    // The schema's length, past the end of the file
+    assert_eq!(damaged(12, &(u32::MAX - 1).to_le_bytes()).code, crate::ErrorCode::WrongFormat);
+    let truncated = work.path().join("truncated.dump");
+    std::fs::write(&truncated, &bytes[..bytes.len() - 3]).unwrap();
+    assert_eq!(crate::dump::load(&truncated, &work.path().join("t")).unwrap_err().code, crate::ErrorCode::WrongFormat);
 
-    // A length past the end of the dump
-    let mut damaged = dump(std::slice::from_ref(&task));
-    damaged[12..16].copy_from_slice(&(u32::MAX - 1).to_le_bytes());
-    let damaged_path = work.path().join("damaged.dump");
-    std::fs::write(&damaged_path, damaged).unwrap();
-    let error = crate::upgrade::upgrade(&damaged_path, &work.path().join("b"), None).unwrap_err();
-    assert_eq!(error.code, crate::ErrorCode::WrongFormat, "{error}");
-
-    // An id longer than LMDB's keys can hold fails the load
-    let long_id = format!("Task-{}", "x".repeat(600));
+    // An id longer than LMDB's keys can hold fails the load, which leaves no database behind and can run again
     let failing = work.path().join("failing.dump");
-    std::fs::write(&failing, dump(&[task.clone(), (vec![s("i"), s(&long_id)], map(vec![("seq", 2.into())]))])).unwrap();
+    let mut file = bytes.clone();
+    let end = file.len() - 12;
+    let long = rmp_serde::to_vec_named(&Load::Entity {
+        id: format!("Task-{}", "x".repeat(600)),
+        fields: BTreeMap::new(),
+        trashed: false,
+    })
+    .unwrap();
+    let mut framed = (long.len() as u32).to_le_bytes().to_vec();
+    framed.extend(long);
+    file.splice(end..end, framed);
+    let count = u64::from_le_bytes(file[file.len() - 8..].try_into().unwrap()) + 1;
+    let at = file.len() - 8;
+    file[at..].copy_from_slice(&count.to_le_bytes());
+    std::fs::write(&failing, &file).unwrap();
     let target = work.path().join("c");
-    assert!(crate::upgrade::upgrade(&failing, &target, None).is_err());
-    assert!(!target.join("data.mdb").exists(), "a failed upgrade leaves no database behind");
-    std::fs::write(&failing, dump(&[task])).unwrap();
-    crate::upgrade::upgrade(&failing, &target, None).expect("the target takes a second upgrade");
+    assert!(crate::dump::load(&failing, &target).is_err());
+    assert!(!target.join("data.mdb").exists(), "a failed load leaves no database behind");
+    crate::dump::load(&path, &target).expect("the target takes a second load");
 }

@@ -1,5 +1,5 @@
 //! A database's maintenance (`docs/architecture/engine.md`, Admin): backups, replacing or emptying its data, what it holds, and
-//! loading data unchecked, as an import or an upgrade does.
+//! loading data unchecked, as an import or a dump's load does.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +17,8 @@ use crate::format::{self, Prefix, PrefixKind, meta};
 use super::unit::{Read, Txn, UnitState};
 use super::{derive, entities, ids, keys, relations, values};
 
-/// One unchecked load: an entity with its fields as they were, a relation under its own id, or a sequence
+/// One unchecked load: an entity with its fields as they were, a relation under its own id, a sequence, an embedding, or
+/// a field taken away
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "load", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -41,6 +42,10 @@ pub enum Load {
     },
     /// A numbering sequence's next number: `shortCode:<Type>`, `label:<Type>:<base>`, or the store's `seq`
     Sequence { name: String, next: u64 },
+    /// A chunk's embedding, in the vector index `index` of the entity's type: its model, the hash of the text it embeds
+    /// and its values. Loaded after its entity, whose fields file the chunk; an embedding of text the chunk no longer
+    /// holds is stored and finds nothing, as a stale one does. No entity, and it is left out
+    Embedding { id: String, index: String, chunk: u32, model: String, hash: String, vector: Vec<f32> },
     /// A field removed from an entity, any field the engine writes included: removing `trashedAt` takes it out of the
     /// trash. An entity without the field, or no entity, is left as it is
     Unset { id: String, field: String },
@@ -116,12 +121,66 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 let next = held.map_or(*next, |held| held.max(*next));
                 t.put(&keys::sequence(name), &values::encode(&next.into()))?;
             }
+            Load::Embedding { id, index, chunk, model, hash, vector } => {
+                if entities::record(t, id)?.is_some() {
+                    super::vector::restore(t, id, index, *chunk, model, hash, vector)?;
+                }
+            }
             Load::Unset { id, field } => {
                 if entities::record(t, id)?.is_some() {
                     entities::delete_field(t, id, field)?;
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Result<()>) -> Result<()> {
+    let corrupt = |what: &str| Error::new(ErrorCode::Corrupted, format!("{what} doesn't read"));
+    let mut made: Vec<(u64, String, bool)> = Vec::new();
+    for (key, bytes) in r.scan(&keys::all_entities())? {
+        let Some(Part::String(id)) = decode_key(&key)?.pop() else { return Err(corrupt("An entity's key")) };
+        let record = values::decode(&bytes)?;
+        let items = record.as_array().ok_or_else(|| corrupt(&format!("{id}'s record")))?;
+        let seq = items.first().and_then(Value::as_u64).ok_or_else(|| corrupt(&format!("{id}'s record")))?;
+        let trashed = items.get(1).and_then(Value::as_bool).ok_or_else(|| corrupt(&format!("{id}'s record")))?;
+        made.push((seq, id, trashed));
+    }
+    made.sort_unstable();
+    for (_, id, trashed) in made {
+        let mut fields = BTreeMap::new();
+        for (field, bytes) in entities::fields(r, &id)? {
+            fields.insert(field, values::decode(&bytes)?);
+        }
+        each(Load::Entity { id, fields, trashed })?;
+    }
+    let mut filed: Vec<(u64, Load)> = Vec::new();
+    for (key, bytes) in r.scan(&keys::all_relations())? {
+        let Some(Part::String(id)) = decode_key(&key)?.pop() else { return Err(corrupt("A relation's key")) };
+        let stored: relations::Stored =
+            rmp_serde::from_slice(&bytes).map_err(|_| corrupt(&format!("relation {id}'s row")))?;
+        let relations::Stored { kind, source, target, info, seq } = stored;
+        filed.push((seq, Load::Relation { id, kind, source, target, info }));
+    }
+    filed.sort_by_key(|(seq, _)| *seq);
+    for (_, load) in filed {
+        each(load)?;
+    }
+    for (key, bytes) in r.scan(&Prefix::Vector.key().to_vec())? {
+        let mut parts = decode_key(&key)?;
+        let (Some(Part::Number(chunk)), Some(Part::String(id)), Some(Part::String(index))) =
+            (parts.pop(), parts.pop(), parts.pop())
+        else {
+            return Err(corrupt("An embedding's key"));
+        };
+        let super::vector::Stored { model, hash, vector } = super::vector::decode_vector(&bytes)?;
+        each(Load::Embedding { id, index, chunk: chunk as u32, model, hash, vector })?;
+    }
+    for (key, bytes) in r.scan(&Prefix::Sequence.key().to_vec())? {
+        let Some(Part::String(name)) = decode_key(&key)?.pop() else { return Err(corrupt("A sequence's key")) };
+        let next = values::decode(&bytes)?.as_u64().ok_or_else(|| corrupt(&format!("sequence {name}")))?;
+        each(Load::Sequence { name, next })?;
     }
     Ok(())
 }
@@ -291,7 +350,16 @@ impl Database {
         Ok(stats)
     }
 
-    /// Applies loads in one durable unit without a write's checks, as an import or an upgrade does, and for specs that
+    /// The database's primary data as the loads that make it again, read in one moment: its entities in the order they
+    /// were made, each with every field it holds, then its relations in theirs, its embeddings, and its sequences last,
+    /// so a load takes each in the place it had (`docs/architecture/format.md`, Dumps)
+    pub fn primary_loads(&self, each: impl FnMut(Load) -> Result<()>) -> Result<()> {
+        let store = self.store()?;
+        let schema = self.engine_schema();
+        store.read(|txn, db| primary_loads_of(&super::unit::Snapshot { txn, db, schema: &schema }, each))
+    }
+
+    /// Applies loads in one durable unit without a write's checks, as an import or a dump's load does, and for specs that
     /// need data the checks would refuse
     pub fn bulk_load(&self, loads: &[Load]) -> Result<()> {
         self.admin_load(loads)

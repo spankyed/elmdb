@@ -68,7 +68,8 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Databases:** the development machine's elmdb and lmdb-js databases (the development profile and every
   `apack-cli` profile) were wiped on 2026-10-26, so each next open makes a format 1 database; the installed app's
   data is the user's to convert, after a release.
-- **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
+- **Data:** G8's dump was made on 2026-10-26 from the backup, through the lmdb-js move path, which was then deleted:
+  `~/Develop/backups/abuddy-backups/elmdb-dumps/`, its README beside it. No phase's copy has been loaded from it yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
   row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
@@ -87,11 +88,11 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
 | G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's work on G7's branch, pushed at each checkpoint, under the one PR opened for it against `master`, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
 | G7 | **One branch for the rest.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in a new worktree (`npm run session:new -- elmdb-next`), under one PR against `master`. `master`'s later commits come in by merging `master` | the user, 2026-10-25 and 2026-10-26 |
-| G8 | **Production-shaped data** is a copy made from the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/full-db/agentbuddy-backup-2026-10-17T23-06-18-232Z`, format 1), by `docs/evidence/phase-1.md`'s recipe: converted to format 4 by apack's `scripts/ears-convert.ts`, run from a detached worktree at a commit that still has it (`3e0b280ff`), dumped by `tools/lmdb-js-export` and read by `elmdb upgrade`. The copy lives in a scratch directory outside both repositories and is never committed; the backup is only read. What the upgrade refuses on the copy (its duplicate short codes) is resolved on the copy and recorded | the user's backup; `phase-1.md` |
+| G8 | **Production-shaped data** is loaded from the dump of the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/elmdb-dumps/agentbuddy-backup-2026-10-17T23-06-18-232Z.elmdb-dump`) by `elmdb load`, into a scratch directory outside both repositories, and is never committed; the dump and the backup are only read. It holds the backup's data in its own contract, with no schema (the README beside it). What a phase's schema refuses on its copy (the 17 duplicate short codes `docs/evidence/phase-7.md` found) is resolved on the copy and recorded | the dump's README; `format.md`, Dumps |
 | G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 3 measures flow runs and records why the chat turn is missing | this goal |
 | G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
 | G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
-| G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data with `elmdb upgrade` is the user's step | this goal |
+| G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data is the user's step | this goal |
 | G13 | **Live queries stay their session's work.** apack's live queries (views, `useView`, the features moved onto them; the plan is archived at `docs/archive/plans/live-queries.md`) landed on `master` with #277 and #278. This goal changes them only where its own work makes it, and later changes to them reach G7's branch by merging `master`. What this goal changes beneath them keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing | `goal-elmdb.md`'s D30; G7 |
 
 ## Phases
@@ -209,7 +210,8 @@ Final unless marked open. Each cites the document that owns it; change the owner
 - **Dependencies:** Phase 2.
 - **Done when:**
   - Size on disk and the readings of long reads are recorded before and after, on the copy.
-  - `check()` and `rebuild()` pass over compressed values, and our databases are reset or converted once, on a copy.
+  - `check()` and `rebuild()` pass over compressed values, and our databases are reset or converted once, on a copy:
+    dumped by the build before the change and loaded by the build after (`format.md`, Dumps). G8's dump needs nothing.
 
 ### Phase 9: substring and regex search
 

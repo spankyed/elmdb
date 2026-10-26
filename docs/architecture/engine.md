@@ -188,10 +188,12 @@ unit is open.
   relations, a role. It refuses a name the schema still declares.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
-- `bulkLoad(loads)`: entities, relations under their own ids and sequences, applied in one durable unit without a
-  write's checks (no schema, no refusals, a unique index taking duplicates), for imports, the upgrade, and specs that
-  need data the checks would refuse. The derived keys are kept as a write keeps them, and `check()` reports what the
-  rules refuse.
+- `bulkLoad(loads)`: entities, relations under their own ids, sequences, embeddings and fields taken away, applied in
+  one durable unit without a write's checks (no schema, no refusals, a unique index taking duplicates), for imports, a
+  dump's load, and specs that need data the checks would refuse. The derived keys are kept as a write keeps them, and
+  `check()` reports what the rules refuse.
+- `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
+  one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).
 
 ## Errors
 

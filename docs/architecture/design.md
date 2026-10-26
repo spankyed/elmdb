@@ -33,8 +33,8 @@ This document is what every "should elmdb do X?" is checked against. The others:
 6. **Each cross-language contract is defined once.** Schemas, plans, batches, results, change sets and error codes are
    Rust types; their TypeScript types are generated from them and never written by hand, so drift fails the build.
 7. **Formats are explicit.** Every database records its format, and an open refuses one it can't read. The format is
-   1, edited in place, until a release has users; from then on an upgrade is a Rust function from one format to the
-   next, run by `elmdb upgrade` on a copy, never on open (`format.md`, Versions).
+   1, edited in place, until a release has users, and a database crosses an edit by a dump and a load; from then on an
+   upgrade is a Rust function from one format to the next, run on a copy, never on open (`format.md`, Versions).
 8. **The engine owns collation.** String order is declared once (icu4x's root collation), so a sort means the same
    wherever it runs.
 
@@ -61,7 +61,7 @@ One product name, with the host language as the suffix:
 |---|---|---|
 | `elmdb` | (none) | the engine and its Rust API |
 | `elmdb-node` | `elmdb` | the N-API binding |
-| `elmdb-cli`, later | (none) | `inspect`, `check`, `backup`, `upgrade` |
+| `elmdb-cli`, later | (none) | `inspect`, `check`, `backup`, `dump`, `load` |
 
 Another host follows the pattern (`elmdb-py`). A new crate needs a reason, such as independent reuse or compile time;
 otherwise it is a module.
