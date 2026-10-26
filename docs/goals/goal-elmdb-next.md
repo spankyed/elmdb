@@ -60,11 +60,11 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   `session/ears-on-elmdb` was rebased onto `master` (`fcb20e0a8`) at `f6c66e4a5`, pinning elmdb `8158696`; strict
   chain green on its tree before the rebase (run 40284993357). The rebased head's own CI run is Phase 2's, on the new
   branch.
-- **live-queries** (main checkout, branch `live-queries`, PR #277): rebased onto the same `master` at `70c695bf6`,
-  2026-10-26; Steps 1–3 committed, Step 4's actions and flows committed (`42f19ca84`). Phase 2 merges whatever is
-  committed when it starts.
-- **Phase 2 next:** the branch `live-queries-on-elmdb`, cut from `session/ears-on-elmdb`'s tip, in a worktree of that
-  name.
+- **Phase 2 under way** (2026-10-26): the branch `session/live-queries-on-elmdb`, in the worktree
+  `AgentBuddy-worktrees.noindex/live-queries-on-elmdb`, PR #278. `live-queries` merged at `97513f457`; the branch is
+  at `3b008cc51`. apack's full `npm run chain` passed on it, native step included (2026-10-26, run
+  `2026-10-26T09-24-46Z-93726`). Left: the strict chain (run 40304246260), and the message-search and migrated-view
+  driving scripts against the merged app.
 - **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
@@ -236,8 +236,8 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| elmdb v1 (P1) | missing | | all |
-| One branch, live queries merged, its PR open (P2) | missing | | all |
+| elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
+| One branch, live queries merged, its PR open (P2) | partial | `session/live-queries-on-elmdb`, merge `97513f457`, PR #278; `npm run chain` passed on `3b008cc51` | strict chain; the driving scripts |
 | A user action's calls to elmdb, and its loops fixed (P3) | missing | | all |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
