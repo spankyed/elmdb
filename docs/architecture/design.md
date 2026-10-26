@@ -32,8 +32,9 @@ This document is what every "should elmdb do X?" is checked against. The others:
    check over `cargo tree`), and the binding refuses to load twice into one process.
 6. **Each cross-language contract is defined once.** Schemas, plans, batches, results, change sets and error codes are
    Rust types; their TypeScript types are generated from them and never written by hand, so drift fails the build.
-7. **Formats are explicit.** Every database records its format, and an upgrade is a Rust function from one format to
-   the next, run by `elmdb upgrade` on a copy, never on open.
+7. **Formats are explicit.** Every database records its format, and an open refuses one it can't read. The format is
+   1, edited in place, until a release has users; from then on an upgrade is a Rust function from one format to the
+   next, run by `elmdb upgrade` on a copy, never on open (`format.md`, Versions).
 8. **The engine owns collation.** String order is declared once (icu4x's root collation), so a sort means the same
    wherever it runs.
 

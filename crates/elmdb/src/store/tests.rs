@@ -90,7 +90,7 @@ fn stamp_format(path: &Path, version: u32) {
 }
 
 #[test]
-fn refuses_a_newer_format_saying_to_update_and_an_older_one_naming_the_upgrade() {
+fn refuses_a_newer_format_saying_to_update_and_an_older_one_saying_it_is_made_again() {
     let dir = tempfile::tempdir().unwrap();
     stamp_format(dir.path(), format::FORMAT_VERSION + 1);
     let newer = Store::open(dir.path(), quiet()).err().unwrap();
@@ -101,7 +101,7 @@ fn refuses_a_newer_format_saying_to_update_and_an_older_one_naming_the_upgrade()
     stamp_format(dir.path(), 0);
     let older = Store::open(dir.path(), quiet()).err().unwrap();
     assert_eq!(older.code, ErrorCode::WrongFormat);
-    assert!(older.message.contains("elmdb upgrade"), "{}", older.message);
+    assert!(older.message.contains("made again") && !older.message.contains("elmdb upgrade"), "{}", older.message);
 }
 
 #[test]

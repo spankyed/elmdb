@@ -5,7 +5,7 @@ pub mod key;
 pub mod value;
 
 /// The format this version writes and reads, recorded as `m/format`
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 1;
 
 /// What `m/kind` holds in an elmdb database
 pub const KIND: &str = "elmdb";

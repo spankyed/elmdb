@@ -53,8 +53,6 @@ pub struct StoreOptions {
     pub sync_interval: Duration,
     /// The map's size at open; by default `initial_map_size` of the file
     pub map_size_bytes: Option<usize>,
-    /// Opened by `elmdb upgrade` to step it to this version's format: a database in an older format opens too
-    pub upgrading: bool,
 }
 
 impl Default for StoreOptions {
@@ -65,7 +63,6 @@ impl Default for StoreOptions {
             sync_idle: Duration::from_millis(100),
             sync_interval: Duration::from_millis(1000),
             map_size_bytes: None,
-            upgrading: false,
         }
     }
 }
@@ -180,7 +177,7 @@ impl Store {
             e => e.into(),
         })?;
 
-        let db = Self::open_db(&env, &canonical, options.read_only, options.upgrading)?;
+        let db = Self::open_db(&env, &canonical, options.read_only)?;
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
@@ -210,7 +207,7 @@ impl Store {
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
-    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool, upgrading: bool) -> Result<Db> {
+    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool) -> Result<Db> {
         let rtxn = env.read_txn()?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -234,7 +231,7 @@ impl Store {
             None => false,
         };
         if let Some(db) = db {
-            check_stamp(env, db, path, upgrading)?;
+            check_stamp(env, db, path)?;
             return Self::with_graphs(env, db, read_only);
         }
         if read_only || foreign {
@@ -676,12 +673,7 @@ pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name:
     db.put(txn, &meta_key(name), value).map_err(Into::into)
 }
 
-fn check_stamp(
-    env: &Env<WithoutTls>,
-    db: heed::Database<'_, Bytes, Bytes>,
-    path: &Path,
-    upgrading: bool,
-) -> Result<()> {
+fn check_stamp(env: &Env<WithoutTls>, db: heed::Database<'_, Bytes, Bytes>, path: &Path) -> Result<()> {
     let txn = env.read_txn()?;
     let kind = db.get(&txn, &meta_key(meta::KIND))?;
     if kind != Some(format::KIND.as_bytes()) {
@@ -691,7 +683,6 @@ fn check_stamp(
         db.get(&txn, &meta_key(meta::FORMAT))?.and_then(|b| <[u8; 4]>::try_from(b).ok()).map(u32::from_be_bytes);
     match format {
         Some(format::FORMAT_VERSION) => Ok(()),
-        Some(f) if upgrading && f < format::FORMAT_VERSION => Ok(()),
         Some(f) if f > format::FORMAT_VERSION => Err(Error::new(
             ErrorCode::WrongFormat,
             format!(
@@ -703,7 +694,8 @@ fn check_stamp(
         Some(f) => Err(Error::new(
             ErrorCode::WrongFormat,
             format!(
-                "The database at {} is in format {f}; this elmdb reads format {}. Upgrade a copy with `elmdb upgrade <dir>`",
+                "The database at {} is in format {f}, from before this elmdb's format {} was fixed; it can't be read, and is \
+                 made again",
                 path.display(),
                 format::FORMAT_VERSION
             ),

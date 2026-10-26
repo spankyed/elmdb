@@ -52,16 +52,18 @@ dictionaries trained per type for small values such as messages.
 
 ## Versions
 
-`m/format` records the format as an integer. An open refuses a database in another format, naming it, and, for a newer
-one, saying to update. An upgrade is a Rust function from one format to the next, run by `elmdb upgrade <dir>` on a
-copy, a step at a time, each recording its format. Nothing upgrades on open. A step that changes only derived data
-deletes it and its index's marker in the unit recording the format, and the upgrade then builds those indexes as an
-open does (`crate::upgrade::upgrade_format`).
+`m/format` records the format as an integer, and an open refuses a database in another format, naming both: a newer
+one says to update elmdb, an older one that it is from before the format was fixed and is made again.
 
-| Format | What changed, and its step |
-|---|---|
-| 1 | the first |
-| 2 | a stemming text index holds its words as written (`d/fw`), and a text document lists them; the step rebuilds every text index |
+**The format is 1 until a release has users** (apack's `docs/plans/storage-format-one.md`). Until then a change to the
+stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
+needs nothing, `rebuild()` building it from primary data. The databases that exist are their developers', reset or
+converted once on a copy. The accepted cost is that a build may misread a database from before an in-place change
+rather than refuse it; the answer is the same reset.
+
+**From the first release with users** (its tag is the condition), format 1 is locked: every later change to the stored
+layout bumps the format and ships an upgrade, a Rust function from one format to the next, run by `elmdb upgrade` on a
+copy and never on open. This section then names the tag.
 
 ## Moving apack's data
 

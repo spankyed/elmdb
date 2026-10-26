@@ -55,8 +55,8 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 ## Current handoff
 
 - **Phase 1 done** (2026-10-26): `goal-elmdb.md` closed (`docs/archive/goals/goal-elmdb.md`), then a review of elmdb
-  and of apack's PR #276 fixed what it found. elmdb `main` is `8158696`, its format 2 (a stemming text index keeps the
-  words as written; `elmdb upgrade <dir>` steps a format 1 copy), every target's CI green (run 40289842885).
+  and of apack's PR #276 fixed what it found. elmdb `main` is `8158696`, every target's CI green (run 40289842885); its
+  format is 1 again, edited in place (G3).
   `session/ears-on-elmdb` was rebased onto `master` (`fcb20e0a8`) at `f6c66e4a5`, pinning elmdb `8158696`; strict
   chain green on its tree before the rebase (run 40284993357). The rebased head's own CI run is Phase 2's, on the new
   branch.
@@ -81,7 +81,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 |---|---|---|
 | G1 | Phase 1 comes first, then Phase 2; every later phase builds on Phase 2's branch. Phases 4 and 5 touch what `goal-elmdb.md`'s Phases 13 and 14 change — `reads.rs`, which tracked reads record through, and apack's `schema.ts` and codegen — so none starts before Phase 1 closes. Phase 14 there builds only the engine's side of watch (its D30) | this goal |
 | G2 | A phase marked gated builds only when its reading says so, by the rule the phase states. The reading is recorded either way, and a phase whose gate isn't met is done when its reading is | this goal |
-| G3 | A change to stored data's layout bumps `FORMAT_VERSION` with an `elmdb upgrade` step to it, run on a copy (`docs/architecture/format.md`, Versions). Derived data only (a text or trigram index) may instead be rebuilt by that step. Stored developer data is converted on a copy, never at boot | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
+| G3 | The format is 1 until a release has users: a change to stored data's layout edits format 1 in place, with no bump and no upgrade step, and a change to derived data (a text or trigram index) needs nothing, `rebuild()` building it. Our databases are reset or converted once on a copy, never at boot. From the first release with users, format 1 is locked and each later change bumps it with its upgrade step (`docs/architecture/format.md`, Versions; apack's `docs/plans/storage-format-one.md`) | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
 | G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's work on Phase 2's branch, pushed at each checkpoint, under the one PR Phase 2 opens, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
@@ -182,8 +182,8 @@ Final unless marked open. Each cites the document that owns it; change the owner
     added to apack's bench as text cases.
   - **The gate:** posting lists in blocks are built if the write's time at 50,000 messages is more than twice its time
     at 1,000; fuzzy terms by seeking, if the fuzzy search's is.
-  - What is built keeps search's specs and the model harness passing, and an upgrade step rebuilds existing text
-    indexes (G3).
+  - What is built keeps search's specs and the model harness passing; existing text indexes are rebuilt (G3: derived
+    data, no upgrade step).
 - **Dependencies:** Phase 2.
 - **Done when:** the readings are recorded, and what the gate called for is built, with the readings after it.
 
@@ -201,14 +201,13 @@ Final unless marked open. Each cites the document that owns it; change the owner
   - A value above a threshold stored compressed with zstd, marked by a tag byte no msgpack value starts with, and
     decompressed where the engine reads it; the threshold chosen by measuring size and read time on a copy of
     production-shaped data.
-  - The format bumped with an `elmdb upgrade` step that compresses what is stored (G3).
+  - Format 1 changed in place, with no bump and no upgrade step (G3).
   - apack's `docs/plans/ears-value-compression.md`, written for the engine before elmdb, archived with this as its
     successor.
 - **Dependencies:** Phase 2.
 - **Done when:**
   - Size on disk and the readings of long reads are recorded before and after, on the copy.
-  - `check()` and `rebuild()` pass over compressed values, and the upgrade step's spec converts a database of the
-    previous format.
+  - `check()` and `rebuild()` pass over compressed values, and our databases are reset or converted once, on a copy.
 
 ### Phase 9: substring and regex search
 
