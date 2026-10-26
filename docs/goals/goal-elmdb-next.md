@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: planned, 2026-10-25. Not started; follows `goal-elmdb.md`, then merges live-queries (Phase 2).
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). Phase 3 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -9,8 +9,8 @@ Implement elmdb/docs/goals/goal-elmdb-next.md. Read Scope, Current handoff, Deci
 Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished by its own
 document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
 elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 5 is
-AgentBuddy/docs/plans/field-types-from-shapes.md. Phase 2 makes the one apack branch the
-rest is built on: elmdb's branch with live-queries merged into it.
+AgentBuddy/docs/plans/field-types-from-shapes.md. Phases 1 and 2 are done; apack's work for
+Phases 3 to 10 is on one branch cut from master, under one PR (G7).
 
 Work in two repositories, both under ~/Develop/Projects:
 - elmdb: follow elmdb/CLAUDE.md and this goal's Constraints.
@@ -54,19 +54,20 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 
 ## Current handoff
 
-- **Phase 1 done** (2026-10-26): `goal-elmdb.md` closed (`docs/archive/goals/goal-elmdb.md`), then a review of elmdb
-  and of apack's PR #276 fixed what it found. elmdb `main` is `8158696`, every target's CI green (run 40289842885); its
-  format is 1 again, edited in place (G3).
-  `session/ears-on-elmdb` was rebased onto `master` (`fcb20e0a8`) at `f6c66e4a5`, pinning elmdb `8158696`; strict
-  chain green on its tree before the rebase (run 40284993357). The rebased head's own CI run is Phase 2's, on the new
-  branch.
-- **Phase 2 done** (2026-10-26): the branch `session/live-queries-on-elmdb`, in the worktree
-  `AgentBuddy-worktrees.noindex/live-queries-on-elmdb`, PR #278 — the one PR (G6), superseding #276. #277 landed on
-  `master` (`cbaa33bd4`) and was merged in at `5d1de25d2`, each conflicted file merged against `70c695bf6`, the
-  live-queries commit first merged at `97513f457`; an audit of every file against #276, `master` and their merge base
-  found each difference intended. The strict chain passed on `5d1de25d2`, every job (run 40326956990). The driving
-  scripts ran against the merged app (kept in the worktree's gitignored `drive/`): `message-search.ts`, `notes-view.ts`.
-- **Phase 3 next:** what a user action costs, on this branch.
+- **Phases 1 and 2 done** (2026-10-26):
+  - elmdb v1: `goal-elmdb.md` closed (`docs/archive/goals/goal-elmdb.md`), and a review of elmdb and of the apack move
+    fixed what it found (every target's CI green, run 40289842885).
+  - The apack move and live queries landed together on `master` with #278 (`0e6d0ffce`): #277 merged in at
+    `5d1de25d2`, an audit of every file found each difference intended, and the strict chain passed on every job
+    (run 40326956990). #276 is closed, superseded by #278.
+  - On `master` since: the format is 1 again, edited in place (G3; elmdb `14bd362`, apack `949b73f4a`); a startup the
+    API can't finish shows the API's own error (`4fd8c17d4`); a pack toggle on a busy pack waits for its teardown or
+    is refused out loud (`272c7b3d9`); the external-pack E2E waits for installs' and toggles' outcomes, not clocks.
+    `npm run chain -- --no-native` passed on `dacf05e33` (2026-10-26).
+- **Phase 3 next**, on G7's branch, which isn't cut yet.
+- **Databases:** the development machine's elmdb and lmdb-js databases (the development profile and every
+  `apack-cli` profile) were wiped on 2026-10-26, so each next open makes a format 1 database; the installed app's
+  data is the user's to convert, after a release.
 - **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
@@ -79,19 +80,19 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 | # | Decision | Owner |
 |---|---|---|
-| G1 | Phase 1 comes first, then Phase 2; every later phase builds on Phase 2's branch. Phases 4 and 5 touch what `goal-elmdb.md`'s Phases 13 and 14 change — `reads.rs`, which tracked reads record through, and apack's `schema.ts` and codegen — so none starts before Phase 1 closes. Phase 14 there builds only the engine's side of watch (its D30) | this goal |
+| G1 | Phase 1 comes first, then Phase 2; every later phase builds on G7's branch. Phases 4 and 5 touch what `goal-elmdb.md`'s Phases 13 and 14 change — `reads.rs`, which tracked reads record through, and apack's `schema.ts` and codegen — so none starts before Phase 1 closes. Phase 14 there builds only the engine's side of watch (its D30) | this goal |
 | G2 | A phase marked gated builds only when its reading says so, by the rule the phase states. The reading is recorded either way, and a phase whose gate isn't met is done when its reading is | this goal |
 | G3 | The format is 1 until a release has users: a change to stored data's layout edits format 1 in place, with no bump and no upgrade step, and a change to derived data (a text or trigram index) needs nothing, `rebuild()` building it. Our databases are reset or converted once on a copy, never at boot. From the first release with users, format 1 is locked and each later change bumps it with its upgrade step (`docs/architecture/format.md`, Versions; apack's `docs/plans/storage-format-one.md`) | `format.md`; apack's `CLAUDE.md`, Backward compatibility |
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
-| G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's work on Phase 2's branch, pushed at each checkpoint, under the one PR Phase 2 opens, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
-| G7 | **One branch for the rest.** Once `goal-elmdb.md` has closed, apack's work moves to a new branch cut from its branch's tip (`session/ears-on-elmdb`), in a new worktree (`npm run session:new`), and `live-queries` is merged into it before anything else (Phase 2). Every later phase commits there. This replaces `goal-elmdb.md`'s D30 landing order, in which live-queries rebased onto `master` after elmdb landed: the merge brings the two together now, so the rest of this goal is built on both and lands as one | the user, 2026-10-25 |
+| G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's `main` pushed at each checkpoint, apack's work on G7's branch, pushed at each checkpoint, under the one PR opened for it against `master`, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
+| G7 | **One branch for the rest.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in a new worktree (`npm run session:new -- elmdb-next`), under one PR against `master`. `master`'s later commits come in by merging `master` | the user, 2026-10-25 and 2026-10-26 |
 | G8 | **Production-shaped data** is a copy made from the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/full-db/agentbuddy-backup-2026-10-17T23-06-18-232Z`, format 1), by `docs/evidence/phase-1.md`'s recipe: converted to format 4 by apack's `scripts/ears-convert.ts`, run from a detached worktree at a commit that still has it (`3e0b280ff`), dumped by `tools/lmdb-js-export` and read by `elmdb upgrade`. The copy lives in a scratch directory outside both repositories and is never committed; the backup is only read. What the upgrade refuses on the copy (its duplicate short codes) is resolved on the copy and recorded | the user's backup; `phase-1.md` |
 | G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 3 measures flow runs and records why the chat turn is missing | this goal |
 | G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
 | G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
 | G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data with `elmdb upgrade` is the user's step | this goal |
-| G13 | **Live queries stay their session's work.** apack's live-queries work (`docs/plans/live-queries.md`: views, `useView`, the features moved onto them) is merged in by Phase 2, which changes it only where a conflict makes it: its plan and its views are otherwise left as they are. Commits `live-queries` makes after the merge come in the same way, by merging the branch again under Phase 2's rules, never by editing its features here. What this goal changes beneath them keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing | `goal-elmdb.md`'s D30; G7 |
+| G13 | **Live queries stay their session's work.** apack's live queries (views, `useView`, the features moved onto them; the plan is archived at `docs/archive/plans/live-queries.md`) landed on `master` with #277 and #278. This goal changes them only where its own work makes it, and later changes to them reach G7's branch by merging `master`. What this goal changes beneath them keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing | `goal-elmdb.md`'s D30; G7 |
 
 ## Phases
 
@@ -103,7 +104,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 ### Phase 2: one branch, live queries merged
 
 - **Deliverable:**
-  - A branch cut from `session/ears-on-elmdb`'s tip after `goal-elmdb.md` closes, in a new worktree (G7), and
+  - A branch cut from `session/ears-on-elmdb`'s tip after `goal-elmdb.md` closes, in a new worktree, and
     `live-queries` merged into it at its latest commit — recorded by its hash, with what `live-queries` held then
     (its plan's Status line). Work the live-queries session hasn't committed isn't merged: it comes in later (G13).
   - The conflicts reconciled, each by what the two branches meant:
@@ -140,10 +141,11 @@ Final unless marked open. Each cites the document that owns it; change the owner
   - A count of a user action's calls to elmdb, in development only: reads, writes outside a unit, units and their
     writes, and the time spent in each, by call site. Kept at the one place every call crosses
     (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:eval`.
-  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`. Views are on the
-    branch (Phase 2), so a reading counts their re-runs too: a streamed message is rewritten every 80 ms, and each view
-    reading it runs again (live-queries' Risks), which is the reading its open question on a minimum re-run interval
-    waits for.
+  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`. Views are on
+    `master`, so a reading counts their re-runs too: a streamed message is rewritten every 80 ms, and each view whose
+    read set holds it runs again. Live queries decided on no minimum re-run interval from an lmdb-js-era reading
+    (`docs/archive/plans/live-queries.md`, Risks); this is its reading on elmdb, which reopens that decision if a view's
+    re-run takes longer than its writer's interval.
   - Each loop of one-entity reads or unit-less writes the readings show costing a measurable share of its action,
     turned into a set read (`query.ids(list)`, `pickAll`) or grouped (`transact`, `setMany`) where it is.
 - **Dependencies:** Phase 2.
@@ -238,7 +240,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
-| One branch, live queries merged, its PR open (P2) | done | `session/live-queries-on-elmdb`, PR #278; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990; `drive/message-search.ts`, `drive/notes-view.ts` | |
+| One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990; `drive/message-search.ts`, `drive/notes-view.ts` | |
 | A user action's calls to elmdb, and its loops fixed (P3) | missing | | all |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
