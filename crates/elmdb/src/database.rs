@@ -231,6 +231,18 @@ impl Database {
     /// `close`, answering false rather than closing while a unit is open, and giving up after `wait` when an operation
     /// still holds the store. A database left open keeps its store, and closes later
     pub fn close_within(&self, wait: Option<Duration>) -> Result<bool> {
+        self.close_as(wait, false)
+    }
+
+    /// `close_within` in a process that is exiting, which waits on no thread but the caller's: on Windows the exit
+    /// handlers run after every other thread was ended, so the index builder is left unjoined and group commit's sync
+    /// runs on this thread (`Store::close_at_exit`). A store an operation still holds after `wait` is synced and left
+    /// open
+    pub fn close_at_exit(&self, wait: Duration) -> Result<bool> {
+        self.close_as(Some(wait), true)
+    }
+
+    fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for
@@ -243,7 +255,11 @@ impl Database {
             }
             // A build in progress stops between chunks, for the next open to finish
             if let Some(mut builder) = self.builder().take() {
-                builder.stop();
+                if at_exit {
+                    builder.abandon();
+                } else {
+                    builder.stop();
+                }
             }
             slot.take()
         };
@@ -253,11 +269,13 @@ impl Database {
         let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
+                Ok(store) if at_exit => return store.close_at_exit(wait.unwrap_or_default()).map(|()| true),
                 Ok(store) => return store.close().map(|()| true),
                 Err(shared) => {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                        let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
-                        return Ok(false);
+                        return synced.map(|()| false);
                     }
                     store = shared;
                     std::thread::sleep(Duration::from_millis(1));

@@ -38,7 +38,11 @@ fn close_all(open: Vec<Weak<elmdb::Database>>) {
 extern "C" fn close_at_process_exit() {
     // A lock poisoned by a panic elsewhere still holds the list
     let open = std::mem::take(&mut *PROCESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-    close_all(open);
+    // On Windows `exit` has ended every other thread before this runs, each database's sync and index threads among
+    // them, so the close waits on none of them
+    for db in open.iter().filter_map(Weak::upgrade) {
+        let _ = db.close_at_exit(CLOSE_WAIT);
+    }
 }
 
 /// The environment's list of the databases it opened, made with its cleanup hook on its first open

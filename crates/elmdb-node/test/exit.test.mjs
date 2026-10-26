@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { Packr } from 'msgpackr';
 
 const binding = fileURLToPath(new URL('../index.js', import.meta.url));
 const { Database } = createRequire(import.meta.url)('../index.js');
@@ -85,3 +86,23 @@ for (const [ends, child] of Object.entries(endings)) {
     assert.deepEqual(semaphoresOf(dir).filter(exists), []);
   });
 }
+
+test('a process that exits with a write group commit hasn\'t synced yet ends, its write on disk', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Note: { fields: {} } } };
+  const batch = new Packr({ useRecords: false, mapsAsObjects: true })
+    .pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-1' }], now: 1000 });
+  // On Windows `exit` ends the sync thread before the exit handlers run, so a close that waited on it never would end
+  const child = [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncIdleMs: 60000, syncIntervalMs: 60000 });`,
+    `db.write(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
+    'process.stdout.write(String(db.sequence));',
+    'process.exit(0);',
+  ].join('\n');
+  const sequence = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 30_000 }));
+  const db = Database.open(dir, { syncs: false });
+  t.after(() => db.close());
+  assert.equal(db.sequence, sequence);
+});

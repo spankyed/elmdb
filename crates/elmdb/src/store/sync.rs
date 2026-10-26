@@ -217,6 +217,37 @@ impl GroupCommit {
     }
 }
 
+impl GroupCommit {
+    /// Stops group commit in a process that is exiting, waiting on no other thread: on Windows the exit handlers run
+    /// after every other thread was ended, the worker among them, so neither a sync asked of it nor a join would return.
+    /// The caller syncs what is owed on its own thread. The worker is told to stop and left to end with the process,
+    /// and the syncer dropped if its lock comes free within `wait`, which a worker ended mid-sync holds for good
+    pub fn stop_at_exit(mut self, wait: Duration) {
+        let deadline = Instant::now() + wait;
+        if let Some(mut state) = lock_before(&self.shared.state, deadline) {
+            state.closing = true;
+            self.shared.changed.notify_all();
+        }
+        // Dropping the handle detaches the worker, and leaves `Drop` nothing to close
+        self.worker.take();
+        if let Some(mut syncer) = lock_before(&self.shared.syncer, deadline) {
+            syncer.take();
+        }
+    }
+}
+
+/// The lock, unless another thread holds it past `deadline`
+fn lock_before<T>(mutex: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if Instant::now() >= deadline => return None,
+            Err(std::sync::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(1)),
+        }
+    }
+}
+
 impl Drop for GroupCommit {
     fn drop(&mut self) {
         if self.worker.is_some() {

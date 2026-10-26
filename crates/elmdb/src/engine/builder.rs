@@ -103,6 +103,20 @@ impl Waiter {
     }
 }
 
+impl Builder {
+    /// Stops the thread without waiting for it, in a process that is exiting, whose other threads may be gone already
+    pub fn abandon(&mut self) {
+        {
+            let (lock, changed) = &*self.shared;
+            lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stopping = true;
+            changed.notify_all();
+        }
+        self.store.wake_unit_waiters();
+        // Dropping the handle detaches the thread
+        self.thread.take();
+    }
+}
+
 impl Drop for Builder {
     fn drop(&mut self) {
         self.stop();

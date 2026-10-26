@@ -584,6 +584,27 @@ impl Store {
         synced
     }
 
+    /// Syncs on the calling thread what group commit owes, without its worker
+    pub fn sync_owed(&self) -> Result<()> {
+        match self.commit {
+            Some(_) => self.env.force_sync().map_err(Into::into),
+            None => Ok(()),
+        }
+    }
+
+    /// `close` in a process that is exiting, whose other threads may be gone already: syncs on this thread, stops group
+    /// commit without its worker (`GroupCommit::stop_at_exit`), and releases the environment without waiting for it
+    /// to close, which a handle a gone thread held would keep open
+    pub fn close_at_exit(mut self, wait: Duration) -> Result<()> {
+        let synced = self.sync_owed();
+        if let Some(commit) = self.commit.take() {
+            commit.stop_at_exit(wait);
+        }
+        self.drop_idle();
+        drop(self);
+        synced
+    }
+
     /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed. The
     /// copy is written beside it, synced and renamed into place, so a failed copy leaves an earlier backup whole; a
     /// target open in this process is refused, the copy's file truncating the one its map reads

@@ -313,6 +313,24 @@ fn a_wait_given_up_on_keeps_no_outcome() {
     h.close_after_failure();
 }
 
+#[test]
+fn stopping_at_exit_waits_on_no_worker() {
+    // A sync the test never settles stands in for a worker an exiting process has ended mid-sync, holding the syncer
+    let Harness { commit, started, finish, .. } = Harness::new();
+    commit.on_commit();
+    drop(commit.durable());
+    started.recv_timeout(Duration::from_millis(200)).expect("a sync started");
+    commit.on_commit();
+    let (stopped, stop) = channel();
+    std::thread::spawn(move || {
+        commit.stop_at_exit(Duration::from_millis(20));
+        stopped.send(()).unwrap();
+    });
+    assert!(stop.recv_timeout(Duration::from_secs(5)).is_ok(), "the stop waited on the worker");
+    // Let the worker end, as an exiting process would never need it to
+    finish.send(Ok(())).unwrap();
+}
+
 /// The failed-sync harness (`docs/architecture/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
 /// what a wait promises rather than against a copy of the implementation. A wait that resolved had a sync covering its
 /// commits finish successfully, and no sync failed before it settled; a wait that rejected had a sync fail before it
