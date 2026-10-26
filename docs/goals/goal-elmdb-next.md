@@ -74,6 +74,11 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
   row's read through the binding is about 2.8 µs (`a0da984`). An indexed `where` with a `limit` of 50 read all 13,000 of
   its matches, 32 ms (apack's `docs/plans/live-queries.md`, Step 1's readings).
+- **Tracking's cost (2026-10-26, apack's bench, `watches`; load average about 5):** a 50-row page read through the
+  binding is 77 µs plain and 148 µs as a watch's run reads it (its token untracked, the read tracked), so tracking
+  about doubles a re-run's read; the untrack is nearly free. Repeated tracked reads under one token without an untrack
+  cost 319 µs each and growing: the read-set index de-duplicates keys but files each range again
+  (`TrackIndex::add`), which no watch does, since each run untracks first.
 
 ## Decisions
 
