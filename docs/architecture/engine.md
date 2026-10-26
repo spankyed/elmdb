@@ -66,7 +66,8 @@ A plan is a scope, a start, steps and a terminal:
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. A `where` or `withRole` straight after a type start
-reads a value index whose first field it names, a compound one's included.
+reads a built value index on that one field (a `where` on a value other than null): a compound index is not read, since
+it holds no entry for an entity missing another of its fields, and without such an index the type's entities are walked.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last
 committed one, which a commit in any process moves), and opens one otherwise; a commit here drops the idle ones, so none
