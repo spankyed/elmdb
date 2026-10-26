@@ -8,7 +8,7 @@
 export function createTemporaryDatabases(): TemporaryDatabases;
 
 // @public
-export const DATABASE_FORMAT = "elmdb/1";
+export const DATABASE_FORMAT = "elmdb/2";
 
 // @public (undocumented)
 export interface DatabaseOptions {

@@ -139,7 +139,7 @@ Held by the types and the engine specs, which say more than a rule over names co
   it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/architecture/engine.md`, Durability). `syncs:
   false` turns syncing off, for a temporary database a crash can't matter to.
 - **A backup is elmdb's compacted copy** (`backup`), and a restore its `replaceWith`, the database staying open: both
-  run through `@apackdev/host/backup`'s `databaseBackupStore`. `DATABASE_FORMAT` (`elmdb/1`) is what a backup records
+  run through `@apackdev/host/backup`'s `databaseBackupStore`. `DATABASE_FORMAT` (`elmdb/2`) is what a backup records
   of where its files came from; opening them is what decides whether they are readable.
 - **Two databases**, each with its own engine: the app's (`openDatabaseStore`, `@apackdev/host/database`, which
   declares the registered packs' schema and again as each registers) and the run history's (`openRunHistory`, held to

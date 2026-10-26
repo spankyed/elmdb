@@ -9,7 +9,7 @@ import type { EarsDatabase } from '../database.ts';
 import { toElmdbSchema, type EngineSchema } from '../schema.ts';
 
 /** The storage format an elmdb database is in, as a backup records it: provenance, since opening is what decides */
-export const DATABASE_FORMAT = 'elmdb/1';
+export const DATABASE_FORMAT = 'elmdb/2';
 
 export interface DatabaseOptions {
   /** The database's directory, created unless `readOnly` */
