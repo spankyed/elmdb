@@ -63,8 +63,10 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Phase 2 under way** (2026-10-26): the branch `session/live-queries-on-elmdb`, in the worktree
   `AgentBuddy-worktrees.noindex/live-queries-on-elmdb`, PR #278. `live-queries` merged at `97513f457`; the branch is
   at `3b008cc51`. apack's full `npm run chain` passed on it, native step included (2026-10-26, run
-  `2026-10-26T09-24-46Z-93726`). Left: the strict chain (run 40304246260), and the message-search and migrated-view
-  driving scripts against the merged app.
+  `2026-10-26T09-24-46Z-93726`). The driving scripts ran against the merged app (2026-10-26, kept in the worktree's
+  gitignored `drive/`): `message-search.ts` found both messages for "deplo" and opened one at its message;
+  `notes-view.ts` saw a note created and renamed by sends straight to the notes system reach the surface through its
+  tree view. Left: the strict chain (run 40304246260).
 - **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
@@ -237,7 +239,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
-| One branch, live queries merged, its PR open (P2) | partial | `session/live-queries-on-elmdb`, merge `97513f457`, PR #278; `npm run chain` passed on `3b008cc51` | strict chain; the driving scripts |
+| One branch, live queries merged, its PR open (P2) | partial | `session/live-queries-on-elmdb`, merge `97513f457`, PR #278; `npm run chain` passed on `3b008cc51`; `drive/message-search.ts`, `drive/notes-view.ts` | the strict chain |
 | A user action's calls to elmdb, and its loops fixed (P3) | missing | | all |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
