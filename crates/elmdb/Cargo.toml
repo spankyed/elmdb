@@ -19,6 +19,8 @@ rmp-serde.workspace = true
 getrandom.workspace = true
 icu_collator.workspace = true
 icu_locale_core.workspace = true
+# A number in a sort key written as ECMAScript's Number::toString writes it, as `JSON.stringify` does
+ryu-js.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true

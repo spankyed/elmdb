@@ -1116,10 +1116,10 @@ fn json_text(v: &Value) -> String {
             entries.iter().map(|(k, v)| format!("{}:{}", json_text(k), json_text(v))).collect::<Vec<_>>().join(",")
         ),
         Value::Ext(..) | Value::Binary(_) => "{}".to_owned(),
+        // JSON has no infinity or NaN, which `JSON.stringify` writes as null
         other => match values::as_number(other) {
-            Some(n) if n.fract() == 0.0 && n.abs() < 1e21 => format!("{}", n as i64),
-            Some(n) => format!("{n}"),
-            None => "null".to_owned(),
+            Some(n) if n.is_finite() => ryu_js::Buffer::new().format_finite(n).to_owned(),
+            _ => "null".to_owned(),
         },
     }
 }

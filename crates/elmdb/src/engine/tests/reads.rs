@@ -329,6 +329,33 @@ fn order_by_sorts_by_rank_then_value_a_timestamp_by_its_time() {
 }
 
 #[test]
+fn order_by_writes_a_list_s_numbers_as_json_stringify_does() {
+    let f = fixture();
+    // `JSON.stringify` writes [1e-7] and [5e-8] in exponent notation, so "[1" sorts before "[5"; and 2^64 - 1 as
+    // the double it reads as, 18446744073709552000, after 1e19's 10000000000000000000
+    let values: Vec<(&str, rmpv::Value)> = vec![
+        ("max", rmpv::Value::Array(vec![u64::MAX.into()])),
+        ("e19", rmpv::Value::Array(vec![1e19.into()])),
+        ("small", rmpv::Value::Array(vec![5e-8.into()])),
+        ("tiny", rmpv::Value::Array(vec![1e-7.into()])),
+    ];
+    let ops = values
+        .into_iter()
+        .map(|(name, value)| crate::engine::batch::Op::Create {
+            entity_type: "Person".into(),
+            id: Some(format!("Person-{name}")),
+            fields: [("value".to_owned(), value)].into(),
+            short_code: None,
+            created_at: None,
+            updated_at: None,
+        })
+        .collect();
+    f.db.write(&crate::engine::batch::Batch { ops, now: Some(1.0) }, false).unwrap();
+    let ordered = ids(&f.db, types(&["Person"]), json!([{ "step": "orderBy", "field": "value" }]));
+    assert_eq!(ordered, json!(["Person-e19", "Person-max", "Person-tiny", "Person-small"]));
+}
+
+#[test]
 fn distinct_and_group_by() {
     let f = fixture();
     let db = &f.db;
