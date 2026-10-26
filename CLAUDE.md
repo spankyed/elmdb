@@ -133,7 +133,8 @@ Held by the types and the engine specs, which say more than a rule over names co
 - **The database is elmdb's.** `openDatabase({ path, schema?, readOnly?, syncs? })` (`@apackdev/ears/lmdb`) opens the
   database at `path`, giving it `schema` (an `EngineSchema`; a schema that differs from the one it holds changes it,
   as `setSchema` would) or keeping the one it holds. `readOnly` opens existing files without writing: every write is
-  refused, and a database this user can't write is read without LMDB's lock file. Nothing opens on import.
+  refused. Reading still requires access to LMDB's lock file for reader registration; a permission failure refuses the
+  open rather than disabling locking. Nothing opens on import.
 - **A unit is visible as it commits, and durable within the window.** elmdb commits each unit without a sync and
   syncs on group commit, so a commit is on disk within a second; `durable()` resolves once every unit committed before
   it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/architecture/engine.md`, Durability). `syncs:
