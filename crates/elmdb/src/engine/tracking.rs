@@ -203,12 +203,11 @@ fn stab<W>(tree: &Tree<W>, key: &[u8], found: &mut impl FnMut(&W)) {
     stab(&node.right, key, found);
 }
 
-/// What an owner has filed, so it can be taken out again, and each range once: a range it reads again is filed already
+/// What an owner has filed, so it can be taken out again: its keys, and each range once, by the id of its node
 #[derive(Default)]
 struct Entry {
     keys: Vec<Vec<u8>>,
-    nodes: Vec<(Vec<u8>, u64)>,
-    ranges: HashSet<(Vec<u8>, Option<Vec<u8>>)>,
+    nodes: HashMap<(Vec<u8>, Option<Vec<u8>>), u64>,
 }
 
 /// The read sets of every owner, indexed by what a write would have to touch to change what they read
@@ -252,11 +251,12 @@ impl<W: Clone + Eq + Hash + Ord> TrackIndex<W> {
             }
         }
         for (low, high) in reads.ranges {
-            if high.as_deref().is_some_and(|high| high <= low.as_slice())
-                || !entry.ranges.insert((low.clone(), high.clone()))
-            {
+            if high.as_deref().is_some_and(|high| high <= low.as_slice()) {
                 continue;
             }
+            // A range the owner read before is filed already
+            let std::collections::hash_map::Entry::Vacant(slot) = entry.nodes.entry((low, high)) else { continue };
+            let (low, high) = slot.key().clone();
             let id = self.next_id;
             self.next_id += 1;
             let priority = self.priority();
@@ -272,7 +272,7 @@ impl<W: Clone + Eq + Hash + Ord> TrackIndex<W> {
             });
             let (before, after) = split(self.root.take(), &low, id);
             self.root = merge(merge(before, Some(node)), after);
-            entry.nodes.push((low, id));
+            slot.insert(id);
             self.ranges += 1;
         }
         self.entries.insert(owner.clone(), entry);
@@ -289,7 +289,7 @@ impl<W: Clone + Eq + Hash + Ord> TrackIndex<W> {
                 }
             }
         }
-        for (low, id) in entry.nodes {
+        for ((low, _), id) in entry.nodes {
             let (before, rest) = split(self.root.take(), &low, id);
             let (_, after) = split(rest, &low, id + 1);
             self.root = merge(before, after);

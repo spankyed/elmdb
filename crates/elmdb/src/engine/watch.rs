@@ -94,14 +94,17 @@ impl Tracks {
     }
 }
 
-/// Runs `reads` on a snapshot of the last commit, recording what they read
-pub fn run_tracked(store: &Store, schema: &Schema, reads: &Reads) -> Result<(Result<Vec<u8>>, ReadSet)> {
-    store.read(|txn, db| {
+/// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
+/// taken read nothing, so the whole store stands for what they read: any commit then names them, where an empty read
+/// set would leave whoever filed it on the failure for good
+pub fn run_tracked(store: &Store, schema: &Schema, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
+    let ran = store.read(|txn, db| {
         let snapshot = Snapshot { txn, db, schema };
         let recording = Recording::new(&snapshot);
         let answer = super::reads::run(&recording, &reads.reads);
         Ok((answer, recording.into_reads()))
-    })
+    });
+    ran.unwrap_or_else(|error| (Err(error), ReadSet { keys: BTreeSet::new(), ranges: vec![(Vec::new(), None)] }))
 }
 
 /// Registers a watch of `reads` and delivers its first answer
@@ -146,12 +149,7 @@ pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64
                 let mut held = tracks.lock();
                 let Some(watching) = held.watches.get(&id) else { break };
                 let reads = watching.reads.clone();
-                // A snapshot that could not be taken read nothing to file, so the whole store is filed in its place:
-                // any commit runs the watch again, where an empty read set would leave it on the failure for good
-                let (answer, read) = match run_tracked(store, schema, &reads) {
-                    Ok(ran) => ran,
-                    Err(error) => (Err(error), ReadSet { keys: BTreeSet::new(), ranges: vec![(Vec::new(), None)] }),
-                };
+                let (answer, read) = run_tracked(store, schema, &reads);
                 held.index.remove(&Owner::Watch(id));
                 held.index.add(&Owner::Watch(id), read);
                 let watching = held.watches.get_mut(&id).expect("held under the lock");
@@ -191,7 +189,7 @@ pub fn read_tracked(
     token: u32,
 ) -> Result<Vec<u8>> {
     let mut held = tracks.lock();
-    let (answer, read) = run_tracked(store, schema, reads)?;
+    let (answer, read) = run_tracked(store, schema, reads);
     held.file(token, read);
     answer
 }
