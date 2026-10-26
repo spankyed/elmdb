@@ -216,3 +216,278 @@ fn a_watch_that_failed_delivers_the_next_answer_even_one_equal_to_the_last_befor
     let unknown = json!(crate::error::ErrorCode::UnknownType);
     assert_eq!(*heard.lock().unwrap(), [json!([]), unknown, json!([])]);
 }
+
+#[test]
+fn a_panicking_listener_is_removed_without_changing_the_commit_outcome() {
+    use crate::error::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let error = db.watch(reads(vec![tasks()], None), Box::new(|_| panic!("initial listener"))).unwrap_err();
+    assert_eq!(error.code, ErrorCode::CallbackPanicked);
+    assert_eq!(db.track_stats(), (0, 0, 0));
+    let mut first = true;
+    let bad = db
+        .watch(
+            reads(vec![tasks()], None),
+            Box::new(move |_| {
+                if first {
+                    first = false;
+                } else {
+                    panic!("subsequent listener");
+                }
+            }),
+        )
+        .unwrap();
+    let heard = Arc::new(Mutex::new(0));
+    let listener_heard = heard.clone();
+    let good = db
+        .watch(
+            reads(vec![tasks()], None),
+            Box::new(move |_| {
+                *listener_heard.lock().unwrap() += 1;
+            }),
+        )
+        .unwrap();
+    let before = db.sequence().unwrap();
+    write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-panic"})]).unwrap();
+    assert_eq!(db.sequence().unwrap(), before + 1);
+    assert_eq!(*heard.lock().unwrap(), 2, "later listeners still run");
+    assert_eq!(db.track_stats().0, 1);
+    db.unwatch(bad);
+    write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-after-panic"})]).unwrap();
+    assert_eq!(*heard.lock().unwrap(), 3);
+    db.unwatch(good);
+    assert_eq!(db.track_stats(), (0, 0, 0));
+    db.close().unwrap();
+}
+
+fn bounded_watch_child(test: &str) -> bool {
+    // A regression must fail within a deadline rather than hang the entire test runner.
+    const CHILD: &str = "ELMDB_TEST_BOUNDED_WATCH_CHILD";
+    if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new(test)) {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, test)
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                assert!(status.success(), "callback close subprocess failed: {status}");
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("callback close subprocess exceeded ten seconds");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+    false
+}
+
+#[test]
+fn callback_close_refuses_before_taking_the_store() {
+    if bounded_watch_child("engine::tests::tracked::callback_close_refuses_before_taking_the_store") {
+        return;
+    }
+    use crate::error::ErrorCode;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open(&dir));
+    let weak = Arc::downgrade(&db);
+    let completed = Arc::new(Mutex::new(0));
+    let heard = completed.clone();
+    let id = db
+        .watch(
+            reads(vec![tasks()], None),
+            Box::new(move |_| {
+                let db = weak.upgrade().unwrap();
+                assert_eq!(db.close().unwrap_err().code, ErrorCode::CallbackActive);
+                assert_eq!(
+                    db.close_within(Some(std::time::Duration::ZERO)).unwrap_err().code,
+                    ErrorCode::CallbackActive
+                );
+                assert!(db.is_open());
+                db.sequence().unwrap();
+                *heard.lock().unwrap() += 1;
+            }),
+        )
+        .unwrap();
+    write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-close"})]).unwrap();
+    assert_eq!(*completed.lock().unwrap(), 2, "both callbacks completed without panicking");
+    db.unwatch(id);
+    db.close().unwrap();
+}
+
+#[test]
+fn callback_schema_unwatch_and_nested_delivery_terminate() {
+    if bounded_watch_child("engine::tests::tracked::callback_schema_unwatch_and_nested_delivery_terminate") {
+        return;
+    }
+    for action in ["schema", "unwatch", "nested"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open(&dir));
+        let weak = Arc::downgrade(&db);
+        let registration = Arc::new(Mutex::new(None));
+        let callback_registration = registration.clone();
+        let completed = Arc::new(Mutex::new(0));
+        let heard = completed.clone();
+        let mut first = true;
+        let id = db
+            .watch(
+                reads(vec![tasks()], None),
+                Box::new(move |_| {
+                    if first {
+                        first = false;
+                        return;
+                    }
+                    let db = weak.upgrade().unwrap();
+                    match action {
+                        "schema" => {
+                            let schema = crate::schema::Schema::from_json(&json!({
+                                "$schema": crate::schema::SCHEMA_LANGUAGE,
+                                "types": {"Task": {"shortCode": {"prefix": "TSK"}, "fields": {}}, "Extra": {"fields": {}}}
+                            }))
+                            .unwrap();
+                            db.set_schema(schema).unwrap();
+                            assert!(db.schema().unwrap().types.contains_key("Extra"));
+                        }
+                        "unwatch" => db.unwatch(callback_registration.lock().unwrap().unwrap()),
+                        "nested" => {
+                            let other_dir = tempfile::tempdir().unwrap();
+                            let other = Arc::new(open(&other_dir));
+                            let outer = Arc::downgrade(&db);
+                            other
+                                .watch(
+                                    reads(vec![tasks()], None),
+                                    Box::new(move |_| {
+                                        assert_eq!(
+                                            outer.upgrade().unwrap().close().unwrap_err().code,
+                                            crate::error::ErrorCode::CallbackActive
+                                        );
+                                    }),
+                                )
+                                .unwrap();
+                            other.close().unwrap();
+                            write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-nested"})]).unwrap();
+                        }
+                        _ => unreachable!(),
+                    }
+                    // Unregister here also bounds self-induced deliveries: a changed schema and nested write named us again.
+                    db.unwatch(callback_registration.lock().unwrap().unwrap());
+                    *heard.lock().unwrap() += 1;
+                }),
+            )
+            .unwrap();
+        *registration.lock().unwrap() = Some(id);
+        write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-trigger"})]).unwrap();
+        assert_eq!(*completed.lock().unwrap(), 1, "{action} callback completed without panic");
+        assert_eq!(db.track_stats(), (0, 0, 0));
+        db.close().unwrap();
+    }
+}
+
+/// Run explicitly in release mode on an idle machine; reports times rather than enforcing a machine-specific limit.
+#[test]
+#[ignore = "tracking contention measurement"]
+fn measure_tracking_contention() {
+    use std::time::Instant;
+    fn distribution(label: &str, mut times: Vec<u128>) {
+        times.sort_unstable();
+        println!(
+            "{label}: samples={} p50_us={} p95_us={} max_us={}",
+            times.len(),
+            times[times.len() / 2],
+            times[(times.len() - 1) * 95 / 100],
+            times.last().unwrap()
+        );
+    }
+    for (mode, writes) in [("locked", 16), ("token", 16), ("watch", 128), ("token", 128), ("token", 16), ("locked", 16)]
+    {
+        for size in [2_000, 20_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(open(&dir));
+            write(
+                &db,
+                (0..size)
+                    .map(|i| {
+                        json!({"op":"create", "type":"Task", "id":format!("Task-{i}"),
+            "fields":{"title":format!("row {i}")}})
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let scan = reads(
+                vec![json!({"read":"query", "plan":{
+            "start":{"from":"types", "types":["Task"]},
+            "steps":[{"step":"where", "field":"title", "value":"absent"}],
+            "terminal":{"answer":"count"}}})],
+                None,
+            );
+            let mut baseline = Vec::new();
+            for _ in 0..8 {
+                let start = Instant::now();
+                db.read(&scan).unwrap();
+                baseline.push(start.elapsed().as_micros());
+            }
+            println!("mode={mode}; rows={size}; two readers x eight full scans; writes={writes}; syncs=false");
+            distribution("untracked_read", baseline);
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let readers: Vec<_> = (1..=2)
+                .map(|token| {
+                    let db = db.clone();
+                    let barrier = barrier.clone();
+                    let mut scan = scan.clone();
+                    scan.track = Some(token);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let mut samples = Vec::new();
+                        for _ in 0..8 {
+                            db.untrack(token);
+                            let start = Instant::now();
+                            match mode {
+                                "locked" => {
+                                    // The previous algorithm, kept only in the measurement for alternating comparison.
+                                    let store = db.store().unwrap();
+                                    let schema = db.engine_schema();
+                                    let mut held = db.tracks.lock();
+                                    let (answer, dependency) =
+                                        crate::engine::watch::run_tracked(&store, &schema, &scan);
+                                    answer.unwrap();
+                                    held.file(token, dependency);
+                                }
+                                "watch" => {
+                                    let id = db.watch(scan.clone(), Box::new(|_| {})).unwrap();
+                                    db.unwatch(id);
+                                }
+                                _ => {
+                                    db.read(&scan).unwrap();
+                                }
+                            }
+                            samples.push(start.elapsed().as_micros());
+                        }
+                        samples
+                    })
+                })
+                .collect();
+            barrier.wait();
+            let mut waits = Vec::new();
+            let mut commits = Vec::new();
+            for i in 0..writes {
+                let start = Instant::now();
+                drop(db.tracks.lock());
+                waits.push(start.elapsed().as_micros());
+                let start = Instant::now();
+                write(&db, vec![json!({"op":"set", "id":"Task-0", "fields":{"a":i}})]).unwrap();
+                commits.push(start.elapsed().as_micros());
+                if writes > 16 {
+                    std::thread::sleep(std::time::Duration::from_micros(250));
+                }
+            }
+            distribution("tracking_lock_wait", waits);
+            distribution("write_end_to_end", commits);
+            distribution("tracked_read", readers.into_iter().flat_map(|r| r.join().unwrap()).collect());
+        }
+    }
+}

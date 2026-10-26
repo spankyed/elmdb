@@ -220,7 +220,8 @@ impl Database {
     }
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a unit
-    /// is open (`UNIT_OPEN`): the unit holds the environment's write transaction, so commit or abort it first
+    /// is open (`UNIT_OPEN`): the unit holds the environment's write transaction, so commit or abort it first.
+    /// Refused from this database's watch callback (`CALLBACK_ACTIVE`); close after the callback returns
     pub fn close(&self) -> Result<()> {
         if self.close_within(None)? {
             return Ok(());
@@ -246,6 +247,12 @@ impl Database {
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
+        if crate::engine::watch::in_callback(&self.tracks) {
+            return Err(Error::new(
+                ErrorCode::CallbackActive,
+                "A watch listener is running on this thread: close the database after the listener returns",
+            ));
+        }
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for

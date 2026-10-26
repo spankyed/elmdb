@@ -92,6 +92,10 @@ pub enum ErrorCode {
     DuplicateEdge,
     /// A short code or label numbering whose next number would pass 2^53 - 1, the largest JavaScript holds exactly
     NumbersExhausted,
+    /// The initial watch listener panicked; its registration was removed
+    CallbackPanicked,
+    /// Closing a database from its own watch callback would wait on the callback's operation
+    CallbackActive,
 }
 
 impl ErrorCode {
@@ -139,6 +143,8 @@ impl ErrorCode {
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
+            Self::CallbackPanicked => "CALLBACK_PANICKED",
+            Self::CallbackActive => "CALLBACK_ACTIVE",
         }
     }
 }
@@ -223,6 +229,8 @@ mod tests {
             ErrorCode::Cycle,
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
+            ErrorCode::CallbackPanicked,
+            ErrorCode::CallbackActive,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

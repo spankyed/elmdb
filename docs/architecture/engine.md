@@ -153,13 +153,22 @@ in either order. `db.sequence` is the last commit's.
   change set names the tokens whose keys and ranges it wrote into (`touched`), found through that index in
   O(log N + matches) a key, so a commit's cost doesn't grow with the reads being tracked; a unit logs the keys it
   writes only while some token is tracked. `db.untrack(token)` drops what a token holds, and a caller re-running its
-  reads drops it first. Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
+  reads drops it first. It also cancels dependency registration by any read already in flight under that token.
+  Tracked queries normally execute outside the tracking mutex. The commit sequence is checked under that mutex
+  before dependencies are filed: an intervening commit retries the query once, then a second conflict uses the locked
+  path. This bounds retries under continuous writes and preserves notification ordering. In-flight token reads keep
+  write logging enabled; removing a token cancels their registrations. The same sequence validation applies to watches.
+  Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
   that wrote into what it read. A commit whose writes aren't logged key by key — `reset`, `replaceWith`, `setSchema`,
   `bulkLoad` and the admin changes — is one the caller hears as writing everything.
 - `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
-  after the commit, outside its transaction, on the thread that committed.
+  after the commit, outside its transaction, on the thread that committed. An unwinding listener panic removes that
+  watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
+  its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
+  This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
+  returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a

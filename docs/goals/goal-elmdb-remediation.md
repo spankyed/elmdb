@@ -67,7 +67,13 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 - Phase 2 local checkpoints: elmdb `af141adb2c7745fceca7fb5af410159fdc9fa30b`; monorepo `5edd51adf7`.
   Shared commit finalization preserves committed schema and notifies observers before reporting failed sync. EARS
   refreshes declaration caches and notifies committed admin changes before rethrowing. Full local checks and firing
-  mutations are recorded in implementation evidence. Next deliverable: Phase 3 watch lifecycle and contention.
+  mutations are recorded in implementation evidence. Next deliverable: Phase 4 constraint auditing and bounded index construction.
+  Phase 3 implements panic cleanup, callback-close refusal and bounded optimistic token/watch registration.
+  Deterministic and mutation regressions pass. Alternating 20,000-row measurements reproduced 167–322 ms prior
+  tracking-lock waits; current nonconflicting waits were zero and paced token/watch waits about 21 ms, with
+  write maxima 22–25 ms. H03 is resolved locally with bounded fallback and documented synchronous watch cost.
+  Final local Rust checks pass (221 engine tests; two measurements ignored), as do binding/type checks and 33 Node tests. Windows test quoting is fixed
+  locally; fresh platform verification and final integration remain pending. See implementation evidence.
   Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
   checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
@@ -185,7 +191,7 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 | Isolated source, build caches and binding resolution | Done locally; isolated binding/EARS builds | Preparation and implementation evidence | Final combined-source baseline in Phase 6 |
 | R01/R02 opening and process safety | Implemented locally; checkpoint `2414390` | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
 | R03 committed outcomes and AgentBuddy notifications | Implemented locally; `af141ad` / `5edd51adf7` | Implementation evidence; fault injection, mutation tests, 198 EARS / eight backup tests | Remote checks and final integration |
-| R05/R06 lifecycle and H03 contention | Missing | Review E01/E05; static trace | Phase 3 |
+| R05/R06 lifecycle and H03 contention | Implemented locally; Phase 3 checkpoint | Implementation evidence; bounded regressions, mutation tests, alternating measurements | Final checks, supported-platform matrix and integration |
 | R04 auditing and R07 bounded construction | Missing | Review E02/E03 and source complexity | Phase 4 |
 | R08 recovery envelope and H01/H02/H04 disposition | Missing | Review source assessment | Phase 5 |
 | Current-upstream integration and required gates | Missing | None | Phase 6; no future-feature dependency |

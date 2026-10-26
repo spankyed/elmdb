@@ -425,7 +425,8 @@ impl Database {
 
     /// Runs `reads` and hands `listener` the answer, then runs them again after each commit that writes into what they
     /// read, handing over each answer that differs from the one before. A listener is called after the commit, outside
-    /// its transaction, on the thread that committed
+    /// its transaction, on the thread that committed. A panicking listener is removed; an initial panic returns
+    /// `CALLBACK_PANICKED`, while later panics do not change the committed operation's outcome
     pub fn watch(&self, reads: plan::Reads, listener: watch::Listener) -> Result<u64> {
         let store = self.store()?;
         watch::watch(&self.tracks, &store, &self.engine_schema(), reads, listener)

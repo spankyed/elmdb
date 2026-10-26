@@ -111,10 +111,10 @@ test('a claim outlives its first worker and database closes', { timeout: 20000 }
   const { execFile } = await import('node:child_process');
   const { stdout } = await promisify(execFile)(process.execPath, ['-e', `
     const { Worker } = require('node:worker_threads');
-    const w = new Worker(\`
+    const w = new Worker(${JSON.stringify(`
       const db = require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false });
       db.close();
-    \`, { eval: true });
+    `)}, { eval: true });
     w.on('error', e => { console.error(e); process.exitCode = 1; });
     w.on('exit', code => {
       if (code !== 0) return;
