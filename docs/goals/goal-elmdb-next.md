@@ -9,12 +9,12 @@ Implement elmdb/docs/goals/goal-elmdb-next.md. Read Scope, Current handoff, Deci
 Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished by its own
 document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
 elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 5 is
-AgentBuddy/docs/plans/field-types-from-shapes.md. Phases 1 and 2 are done; apack's work for
+apack/monorepo/docs/plans/field-types-from-shapes.md. Phases 1 and 2 are done; apack's work for
 Phases 3 to 10 is on one branch cut from master, under one PR (G7).
 
 Work in two repositories, both under ~/Develop/Projects:
 - elmdb: follow elmdb/CLAUDE.md and this goal's Constraints.
-- AgentBuddy (apack): follow its CLAUDE.md, its docs/AGENTS.md and its user memory, in a
+- apack/monorepo (apack): follow its CLAUDE.md, its docs/AGENTS.md and its user memory, in a
   worktree (never the main checkout).
 
 Inspect current code before relying on a path or a figure here.
