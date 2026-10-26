@@ -78,14 +78,17 @@ snapshot as a search when it needs to say that search is incomplete.
 
 - **Keys** (`format.md`, Keys): per type and index, a term's posting list (`d/ft`, a roaring bitmap of the
   entities' places), its positions in each entity (`d/fp`), each entity's document — id, each field's length, its
-  terms — (`d/fd`), and the index's statistics (`d/fs`: documents, each field's total length). Every write that changes
-  an indexed field refiles the entity from its stored document, in the same unit; an index declared over existing data
-  is built in the background as a value index is, and `check()` and `rebuild()` cover it.
+  terms and words as written — (`d/fd`), the index's statistics (`d/fs`: documents, each field's total length), and,
+  in a stemming index, each word as written and the entities holding it (`d/fw`). Every write that changes an indexed
+  field refiles the entity from its stored document, in the same unit; an index declared over existing data is built
+  in the background as a value index is, and `check()` and `rebuild()` cover it.
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
 - **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`; `field:word`;
-  `a OR b`. The last word matches the terms it starts with `prefix`; a word of five letters or more also matches a term
-  an edit away, nine or more two, unless `fuzzy: false`; the word itself outranks both.
+  `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
+  written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
+  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; the word itself
+  outranks both.
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
   when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
   order.
@@ -93,7 +96,9 @@ snapshot as a search when it needs to say that search is incomplete.
   entities they reached, in which a type with no text index holds no match. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
   `counts` is a facet; `after` pages by the last id of the page before.
-- **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first.
+- **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
+  stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
+  (`databas`).
   `findLabels` is the quick-open: a query's characters in order in each type's label field, scored for word starts,
   runs and position, best first.
 

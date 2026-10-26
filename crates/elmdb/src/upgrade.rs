@@ -213,3 +213,78 @@ impl Drop for Written {
         }
     }
 }
+
+/// What stepping a database to this version's format did: the formats it was in and is now in, and the indexes the
+/// steps rebuilt, as `type.index`
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatReport {
+    pub from: u32,
+    pub to: u32,
+    pub rebuilt: Vec<String>,
+}
+
+/// Steps the elmdb database at `dir`, in place, from the format it is in to this version's, a step at a time, each in
+/// one durable unit recording the format it reaches. Run on a copy (`docs/architecture/format.md`, Versions)
+pub fn upgrade_format(dir: &Path) -> Result<FormatReport> {
+    use crate::format::{FORMAT_VERSION, meta};
+    use crate::store::{Store, StoreOptions};
+    let store = Store::open(dir, StoreOptions { upgrading: true, ..Default::default() })?;
+    let format_of = |store: &Store| -> Result<u32> {
+        store.meta(meta::FORMAT)?.and_then(|b| <[u8; 4]>::try_from(b).ok()).map(u32::from_be_bytes).ok_or_else(|| {
+            Error::new(ErrorCode::Corrupted, format!("The database at {} records no format", dir.display()))
+        })
+    };
+    let from = format_of(&store)?;
+    let mut report = FormatReport { from, to: from, rebuilt: Vec::new() };
+    while report.to < FORMAT_VERSION {
+        match report.to {
+            1 => report.rebuilt.extend(unbuild_text_indexes(&store, 2)?),
+            f => {
+                let _ = store.close();
+                return Err(Error::new(ErrorCode::WrongFormat, format!("elmdb has no upgrade from format {f}")));
+            }
+        }
+        report.to = format_of(&store)?;
+    }
+    store.close()?;
+    // A step leaves the indexes it changed unbuilt, which an open builds in the background; the upgrade waits for
+    // them, so the copy it hands back is ready to search
+    if !report.rebuilt.is_empty() {
+        let db = Database::open(dir, OpenOptions::default())?;
+        db.wait_for_index_builds();
+        db.close()?;
+    }
+    Ok(report)
+}
+
+/// Format 1 to 2: a stemming text index holds the words as written beside their stems (`d/fw`), and a text index's
+/// document lists them. Every text index's data and marker are deleted, to be built again, and the format recorded
+fn unbuild_text_indexes(store: &crate::store::Store, to: u32) -> Result<Vec<String>> {
+    use crate::format::meta;
+    use crate::schema::{Change, Effect, IndexDef, SchemaChange};
+    let schema = match store.meta(meta::SCHEMA)? {
+        Some(bytes) => Some(Schema::from_canonical(&String::from_utf8_lossy(&bytes))?),
+        None => None,
+    };
+    let mut changes = Vec::new();
+    for (entity_type, def) in schema.iter().flat_map(|s| s.types.iter()) {
+        for (index, declared) in &def.indexes {
+            if matches!(declared, IndexDef::Text { .. }) {
+                changes.push(SchemaChange {
+                    path: format!("types.{entity_type}.indexes.{index}"),
+                    change: Change::Changed,
+                    effect: Effect::Rebuilds,
+                });
+            }
+        }
+    }
+    store.write(
+        |txn, db| {
+            crate::engine::drop_index_data(db, txn, &changes)?;
+            crate::store::put_meta(txn, db.main, meta::FORMAT, &to.to_be_bytes())
+        },
+        true,
+    )?;
+    Ok(changes.into_iter().map(|c| c.path.replacen("types.", "", 1).replacen(".indexes.", ".", 1)).collect())
+}

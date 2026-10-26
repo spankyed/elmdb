@@ -1,5 +1,6 @@
 //! Searching a text index (`docs/architecture/search.md`, Methods): a query's clauses, each clause's words expanded to the index's
-//! terms — the word itself, the terms it starts for search as you type, and those an edit or two away — matched
+//! terms — the word itself, the terms it starts for search as you type (in a stemming index, the stems of the words as
+//! written it starts), and those an edit or two away — matched
 //! through the posting lists, checked against positions where a phrase or a field asks it, and ranked by BM25F, each
 //! field's term frequency and length counted at its weight.
 //!
@@ -94,6 +95,8 @@ pub fn parse(query: &str) -> Vec<RawClause> {
 #[derive(Debug, Clone)]
 struct Word {
     alternatives: Vec<String>,
+    /// The words as written those terms were read from, which a prefix starts unstemmed
+    written: Vec<String>,
     /// The clause's last word, matched as a prefix too
     prefix: bool,
 }
@@ -126,11 +129,14 @@ fn clauses(index: &TextIndex, raw: &[RawClause], options: &SearchOptions) -> Vec
             },
             None => (allowed.clone(), clause.text.clone()),
         };
-        let mut by_place: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+        let mut by_place: BTreeMap<u32, (Vec<String>, Vec<String>)> = BTreeMap::new();
         for term in index.analyzer.terms(&text) {
-            let alternatives = by_place.entry(term.position).or_default();
+            let (alternatives, written) = by_place.entry(term.position).or_default();
             if !alternatives.contains(&term.text) {
                 alternatives.push(term.text);
+            }
+            if !written.contains(&term.word) {
+                written.push(term.word);
             }
         }
         if by_place.is_empty() {
@@ -141,7 +147,7 @@ fn clauses(index: &TextIndex, raw: &[RawClause], options: &SearchOptions) -> Vec
         let words = by_place
             .into_values()
             .enumerate()
-            .map(|(i, alternatives)| Word { alternatives, prefix: prefix && i + 1 == count })
+            .map(|(i, (alternatives, written))| Word { alternatives, written, prefix: prefix && i + 1 == count })
             .collect();
         if !clause.or_previous || out.is_empty() {
             group += 1;
@@ -179,19 +185,19 @@ fn term_of(key: &[u8]) -> Result<String> {
     }
 }
 
-/// Every term of the index within `distance` edits of `word`, with its distance
-fn within(r: &impl Read, entity_type: &str, index: &str, dfa: &DFA, distance: u8) -> Result<Vec<(String, u8)>> {
+/// Every entry of a dictionary of the index (its terms, or its words as written) within `distance` edits of `word`,
+/// with its distance and its posting list
+fn within(r: &impl Read, dictionary: &[u8], dfa: &DFA, distance: u8) -> Result<Vec<(String, u8, RoaringTreemap)>> {
     let mut out = Vec::new();
     let mut failed = None;
-    r.visit(&keys::text_terms(entity_type, index), |key, _| {
-        match term_of(key) {
-            Ok(term) => {
-                if let Distance::Exact(d) = dfa.eval(&term)
-                    && d <= distance
-                {
-                    out.push((term, d));
-                }
-            }
+    r.visit(dictionary, |key, value| {
+        let found = term_of(key).and_then(|entry| match dfa.eval(&entry) {
+            Distance::Exact(d) if d <= distance => Ok(Some((entry, d, decode_postings(value)?))),
+            _ => Ok(None),
+        });
+        match found {
+            Ok(Some(entry)) => out.push(entry),
+            Ok(None) => {}
             Err(e) => {
                 failed = Some(e);
                 return false;
@@ -226,42 +232,63 @@ fn merge(
     Ok(())
 }
 
-fn expand(r: &impl Read, entity_type: &str, index: &str, word: &Word, fuzzy: bool) -> Result<Expansions> {
+/// The entries of a dictionary of the index starting with the bytes `starting`, each with its posting list, most held
+/// first
+fn started(r: &impl Read, starting: &[u8]) -> Result<Vec<(String, RoaringTreemap)>> {
+    let mut out: Vec<(String, RoaringTreemap)> = Vec::new();
+    let mut failed = None;
+    r.visit_starting(starting, |key, value| {
+        match (term_of(key), decode_postings(value)) {
+            (Ok(entry), Ok(p)) => out.push((entry, p)),
+            (Err(e), _) | (_, Err(e)) => {
+                failed = Some(e);
+                return false;
+            }
+        }
+        true
+    })?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    out.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    Ok(out)
+}
+
+fn expand(r: &impl Read, entity_type: &str, index: &TextIndex, word: &Word, fuzzy: bool) -> Result<Expansions> {
+    let name = index.name.as_str();
     let mut out = Expansions::new();
     let postings = |term: &str| -> Result<Option<RoaringTreemap>> {
-        r.get(&keys::text_term(entity_type, index, term))?.map(|b| decode_postings(&b)).transpose()
+        r.get(&keys::text_term(entity_type, name, term))?.map(|b| decode_postings(&b)).transpose()
     };
     for alternative in &word.alternatives {
         merge(&mut out, alternative.clone(), 1.0, || postings(alternative))?;
         if word.prefix {
-            let mut started: Vec<(String, RoaringTreemap)> = Vec::new();
-            let mut failed = None;
-            r.visit_starting(&keys::text_terms_starting(entity_type, index, alternative), |key, value| {
-                match (term_of(key), decode_postings(value)) {
-                    (Ok(term), Ok(p)) => started.push((term, p)),
-                    (Err(e), _) | (_, Err(e)) => {
-                        failed = Some(e);
-                        return false;
-                    }
-                }
-                true
-            })?;
-            if let Some(e) = failed {
-                return Err(e);
-            }
-            started.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
-            for (term, p) in started.into_iter().take(MAX_PREFIX_TERMS) {
+            for (term, p) in started(r, &keys::text_terms_starting(entity_type, name, alternative))?
+                .into_iter()
+                .take(MAX_PREFIX_TERMS)
+            {
                 merge(&mut out, term, PREFIX_WEIGHT, || Ok(Some(p)))?;
             }
         }
         let edits = if fuzzy { edits_for(alternative) } else { 0 };
         if edits > 0 {
             let dfa = automaton(edits).build_dfa(alternative);
-            for (term, d) in within(r, entity_type, index, &dfa, edits)? {
+            for (term, d, p) in within(r, &keys::text_terms(entity_type, name), &dfa, edits)? {
                 if d > 0 {
                     let weight = if d == 1 { ONE_EDIT_WEIGHT } else { TWO_EDITS_WEIGHT };
-                    merge(&mut out, term.clone(), weight, || postings(&term))?;
+                    merge(&mut out, term, weight, || Ok(Some(p)))?;
                 }
+            }
+        }
+    }
+    // A stem need not start as its word does (`runni` starts `running`, held as `run`): in a stemming index the prefix
+    // is matched against the words as written, each standing for the term it is held as
+    if word.prefix && index.analyzer.stems() {
+        for written in &word.written {
+            let found = started(r, &keys::text_words_starting(entity_type, name, written))?;
+            for (held, _) in found.into_iter().take(MAX_PREFIX_TERMS) {
+                let term = index.analyzer.stem(&held);
+                merge(&mut out, term.clone(), PREFIX_WEIGHT, || postings(&term))?;
             }
         }
     }
@@ -353,7 +380,7 @@ pub fn search(
     let mut matched = Vec::with_capacity(clauses.len());
     for clause in &clauses {
         let words: Vec<_> =
-            clause.words.iter().map(|w| expand(r, entity_type, name, w, options.fuzzy)).collect::<Result<_>>()?;
+            clause.words.iter().map(|w| expand(r, entity_type, index, w, options.fuzzy)).collect::<Result<_>>()?;
         let mut candidates = words.first().map(union).unwrap_or_default();
         for word in words.iter().skip(1) {
             candidates &= union(word);
@@ -498,8 +525,8 @@ pub fn highlights(r: &impl Read, index: &TextIndex, hit: &Hit) -> Result<Vec<(St
     Ok(out)
 }
 
-/// The terms a word being typed starts, most held first, and the terms nearest it, nearest first: what `suggest`
-/// answers
+/// The words a word being typed starts, most held first, and the words nearest it, nearest first: what `suggest`
+/// answers. A stemming index answers from its words as written, so a suggestion is a word and not a stem
 pub fn suggest(
     r: &impl Read,
     entity_type: &str,
@@ -508,26 +535,18 @@ pub fn suggest(
     limit: usize,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let name = index.name.as_str();
-    let Some(term) = index.analyzer.terms(word).into_iter().next().map(|t| t.text) else {
+    let Some(first) = index.analyzer.terms(word).into_iter().next() else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let mut started: Vec<(String, u64)> = Vec::new();
-    let mut failed = None;
-    r.visit_starting(&keys::text_terms_starting(entity_type, name, &term), |key, value| {
-        match (term_of(key), decode_postings(value)) {
-            (Ok(t), Ok(p)) => started.push((t, p.len())),
-            (Err(e), _) | (_, Err(e)) => {
-                failed = Some(e);
-                return false;
-            }
-        }
-        true
-    })?;
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    started.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let completions = started.into_iter().take(limit).map(|(t, _)| t).collect();
+    // A stemming index's words as written, or the terms of one whose terms are its words
+    let (term, dictionary, starting) = if index.analyzer.stems() {
+        let starting = keys::text_words_starting(entity_type, name, &first.word);
+        (first.word, keys::text_words(entity_type, name), starting)
+    } else {
+        let starting = keys::text_terms_starting(entity_type, name, &first.text);
+        (first.text, keys::text_terms(entity_type, name), starting)
+    };
+    let completions = started(r, &starting)?.into_iter().take(limit).map(|(t, _)| t).collect();
     let edits = match term.chars().count() {
         0..=2 => 0,
         3..=6 => 1,
@@ -536,17 +555,10 @@ pub fn suggest(
     let mut near: Vec<(u8, u64, String)> = Vec::new();
     if edits > 0 {
         let dfa = automaton(edits).build_dfa(&term);
-        for (t, d) in within(r, entity_type, name, &dfa, edits)? {
-            if d == 0 {
-                continue;
+        for (t, d, p) in within(r, &dictionary, &dfa, edits)? {
+            if d > 0 {
+                near.push((d, p.len(), t));
             }
-            let held = r
-                .get(&keys::text_term(entity_type, name, &t))?
-                .map(|b| decode_postings(&b))
-                .transpose()?
-                .map(|p| p.len())
-                .unwrap_or(0);
-            near.push((d, held, t));
         }
     }
     near.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| b.1.cmp(&a.1)).then_with(|| a.2.cmp(&b.2)));

@@ -5,6 +5,9 @@
 //! - `d/fp term seq` → where the entity holds it: each field's index among the index's fields, and its positions
 //! - `d/fd seq` → the entity's document: its id, each field's length in words, and its terms
 //! - `d/fs` → the index's statistics: how many documents, and each field's total length
+//! - `d/fw word` → a stemming index's words as written, each the places of the entities holding it: where search as
+//!   you type and suggestions find what a word being typed starts, which its stem may not (`runni` starts `running`,
+//!   held as `run`)
 //!
 //! A field holding a list of strings is its elements' terms, each element's positions starting `ELEMENT_GAP` past
 //! the last one's, so no phrase spans two elements. A value that is neither is no text, and a term longer than
@@ -14,7 +17,7 @@ pub mod analyze;
 pub mod labels;
 pub mod search;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rmpv::Value;
 use roaring::RoaringTreemap;
@@ -99,6 +102,8 @@ pub struct Document {
     pub lengths: Vec<u32>,
     /// Each term, with the fields and positions it is at: `(field, positions)` in field order
     pub terms: BTreeMap<String, Vec<(u32, Vec<u32>)>>,
+    /// The words as written its terms were read from, when the index stems; none when every term is its word
+    pub words: BTreeSet<String>,
 }
 
 impl Document {
@@ -128,7 +133,8 @@ pub fn texts_of(value: Option<&Value>) -> Vec<&str> {
 
 /// What the index holds of an entity, from its fields' values in field order
 pub fn document_of(index: &TextIndex, values: &[Option<Value>]) -> Document {
-    let mut doc = Document { lengths: vec![0; index.fields.len()], terms: BTreeMap::new() };
+    let mut doc = Document { lengths: vec![0; index.fields.len()], terms: BTreeMap::new(), words: BTreeSet::new() };
+    let stems = index.analyzer.stems();
     for (field, value) in values.iter().enumerate() {
         let mut base = 0u32;
         for text in texts_of(value.as_ref()) {
@@ -138,6 +144,9 @@ pub fn document_of(index: &TextIndex, values: &[Option<Value>]) -> Document {
                 last = Some(term.position);
                 if term.text.len() > MAX_TERM_BYTES {
                     continue;
+                }
+                if stems && term.word.len() <= MAX_TERM_BYTES {
+                    doc.words.insert(term.word.clone());
                 }
                 let position = base + term.position;
                 let places = doc.terms.entry(term.text.clone()).or_default();
@@ -210,25 +219,27 @@ pub fn decode_places(stored: &[u8]) -> Result<Vec<(u32, Vec<u32>)>> {
         .collect()
 }
 
-/// A document's stored record: the entity's id, each field's length, its terms
+/// A document's stored record: the entity's id, each field's length, its terms, its words as written
 fn encode_document(id: &str, doc: &Document) -> Vec<u8> {
     values::encode(&Value::Array(vec![
         id.into(),
         Value::Array(doc.lengths.iter().map(|l| (*l).into()).collect()),
         Value::Array(doc.terms.keys().map(|t| t.as_str().into()).collect()),
+        Value::Array(doc.words.iter().map(|w| w.as_str().into()).collect()),
     ]))
 }
 
-/// A stored document: the entity's id, each field's length, and its terms
+/// A stored document: the entity's id, each field's length, its terms, and its words as written, in order
 pub struct StoredDocument {
     pub id: String,
     pub lengths: Vec<u32>,
     pub terms: Vec<String>,
+    pub words: Vec<String>,
 }
 
 pub fn decode_document(stored: &[u8]) -> Result<StoredDocument> {
     let value = values::decode(stored)?;
-    let items = value.as_array().filter(|i| i.len() == 3).ok_or_else(|| corrupt("document"))?;
+    let items = value.as_array().filter(|i| i.len() == 4).ok_or_else(|| corrupt("document"))?;
     let id = items[0].as_str().ok_or_else(|| corrupt("document"))?.to_owned();
     let lengths = items[1]
         .as_array()
@@ -236,13 +247,14 @@ pub fn decode_document(stored: &[u8]) -> Result<StoredDocument> {
         .iter()
         .map(|l| l.as_u64().map(|l| l as u32).ok_or_else(|| corrupt("document")))
         .collect::<Result<_>>()?;
-    let terms = items[2]
-        .as_array()
-        .ok_or_else(|| corrupt("document"))?
-        .iter()
-        .map(|t| t.as_str().map(str::to_owned).ok_or_else(|| corrupt("document")))
-        .collect::<Result<_>>()?;
-    Ok(StoredDocument { id, lengths, terms })
+    let strings = |item: &Value| -> Result<Vec<String>> {
+        item.as_array()
+            .ok_or_else(|| corrupt("document"))?
+            .iter()
+            .map(|t| t.as_str().map(str::to_owned).ok_or_else(|| corrupt("document")))
+            .collect()
+    };
+    Ok(StoredDocument { id, lengths, terms: strings(&items[2])?, words: strings(&items[3])? })
 }
 
 /// A text index's statistics: its documents, and each field's total length
@@ -349,6 +361,24 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
             t.put(&key, &encoded)?;
         }
     }
+    let before_words: Vec<String> = before.as_ref().map(|d| d.words.clone()).unwrap_or_default();
+    for word in before_words.iter().filter(|word| !now.words.contains(*word)) {
+        let key = keys::text_word(entity_type, name, word);
+        if let Some(stored) = t.get(&key)? {
+            let mut postings = decode_postings(&stored)?;
+            postings.remove(seq);
+            if postings.is_empty() { t.del(&key)? } else { t.put(&key, &encode_postings(&postings))? }
+        }
+    }
+    for word in now.words.iter().filter(|word| before_words.binary_search(word).is_err()) {
+        let key = keys::text_word(entity_type, name, word);
+        let mut postings = match t.get(&key)? {
+            Some(stored) => decode_postings(&stored)?,
+            None => RoaringTreemap::new(),
+        };
+        postings.insert(seq);
+        t.put(&key, &encode_postings(&postings))?;
+    }
     let mut stats = stats(t, entity_type, index)?;
     if let Some(before) = &before {
         stats.documents -= 1;
@@ -379,6 +409,7 @@ pub fn entries(
     let name = index.name.as_str();
     let mut out = BTreeMap::new();
     let mut postings: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
+    let mut words: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
     let mut stats = Stats { documents: 0, lengths: vec![0; index.fields.len()] };
     for (seq, id) in of {
         let doc = document_of(index, &field_values(r, index, id)?);
@@ -389,6 +420,9 @@ pub fn entries(
             postings.entry(term.clone()).or_default().insert(*seq);
             out.insert(keys::text_positions(entity_type, name, term, *seq), encode_places(places));
         }
+        for word in &doc.words {
+            words.entry(word.clone()).or_default().insert(*seq);
+        }
         stats.documents += 1;
         for (total, l) in stats.lengths.iter_mut().zip(&doc.lengths) {
             *total += u64::from(*l);
@@ -397,6 +431,9 @@ pub fn entries(
     }
     for (term, bitmap) in &postings {
         out.insert(keys::text_term(entity_type, name, term), encode_postings(bitmap));
+    }
+    for (word, bitmap) in &words {
+        out.insert(keys::text_word(entity_type, name, word), encode_postings(bitmap));
     }
     if stats.documents > 0 {
         out.insert(keys::text_stats(entity_type, name), encode_stats(&stats));

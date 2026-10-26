@@ -88,6 +88,7 @@ impl Database {
                 sync_idle: Duration::from_millis(options.sync_idle_ms),
                 sync_interval: Duration::from_millis(options.sync_interval_ms),
                 map_size_bytes: options.map_size_bytes,
+                upgrading: false,
             },
         )?;
         let (schema, report) = match apply_schema(&store, options.schema) {

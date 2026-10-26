@@ -24,8 +24,9 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/b` source kind target seq | the edges between two entities | derived |
 | `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
 | `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
-| `d/fd` type index seq | the entity's document: its id, each field's length, its terms | derived |
+| `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |
 | `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
+| `d/fw` type index word | a stemming text index's word as written: the places of the entities holding it | derived |
 | `d/qc`, `d/qp` type index id chunk | a vector index's chunk: its hash and text; and that it waits for an embedding | derived |
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
 | `d/qj` type index item | a unit's graph changes, applied as it commits | derived |
@@ -53,7 +54,14 @@ dictionaries trained per type for small values such as messages.
 
 `m/format` records the format as an integer. An open refuses a database in another format, naming it, and, for a newer
 one, saying to update. An upgrade is a Rust function from one format to the next, run by `elmdb upgrade <dir>` on a
-copy, a step at a time, each recording its format. Nothing upgrades on open.
+copy, a step at a time, each recording its format. Nothing upgrades on open. A step that changes only derived data
+deletes it and its index's marker in the unit recording the format, and the upgrade then builds those indexes as an
+open does (`crate::upgrade::upgrade_format`).
+
+| Format | What changed, and its step |
+|---|---|
+| 1 | the first |
+| 2 | a stemming text index holds its words as written (`d/fw`), and a text document lists them; the step rebuilds every text index |
 
 ## Moving apack's data
 

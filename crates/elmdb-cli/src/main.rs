@@ -22,12 +22,15 @@ enum Command {
     Check { dir: PathBuf },
     /// A compacted copy of a database into a new directory
     Backup { dir: PathBuf, target: PathBuf },
-    /// An apack format 4 database, dumped by tools/lmdb-js-export, as a new elmdb database
+    /// With one directory, steps that elmdb database in place to this version's format (run it on a copy); with a dump
+    /// and a target, reads an apack format 4 database, dumped by tools/lmdb-js-export, into a new elmdb database
     Upgrade {
-        dump: PathBuf,
-        target: PathBuf,
-        /// The schema to hold the new database to, as JSON
-        #[arg(long)]
+        /// The database to step, or the dump to read
+        source: PathBuf,
+        /// The new database a dump is read into
+        target: Option<PathBuf>,
+        /// The schema to hold a dump's new database to, as JSON
+        #[arg(long, requires = "target")]
         schema: Option<PathBuf>,
     },
 }
@@ -54,7 +57,12 @@ fn run(command: Command) -> elmdb::Result<bool> {
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)
         }
-        Command::Upgrade { dump, target, schema } => {
+        Command::Upgrade { source, target: None, .. } => {
+            let report = elmdb::upgrade::upgrade_format(&source)?;
+            println!("{}", serde_json::to_string_pretty(&report).expect("a report serializes"));
+            Ok(true)
+        }
+        Command::Upgrade { source: dump, target: Some(target), schema } => {
             let schema = match schema {
                 Some(path) => {
                     let text = std::fs::read_to_string(&path)?;

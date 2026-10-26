@@ -1,7 +1,7 @@
 //! A text field's value as terms (`docs/architecture/search.md`, Declaring). The standard analyzer is charabia's tokenizing and
 //! normalizing — words, an identifier split on its case and underscores, case and accents folded — with a code such as
-//! `THR-12` kept whole beside its parts, and a stem in place of each word when the index names a language. The exact
-//! analyzer is the whole value, case folded.
+//! `THR-12` kept whole beside its parts, and a stem in place of each word when the index names a language, the word as
+//! written kept beside it for search as you type. The exact analyzer is the whole value, case folded.
 
 use charabia::Tokenize;
 use rust_stemmers::{Algorithm, Stemmer};
@@ -12,6 +12,8 @@ use crate::schema::Analyzer as Kind;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Term {
     pub text: String,
+    /// The word the term was read from, folded and unstemmed: the term itself unless the analyzer stems
+    pub word: String,
     pub position: u32,
     pub start: usize,
     pub end: usize,
@@ -63,7 +65,7 @@ impl Analyzer {
                     return Vec::new();
                 }
                 let start = text.len() - text.trim_start().len();
-                vec![Term { text: folded, position: 0, start, end: start + text.trim().len() }]
+                vec![Term { word: folded.clone(), text: folded, position: 0, start, end: start + text.trim().len() }]
             }
             Kind::Standard => self.standard(text),
         }
@@ -77,6 +79,7 @@ impl Analyzer {
             }
             words.push(Term {
                 text: token.lemma().to_owned(),
+                word: token.lemma().to_owned(),
                 position: words.len() as u32,
                 start: token.byte_start,
                 end: token.byte_end,
@@ -90,8 +93,10 @@ impl Analyzer {
                 && word.text.chars().all(char::is_alphabetic)
                 && next.text.chars().all(|c| c.is_ascii_digit())
             {
+                let code = format!("{}-{}", word.text, next.text);
                 out.push(Term {
-                    text: format!("{}-{}", word.text, next.text),
+                    word: code.clone(),
+                    text: code,
                     position: word.position,
                     start: word.start,
                     end: next.end,
@@ -101,7 +106,13 @@ impl Analyzer {
         out
     }
 
-    fn stem(&self, word: &str) -> String {
+    /// Whether a term may differ from the word it was read from
+    pub fn stems(&self) -> bool {
+        self.stemmer.is_some()
+    }
+
+    /// The term a word is held as
+    pub fn stem(&self, word: &str) -> String {
         match &self.stemmer {
             Some(stemmer) => stemmer.stem(word).into_owned(),
             None => word.to_owned(),
@@ -149,6 +160,8 @@ mod tests {
     fn a_language_stems_each_word_and_no_code() {
         let a = Analyzer::new(Kind::Standard, Some("en"));
         assert_eq!(texts(&a, "running runs"), ["run", "run"]);
+        let words: Vec<String> = a.terms("running runs").into_iter().map(|t| t.word).collect();
+        assert_eq!(words, ["running", "runs"]);
         assert_eq!(texts(&a, "THR-12"), ["thr", "thr-12", "12"]);
     }
 
@@ -156,7 +169,10 @@ mod tests {
     fn the_exact_analyzer_is_the_whole_value_case_folded() {
         let a = Analyzer::new(Kind::Exact, None);
         let terms = a.terms("  Hello World ");
-        assert_eq!(terms, [Term { text: "hello world".into(), position: 0, start: 2, end: 13 }]);
+        assert_eq!(
+            terms,
+            [Term { text: "hello world".into(), word: "hello world".into(), position: 0, start: 2, end: 13 }]
+        );
         assert!(a.terms("   ").is_empty());
     }
 }

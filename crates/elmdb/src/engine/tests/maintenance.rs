@@ -268,3 +268,75 @@ fn upgrade_skips_fields_with_no_entity_refuses_a_damaged_dump_and_leaves_nothing
     std::fs::write(&failing, dump(&[task])).unwrap();
     crate::upgrade::upgrade(&failing, &target, None).expect("the target takes a second upgrade");
 }
+
+#[test]
+fn upgrade_steps_a_format_1_database_rebuilding_its_text_indexes_with_the_words_as_written() {
+    use crate::format::{Prefix, meta};
+    use crate::store::{Store, StoreOptions, put_meta};
+    let schema = crate::schema::Schema::from_json(&json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": { "Doc": {
+            "fields": { "body": { "type": "string", "optional": true } },
+            "indexes": { "stemmed": { "kind": "text", "fields": { "body": {} }, "stem": "en" } }
+        } }
+    }))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "body": "running late" } })])
+        .unwrap();
+    db.close().unwrap();
+    // Format 1's text index: no words as written, and a document of its id, lengths and terms only
+    let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+    store
+        .write(
+            |txn, db| {
+                let under = |prefix: Prefix| crate::format::key::prefix_range(&prefix.key().to_vec());
+                let (low, high) = under(Prefix::TextWord);
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let words: Vec<Vec<u8>> =
+                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                assert!(!words.is_empty());
+                for key in words {
+                    db.delete(txn, &key)?;
+                }
+                let (low, high) = under(Prefix::TextDocument);
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let documents: Vec<(Vec<u8>, Vec<u8>)> = db
+                    .range(txn, &range)?
+                    .map(|e| e.map(|(k, v)| (k.to_vec(), v.to_vec())))
+                    .collect::<heed::Result<_>>()?;
+                for (key, stored) in documents {
+                    let mut items = crate::engine::values::decode(&stored)?.as_array().unwrap().clone();
+                    items.truncate(3);
+                    db.put(txn, &key, &crate::engine::values::encode(&rmpv::Value::Array(items)))?;
+                }
+                put_meta(txn, db.main, meta::FORMAT, &1u32.to_be_bytes())
+            },
+            false,
+        )
+        .unwrap();
+    store.close().unwrap();
+
+    let refused = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).err().unwrap();
+    assert_eq!(refused.code, crate::ErrorCode::WrongFormat);
+    let report = crate::upgrade::upgrade_format(dir.path()).unwrap();
+    assert_eq!((report.from, report.to, report.rebuilt.as_slice()), (1, 2, ["Doc.stemmed".to_owned()].as_slice()));
+    let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let reads = crate::engine::plan::Reads {
+        reads: vec![
+            serde_json::from_value(json!({ "read": "query", "plan": {
+            "start": { "from": "types", "types": ["Doc"] },
+            "steps": [{ "step": "search", "query": "runni", "options": { "prefix": true } }],
+            "terminal": { "answer": "ids" }
+        } }))
+            .unwrap(),
+        ],
+        track: None,
+    };
+    let answer = db.read(&reads).unwrap();
+    let found: serde_json::Value = serde_json::to_value(rmpv::decode::read_value(&mut &answer[..]).unwrap()).unwrap();
+    assert_eq!(found[0]["ids"], json!(["Doc-1"]));
+}

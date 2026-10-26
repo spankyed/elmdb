@@ -206,6 +206,46 @@ fn a_stemmed_index_matches_a_words_other_forms() {
 }
 
 #[test]
+fn a_stemmed_index_matches_a_prefix_as_typed_and_suggests_words_not_stems() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Doc", "Doc-1", json!({ "body": "running the database nightly" })),
+            create("Doc", "Doc-2", json!({ "body": "a quiet afternoon" })),
+        ],
+    );
+    let typed = |q: &str| {
+        read(
+            &db,
+            json!({ "read": "query", "plan": {
+            "start": { "from": "types", "types": ["Doc"] },
+            "steps": [{ "step": "search", "query": q, "index": "stemmed", "options": { "prefix": true, "fuzzy": false } }],
+            "terminal": { "answer": "ids" }
+        } }),
+        )
+        .unwrap()["ids"]
+            .clone()
+    };
+    // "running" is held as "run", which "runn" and "runni" do not start; the word as written does
+    for q in ["ru", "run", "runn", "runni", "running", "databa", "database"] {
+        assert_eq!(typed(q), json!(["Doc-1"]), "{q}");
+    }
+    assert_eq!(typed("runx"), json!([]));
+    let answer =
+        read(&db, json!({ "read": "suggest", "type": "Doc", "index": "stemmed", "term": "Datab", "limit": 3 }))
+            .unwrap();
+    assert_eq!(answer["completions"], json!(["database"]));
+    let answer = read(&db, json!({ "read": "suggest", "type": "Doc", "index": "stemmed", "term": "runnign" })).unwrap();
+    assert_eq!(answer["corrections"], json!(["running"]));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    write(&db, vec![json!({ "op": "set", "id": "Doc-1", "fields": { "body": "walked home" } })]);
+    assert_eq!(typed("runni"), json!([]));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+#[test]
 fn recency_halves_a_score_every_half_life() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -445,9 +485,12 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
         .snapshot(|s| {
             use crate::engine::unit::Read as _;
             let mut n = 0;
-            for prefix in
-                [crate::format::Prefix::TextTerm, crate::format::Prefix::TextDocument, crate::format::Prefix::TextStats]
-            {
+            for prefix in [
+                crate::format::Prefix::TextTerm,
+                crate::format::Prefix::TextDocument,
+                crate::format::Prefix::TextStats,
+                crate::format::Prefix::TextWord,
+            ] {
                 s.visit(&prefix.key().to_vec(), |_, _| {
                     n += 1;
                     true

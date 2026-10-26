@@ -122,7 +122,7 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 13] = [
+const COMPARED: [Prefix; 14] = [
     Prefix::Live,
     Prefix::Trashed,
     Prefix::Count,
@@ -134,17 +134,19 @@ const COMPARED: [Prefix; 13] = [
     Prefix::TextPositions,
     Prefix::TextDocument,
     Prefix::TextStats,
+    Prefix::TextWord,
     Prefix::VectorChunk,
     Prefix::VectorPending,
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 7] = [
+const PER_INDEX: [Prefix; 8] = [
     Prefix::Index,
     Prefix::TextTerm,
     Prefix::TextPositions,
     Prefix::TextDocument,
     Prefix::TextStats,
+    Prefix::TextWord,
     Prefix::VectorChunk,
     Prefix::VectorPending,
 ];

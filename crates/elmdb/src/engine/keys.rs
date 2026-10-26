@@ -175,14 +175,36 @@ pub fn text_stats(entity_type: &str, index: &str) -> Vec<u8> {
     })
 }
 
-/// The ranges of a text index's terms, positions and documents; its statistics are the one key `text_stats` builds
-pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
+/// A stemming text index's posting list for a word as written
+pub fn text_word(entity_type: &str, index: &str, word: &str) -> Vec<u8> {
+    with(Prefix::TextWord, |w| {
+        w.string(entity_type).string(index).string(word);
+    })
+}
+
+/// Every word as written of a stemming text index, in word order
+pub fn text_words(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::TextWord, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// The bytes every word as written of a stemming text index starting with `prefix` starts with
+pub fn text_words_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<u8> {
+    with(Prefix::TextWord, |w| {
+        w.string(entity_type).string(index).string_prefix(prefix);
+    })
+}
+
+/// The ranges of a text index's terms, positions, documents and words; its statistics are the one key `text_stats`
+/// builds
+pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 4] {
     let range = |prefix: Prefix| {
         with(prefix, |w| {
             w.string(entity_type).string(index);
         })
     };
-    [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument)]
+    [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument), range(Prefix::TextWord)]
 }
 
 /// A chunk's stored embedding, the vectors of an entity's chunks, and of an index
