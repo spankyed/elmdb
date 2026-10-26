@@ -309,3 +309,52 @@ checks. Logs: `/private/tmp/elmdb-remediation-phase3-final-clippy.log` and `-fin
 change since the passing binding build is the test measurement expansion; production code is unchanged. All
 local Phase 3 sessions are terminal. Next implementation phase is primary-data constraint auditing and bounded
 index construction. Remote platform evidence on this checkpoint and final integrated acceptance remain required.
+
+
+### Phase 3 checkpoint and integration follow-up
+
+Phase 3 checkpoint `5146508d7372d284ab43651693e91062edb704e6` was committed and pushed. Its platform run is
+https://github.com/spankyed/elmdb/actions/runs/40421138412. This checkpoint is not yet accepted in the monorepo.
+The attempted pin ran 198 EARS tests with passing API/type checks, but inspection found fatal TLS-destruction
+panics during each worker's teardown despite Vitest reporting success. Treat that run as failed integration, not
+clean evidence. Log: `/private/tmp/elmdb-remediation-phase3-ears.log`. No pin commit/push was made.
+
+Cause: N-API cleanup closes databases after callback TLS has been destroyed. The new `in_callback` lookup used a
+panicking TLS accessor. The follow-up uses `try_with` and treats unavailable state as inactive: no live callback
+scope can remain on a thread whose TLS destructors are executing. A bounded subprocess initializes database-owning
+TLS before callback TLS, forcing the destruction order; the corrected implementation passes. Log:
+`/private/tmp/elmdb-remediation-phase3-tls.log`. Disposable mutation proof is running in session 1846; required
+Rust/binding checks for the correction are running in session 7913, logs with prefix
+`/private/tmp/elmdb-remediation-phase3-tls-`. Keep those sessions until terminal; no replacement run.
+
+The original monorepo strict-chain run has a completed failed integration-2 job (121913624373); other consumers
+continue. Log: `/private/tmp/elmdb-remediation-phase2-strict-integration2.log`. Failure is the old CLI test that
+chmods both data and lock files read-only and expects a successful open, contrary to R02. The isolated CLI test now
+separates readable nonwritable data (writable lock retained) from lock-access refusal with actionable IO diagnostics.
+Its focused validation waits for the corrected binding. These test edits and the temporary `5146508` vendor pin
+remain uncommitted; update the pin to the TLS-fix checkpoint before accepting it.
+
+
+TLS regression firing proof completed: the pre-fix accessor aborts the child with SIGTRAP and fails the parent
+(exit 101); corrected source passes. The disposable harness initially retained an earlier mutation removing the
+close guard, so that initial run did not exercise the lookup. Restoring the current database call site made the
+intended mutation fail; no production source was changed to manufacture the result. Final failing log:
+`/private/tmp/elmdb-remediation-phase3-tls-mutation.log`. Session 1846 and corrected proof session 5743 are terminal.
+The correction's full Rust checks passed; session 7913 continues into binding rebuild/type/Node checks. Monorepo
+permission tests and the temporary pin remain uncommitted pending corrected-binding validation.
+
+
+### TLS correction validated locally — 2026-10-26
+
+The correction's required checks passed: formatting, workspace clippy, all workspace tests, generated protocol,
+single-LMDB dependency, rebuilt release binding, typecheck and all 33 Node tests. Session 7913 is terminal.
+The rebuilt binding then passed all 198 EARS tests with **no** panic/abort/TLS diagnostics (explicit log inspection):
+`/private/tmp/elmdb-remediation-phase3-tls-ears.log`. This replaces the invalid earlier green Vitest total.
+
+A separate natural/terminated Node worker probe did not reproduce the precise TLS destruction order and was
+removed; the deterministic bounded Rust regression and the existing EARS worker integration provide the firing
+and corrected evidence. CLI typecheck passed. Focused CLI permission cases initially failed before assertions
+because the isolated worktree lacked `packages/default-setup/dist`; a single prerequisite build followed by the
+focused cases and affected database suite is now running in session 2370. Logs use prefix
+`/private/tmp/elmdb-remediation-phase3-` with suffixes `default-setup.log`, `cli-permissions.log`, `cli-db.log`.
+No app launch or live-data access is involved.

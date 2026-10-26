@@ -40,7 +40,9 @@ impl Drop for CallbackScope {
 }
 
 pub(crate) fn in_callback(tracks: &SharedTracks) -> bool {
-    CALLBACKS.with_borrow(|active| active.contains(&(Arc::as_ptr(tracks) as usize)))
+    // N-API can close databases from thread-exit destructors after this TLS value was destroyed. No callback
+    // scope can remain on that thread at that point, so unavailable state means no active callback.
+    CALLBACKS.try_with(|active| active.borrow().contains(&(Arc::as_ptr(tracks) as usize))).unwrap_or(false)
 }
 
 /// Who filed a read set: a caller, by the token its reads named, or one of the database's watches

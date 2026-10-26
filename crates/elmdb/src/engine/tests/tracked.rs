@@ -388,6 +388,28 @@ fn callback_schema_unwatch_and_nested_delivery_terminate() {
     }
 }
 
+#[test]
+fn database_cleanup_after_callback_tls_destruction_terminates() {
+    if bounded_watch_child("engine::tests::tracked::database_cleanup_after_callback_tls_destruction_terminates") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_owned();
+    std::thread::spawn(move || {
+        thread_local! {
+            static EXIT_DATABASE: std::cell::RefCell<Option<Database>> = const { std::cell::RefCell::new(None) };
+        }
+        // TLS destructors run in reverse initialization order: the database drops after callback TLS is destroyed.
+        EXIT_DATABASE.with_borrow(|slot| assert!(slot.is_none()));
+        let db = Database::open(&path, crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        db.watch(reads(Vec::new(), None), Box::new(|_| {})).unwrap();
+        EXIT_DATABASE.with_borrow_mut(|slot| *slot = Some(db));
+    })
+    .join()
+    .unwrap();
+    Database::open(dir.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap().close().unwrap();
+}
+
 /// Run explicitly in release mode on an idle machine; reports times rather than enforcing a machine-specific limit.
 #[test]
 #[ignore = "tracking contention measurement"]

@@ -73,7 +73,12 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   tracking-lock waits; current nonconflicting waits were zero and paced token/watch waits about 21 ms, with
   write maxima 22–25 ms. H03 is resolved locally with bounded fallback and documented synchronous watch cost.
   Final local Rust checks pass (221 engine tests; two measurements ignored), as do binding/type checks and 33 Node tests. Windows test quoting is fixed
-  locally; fresh platform verification and final integration remain pending. See implementation evidence.
+  locally; fresh platform verification and final integration remain pending. Checkpoint `5146508` is pushed;
+  monorepo validation exposed callback-TLS teardown panics hidden by passing Vitest totals. A `try_with` correction
+  and bounded TLS-destruction regression pass all required Rust/binding checks and 198 EARS tests without fatal
+  diagnostics. Commit the correction, then update the temporary monorepo pin to that commit. CLI typecheck passes;
+  build prerequisite default-setup output and validate prepared permission cases plus the affected database suite
+  (session 2370) before committing that integration correction. See implementation evidence.
   Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
   checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
