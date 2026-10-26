@@ -203,11 +203,12 @@ fn stab<W>(tree: &Tree<W>, key: &[u8], found: &mut impl FnMut(&W)) {
     stab(&node.right, key, found);
 }
 
-/// What an owner has filed, so it can be taken out again
+/// What an owner has filed, so it can be taken out again, and each range once: a range it reads again is filed already
 #[derive(Default)]
 struct Entry {
     keys: Vec<Vec<u8>>,
     nodes: Vec<(Vec<u8>, u64)>,
+    ranges: HashSet<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
 /// The read sets of every owner, indexed by what a write would have to touch to change what they read
@@ -251,7 +252,9 @@ impl<W: Clone + Eq + Hash + Ord> TrackIndex<W> {
             }
         }
         for (low, high) in reads.ranges {
-            if high.as_deref().is_some_and(|high| high <= low.as_slice()) {
+            if high.as_deref().is_some_and(|high| high <= low.as_slice())
+                || !entry.ranges.insert((low.clone(), high.clone()))
+            {
                 continue;
             }
             let id = self.next_id;

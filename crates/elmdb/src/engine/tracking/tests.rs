@@ -97,3 +97,23 @@ fn finds_a_range_by_a_key_at_its_low_end_and_not_at_its_high_end() {
     assert_eq!(touched(&[0xFF, 0xFF]), ["open"]);
     assert!(touched(b"a").is_empty());
 }
+
+#[test]
+fn an_owner_reading_the_same_keys_and_ranges_again_files_them_once() {
+    let mut index = TrackIndex::<&str>::default();
+    let reads = || ReadSet {
+        keys: BTreeSet::from([b"k".to_vec()]),
+        ranges: vec![(b"b".to_vec(), Some(b"d".to_vec())), (b"x".to_vec(), None)],
+    };
+    for _ in 0..3 {
+        index.add(&"w", reads());
+    }
+    assert_eq!(index.size(), (1, 2));
+    index.add(&"other", reads());
+    assert_eq!(index.size(), (1, 4), "another owner's reads are its own");
+    assert_eq!(index.touched_by([b"c".as_slice()]).into_iter().collect::<Vec<_>>(), ["other", "w"]);
+    index.remove(&"w");
+    assert_eq!(index.size(), (1, 2));
+    index.add(&"w", reads());
+    assert_eq!(index.size(), (1, 4), "a removed owner files its reads anew");
+}
