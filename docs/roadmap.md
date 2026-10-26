@@ -74,7 +74,6 @@ feature calls for it.
 Directions past these, each a design to argue for before it is built, are in `roadmap/` (`roadmap/README.md`).
 
 - Value compression with per-type dictionaries.
-- `elmdb-cli`.
 - LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
 - Substring and regex search.
 - Fewer reads per field write. The global sequence key every insert rewrites costs little: LMDB has one writer, and

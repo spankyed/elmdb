@@ -3,4 +3,4 @@
 /**
  * One unchecked load: an entity with its fields as they were, a relation under its own id, or a sequence
  */
-export type Load = { "load": "entity", id: string, fields: Record<string, unknown>, trashed: boolean, } | { "load": "relation", id: string, kind: string, source: string, target: string, info: unknown, } | { "load": "sequence", name: string, next: number, } | { "load": "unset", id: string, field: string, };
+export type Load = { "load": "entity", id: string, fields: Record<string, unknown>, trashed?: boolean, } | { "load": "relation", id: string, kind: string, source: string, target: string, info?: unknown, } | { "load": "sequence", name: string, next: number, } | { "load": "unset", id: string, field: string, };

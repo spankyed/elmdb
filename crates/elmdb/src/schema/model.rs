@@ -19,12 +19,16 @@ pub struct Schema {
     pub language: String,
     /// How strings sort: `root` (ICU's root collation) or a locale such as `en`
     #[serde(default = "root_collation")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<String>", optional))]
     pub collation: String,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, RoleDef>>", optional))]
     pub roles: BTreeMap<String, RoleDef>,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, RelationDef>>", optional))]
     pub relations: BTreeMap<String, RelationDef>,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, TypeDef>>", optional))]
     pub types: BTreeMap<String, TypeDef>,
 }
 
@@ -39,6 +43,7 @@ fn root_collation() -> String {
 pub struct RoleDef {
     /// Who declared it, named in every error about it
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub declared_by: Option<String>,
 }
 
@@ -48,19 +53,24 @@ pub struct RoleDef {
 #[serde(rename_all = "camelCase")]
 pub struct RelationDef {
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub declared_by: Option<String>,
     pub cardinality: Cardinality,
     /// A link that would close a cycle through this kind is refused
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub acyclic: bool,
     /// At most one edge of this kind between two entities; linking a pair again updates the edge's info
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub unique: bool,
     /// The type pairs an edge may join; `None` is any
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub endpoints: Option<Vec<Endpoint>>,
     /// What an edge's info holds
     #[serde(default = "any_info")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<FieldDef>", optional))]
     pub info: FieldDef,
 }
 
@@ -95,15 +105,20 @@ pub struct Endpoint {
 #[serde(rename_all = "camelCase")]
 pub struct TypeDef {
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub declared_by: Option<String>,
     /// The engine numbers each created row `<prefix>-<n>`
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub short_code: Option<ShortCodeDef>,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, FieldDef>>", optional))]
     pub fields: BTreeMap<String, FieldDef>,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<AdditionalFields>", optional))]
     pub additional_fields: AdditionalFields,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, IndexDef>>", optional))]
     pub indexes: BTreeMap<String, IndexDef>,
 }
 
@@ -132,9 +147,11 @@ pub struct FieldDef {
     pub value: ValueType,
     /// The row may lack it. A field that isn't optional is required
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub optional: bool,
     /// It may hold `null`
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub nullable: bool,
 }
 
@@ -219,25 +236,31 @@ pub enum IndexDef {
     Value {
         fields: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         unique: bool,
     },
     /// Ranked full-text search
     Text {
         fields: BTreeMap<String, TextField>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Analyzer>", optional))]
         analyzer: Analyzer,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         stem: Option<String>,
     },
     /// Nearest neighbours of embeddings computed from text fields
     Vector {
         from: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Chunk>", optional))]
         chunk: Chunk,
         dims: u32,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Metric>", optional))]
         metric: Metric,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Precision>", optional))]
         precision: Precision,
         model: String,
     },
@@ -257,6 +280,7 @@ impl IndexDef {
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
 pub struct TextField {
     #[serde(default = "unit_weight")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
     pub weight: f64,
 }
 

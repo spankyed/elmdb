@@ -7,4 +7,4 @@ export type RoleDef = {
 /**
  * Who declared it, named in every error about it
  */
-declaredBy: string | null, };
+declaredBy?: string, };

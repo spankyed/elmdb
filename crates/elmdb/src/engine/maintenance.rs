@@ -27,6 +27,7 @@ pub enum Load {
         #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown>"))]
         fields: BTreeMap<String, Value>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         trashed: bool,
     },
     Relation {
@@ -35,7 +36,7 @@ pub enum Load {
         source: String,
         target: String,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
     },
     /// A numbering sequence's next number: `shortCode:<Type>`, `label:<Type>:<base>`, or the store's `seq`

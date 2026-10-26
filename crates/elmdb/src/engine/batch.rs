@@ -16,6 +16,7 @@ pub struct Batch {
     pub ops: Vec<Op>,
     /// The time the batch's writes are stamped with, in milliseconds since the epoch; the engine's clock by default
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub now: Option<f64>,
 }
 
@@ -30,15 +31,19 @@ pub enum Op {
         #[serde(rename = "type")]
         entity_type: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         id: Option<String>,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown>"))]
+        #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown> | undefined", optional))]
         fields: BTreeMap<String, Value>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         short_code: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         created_at: Option<f64>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         updated_at: Option<f64>,
     },
     /// Writes the fields to the entity with the id, creating it as `type` with them when no entity has it
@@ -47,9 +52,10 @@ pub enum Op {
         entity_type: String,
         id: String,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown>"))]
+        #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown> | undefined", optional))]
         fields: BTreeMap<String, Value>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         short_code: Option<String>,
     },
     /// Sets each field. `touch` stamps `updatedAt`, as every attribute write does unless told not to
@@ -58,6 +64,7 @@ pub enum Op {
         #[cfg_attr(feature = "codegen", ts(type = "Record<string, unknown>"))]
         fields: BTreeMap<String, Value>,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Appends to the field's list, starting one when it has none
@@ -67,6 +74,7 @@ pub enum Op {
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Merges into the field's map, or sets it when either isn't a map
@@ -76,6 +84,7 @@ pub enum Op {
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Removes the field
@@ -83,6 +92,7 @@ pub enum Op {
         id: String,
         field: String,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Removes the list's element at `index`; an index past its end does nothing
@@ -91,6 +101,7 @@ pub enum Op {
         field: String,
         index: u32,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Removes the list's first element equal to `value`, or, for a map, the first holding each of its fields
@@ -100,12 +111,14 @@ pub enum Op {
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
         #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         touch: bool,
     },
     /// Puts the entity in the trash, at `at` or now; a trashed entity keeps the time it was first trashed
     Trash {
         id: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         at: Option<f64>,
     },
     Restore {
@@ -132,26 +145,30 @@ pub enum Op {
         kind: String,
         target: String,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
     },
     /// Removes the source's edges of `kind` to `target`; with no kind, of every kind; with no target, to every target
     Unlink {
         source: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         kind: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         target: Option<String>,
     },
     /// Moves a relation's ends or replaces its info, keeping its id
     UpdateRelation {
         relation: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         source: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         target: Option<String>,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
     },
     RemoveRelation {
@@ -172,6 +189,7 @@ pub enum Op {
     Embed {
         id: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         chunk: u32,
         hash: String,

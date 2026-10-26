@@ -1,5 +1,6 @@
-//! The Node binding: elmdb's API for JavaScript, over N-API. Every failure throws an `Error` whose `code` is an
-//! `ErrorCode`.
+//! The Node binding: elmdb's API for JavaScript, over N-API. Every failure elmdb reports throws an `Error` whose `code`
+//! is an `ErrorCode`; an argument of the wrong JavaScript type is refused by N-API before elmdb sees it, with N-API's
+//! own code (`InvalidArg`, `NumberExpected`, …).
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -13,6 +14,18 @@ pub struct Code(&'static str);
 impl AsRef<str> for Code {
     fn as_ref(&self) -> &str {
         self.0
+    }
+}
+
+/// An option that must be a whole number of at least `least`, refused otherwise (`VALUE_INVALID`) rather than cast
+fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
+    match value {
+        None => Ok(None),
+        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= least && n <= 2f64.powi(53) => Ok(Some(n as u64)),
+        Some(n) => Err(napi::Error::new(
+            Code("VALUE_INVALID"),
+            format!("{name} must be a whole number of at least {least}, and is {n}"),
+        )),
     }
 }
 
@@ -31,8 +44,8 @@ pub struct OpenOptions {
     pub schema: Option<serde_json::Value>,
     /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory
     pub syncs: Option<bool>,
-    pub sync_idle_ms: Option<u32>,
-    pub sync_interval_ms: Option<u32>,
+    pub sync_idle_ms: Option<f64>,
+    pub sync_interval_ms: Option<f64>,
     pub map_size_bytes: Option<f64>,
 }
 
@@ -57,7 +70,7 @@ impl Database {
     /// Opens the database at `path`, creating it unless `readOnly`
     #[napi(factory)]
     pub fn open(env: Env, path: String, options: Option<OpenOptions>) -> Result<Self, Code> {
-        process::claim(&env)?;
+        process::claim()?;
         let options = options.unwrap_or(OpenOptions {
             read_only: None,
             schema: None,
@@ -75,9 +88,10 @@ impl Database {
             read_only: options.read_only.unwrap_or(false),
             schema,
             syncs: options.syncs.unwrap_or(true),
-            sync_idle_ms: options.sync_idle_ms.map_or(defaults.sync_idle_ms, u64::from),
-            sync_interval_ms: options.sync_interval_ms.map_or(defaults.sync_interval_ms, u64::from),
-            map_size_bytes: options.map_size_bytes.map(|n| n as usize),
+            sync_idle_ms: whole("syncIdleMs", options.sync_idle_ms, 0.0)?.unwrap_or(defaults.sync_idle_ms),
+            sync_interval_ms: whole("syncIntervalMs", options.sync_interval_ms, 0.0)?
+                .unwrap_or(defaults.sync_interval_ms),
+            map_size_bytes: whole("mapSizeBytes", options.map_size_bytes, 1.0)?.map(|n| n as usize),
         };
         let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
         exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
@@ -122,8 +136,8 @@ impl Database {
 
     /// Group commit's syncs so far
     #[napi(getter)]
-    pub fn syncs(&self) -> Result<u32, Code> {
-        self.inner.syncs().map(|n| n as u32).map_err(to_js)
+    pub fn syncs(&self) -> Result<f64, Code> {
+        self.inner.syncs().map(|n| n as f64).map_err(to_js)
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of

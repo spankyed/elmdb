@@ -254,7 +254,7 @@ relations.parent_of.endpoints[1].target: no such type "Documnet"
 
 elmdb's Rust schema types are the definition. From them the build generates:
 
-- the TypeScript types of the schema (`ElmdbSchema`), published in the `elmdb` package;
+- the TypeScript types of the schema (`Schema`, `protocol/Schema.ts`), published in the `elmdb` package;
 - the JSON Schema at `$schema`'s URL, for editors and for validating a schema before opening a database.
 
 ## apack's schema

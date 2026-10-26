@@ -6,20 +6,20 @@ import type { FieldDef } from "./FieldDef.js";
 /**
  * A relation kind
  */
-export type RelationDef = { declaredBy: string | null, cardinality: Cardinality, 
+export type RelationDef = { declaredBy?: string, cardinality: Cardinality, 
 /**
  * A link that would close a cycle through this kind is refused
  */
-acyclic: boolean, 
+acyclic?: boolean, 
 /**
  * At most one edge of this kind between two entities; linking a pair again updates the edge's info
  */
-unique: boolean, 
+unique?: boolean, 
 /**
  * The type pairs an edge may join; `None` is any
  */
-endpoints: Array<Endpoint> | null, 
+endpoints?: Array<Endpoint>, 
 /**
  * What an edge's info holds
  */
-info: FieldDef, };
+info?: FieldDef, };

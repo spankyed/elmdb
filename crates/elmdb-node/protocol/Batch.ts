@@ -8,4 +8,4 @@ export type Batch = { ops: Array<Op>,
 /**
  * The time the batch's writes are stamped with, in milliseconds since the epoch; the engine's clock by default
  */
-now: number | null, };
+now?: number, };

@@ -14,4 +14,4 @@ $schema: string,
 /**
  * How strings sort: `root` (ICU's root collation) or a locale such as `en`
  */
-collation: string, roles: { [key in string]: RoleDef }, relations: { [key in string]: RelationDef }, types: { [key in string]: TypeDef }, };
+collation?: string, roles?: { [key in string]: RoleDef }, relations?: { [key in string]: RelationDef }, types?: { [key in string]: TypeDef }, };

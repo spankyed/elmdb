@@ -8,20 +8,20 @@ export type SearchOptions = {
 /**
  * The query's last word matches the terms it starts, for search as you type
  */
-prefix: boolean, 
+prefix?: boolean, 
 /**
  * A word of five letters or more also matches a term one edit away, nine or more two
  */
-fuzzy: boolean, 
+fuzzy?: boolean, 
 /**
  * Any clause matching is enough, rather than every one
  */
-any: boolean, 
+any?: boolean, 
 /**
  * Only these of the index's fields
  */
-fields: Array<string> | null, 
+fields?: Array<string>, 
 /**
  * A score halved for every `halfLife` milliseconds the field's time is before `now`
  */
-recency: Recency | null, };
+recency?: Recency, };

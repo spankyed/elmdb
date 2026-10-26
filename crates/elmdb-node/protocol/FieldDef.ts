@@ -8,8 +8,8 @@ export type FieldDef = {
 /**
  * The row may lack it. A field that isn't optional is required
  */
-optional: boolean, 
+optional?: boolean, 
 /**
  * It may hold `null`
  */
-nullable: boolean, } & ({ "type": "string" } | { "type": "number" } | { "type": "integer" } | { "type": "boolean" } | { "type": "bytes" } | { "type": "enum", values: Array<string>, } | { "type": "ref", to: Array<string>, } | { "type": "list", of: ValueType, } | { "type": "object" } | { "type": "any" });
+nullable?: boolean, } & ({ "type": "string" } | { "type": "number" } | { "type": "integer" } | { "type": "boolean" } | { "type": "bytes" } | { "type": "enum", values: Array<string>, } | { "type": "ref", to: Array<string>, } | { "type": "list", of: ValueType, } | { "type": "object" } | { "type": "any" });

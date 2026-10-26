@@ -7,4 +7,4 @@ import type { Terminal } from "./Terminal.js";
 /**
  * A query: where it starts, the steps after, and what it answers
  */
-export type Plan = { scope: Scope, start: Start, steps: Array<Step>, terminal: Terminal, };
+export type Plan = { scope?: Scope, start: Start, steps?: Array<Step>, terminal: Terminal, };

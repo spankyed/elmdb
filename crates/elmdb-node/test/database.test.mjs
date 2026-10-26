@@ -115,3 +115,12 @@ test('another elmdb binary in the process is refused at open, naming both files'
     return true;
   });
 });
+
+test('an open refuses a sync or map option that is not a whole number in range, rather than casting it', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  for (const options of [{ syncIdleMs: -1 }, { syncIntervalMs: 1.5 }, { syncIdleMs: Number.NaN }, { mapSizeBytes: 0 }, { mapSizeBytes: Infinity }]) {
+    assert.throws(() => Database.open(dir, { syncs: false, ...options }), { code: 'VALUE_INVALID' }, JSON.stringify(options));
+  }
+  Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
+});

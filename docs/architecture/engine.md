@@ -26,6 +26,11 @@ and `runs` (its flow run history), which reset and back up independently.
 Several processes may open one database: one writes at a time, LMDB's lock serializing them, and a read-only open
 reads while the app writes (apack's `apack db`).
 
+On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
+Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
+process killed by a signal, or one ending with a unit open, leaves them in the system's table until a later open of
+the same path, taking the lock first, replaces them and a close removes them.
+
 ## Schema
 
 Types, fields, relation kinds, roles and indexes are declared as data (`schema.md`), stored in the database, and
@@ -51,7 +56,8 @@ A plan is a scope, a start, steps and a terminal:
   each entity once, so a cycle ends the walk).
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
   then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
-  after an id, a page's cursor).
+  after an id, a page's cursor; an id no longer in the answer answers nothing, so a caller pages again from the
+  start).
 - **Search:** `search` (a text index's matches, most relevant first; `search.md`, Text search as built).
 - **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
   `edges` (relation rows), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
@@ -75,9 +81,9 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.write(batch, { durable? })` applies a batch as one unit. A unit can also stay open across calls, as a caller's
+`db.write(batch, durable?)` applies a batch as one unit. A unit can also stay open across calls, as a caller's
 transaction running its own code between writes needs: `db.begin()` opens one, `unit.write(batch)` applies a batch in
-it, its writes read their own, and `unit.commit({ durable? })` or `unit.abort()` ends it. One unit is open at a time,
+it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends it. One unit is open at a time,
 and while it is `db.write` refuses (`UNIT_OPEN`): its writes go through the unit. The unit's write transaction belongs
 to the thread that began it. A unit opening on a map more than half used grows the map first, since an open unit can't
 grow it. A background index build waits for an open unit to end, woken when it does, and goes on from where it
@@ -109,8 +115,9 @@ A batch is data, so the engine can retry it (after growing the map, `design.md`)
 A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine
 failing is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s)
 after the first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is
-on disk, and rejects if the sync it waits on fails, leaving those commits owed to the next one. `durable: true` on a
-write commits with a sync. `close()` syncs what is owed.
+on disk, and rejects if the sync it waits on fails, leaving those commits owed to the next one. A write or a
+commit passed `durable` commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made
+and its change set delivered. `close()` syncs what is owed.
 
 ## Change sets and watch
 
@@ -147,6 +154,10 @@ edit to one entity names no token whose reads didn't touch that entity.
 
 ## Admin
 
+The admin calls return no change set: each commits writes that aren't logged key by key, so a caller tracking reads
+hears every one as touching everything (`db.sequence` rises with it). Each that writes refuses with `UNIT_OPEN` while a
+unit is open.
+
 - `backup(dir)`: LMDB's copy of one read transaction, compacted (`mdb_env_copy2` with `MDB_CP_COMPACT`), which opens
   as a database of its own.
 - `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
@@ -168,7 +179,7 @@ edit to one entity names no token whose reads didn't touch that entity.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role. It refuses a name the schema still declares.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
-  Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them.
+  Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
 - `bulkLoad(loads)`: entities, relations under their own ids and sequences, applied in one durable unit without a
   write's checks (no schema, no refusals, a unique index taking duplicates), for imports, the upgrade, and specs that
   need data the checks would refuse. The derived keys are kept as a write keeps them, and `check()` reports what the
@@ -176,7 +187,9 @@ edit to one entity names no token whose reads didn't touch that entity.
 
 ## Errors
 
-Every failure is an `ElmdbError` with a code from one enum, the same in Rust and TypeScript. LMDB's own errors map to
+Every failure elmdb reports carries a code from one enum, the same in Rust and TypeScript (`ErrorCode`): an `Error`
+in Rust, and in Node an `Error` whose `code` is it. An argument of the wrong JavaScript type is refused by N-API before
+elmdb sees it, with N-API's own code. LMDB's own errors map to
 codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compiled out of a release build (heed's
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).

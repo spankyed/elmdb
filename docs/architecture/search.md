@@ -70,8 +70,9 @@ Reranking with a model is the caller's: apack has `rerank` in `services.inferenc
 
 The engine never calls a model. A write that changes a vector index's source fields records the entity's chunks as
 pending, in the same unit. A caller's worker takes pending chunks (`db.pendingEmbeddings(index, limit)`), embeds them
-and writes the vectors back in a batch, which the engine accepts only if the source hasn't changed since. `stats()`
-reports how many are pending, so a search can say it is incomplete.
+and writes the vectors back in a batch, which the engine accepts only if the source hasn't changed since, and answers
+`stale` for one whose entity is gone. `pendingEmbeddings` is a read (`ReadOp`), so a caller asks it within the same
+snapshot as a search when it needs to say that search is incomplete.
 
 ## Text search as built
 

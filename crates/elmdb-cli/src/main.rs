@@ -1,5 +1,5 @@
 //! The `elmdb` command: inspect, check, back up and upgrade databases. Each opens the database itself, so the app that
-//! holds one open must close it first, except for the read-only `inspect` and `check`.
+//! holds one open must close it first, except for `inspect`, `check` and `backup`, which open it read-only.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

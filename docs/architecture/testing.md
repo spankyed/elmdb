@@ -47,7 +47,8 @@ that a stopped scan is tracked as far as it went, the commit sequence, and `Data
 
 `crates/elmdb-node/test/`: each operation through JavaScript, and fuzzing (`fuzz.test.mjs`): random bytes and random
 msgpack as batches, reads and loads, flipped bytes, arguments of the wrong type, a closed database and an ended unit.
-Each must throw an error carrying an elmdb code or apply, and `check()` stays clean. The TypeScript types are generated
+Each must apply or throw: an error carrying an elmdb code when the payload reached elmdb, and N-API's own for an
+argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
 ## Platforms

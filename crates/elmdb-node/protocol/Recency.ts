@@ -8,4 +8,4 @@ field: string, halfLife: number,
 /**
  * The time ages are measured from; the read's clock when absent
  */
-now: number | null, };
+now?: number, };

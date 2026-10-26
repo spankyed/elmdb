@@ -26,6 +26,7 @@ pub enum ReadOp {
     Query {
         plan: Plan,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         visits: bool,
     },
     /// The entity's row: its id, type and every field; `null` for an id no entity has. It reads through the trash
@@ -37,10 +38,13 @@ pub enum ReadOp {
     /// The rows of the matching relations: by an end, its edges in the order linked; otherwise every relation
     FindRelations {
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         kind: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         source: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         target: Option<String>,
     },
     /// Whether linking `source` to `target` would close a cycle through these kinds
@@ -51,9 +55,11 @@ pub enum ReadOp {
         #[serde(rename = "type")]
         entity_type: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         term: String,
         #[serde(default = "ten")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         limit: u32,
     },
     /// The chunks of a type's vector index waiting for embeddings, up to `limit`, with the model and dimensions to embed
@@ -62,8 +68,10 @@ pub enum ReadOp {
         #[serde(rename = "type")]
         entity_type: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         #[serde(default = "hundred")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         limit: u32,
     },
     /// The entities whose label holds the query's characters in order, best first: for a quick-open across types.
@@ -72,8 +80,10 @@ pub enum ReadOp {
         query: String,
         fields: std::collections::BTreeMap<String, String>,
         #[serde(default = "ten")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         limit: u32,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Scope>", optional))]
         scope: Scope,
     },
 }
@@ -92,9 +102,11 @@ fn hundred() -> u32 {
 #[serde(rename_all = "camelCase")]
 pub struct Plan {
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<Scope>", optional))]
     pub scope: Scope,
     pub start: Start,
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<Vec<Step>>", optional))]
     pub steps: Vec<Step>,
     pub terminal: Terminal,
 }
@@ -160,43 +172,51 @@ pub enum Step {
     LinkedTo {
         kind: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         other: Option<String>,
     },
     LinkedFrom {
         kind: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         other: Option<String>,
     },
     UnlinkedTo {
         kind: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         other: Option<String>,
     },
     UnlinkedFrom {
         kind: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         other: Option<String>,
     },
     /// The far ends of the set's edges of the kinds, each once, of the types when given
     Out {
         kinds: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
     In {
         kinds: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
     /// Every entity the set reaches through the kinds, any number of edges deep: nearest first, each once
     Descendants {
         kinds: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
     Ancestors {
         kinds: Vec<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
     /// By the field's value: booleans, numbers, timestamps, strings (by the schema's collation), anything else by its
@@ -204,6 +224,7 @@ pub enum Step {
     OrderBy {
         field: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         descending: bool,
     },
     Reverse,
@@ -213,6 +234,7 @@ pub enum Step {
     /// Each entity once, or with a field, the first entity of each value
     Distinct {
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         field: Option<String>,
     },
     /// The entities after `id` in the order so far: a page's cursor, the last id of the page before
@@ -223,16 +245,20 @@ pub enum Step {
     Near {
         vector: Vec<f32>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         #[serde(default = "ten")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         k: u32,
     },
     /// The `k` entities nearest the entity `id`'s own embedding, nearest first, `id` itself left out: more like this
     Like {
         id: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         #[serde(default = "ten")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         k: u32,
     },
     /// A text search and a vector search of one type, their rankings fused (reciprocal rank fusion, 60): the `k` best
@@ -240,12 +266,16 @@ pub enum Step {
         query: String,
         vector: Vec<f32>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         text_index: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         vector_index: Option<String>,
         #[serde(default = "ten")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         k: u32,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<SearchOptions>", optional))]
         options: SearchOptions,
     },
     /// The entities a type's text index matches to `query`, most relevant first (`docs/architecture/search.md`). `index` names
@@ -253,8 +283,10 @@ pub enum Step {
     Search {
         query: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         index: Option<String>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<SearchOptions>", optional))]
         options: SearchOptions,
     },
 }
@@ -266,18 +298,23 @@ pub enum Step {
 pub struct SearchOptions {
     /// The query's last word matches the terms it starts, for search as you type
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub prefix: bool,
     /// A word of five letters or more also matches a term one edit away, nine or more two
     #[serde(default = "yes")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub fuzzy: bool,
     /// Any clause matching is enough, rather than every one
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub any: bool,
     /// Only these of the index's fields
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub fields: Option<Vec<String>>,
     /// A score halved for every `halfLife` milliseconds the field's time is before `now`
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub recency: Option<Recency>,
 }
 
@@ -300,6 +337,7 @@ pub struct Recency {
     pub half_life: f64,
     /// The time ages are measured from; the read's clock when absent
     #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional))]
     pub now: Option<f64>,
 }
 
@@ -316,11 +354,13 @@ pub enum Terminal {
     /// Each entity's row, or with fields, its id and those of the fields it holds
     Rows {
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         fields: Option<Vec<String>>,
     },
     /// The first entity's row, or with fields, its id and those of them it holds; `null` when there is none
     FirstRow {
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         fields: Option<Vec<String>>,
     },
     /// Each edge of the kinds out of (or into) the set whose far end the query could reach, as a relation row
@@ -328,20 +368,24 @@ pub enum Terminal {
         kinds: Vec<String>,
         outward: bool,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
     /// The ids by the field's value, in the order each value first appears; with `counts`, how many in place of the ids
     GroupBy {
         field: String,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         counts: bool,
     },
     /// Each entity with what a search found in it: its score, the index's terms it matched, and with `highlights`
     /// where they are in each field, `[element, start, end]` in UTF-16 units; with `fields`, its id and those fields
     Hits {
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
         fields: Option<Vec<String>>,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         highlights: bool,
     },
 }
