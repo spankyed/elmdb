@@ -55,8 +55,8 @@ test('the canonical form a database answers is a Schema, every absent option nul
     },
   };
   const db = Database.open(join(dir, 'db'), { schema: given, syncs: false });
-  t.after(() => db.close());
   assert.deepEqual(db.schema, canonical);
   // What a database answers, it takes back unchanged
   assert.deepEqual(db.setSchema(canonical), []);
+  db.close();
 });

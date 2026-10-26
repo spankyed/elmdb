@@ -103,6 +103,7 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   ].join('\n');
   const sequence = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 30_000 }));
   const db = Database.open(dir, { syncs: false });
-  t.after(() => db.close());
-  assert.equal(db.sequence, sequence);
+  const reopened = db.sequence;
+  db.close();
+  assert.equal(reopened, sequence);
 });
