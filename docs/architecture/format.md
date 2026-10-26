@@ -55,7 +55,7 @@ dictionaries trained per type for small values such as messages.
 `m/format` records the format as an integer, and an open refuses a database in another format, naming both: a newer
 one says to update elmdb, an older one that it is from before the format was fixed and is made again.
 
-**The format is 1 until a release has users** (apack's `docs/plans/storage-format-one.md`). Until then a change to the
+**The format is 1 until a release has users** (apack's `docs/archive/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
 needs nothing, `rebuild()` building it from primary data. The databases that exist are their developers', reset or
 converted once on a copy (Dumps, below). The accepted cost is that a build may misread a database from before an
