@@ -61,5 +61,17 @@ old NO_LOCK fallback. It failed in the child with `a reader without lock-file ac
 
 R01/R02 are implemented and locally verified, not yet closed across supported platforms. The binding matrix must
 verify the kernel-lock behavior on Linux glibc/musl and Windows as well as both macOS architectures. There was no
-simulated cross-platform result. Phase 2 and all later findings remain outstanding. The complete final feature
-integration must use upstream main/master inputs under D11; no feature-branch merge or remediation merge-out is allowed.
+simulated cross-platform result. Phase 2 and all later findings remain outstanding. Final remediation acceptance uses the currently implemented upstream main/master inputs under D11; no feature-branch
+merge or remediation merge-out is allowed. It does not wait for future goal-elmdb-next features.
+
+
+## Sequencing decision — 2026-10-26
+
+The original remediation Phase 6 required the completed goal-elmdb-next feature set, while that work was paused for
+remediation. This created a circular dependency. The user selected remediation-first execution: complete remediation
+against currently implemented upstream, commit/push the branches for review, and do not merge them. Landing is a
+separate user-authorized step. goal-elmdb-next stays paused before Phase 3 until the user resumes it after landing.
+
+Future-feature integration assertions are retained in goal-elmdb-next's acceptance: planner ordering/limits/tracking,
+field-type auditing, compressed read/export/recovery paths, and trigram/regex correctness. This transfers ownership
+of those later checks; it does not waive current remediation regressions, platform checks, or recovery acceptance.

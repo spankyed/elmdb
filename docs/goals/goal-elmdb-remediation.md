@@ -15,7 +15,8 @@ Acceptance and Constraints. The assessment is docs/reviews/elmdb-review-2026-10.
 docs/evidence/elmdb-remediation-preparation.md. Inspect current source before relying on this survey.
 
 Use the two isolated session/elmdb-remediation worktrees named in Current handoff. Do not edit or build in the source
-checkouts. The active goal-elmdb-next.md is separate work; reconcile pinned committed results in isolation.
+checkouts. goal-elmdb-next.md is paused before Phase 3. Finish remediation against current upstream; do not wait
+for its future features or resume that goal. Leave remediation unmerged for user review.
 
 Finished when every acceptance row is proved on the final integrated commits, current reference docs describe the
 result, finding dispositions link to fixes or evidence, Outcome is written, and the goal is archived with links repaired.
@@ -25,7 +26,8 @@ No finding is closed by an unrelated passing test or by moving its requirement t
 ## Scope
 
 Resolve R01–R08 from the [engineering review](../reviews/elmdb-review-2026-10.md), investigate H01–H04 to a recorded
-conclusion, and preserve the active goal's query, watch, type, compression, and search guarantees when integrating.
+conclusion, and preserve the behavior already implemented on upstream main/master when integrating. Future
+planner, field-type, compression and search changes belong to goal-elmdb-next.md after remediation is landed.
 The review remains the dated assessment; this goal owns implementation order and acceptance.
 
 Required outcomes: safe process registration and database opening; one coherent commit outcome across every mutation
@@ -55,6 +57,10 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   formatting, and clippy passed. Full Rust/generated/dependency final checks and the platform matrix are recorded in
   [implementation evidence](../evidence/elmdb-remediation.md). Cross-platform closure is pending, not waived.
 - Regressions were shown failing against the old behavior in disposable copies. No shared checkout was mutated.
+- Sequencing (user decision, 2026-10-26): goal-elmdb-next is paused before Phase 3. This goal runs independently
+  against current upstream, completes its own checks, and leaves committed/pushed remediation branches for user
+  review. Landing requires separate user authorization. goal-elmdb-next resumes only when the user resumes it after
+  remediation has landed in both repositories and its branches incorporate those upstream commits.
 - Next deliverable: finish the Phase 1 checkpoint/platform verification, then Phase 2's committed-error finalization
   and AgentBuddy declaration-cache/observer behavior. Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
@@ -72,9 +78,10 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 | D6 | AgentBuddy refreshes declaration caches and invalidates affected views after a committed schema/admin error before rethrowing it. This must happen once per committed operation; ordinary pre-commit failures produce no notification. Do not infer commit from error text. |
 | D7 | R05/R06 require an explicit listener panic and reentrant-close contract. Prefer a bounded, local correction over a general event-dispatch rewrite; publish the chosen behavior in engine.md and test it. |
 | D8 | H01–H04 are hypotheses, not predetermined fixes. Close each with a deterministic test, measurement, or a documented contract; if it demonstrates a gap in the required guarantees, fix that gap and add its acceptance evidence. |
-| D9 | The active goal retains its own features and roadmap designs. This goal contributes the review's acceptance requirements and verifies the final combined result without rewriting that goal or its code concurrently. |
+| D9 | **Remediation first, then goal-elmdb-next.** goal-elmdb-next stays paused before Phase 3. This goal completes against currently implemented upstream main/master and does not depend on that goal's future work. After separately authorized landing of remediation in both repositories, the user may resume goal-elmdb-next; it incorporates upstream and owns verification of its new features against the remediation guarantees. |
 | D10 | Preserve format/version policy from format.md and AgentBuddy's current compatibility policy. Prefer API/behavior changes with coordinated in-repo callers over compatibility shims. No live-data conversions. |
-| D11 | The user authorized implementation, commits and pushes on both session/elmdb-remediation branches (2026-10-26). Rebase onto or merge in upstream main/master as needed. Never merge a remediation branch into main/master or another branch; no feature-branch merges are authorized. After an authorized rebase, update only the owned remote remediation branch with --force-with-lease when necessary, never an unconditional force push. Release/tag/publication permission is not granted. |
+| D11 | The user authorized implementation, commits and pushes on both session/elmdb-remediation branches (2026-10-26). Rebase onto or merge in upstream main/master as needed. Never merge a remediation branch into main/master or another branch; no feature-branch merges are authorized. After an authorized rebase, update only the owned remote remediation branch with --force-with-lease when necessary, never an unconditional force push. Required CI may run on the owned pushed branches; do not dispatch it as a debugging loop. Release/tag/publication permission is not granted. |
+| D12 | Choose and record workload-based resource bounds before optimizing R08/H03; routine engineering parameters do not require another user decision. Each hypothesis gets a finite investigation, evidence and a conclusion. Preserve required guarantees; deferring a demonstrated required repair or changing scope still needs user authorization. |
 
 Registration design requirements: use an independently opened handle for each independently loaded binary; a private
 Rust static or N-API environment data is insufficient across copies and workers. The lock namespace must identify this
@@ -126,7 +133,7 @@ fix a demonstrated unacceptable serialization cost or record the supported behav
 ### Phase 4: constraint auditing and bounded construction — R04/R07
 
 **Deliverable:** constraint inventory with independent audit checks, and cursor-based index-build traversal.
-**Dependencies:** Phase 0; reconcile changes to derive/entities with current active-goal commits before integration.
+**Dependencies:** Phase 0; reconcile changes to derive/entities with currently landed upstream commits before integration.
 **Done when:** unchecked invalid primary data for every declared constraint produces a specific violation, including
 cycles, unique pairs, endpoints, self-links, info types, and unindexed unique values. Nested references follow the stated
 contract. Rebuild cannot hide violations. Index-build visits grow approximately linearly overall, memory follows chunk
@@ -147,15 +154,18 @@ of the required guarantees; a hypothesis label alone is not closure.
 ### Phase 6: integrated acceptance and disposition
 
 **Deliverable:** one tested combined result, current contracts, and final finding dispositions.
-**Dependencies:** Phases 1–5 and the committed active-goal implementation being combined.
+**Dependencies:** Phases 1–5 only. No dependency on goal-elmdb-next completion or its unlanded feature branches.
 **Done when:** incorporate upstream main/master into the remediation branches using D11, pin exact inputs in both
 repositories, and validate the combined result in isolated checkouts. Do not merge other feature branches to construct
-a candidate; work awaiting upstream integration remains pending.
+a candidate. Test remediation with currently implemented upstream behavior; do not wait for future goal-elmdb-next
+features or for remediation to be merged out.
 Run elmdb's required Rust/generated/dependency/binding checks and supported-platform matrix; run AgentBuddy's focused
 EARS/watch/model/backup/schema checks, full typecheck for shared-source edits, and required final strict chain. Follow
 its Linux/native boundary and one-expensive-run constraints. Investigate regressions using the active goal's workload
-and single-row benchmarks with recorded conditions. Confirm planner order/limits/tracking, typed schema validation,
-compressed read/export/recovery paths, and substring/regex candidate correctness on the final feature set. If either
+and single-row benchmarks with recorded conditions. Verify existing query order/limits/tracking, current schema
+validation, value read/export/recovery paths, and currently implemented search behavior. Record the exact upstream
+feature set tested. The checks for future planner/type/compression/substring changes are owned by goal-elmdb-next,
+not prerequisites for this goal's closure. If either
 input advances, re-evaluate affected evidence. Commit and push validated checkpoints under D11; leave the remediation
 branches unmerged for review.
 
@@ -172,7 +182,7 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 | R05/R06 lifecycle and H03 contention | Missing | Review E01/E05; static trace | Phase 3 |
 | R04 auditing and R07 bounded construction | Missing | Review E02/E03 and source complexity | Phase 4 |
 | R08 recovery envelope and H01/H02/H04 disposition | Missing | Review source assessment | Phase 5 |
-| Final feature integration and required gates | Missing | None | Phase 6 |
+| Current-upstream integration and required gates | Missing | None | Phase 6; no future-feature dependency |
 | Current reference docs, review dispositions, Outcome and closure | Missing | None | Phase 6 |
 
 ## Constraints
@@ -181,7 +191,8 @@ Follow each repository's standing guidance. Implementation, commits and pushes t
 authorized by D11. Only rebase onto or merge in upstream main/master. Do not merge a remediation branch into any
 other branch, including main/master. PR creation, releases, tags and publication are not authorized by this permission. Never share writable dependencies or build outputs, modify live
 app data, or run the app without an isolated profile. Copied artifacts seed a build; they do not establish freshness.
-Keep goal-next's expensive measurements separate from remediation runs; use idle checks and the repository's measurement
+Keep goal-elmdb-next paused; neither its completion nor user-authorized landing of remediation is a condition for
+this goal's own completion. Do not automatically resume the paused work. Use idle checks and the repository's measurement
 runner, or report alternating comparisons and load conditions. Do not dispatch CI as a debugging loop.
 
 Use specific regressions and bounded validation during development, then the required converged checks. Preserve logs

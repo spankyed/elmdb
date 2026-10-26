@@ -120,9 +120,17 @@ No loader/declaration diff was produced. These checks establish the prepared bin
 review finding or substitute for final Rust, application, or platform acceptance. Both remediation worktrees were clean
 before the two preparation documents were installed; elmdb's source checkout remained clean at e74f9dd.
 
-## Next action
+## Current execution and sequencing
 
-After implementation authorization, recheck source and branch inputs, complete Phase 0's current-source validation,
-then implement storage opening and the process claim. The goal owns subsequent acceptance:
+Implementation was subsequently authorized; Phase 0/1 results are in
+[implementation evidence](elmdb-remediation.md). The preparation results above remain dated evidence.
+
+On 2026-10-26 the user chose serial execution: goal-elmdb-next stays paused before Phase 3 while remediation completes
+against current upstream main/master. Remediation may commit and push its own branches and bring in main/master;
+it must not merge out. The user reviews and separately authorizes landing. Only afterward may the user resume
+goal-elmdb-next, whose branches incorporate upstream and whose acceptance owns its future features' compatibility.
+Remediation completion does not depend on those future features or on its branches being landed.
+
+The goal owns current execution and acceptance:
 [goal-elmdb-remediation.md](../goals/goal-elmdb-remediation.md). The original assessment remains
 [elmdb-review-2026-10.md](../reviews/elmdb-review-2026-10.md).
