@@ -7,8 +7,8 @@ import type { ShortCodeDef } from "./ShortCodeDef.js";
 /**
  * An entity type
  */
-export type TypeDef = { declaredBy?: string, 
+export type TypeDef = { declaredBy?: string | null, 
 /**
  * The engine numbers each created row `<prefix>-<n>`
  */
-shortCode?: ShortCodeDef, fields?: { [key in string]: FieldDef }, additionalFields?: AdditionalFields, indexes?: { [key in string]: IndexDef }, };
+shortCode?: ShortCodeDef | null, fields?: { [key in string]: FieldDef }, additionalFields?: AdditionalFields, indexes?: { [key in string]: IndexDef }, };

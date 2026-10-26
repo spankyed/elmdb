@@ -43,7 +43,7 @@ fn root_collation() -> String {
 pub struct RoleDef {
     /// Who declared it, named in every error about it
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
     pub declared_by: Option<String>,
 }
 
@@ -53,7 +53,7 @@ pub struct RoleDef {
 #[serde(rename_all = "camelCase")]
 pub struct RelationDef {
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
     pub declared_by: Option<String>,
     pub cardinality: Cardinality,
     /// A link that would close a cycle through this kind is refused
@@ -66,7 +66,7 @@ pub struct RelationDef {
     pub unique: bool,
     /// The type pairs an edge may join; `None` is any
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
     pub endpoints: Option<Vec<Endpoint>>,
     /// What an edge's info holds
     #[serde(default = "any_info")]
@@ -105,11 +105,11 @@ pub struct Endpoint {
 #[serde(rename_all = "camelCase")]
 pub struct TypeDef {
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
     pub declared_by: Option<String>,
     /// The engine numbers each created row `<prefix>-<n>`
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
     pub short_code: Option<ShortCodeDef>,
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, FieldDef>>", optional))]
@@ -246,7 +246,7 @@ pub enum IndexDef {
         #[cfg_attr(feature = "codegen", ts(as = "Option<Analyzer>", optional))]
         analyzer: Analyzer,
         #[serde(default)]
-        #[cfg_attr(feature = "codegen", ts(optional))]
+        #[cfg_attr(feature = "codegen", ts(optional = nullable))]
         stem: Option<String>,
     },
     /// Nearest neighbours of embeddings computed from text fields

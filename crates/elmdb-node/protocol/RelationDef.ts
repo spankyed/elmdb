@@ -6,7 +6,7 @@ import type { FieldDef } from "./FieldDef.js";
 /**
  * A relation kind
  */
-export type RelationDef = { declaredBy?: string, cardinality: Cardinality, 
+export type RelationDef = { declaredBy?: string | null, cardinality: Cardinality, 
 /**
  * A link that would close a cycle through this kind is refused
  */
@@ -18,7 +18,7 @@ unique?: boolean,
 /**
  * The type pairs an edge may join; `None` is any
  */
-endpoints?: Array<Endpoint>, 
+endpoints?: Array<Endpoint> | null, 
 /**
  * What an edge's info holds
  */

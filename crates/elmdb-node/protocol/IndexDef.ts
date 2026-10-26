@@ -8,4 +8,4 @@ import type { TextField } from "./TextField.js";
 /**
  * Derived data kept for a type's fields
  */
-export type IndexDef = { "kind": "value", fields: Array<string>, unique?: boolean, } | { "kind": "text", fields: { [key in string]: TextField }, analyzer?: Analyzer, stem?: string, } | { "kind": "vector", from: Array<string>, chunk?: Chunk, dims: number, metric?: Metric, precision?: Precision, model: string, };
+export type IndexDef = { "kind": "value", fields: Array<string>, unique?: boolean, } | { "kind": "text", fields: { [key in string]: TextField }, analyzer?: Analyzer, stem?: string | null, } | { "kind": "vector", from: Array<string>, chunk?: Chunk, dims: number, metric?: Metric, precision?: Precision, model: string, };

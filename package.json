@@ -6,7 +6,7 @@
     "build": "napi build --cwd crates/elmdb-node --platform --release",
     "build:debug": "napi build --cwd crates/elmdb-node --platform",
     "test": "node --test \"crates/elmdb-node/test/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 crates/elmdb-node/protocol/*.ts crates/elmdb-node/index.d.ts"
+    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 crates/elmdb-node/protocol/*.ts crates/elmdb-node/index.d.ts && tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowJs --checkJs crates/elmdb-node/test/schema-types.test.mjs"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.10.9",
