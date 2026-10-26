@@ -61,8 +61,14 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   against current upstream, completes its own checks, and leaves committed/pushed remediation branches for user
   review. Landing requires separate user authorization. goal-elmdb-next resumes only when the user resumes it after
   remediation has landed in both repositories and its branches incorporate those upstream commits.
-- Next deliverable: finish the Phase 1 checkpoint/platform verification, then Phase 2's committed-error finalization
-  and AgentBuddy declaration-cache/observer behavior. Revalidate upstream inputs before integrating them under D11.
+- Local Phase 1 checkpoints: elmdb `2414390`; monorepo `a68ee6999b` (pin and persistence guidance).
+  All 189 EARS tests passed against the final Phase 1 binding. Its initial push was rejected by automatic approval review before execution. The user subsequently explicitly
+  approved both branch pushes, PR creation and required CI on 2026-10-26; the earlier block is resolved.
+- Phase 2 local checkpoints: elmdb `af141adb2c7745fceca7fb5af410159fdc9fa30b`; monorepo `5edd51adf7`.
+  Shared commit finalization preserves committed schema and notifies observers before reporting failed sync. EARS
+  refreshes declaration caches and notifies committed admin changes before rethrowing. Full local checks and firing
+  mutations are recorded in implementation evidence. Next deliverable: Phase 3 watch lifecycle and contention.
+  Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
   checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
 
@@ -177,8 +183,8 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
 | Isolated source, build caches and binding resolution | Done locally; isolated binding/EARS builds | Preparation and implementation evidence | Final combined-source baseline in Phase 6 |
-| R01/R02 opening and process safety | Implemented locally; checkpoint pending | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
-| R03 committed outcomes and AgentBuddy notifications | Missing | Review E04/E06; integration trace | Phase 2 |
+| R01/R02 opening and process safety | Implemented locally; checkpoint `2414390` | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
+| R03 committed outcomes and AgentBuddy notifications | Implemented locally; `af141ad` / `5edd51adf7` | Implementation evidence; fault injection, mutation tests, 198 EARS / eight backup tests | Remote checks and final integration |
 | R05/R06 lifecycle and H03 contention | Missing | Review E01/E05; static trace | Phase 3 |
 | R04 auditing and R07 bounded construction | Missing | Review E02/E03 and source complexity | Phase 4 |
 | R08 recovery envelope and H01/H02/H04 disposition | Missing | Review source assessment | Phase 5 |
@@ -189,7 +195,7 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 
 Follow each repository's standing guidance. Implementation, commits and pushes to the two remediation branches are
 authorized by D11. Only rebase onto or merge in upstream main/master. Do not merge a remediation branch into any
-other branch, including main/master. PR creation, releases, tags and publication are not authorized by this permission. Never share writable dependencies or build outputs, modify live
+other branch, including main/master. The user additionally authorized PR creation and required CI on 2026-10-26. Releases, tags and publication remain unauthorized. Never share writable dependencies or build outputs, modify live
 app data, or run the app without an isolated profile. Copied artifacts seed a build; they do not establish freshness.
 Keep goal-elmdb-next paused; neither its completion nor user-authorized landing of remediation is a condition for
 this goal's own completion. Do not automatically resume the paused work. Use idle checks and the repository's measurement

@@ -64,6 +64,21 @@ verify the kernel-lock behavior on Linux glibc/musl and Windows as well as both 
 simulated cross-platform result. Phase 2 and all later findings remain outstanding. Final remediation acceptance uses the currently implemented upstream main/master inputs under D11; no feature-branch
 merge or remediation merge-out is allowed. It does not wait for future goal-elmdb-next features.
 
+### Checkpoint and remote verification
+
+Local Phase 1 checkpoint: `2414390` (`fix: preserve process exclusion and reader registration`). The requested
+`git push -u origin session/elmdb-remediation` to https://github.com/spankyed/elmdb was rejected by automatic approval
+review before execution: the external destination and exact branch were not established as explicitly authorized by
+trusted user content. A user approval request naming both repository destinations, both remediation branches, and
+required CI is pending. No alternate transport, push, workflow dispatch, merge or release was attempted.
+Local implementation continues independently; platform-matrix verification remains pending.
+
+The isolated monorepo then ran the complete EARS package suite against the final Phase 1 binding:
+`ELMDB_DIR=<isolated-elmdb> npm test -w @apackdev/ears` passed 12 files / 189 tests, including the model and watch
+properties. Log: `/private/tmp/elmdb-remediation-phase1-ears.log`. Monorepo checkpoint `a68ee6999b` updates its elmdb pin
+to `241439064550cbee34d44510a0dc15a697558952` and corrects the persistence guidance. It remains local while push approval
+is pending. There were no EARS implementation changes or generated API changes in that checkpoint.
+
 
 ## Sequencing decision — 2026-10-26
 
@@ -75,3 +90,40 @@ separate user-authorized step. goal-elmdb-next stays paused before Phase 3 until
 Future-feature integration assertions are retained in goal-elmdb-next's acceptance: planner ordering/limits/tracking,
 field-type auditing, compressed read/export/recovery paths, and trigram/regex correctness. This transfers ownership
 of those later checks; it does not waive current remediation regressions, platform checks, or recovery acceptance.
+
+
+## Phase 2 checkpoint — 2026-10-26
+
+elmdb `af141adb2c7745fceca7fb5af410159fdc9fa30b` centralizes commit finalization. Schema memory and
+index markers agree with the committed transaction; watches are notified before a failed sync is returned as
+`NOT_DURABLE`. A pre-commit error leaves sequence, data, schema and notifications unchanged. Fault injection
+covers batch, unit, reset, replace, load, rename, rebuild and schema mutation.
+
+Monorepo `5edd51adf7` pins that engine and updates load, clear, replace, setSchema and declare handling.
+Committed errors refresh declarations and notify before rethrowing; pre-commit refusals do neither. A direct
+connection listener test proves exactly one notification. The backup importer test proves rollback after a
+replacement commits and then reports failed sync. API reports are unchanged.
+
+Local checks passed on the isolated macOS worktrees:
+
+- Rust workspace: engine 214 passed / one measurement ignored; CLI one, binding two, xtask two passed.
+  Formatting, clippy with warnings denied, generated protocol and single-LMDB checks passed.
+- Rebuilt release binding, TypeScript checks and all 33 Node tests passed.
+- Full monorepo typecheck passed; final focused EARS typecheck passed after the last test addition.
+  EARS: 12 files / 198 tests passed. Host backup: eight tests passed against the rebuilt binding.
+  EARS API check: two reports current.
+
+Logs have prefix `/private/tmp/elmdb-remediation-phase2-`: `rust-final.log`, `clippy-final.log`,
+`generated.log`, `one-lmdb.log`, `build.log`, `types.log`, `node.log`, `typecheck.log`,
+`ears-types-final.log`, `ears-final.log`, `backup-final.log`, and `api.log`.
+
+Firing evidence used disposable copies only. Moving the Rust sync-error return ahead of notification made
+`committed_operations_notify_before_reporting_a_failed_sync` fail (watch count one rather than two); see
+`rust-mutation.log`. Omitting EARS committed-error notification made five watch cases fail; see
+`ears-mutation.log`. The initial disposable resolver harness error was diagnosed and corrected, with its log
+retained separately as `mutation-resolver-error.log`. No working source was mutated for these checks.
+
+The user explicitly approved both repository branch pushes and required CI, then PR creation, on 2026-10-26.
+This resolves the earlier automatic approval rejection; no merge, release or tag is authorized. Remote CI and
+platform results will be recorded separately. These are Phase 1–2 checkpoints, not final remediation closure;
+Phases 3–6 and integrated acceptance remain outstanding.
