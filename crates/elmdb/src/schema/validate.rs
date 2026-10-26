@@ -172,6 +172,10 @@ impl Validator<'_> {
         let who = def.declared_by.as_deref();
         let at = format!("types.{type_name}.indexes.{index}");
         self.lower_camel(&at, index, "index", who);
+        // Every type has these two value indexes, which share a declared one's keys and built marker
+        if index == "role" || index == "shortCode" {
+            self.problem(at.clone(), format!("is the name of the engine's own index on {index}"), who);
+        }
         let field_of = |name: &str| def.fields.get(name).map(|f| &f.value);
         match index_def {
             IndexDef::Value { fields, .. } => {

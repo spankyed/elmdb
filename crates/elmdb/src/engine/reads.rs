@@ -354,6 +354,9 @@ fn is_live(r: &impl Read, id: &str) -> Result<bool> {
 }
 
 /// A query over one read
+/// The most steps a plan holds: a long plan's walk would overflow a reading thread's stack, and no real query is near it
+pub const MAX_STEPS: usize = 256;
+
 struct Query<'r, R: Read> {
     r: &'r R,
     plan: &'r Plan,
@@ -773,15 +776,26 @@ impl<R: Read> Query<'_, R> {
                     Some(super::vector::items_of(self.r, entity_type, &def.name, &of_type)?)
                 }
             };
-            // Asked for more than `k`: the trash and `except` are left out after the graph answers
-            for (id, distance) in super::vector::nearest(self.r, entity_type, &def, vector, k + 8, within.as_ref())? {
-                self.visited.set(self.visited.get() + 1);
-                if except == Some(id.as_str()) || (among.is_none() && !self.admits(&id)?) {
-                    continue;
+            // The trash, the scope and `except` are left out after the graph answers, so it is asked for more than `k`,
+            // and asked again for more while what it gave was not enough and it held more
+            let mut ask = k + 8;
+            loop {
+                let nearest = super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
+                let exhausted = nearest.len() < ask;
+                let mut admitted = Vec::new();
+                for (id, distance) in nearest {
+                    self.visited.set(self.visited.get() + 1);
+                    if except == Some(id.as_str()) || (among.is_none() && !self.admits(&id)?) {
+                        continue;
+                    }
+                    let score = 1.0 / (1.0 + f64::from(distance));
+                    admitted.push((distance, Hit { id, seq: 0, score, terms: Vec::new(), fields: Vec::new() }));
                 }
-                let hit =
-                    Hit { id, seq: 0, score: 1.0 / (1.0 + f64::from(distance)), terms: Vec::new(), fields: Vec::new() };
-                found.push((distance, hit, def.name.clone()));
+                if admitted.len() >= k || exhausted {
+                    found.extend(admitted.into_iter().map(|(distance, hit)| (distance, hit, def.name.clone())));
+                    break;
+                }
+                ask = ask.saturating_mul(4);
             }
         }
         found.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
@@ -1040,7 +1054,8 @@ fn index_on(r: &impl Read, entity_type: &str, name: &str) -> Option<String> {
         field::ROLE => Some(ROLE_INDEX.to_owned()),
         field::SHORT_CODE => Some(SHORT_CODE_INDEX.to_owned()),
         _ => r.schema().types.get(entity_type)?.indexes.iter().find_map(|(index_name, index)| match index {
-            crate::schema::IndexDef::Value { fields, .. } if fields.first().is_some_and(|f| f == name) => {
+            // A single-field index only: a compound one holds no entry for an entity missing another of its fields
+            crate::schema::IndexDef::Value { fields, .. } if fields.len() == 1 && fields[0] == name => {
                 Some(index_name.clone())
             }
             _ => None,
@@ -1170,6 +1185,14 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
                 ),
             ));
         }
+    }
+    // A step is a frame of the walk that pulls ids through the steps before it, so a plan is held to a depth the
+    // stack of a reading thread carries
+    if plan.steps.len() > MAX_STEPS {
+        return Err(Error::new(
+            ErrorCode::BatchInvalid,
+            format!("A plan holds at most {MAX_STEPS} steps, and this one {}", plan.steps.len()),
+        ));
     }
     let q = Query { r, plan, visited: Cell::new(0), hits: RefCell::new(HashMap::new()) };
     let last = plan.steps.len();

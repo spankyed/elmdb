@@ -108,6 +108,16 @@ impl Document {
 }
 
 /// The texts a field's value holds: a string, or each string of a list
+/// `texts_of`, each with its element's place in the value: 0 for a string, its index in a list, where a value that
+/// isn't text still holds a place
+pub fn texts_at(value: Option<&Value>) -> Vec<(usize, &str)> {
+    match value {
+        Some(Value::String(s)) => s.as_str().into_iter().map(|s| (0, s)).collect(),
+        Some(Value::Array(items)) => items.iter().enumerate().filter_map(|(i, v)| Some((i, v.as_str()?))).collect(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn texts_of(value: Option<&Value>) -> Vec<&str> {
     match value {
         Some(Value::String(s)) => s.as_str().into_iter().collect(),

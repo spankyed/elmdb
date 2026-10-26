@@ -366,8 +366,9 @@ pub fn embed(
 ) -> Result<Embedded> {
     let entity_type = ids::type_of(id).to_owned();
     let index = resolve(t.schema, &entity_type, index, "embed")?;
+    // An entity gone since its chunks were pending took them with it: the embedding is of text no longer held
     if entities::record(t, id)?.is_none() {
-        return Err(Error::new(ErrorCode::NoSuchEntity, format!("embed: no entity has the id \"{id}\"")));
+        return Ok(Embedded::Stale);
     }
     if vector.len() != index.dims {
         return Err(Error::new(
@@ -386,9 +387,7 @@ pub fn embed(
             format!("embed: {entity_type}.{} is embedded by {}, and this vector by {model}", index.name, index.model),
         ));
     }
-    if vector.iter().any(|f| !f.is_finite()) {
-        return Err(Error::new(ErrorCode::ValueInvalid, "embed: a vector holds only finite numbers"));
-    }
+    check_vector("embed", &index, vector)?;
     let name = index.name.as_str();
     let current = t.get(&keys::vector_chunk_key(Prefix::VectorChunk, &entity_type, name, id, chunk))?;
     let Some(current) = current else { return Ok(Embedded::Stale) };
@@ -615,6 +614,21 @@ pub fn pending(r: &impl Read, entity_type: &str, index: &str, limit: usize) -> R
     Ok((out, count))
 }
 
+/// Refuses a vector the index can't compare: one holding a number that isn't finite, or, under cosine, all zeros,
+/// which has no direction
+fn check_vector(what: &str, index: &VectorIndex, vector: &[f32]) -> Result<()> {
+    if vector.iter().any(|f| !f.is_finite()) {
+        return Err(Error::new(ErrorCode::ValueInvalid, format!("{what}: a vector holds only finite numbers")));
+    }
+    if index.metric == Metric::Cosine && vector.iter().all(|f| *f == 0.0) {
+        return Err(Error::new(
+            ErrorCode::ValueInvalid,
+            format!("{what}: {} measures cosine distance, which a vector of zeros has none of", index.name),
+        ));
+    }
+    Ok(())
+}
+
 /// The nearest chunks to `vector` in an index's graph, among `among`'s items when given, best `k` entities first, each
 /// once with its nearest chunk's distance
 pub fn nearest(
@@ -636,9 +650,12 @@ pub fn nearest(
             ),
         ));
     }
+    check_vector("near", index, vector)?;
     // The graph is read through hannoy, outside what a tracked read records: what it answers changes with the index's
-    // items, every one of which a commit adding or removing a vector writes
+    // items, which a commit adding or removing a vector writes, and with the embeddings, which re-embedding a chunk
+    // writes in place
     r.note(&keys::vector_index_range(Prefix::VectorItem, entity_type, &index.name));
+    r.note(&keys::vector_index_range(Prefix::Vector, entity_type, &index.name));
     let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok(Vec::new()) };
     let (txn, db) = r.raw();
     // Several chunks of one entity may come first: asking for more items than entities finds the k entities

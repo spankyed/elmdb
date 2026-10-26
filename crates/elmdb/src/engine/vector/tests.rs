@@ -152,7 +152,7 @@ fn a_chunk_is_pending_until_embedded_and_pending_again_when_its_text_changes() {
 }
 
 #[test]
-fn an_embedding_of_another_model_or_size_or_index_is_refused() {
+fn an_embedding_of_another_model_or_size_or_index_is_refused_and_one_of_no_entity_is_stale() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     corpus(&db);
@@ -165,13 +165,14 @@ fn an_embedding_of_another_model_or_size_or_index_is_refused() {
     assert_eq!(embed("m2", json!([1.0, 0.0, 0.0]), "meaning"), ErrorCode::ValueInvalid);
     assert_eq!(embed("m1", json!([1.0, 0.0]), "meaning"), ErrorCode::ValueInvalid);
     assert_eq!(embed("m1", json!([1.0, 0.0, 0.0]), "nope"), ErrorCode::UnknownIndex);
+    // No entity has the id: its chunks went with it, as a destroy takes them, so the embedding is of text no longer held
     let missing = write(
         &db,
         vec![
             json!({ "op": "embed", "id": "Doc-none", "chunk": 0, "hash": hash, "model": "m1", "vector": [1.0, 0.0, 0.0] }),
         ],
     );
-    assert_eq!(missing.unwrap_err().code, ErrorCode::NoSuchEntity);
+    assert!(matches!(missing.unwrap()[..], [OpResult::Stale]));
 }
 
 #[test]
@@ -344,4 +345,75 @@ fn a_reset_empties_the_graphs_with_everything_else() {
     assert_eq!(ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }])), json!([]));
     embed_pending(&db, topic);
     assert_eq!(ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }])), json!(["Doc-cats"]));
+}
+
+#[test]
+fn near_answers_k_live_entities_when_trashed_ones_sit_closer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let mut ops: Vec<Json> = (0..30)
+        .map(|i| json!({ "op": "create", "type": "Doc", "id": format!("Doc-t{i}"), "fields": { "title": "cat" } }))
+        .collect();
+    ops.push(json!({ "op": "create", "type": "Doc", "id": "Doc-far1", "fields": { "title": "sea" } }));
+    ops.push(json!({ "op": "create", "type": "Doc", "id": "Doc-far2", "fields": { "title": "car" } }));
+    write(&db, ops).unwrap();
+    embed_pending(&db, topic);
+    write(&db, (0..30).map(|i| json!({ "op": "trash", "id": format!("Doc-t{i}") })).collect()).unwrap();
+    // The 30 nearest are trashed: the graph is asked again for more until two live ones are found
+    let found = ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 2 }]));
+    assert_eq!(found.as_array().unwrap().len(), 2, "{found}");
+}
+
+#[test]
+fn an_embedding_of_an_entity_destroyed_since_is_stale_and_the_rest_of_its_batch_is_stored() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    let chunks = pending(&db)["chunks"].as_array().unwrap().clone();
+    write(&db, vec![json!({ "op": "destroy", "id": "Doc-cats" })]).unwrap();
+    let ops = chunks
+        .iter()
+        .map(|c| json!({ "op": "embed", "id": c["id"], "index": "meaning", "chunk": c["chunk"], "hash": c["hash"], "model": "m1", "vector": topic(c["text"].as_str().unwrap()) }))
+        .collect();
+    let results = write(&db, ops).unwrap();
+    assert!(results.iter().any(|r| matches!(r, OpResult::Stale)));
+    assert!(results.iter().any(|r| matches!(r, OpResult::Done)));
+    assert_eq!(pending(&db)["count"], 0);
+}
+
+#[test]
+fn a_cosine_index_refuses_a_zero_vector_and_a_query_holding_a_number_that_isn_t_finite() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    let c = pending(&db)["chunks"][0].clone();
+    let zero = write(&db, vec![json!({ "op": "embed", "id": c["id"], "index": "meaning", "chunk": c["chunk"], "hash": c["hash"], "model": "m1", "vector": [0.0, 0.0, 0.0] })]).unwrap_err();
+    assert_eq!(zero.code, ErrorCode::ValueInvalid, "{}", zero.message);
+    embed_pending(&db, topic);
+    let plan = |vector: Json| json!({ "read": "query", "plan": { "start": docs(), "steps": [{ "step": "near", "vector": vector, "k": 1 }], "terminal": { "answer": "ids" } } });
+    // msgpack carries a NaN, which JSON can't: the reads are built as the binding decodes them
+    let nan =
+        Reads { reads: vec![serde_json::from_value::<ReadOp>(plan(json!([0.0, 0.0, 0.0]))).unwrap()], track: None };
+    let mut nan = nan;
+    if let ReadOp::Query { plan, .. } = &mut nan.reads[0]
+        && let Some(crate::engine::plan::Step::Near { vector, .. }) = plan.steps.first_mut()
+    {
+        vector[0] = f32::NAN;
+    }
+    assert_eq!(db.read(&nan).unwrap_err().code, ErrorCode::ValueInvalid);
+}
+
+#[test]
+fn re_embedding_a_chunk_names_a_tracked_near() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    let cats = pending(&db)["chunks"].as_array().unwrap().iter().find(|c| c["id"] == "Doc-cats").unwrap().clone();
+    embed_pending(&db, topic);
+    let near = json!({ "read": "query", "plan": { "start": docs(), "steps": [{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }], "terminal": { "answer": "ids" } } });
+    db.read(&Reads { reads: vec![serde_json::from_value::<ReadOp>(near).unwrap()], track: Some(5) }).unwrap();
+    // The same chunk under the same hash, with another vector: the graph item stays, the embedding changes
+    let again = json!({ "op": "embed", "id": "Doc-cats", "index": "meaning", "chunk": cats["chunk"], "hash": cats["hash"], "model": "m1", "vector": [0.0, 1.0, 0.0] });
+    let (_, changes) = db.write(&crate::engine::tests::batch(vec![again]), false).unwrap();
+    assert_eq!(changes.touched, [5]);
 }

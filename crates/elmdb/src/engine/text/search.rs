@@ -17,7 +17,7 @@ use crate::format::key::{Part, decode as decode_key};
 
 use super::super::keys;
 use super::super::unit::Read;
-use super::{TextIndex, decode_places, decode_postings, document, stats, texts_of};
+use super::{TextIndex, decode_places, decode_postings, document, stats, texts_at};
 use crate::engine::plan::SearchOptions;
 
 /// BM25's saturation of term frequency, and its normalization by length
@@ -470,7 +470,7 @@ pub fn highlights(r: &impl Read, index: &TextIndex, hit: &Hit) -> Result<Vec<(St
         let Some((name, _)) = index.fields.get(f as usize) else { continue };
         let value = super::super::entities::get(r, &hit.id, name)?;
         let mut marks = Vec::new();
-        for (element, text) in texts_of(value.as_ref()).into_iter().enumerate() {
+        for (element, text) in texts_at(value.as_ref()) {
             let mut spans: Vec<(usize, usize)> = index
                 .analyzer
                 .terms(text)

@@ -458,3 +458,20 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
         .unwrap();
     assert_eq!(left, 0);
 }
+
+#[test]
+fn a_highlight_names_its_element_by_its_place_in_the_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Doc", "Doc-1", json!({ "body": [7, "zebra"] }))]);
+    let answer = read(
+        &db,
+        json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Doc"] },
+        "steps": [{ "step": "search", "query": "zebra", "index": "text", "options": {} }],
+        "terminal": { "answer": "hits", "highlights": true }
+    } }),
+    )
+    .unwrap();
+    assert_eq!(answer["hits"][0]["highlights"]["body"], json!([[1, 0, 5]]), "{answer}");
+}

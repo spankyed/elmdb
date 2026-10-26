@@ -392,3 +392,34 @@ fn an_indexed_string_is_held_to_bytes_and_a_key_past_lmdb_s_limit_is_refused() {
     assert_eq!(refused.code, ErrorCode::ValueInvalid, "{}", refused.message);
     assert!(refused.message.contains("pair"), "{}", refused.message);
 }
+
+#[test]
+fn a_where_on_a_compound_index_s_first_field_answers_as_a_scan_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["title"] = json!({ "type": "any", "optional": true });
+    let db =
+        with_schema(&dir, notes(fields, json!({ "ab": { "kind": "value", "fields": ["title", "kind"] } }))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "x" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "x", "kind": "k" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-3", "fields": { "title": ["x", "y"], "kind": "k" } }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(ids_where(&db, "title", json!("x")).0, json!(["Note-1", "Note-2", "Note-3"]));
+}
+
+#[test]
+fn a_plan_past_the_step_limit_is_refused_rather_than_overflowing_the_stack() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let steps: Vec<Json> =
+        (0..=crate::engine::reads::MAX_STEPS).map(|_| json!({ "step": "ofType", "type": "Task" })).collect();
+    let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+        "start": { "from": "all" }, "steps": steps, "terminal": { "answer": "ids" } } }] }))
+    .unwrap();
+    assert_eq!(db.read(&reads).unwrap_err().code, ErrorCode::BatchInvalid);
+}

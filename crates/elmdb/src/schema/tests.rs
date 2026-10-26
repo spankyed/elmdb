@@ -484,3 +484,32 @@ mod changes {
         assert_eq!(changes(|j| j["collation"] = json!("en")), one("collation", Change::Changed, Effect::Applied));
     }
 }
+
+#[test]
+fn an_index_may_not_take_the_name_of_the_engine_s_own() {
+    for name in ["role", "shortCode"] {
+        let mut schema = example();
+        schema["types"]["Thread"]["indexes"][name] = json!({ "kind": "value", "fields": ["topic"] });
+        let problem = Schema::from_json(&schema).unwrap_err();
+        assert_eq!(problem.code, crate::error::ErrorCode::SchemaInvalid);
+        assert!(problem.message.contains("the engine's own index"), "{}", problem.message);
+    }
+}
+
+#[test]
+fn the_canonical_form_is_the_same_whatever_order_a_set_is_listed_in() {
+    let mut a = example();
+    let mut b = example();
+    a["types"]["Message"]["fields"]["sender"]["values"] = json!(["user", "assistant", "system", "marker"]);
+    b["types"]["Message"]["fields"]["sender"]["values"] = json!(["marker", "system", "assistant", "user"]);
+    a["relations"]["references"]["endpoints"] =
+        json!([{ "source": "Note", "target": "Note" }, { "source": "Thread", "target": "Note" }]);
+    b["relations"]["references"]["endpoints"] =
+        json!([{ "source": "Thread", "target": "Note" }, { "source": "Note", "target": "Note" }]);
+    let (a, b) = (Schema::from_json(&a).unwrap(), Schema::from_json(&b).unwrap());
+    assert_eq!(a.hash(), b.hash());
+    // An index's fields are an order, and stay one
+    let mut c = example();
+    c["types"]["Message"]["indexes"]["senderByTime"]["fields"] = json!(["timestamp", "sender"]);
+    assert_ne!(Schema::from_json(&c).unwrap().hash(), a.hash());
+}
