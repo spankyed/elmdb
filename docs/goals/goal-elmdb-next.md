@@ -54,10 +54,17 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 
 ## Current handoff
 
-- **Not started.** Phase 1 is `goal-elmdb.md`, under way in its own session (Phases 0–14 and 16's docs done, Phase 15
-  under way, 2026-10-25); its Current handoff is the state to read.
-- **live-queries** (main checkout, branch `live-queries`, 2026-10-25): Steps 1–3 committed, Step 4 under way — actions
-  and flows committed (`50d788397`), notes done but not committed. Phase 2 merges whatever is committed when it starts.
+- **Phase 1 done** (2026-10-26): `goal-elmdb.md` closed (`docs/archive/goals/goal-elmdb.md`), then a review of elmdb
+  and of apack's PR #276 fixed what it found. elmdb `main` is `8158696`, its format 2 (a stemming text index keeps the
+  words as written; `elmdb upgrade <dir>` steps a format 1 copy), every target's CI green (run 40289842885).
+  `session/ears-on-elmdb` was rebased onto `master` (`fcb20e0a8`) at `f6c66e4a5`, pinning elmdb `8158696`; strict
+  chain green on its tree before the rebase (run 40284993357). The rebased head's own CI run is Phase 2's, on the new
+  branch.
+- **live-queries** (main checkout, branch `live-queries`, PR #277): rebased onto the same `master` at `70c695bf6`,
+  2026-10-26; Steps 1–3 committed, Step 4's actions and flows committed (`42f19ca84`). Phase 2 merges whatever is
+  committed when it starts.
+- **Phase 2 next:** the branch `live-queries-on-elmdb`, cut from `session/ears-on-elmdb`'s tip, in a worktree of that
+  name.
 - **Data:** the backup G8 names is there (checked 2026-10-25); no copy has been made yet.
 - **Measured so far (2026-10-25):** a cold boot of apack with its shipped pack makes 900 reads, 174 commits outside a
   unit and one unit of 470 writes, about 26 ms in elmdb of 2.3 s (`docs/roadmap/javascript-boundary.md`). A single
