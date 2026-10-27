@@ -19,3 +19,5 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 
 - [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
   benchmarks, concurrency models and diagnostics; planned, with adoption gates.
+- [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
+  failpoints, heap assertions, per-process tests, model-based properties, profiling; planned.
