@@ -157,12 +157,15 @@ pub fn claim() -> Result<(), Code> {
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let mine = process_path::get_dylib_path()
                 .map_or_else(|| "an unknown file".to_owned(), |p| p.display().to_string());
-            Err(napi::Error::new(
-                Code("ALREADY_LOADED"),
-                format!(
-                    "Another elmdb binary already claimed this process, so {mine} can't open a database. Load one elmdb package"
-                ),
-            ))
+            #[cfg(target_os = "macos")]
+            let message = format!(
+                "The Mach process claim name is occupied, so {mine} can't open a database. Another elmdb binary or an unrelated component may own it. Ensure only one elmdb package is loaded; if the collision persists, report the conflicting component"
+            );
+            #[cfg(not(target_os = "macos"))]
+            let message = format!(
+                "Another elmdb binary already claimed this process, so {mine} can't open a database. Load one elmdb package"
+            );
+            Err(napi::Error::new(Code("ALREADY_LOADED"), message))
         }
         Err(error) => Err(napi::Error::new(
             Code("IO"),

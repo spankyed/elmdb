@@ -28,10 +28,11 @@ test('an open from a second elmdb binary in the process is refused, naming the r
       second.Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false });
       console.log('opened');
     } catch (error) {
-      console.log(JSON.stringify({ code: error.code, names: error.message.includes(${JSON.stringify(copy)}) }));
+      console.log(JSON.stringify({ code: error.code, names: error.message.includes(${JSON.stringify(copy)}),
+        explainsCollision: process.platform !== 'darwin' || error.message.includes('unrelated component') }));
     }
   `);
-  assert.deepEqual(JSON.parse(printed), { code: 'ALREADY_LOADED', names: true });
+  assert.deepEqual(JSON.parse(printed), { code: 'ALREADY_LOADED', names: true, explainsCollision: true });
 });
 
 test('a child process opens with a binary of its own, whatever its parent claimed', (t) => {

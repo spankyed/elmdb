@@ -42,8 +42,9 @@ after fork without exec.
 
 macOS atomically reserves receive-right name `0x000e1d03` in the process's own Mach IPC table. This requires neither
 launchd registration nor filesystem state. Occupation of that reserved name, including by an unrelated component,
-refuses before LMDB opens; it never chooses another name. Windows uses a session-local PID-named kernel event with
-a non-inheritable handle retained until process exit. The kernel reclaims these claims on ordinary exit and hard
+refuses before LMDB opens; it never chooses another name. The error retains `ALREADY_LOADED` but explains that
+either another binding or an unrelated component may own the name; macOS does not identify its owner. Windows uses
+a session-local PID-named kernel event with a non-inheritable handle retained until process exit. The kernel reclaims these claims on ordinary exit and hard
 termination. No coordination files are created, and temporary-directory cleanup cannot split a live claim.
 Failed acquisition is retryable; only success is cached. OS restrictions that deny the required kernel operation
 are reported as IO rather than falling back to an unprotected open. The shipped targets are Linux, macOS and Windows;
