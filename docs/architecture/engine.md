@@ -272,19 +272,26 @@ unit is open.
 
 ### Recovery resources
 
-`check()` and full `rebuild()` spill derived entries to owned scratch files: an 8 MiB spill threshold accounting for
-payload capacities and per-row metadata, plus vector spare capacity and the largest row. A merge keeps one head
-from each of at most 16 input runs plus pending/current rows and I/O buffers, so merge memory also depends on the
-largest row. Sorting costs O(D log D) comparisons for D
-emitted entries and uses temporary disk proportional to their encoded bytes. Rebuild deletes batches of at most
-1,000 keys without retaining stored values. Full recovery streams value/vector entries directly to the spill
-consumer, including the value-index marker-validation pass; single-index builds retain their existing collections.
-Per-entity field decoding and compound-index expansion are additional workload-dependent work, not part of the
-8 MiB sorter threshold. Replacement streams primary ranges from one source snapshot instead
-of collecting source data. These bound those intermediate collections, not the complete operation: entity/graph
-inventory, unique-index validation/auditing, text/vector aggregation, output reports and LMDB's dirty/resident pages remain
-workload-dependent. Compound value indexes can expand with the product of list cardinalities. Single-index rebuilds
-also retain index-specific work; the measurements below concern full rebuilds.
+Derived-entry sorting, single-index rebuild staging and dump identifier ordering use owned scratch files. Each
+sorter spills at 8 MiB of payload capacities and per-row metadata, plus row-buffer spare capacity and the largest row.
+Text rebuilding can have two sorters active: memberships and final entries. The threshold is per sorter, not an
+operation-wide allowance. A merge keeps one head from each of at most 16 runs plus pending/current rows and I/O buffers.
+Equal-sized runs are compacted as they arrive, keeping at most 15 paths per level rather than a path for every spill.
+Sorting D emitted rows costs O(D log D) comparisons and temporary disk proportional to their encoded bytes.
+
+A single-index rebuild scans primary records rather than trusting derived type ranges. Value entries spill directly;
+unique entries sort by value and holder so conflicts are checked with one adjacent group, without a map of all values.
+Text document memberships spill and merge into one posting bitmap at a time, rather than retaining every term's
+bitmap. Vector identifiers spill; graph updates drain journal batches of at most 1,000 rows, decode one added vector
+at a time, and build each affected graph once after its updates. Rebuild deletes batches of at most 1,000 keys without
+retaining their values. Every replacement remains one atomic transaction, including failures after partial writes.
+
+These bounds concern intermediate collections. One decoded entity and its index expansion, a final text posting,
+hannoy's graph builder, and LMDB's dirty/resident pages have separate workload-dependent costs. A list-valued field
+can emit an entry per indexable element; compound value indexes take scalar fields. Full check/rebuild also retain
+entity/graph inventories, primary constraint/uniqueness auditing and output reports; the complete operation does not
+have an 8 MiB or constant-RSS bound. Replacement streams primary ranges from one source snapshot. The historical
+measurements below concern full rebuilds; later single-index/export observations have their own [dated evidence](../evidence/maintenance-memory-2026-10-27.md).
 
 The recorded operating envelope is the explicit synthetic shapes in the
 [remediation evidence](../evidence/elmdb-remediation.md), measured on 2026-10-26 on a 32 GiB macOS host with local
@@ -318,17 +325,20 @@ Normal return/error drops remove scratch. SIGKILL, abort or power loss can leave
 Use a private per-operation scratch parent and remove it only after the owning process has exited; no automatic
 age-based cleanup or scratch quota is provided.
 
-Dump export remains workload-dependent: it inventories entity identifiers, sorts complete relation loads by sequence,
-and currently scans vector primary rows into a collection. The Rust `primary_loads` convenience also collects its
-output. A bounded dump loader does not make dump export bounded. Streaming/spilling these remaining export and
-inventory phases is follow-up work; do not infer an 8 MiB or whole-process memory bound from the sorter threshold.
+Dump export spill-sorts entity and relation identifiers by their original u64 sequence, then reads each complete row
+from the same snapshot. Relations' full payloads are not retained in the sorter. Vector and sequence ranges use
+fallible cursor visits, stopping on the first output error. The Rust `primary_loads` API delivers owned loads to its
+callback; callers choosing to collect them own that additional memory. One entity's fields, one relation payload or
+one embedding can still be large. Both ordinary failure and unwinding release owned scratch; hard-exit cleanup has
+the limitations above. Export retains the existing dump version and byte ordering (`format.md`, Dumps).
 
 Check and backup take read snapshots rather than the LMDB writer, but long snapshots pin pages and can delay map
 growth. Rebuild/replacement hold the destination writer for their atomic transaction; their entire measured operation
 time is a conservative occupancy upper bound. Dump loading writes only a private staging database until no-clobber
-publication. Linux/macOS use a native exclusive rename rather than requiring hard links; Windows uses no-replace
-MoveFileExW. A filesystem must support the requested atomic no-clobber publication and synchronization semantics;
-unsupported operations return an error, and arbitrary network/exFAT configurations are not certified by the host tests.
+publication. Linux prefers exclusive rename with an atomic hard-link fallback when exclusive rename is unsupported;
+macOS uses exclusive rename and Windows uses no-replace MoveFileExW. The requested publication and synchronization
+semantics must be available; unsupported operations return an error. The actual coverage and unvalidated configurations
+are described in [filesystems.md](filesystems.md).
 A scratch or pre-publication failure aborts/removes owned work and preserves the earlier database or
 backup. Retrying after an explicit post-publication sync error must respect whether a complete result is already
 visible (`format.md`, Dumps). Filesystem/device sync behavior remains a platform dependency.

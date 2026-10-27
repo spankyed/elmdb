@@ -448,3 +448,17 @@ observations. No old total is retroactively relabeled as an isolated operation m
 
 See the [finding-by-finding disposition](../evidence/elmdb-remediation.md#process-claim-follow-up-review--2026-10-27)
 for tests, demonstrated failures and remaining limits. apack needs only an updated engine revision pin.
+
+## Single-index/export follow-ups completed — 2026-10-27
+
+The previously retained single-index and export collections are removed at implementation checkpoint c78c623.
+Selected value rebuilds spill and validate adjacent holders; text memberships spill rather than accumulating all
+postings; vector identifiers spill and vector journaling consumes bounded batches and one added vector at a time.
+Export sorts only identifiers and reads complete rows from one snapshot, preserving dump bytes and creation order.
+The common sorter also compacts its live path metadata while accepting rows. These are bounds on intermediate
+collections, not a constant-RSS promise for large records, LMDB or hannoy, or a replacement for full-audit inventories.
+
+[Resource evidence](../evidence/maintenance-memory-2026-10-27.md) records forced-spill/rollback tests, seven actual
+failing disposable regressions, before/after 10k/100k observations and a 2k/1,536-dimension vector case. Full outputs
+and independently maintained derived bytes are checked, not just counts. The filesystem follow-up is now an explicit
+[support and coverage note](../architecture/filesystems.md); it does not claim new NFS/SMB/exFAT test coverage.

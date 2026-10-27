@@ -79,6 +79,11 @@ and a load by the build after it. That is how our databases are converted once, 
 - The loads, in the order a load applies them: each entity in the order it was made, with every field it holds, the
   engine's own (`shortCode`, `trashedAt`, ...) among them; each relation in the order it was made, under its id; each
   embedding (`p/q`); each sequence (`p/s`), last, so a numbering goes on where it was.
+- Export spill-sorts only entity/relation identifiers, then emits one complete load at a time from the same snapshot.
+  Embeddings and sequences are visited directly. Scratch has a per-sorter 8 MiB spill threshold plus row/buffer
+  overhead; one load's decoded fields or embedding still needs its own memory. Original u64 creation order, field
+  order and dump bytes are preserved. Export scratch needs writable temporary storage and follows the cleanup
+  limitations in `engine.md`, Recovery resources.
 - A load applies unchecked batches in a private database in the destination directory, using at most 1,000 loads
   or 8 MiB of encoded frames per batch plus the largest frame. Decoded values and rebuild state have separate
   workload-dependent costs. It validates the footer/count and refuses trailing bytes, rebuilds derived data, then

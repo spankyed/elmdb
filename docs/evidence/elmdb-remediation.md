@@ -1410,3 +1410,16 @@ measurements ignored), the CLI, two binding Rust tests, two xtask tests, generat
 release binding build, TypeScript and all 37 Node tests. The new timing fields were smoke-tested on a separate owned
 100-row/64-byte synthetic fixture; this is harness verification, not a new production-scale resource allowance.
 Receipt: `/private/tmp/elmdb-review3-small-replace.log`.
+
+## Single-index/export follow-ups — 2026-10-27
+
+Implementation checkpoint c78c623 completes the two previously deferred memory paths. The current resource contract,
+source/test details, exact baseline and before/after observations are in
+[maintenance-memory-2026-10-27.md](maintenance-memory-2026-10-27.md). Earlier collection limitations above describe
+their dated checkpoints and are superseded for selected rebuilds and callback-driven export. Full audit inventories,
+large individual records/postings, LMDB pages and hannoy's builder remain distinct resource costs.
+
+[Filesystem coverage notes](../architecture/filesystems.md) separate live-database requirements, new-database load
+publication, dump-file visibility and closed-artifact transport. They explicitly identify unvalidated configurations;
+no new filesystem certification is claimed. The independent verification-tooling plan committed by another session
+is retained unchanged. These changes continue to use isolated worktrees and require fresh final-tip CI acceptance.

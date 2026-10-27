@@ -17,10 +17,10 @@ Backup, dump and load destinations must support the particular operation's write
 For publishing a new database from a load:
 Linux tries exclusive rename and falls back to atomic hard-link creation only when exclusive rename is unsupported;
 macOS uses exclusive rename, and Windows uses its native move operation. Existing targets are not overwritten by
-new-file publication. A filesystem supporting neither publication method returns an error. No load-publication fallback copies bytes
-into a publicly visible partial destination. A dump file itself is created exclusively, written and synced in place;
-it can be visible while being written, and an ordinary failure removes it. Consume it only after dump succeeds. Ordinary backup replacement has its separately documented overwrite
-contract; callers must exclusively own the backup destination against other processes.
+new-file publication. A filesystem supporting neither publication method returns an error. No load-publication
+fallback copies bytes into a publicly visible partial destination. A dump file itself is created exclusively, written and synced in place;
+it can be visible while being written, and an ordinary failure removes it. Consume it only after dump succeeds.
+Ordinary backup replacement has its separately documented overwrite contract; callers must exclusively own the backup destination against other processes.
 
 For an untested storage destination, create and verify a complete backup/dump on validated local storage, then transfer
 the closed artifact. Restore onto local storage and verify it before switching the application. Transporting a closed
