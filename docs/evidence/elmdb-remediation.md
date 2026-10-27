@@ -1259,3 +1259,28 @@ and engine 6566b85, dispatched with `strict_chain=true`. At this documentation c
 both GNU Linux targets and Linux checks have passed; the full runs are still in progress. Terminal status is available
 at those immutable run links and in the updated PR descriptions. This checkpoint changes documentation only;
 the app pin remains the tested engine correction. Both isolated worktrees were clean after their source commits.
+
+### Additional supported-value finding — map equality
+
+The final equality check found a fourth issue (P2), distinct from the rejected nonfinite-value probe. MessagePack
+maps preserve repeated string keys, and those values pass normal write validation. `values::same` previously reused
+one matching entry on the right for several entries on the left. Equality was asymmetric and discarded multiplicity:
+entries `[(a,1),(a,1)]` compared equal to `[(a,1),(b,2)]` in one direction only. A unique write could be accepted in
+one insertion order and refused in the other; the accepted pair then produced a false audit violation.
+
+The new regression uses normal `Database::write` calls with finite values, not damaged primary data or unchecked
+bulk loading. On the pre-fix source it fails after both distinct values were accepted, because `check()` reports them
+as duplicates (exit 101): `/private/tmp/elmdb-pr-review-map-before.log`. Additional independent equality assertions
+also fail before the correction: `/private/tmp/elmdb-pr-review-map-equality-before.log`.
+
+Deep map equality now matches each entry at most once. It preserves repeated-key multiplicity, ignores entry order
+and retains numeric-coercion/recursive equality rules. Worst-case comparison remains quadratic in each map's entry
+count, with linear matching bookkeeping. The audit keeps its exact fallback for repeated-key maps, since sorting
+field names alone cannot canonicalize their value order; its existing exceptional-case cost remains workload-dependent.
+The regression checks both insertion orders, clean audit before/after rebuild, and rejection of a true duplicate.
+The format reference now makes repeated keys and equality multiplicity explicit. A fresh pinned pair and acceptance
+runs are required for this comparator change; the earlier 6566b85 results do not cover it.
+
+The complete required local engine gate sequence passes again after the comparator correction: formatting,
+warning-denying workspace lint, 257 engine tests (two manual measurements ignored), CLI/binding/xtask suites,
+generated protocol, one-LMDB, rebuilt release binding, TypeScript and all 36 Node tests. No generated API changes.

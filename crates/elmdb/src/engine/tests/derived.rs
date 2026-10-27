@@ -1013,3 +1013,39 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
         assert_eq!(db.check().unwrap().violations, report.violations);
     }
 }
+
+#[test]
+fn duplicate_map_key_multiplicity_is_preserved_by_writes_and_audits() {
+    use crate::engine::batch::{Batch, Op};
+    use rmpv::Value;
+    let distinct = Value::Map(vec![("a".into(), 1.into()), ("b".into(), 2.into())]);
+    let repeated = Value::Map(vec![("a".into(), 1.into()), ("a".into(), 1.into())]);
+    for values in [[distinct.clone(), repeated.clone()], [repeated, distinct]] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = with_schema(
+            &dir,
+            notes(
+                json!({"u":{"type":"any","optional":true}}),
+                json!({"u":{"kind":"value","fields":["u"],"unique":true}}),
+            ),
+        )
+        .unwrap();
+        let create = |id: &str, value: Value| Batch {
+            ops: vec![Op::Create {
+                entity_type: "Note".into(),
+                id: Some(id.into()),
+                fields: [("u".into(), value)].into(),
+                short_code: None,
+                created_at: None,
+                updated_at: None,
+            }],
+            now: Some(1000.0),
+        };
+        db.write(&create("Note-0", values[0].clone()), false).unwrap();
+        db.write(&create("Note-1", values[1].clone()), false).unwrap();
+        assert!(db.check().unwrap().is_clean(), "distinct maps must not be reported as duplicates: {values:?}");
+        db.rebuild(None).unwrap();
+        assert!(db.check().unwrap().is_clean());
+        assert_eq!(db.write(&create("Note-2", values[0].clone()), false).unwrap_err().code, crate::ErrorCode::Unique);
+    }
+}

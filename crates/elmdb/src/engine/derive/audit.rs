@@ -185,8 +185,8 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
     Ok(out)
 }
 
-/// Canonicalize numeric representations and unordered map fields according to values::same. Duplicate-key maps
-/// have non-equivalence semantics in that comparator, so they use an exact pairwise fallback rather than a hash key.
+/// Canonicalize numeric representations and unordered map fields according to values::same. Sorting by field name
+/// alone cannot canonicalize repeated keys' value order, so those maps use an exact pairwise fallback.
 fn unique_canonical(value: &Value) -> Option<Value> {
     if let Some(number) = values::as_number(value) {
         return Some(Value::F64(if number == 0.0 { 0.0 } else { number }));

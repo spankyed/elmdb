@@ -48,7 +48,21 @@ pub fn same(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Array(x), Value::Array(y)) => x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same(p, q)),
         (Value::Map(x), Value::Map(y)) => {
-            x.len() == y.len() && x.iter().all(|(k, v)| y.iter().any(|(k2, v2)| k == k2 && same(v, v2)))
+            if x.len() != y.len() {
+                return false;
+            }
+            // A map may preserve repeated keys. Match each entry once so equality preserves multiplicity;
+            // reusing one entry for several matches makes equality asymmetric and breaks unique constraints.
+            let mut matched = vec![false; y.len()];
+            for (key, value) in x {
+                let Some(position) = y.iter().enumerate().find_map(|(i, (other_key, other_value))| {
+                    (!matched[i] && key == other_key && same(value, other_value)).then_some(i)
+                }) else {
+                    return false;
+                };
+                matched[position] = true;
+            }
+            true
         }
         _ => scalar_equal(a, b),
     }
@@ -289,6 +303,13 @@ mod tests {
         assert!(same(&Value::Array(vec![1.into()]), &Value::Array(vec![1.0.into()])));
         let m = |pairs: Vec<(&str, Value)>| Value::Map(pairs.into_iter().map(|(k, v)| (k.into(), v)).collect());
         assert!(same(&m(vec![("a", 1.into()), ("b", 2.into())]), &m(vec![("b", 2.into()), ("a", 1.into())])));
+        let repeated = m(vec![("a", 1.into()), ("a", 1.into())]);
+        let distinct = m(vec![("a", 1.into()), ("b", 2.into())]);
+        assert!(!same(&repeated, &distinct));
+        assert!(!same(&distinct, &repeated));
+        assert!(!same(&repeated, &m(vec![("a", 1.into()), ("a", 2.into())])));
+        assert!(same(&m(vec![("a", 1.into()), ("a", 2.into())]), &m(vec![("a", 2.0.into()), ("a", 1.0.into())])));
+        assert!(!same(&Value::Array(vec![repeated]), &Value::Array(vec![distinct])));
         assert!(matches_removal(&m(vec![("a", 1.into()), ("b", 2.into())]), &m(vec![("a", 1.into())])));
     }
 

@@ -40,7 +40,8 @@ compares.
 
 A value is msgpack bytes, written by the caller and stored as given:
 
-- maps keep their keys as written, and a key named `__proto__` is a key;
+- maps keep their keys as written, including repeated keys, and a key named `__proto__` is a key. Deep equality
+  ignores entry order but preserves each entry's multiplicity;
 - `nil`, booleans, integers, floats, strings, binary, arrays and maps whose keys are strings, and of the extension
   types only msgpack's timestamp (type −1, how a JavaScript `Date` encodes); a write holding any other extension is
   refused (`VALUE_INVALID`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);

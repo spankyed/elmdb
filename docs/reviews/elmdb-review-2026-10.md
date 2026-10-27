@@ -377,11 +377,13 @@ and findings against the implementation agent's final commit before scheduling o
 
 ## Post-acceptance PR review — 2026-10-27
 
-A fresh review of PR #1 and adoption PR #283 found three additional edge cases: a stale schema setter could overwrite
+A fresh review of PR #1 and adoption PR #283 found four additional edge cases: a stale schema setter could overwrite
 or silently adopt another process's declaration (P1); Windows temporary-directory environment changes could split
-process claims (P1); Unix claims followed symlinks or accepted a foreign-owned replaceable inode (P2). Corrections
+process claims (P1); Unix claims followed symlinks or accepted a foreign-owned replaceable inode (P2); and deep map
+equality reused entries, making uniqueness writes order-dependent and auditing accepted data as invalid (P2). Corrections
 validate the setter's cached fingerprint in the declaration snapshot, use a PID-named Windows kernel event and refuse
-symlink/foreign-owned Unix claim files. Independent failing regressions and fresh acceptance are recorded in the
+symlink/foreign-owned Unix claim files. Map equality now matches each entry once to preserve multiplicity. Independent
+failing regressions and fresh acceptance are recorded in the
 [post-acceptance evidence](../evidence/elmdb-remediation.md#post-acceptance-pr-review--2026-10-27).
 
 The recovery resource contract also now identifies 8 MiB as a spill threshold, with vector spare capacity and the
