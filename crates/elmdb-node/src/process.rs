@@ -36,7 +36,8 @@ fn claim_address() -> io::Result<std::os::unix::net::SocketAddr> {
     // SAFETY: the non-null loader-owned AT_RANDOM region contains exactly 16 readable bytes, as specified above.
     digest.update(unsafe { std::slice::from_raw_parts(random, 16) });
     digest.update(std::process::id().to_ne_bytes());
-    let name = format!("elmdb-binding-{:x}", digest.finalize());
+    let mut name = b"elmdb-binding-".to_vec();
+    name.extend_from_slice(&digest.finalize());
     std::os::unix::net::SocketAddr::from_abstract_name(name)
 }
 
