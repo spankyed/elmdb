@@ -11,6 +11,11 @@ use crate::error::Result;
 const MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const FAN_IN: usize = 16;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static FAIL_NEXT_NEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 #[derive(PartialEq, Eq)]
 struct Row {
     key: Vec<u8>,
@@ -53,6 +58,10 @@ pub(super) struct Scratch {
 
 impl Scratch {
     pub(super) fn new() -> Result<Self> {
+        #[cfg(test)]
+        if FAIL_NEXT_NEW.replace(false) {
+            return Err(std::io::Error::other("injected scratch creation failure").into());
+        }
         Ok(Self {
             directory: tempfile::Builder::new().prefix("elmdb-check-").tempdir()?,
             runs: Vec::new(),

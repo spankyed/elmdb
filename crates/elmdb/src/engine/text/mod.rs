@@ -458,9 +458,7 @@ pub fn entries_into(
 /// Deletes every key of a text index of a type
 pub fn clear(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<()> {
     for range in keys::text_index_ranges(entity_type, index) {
-        for (key, _) in t.scan(&range)? {
-            t.del(&key)?;
-        }
+        t.clear_prefix(&range)?;
     }
     t.del(&keys::text_stats(entity_type, index))
 }

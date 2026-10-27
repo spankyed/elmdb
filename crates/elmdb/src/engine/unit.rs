@@ -226,6 +226,24 @@ impl Txn<'_, '_> {
         Ok(())
     }
 
+    /// Delete bounded batches of keys, seeking from the beginning after each batch has been removed. Values are
+    /// never copied, and already removed rows are not revisited. Preserve normal undo/tracking through del.
+    pub(crate) fn clear_prefix(&mut self, prefix: &[u8]) -> Result<()> {
+        loop {
+            let mut keys = Vec::new();
+            self.visit(prefix, |key, _| {
+                keys.push(key.to_vec());
+                keys.len() < 1000
+            })?;
+            if keys.is_empty() {
+                return Ok(());
+            }
+            for key in keys {
+                self.del(&key)?;
+            }
+        }
+    }
+
     pub fn event(&mut self, event: Event) {
         self.state.events.push(event);
     }

@@ -281,3 +281,30 @@ fn a_dump_and_a_load_each_write_something_new_and_a_damaged_dump_or_a_failed_loa
     assert!(!target.join("data.mdb").exists(), "a failed load leaves no database behind");
     crate::dump::load(&path, &target).expect("the target takes a second load");
 }
+
+#[test]
+fn scratch_failure_during_rebuild_and_replace_aborts_all_destination_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-original", "fields":{"title":"keep"}})]).unwrap();
+    let other = open(&source);
+    write(&other, vec![json!({"op":"create", "type":"Task", "id":"Task-replacement", "fields":{"title":"new"}})])
+        .unwrap();
+    other.close().unwrap();
+    let before = loads_of(&db);
+    let sequence = db.sequence().unwrap();
+    for replacement in [false, true] {
+        crate::engine::derive::fail_next_scratch();
+        let result = if replacement { db.replace_with(source.path()) } else { db.rebuild(None) };
+        assert_eq!(result.unwrap_err().code, crate::ErrorCode::Io);
+        assert_eq!(db.sequence().unwrap(), sequence);
+        assert_eq!(loads_of(&db), before);
+        assert_eq!(row(&db, "Task-original").unwrap()["title"], "keep");
+        assert!(row(&db, "Task-replacement").is_none());
+        assert!(db.check().unwrap().is_clean());
+    }
+    db.replace_with(source.path()).unwrap();
+    assert!(row(&db, "Task-original").is_none());
+    assert_eq!(row(&db, "Task-replacement").unwrap()["title"], "new");
+}

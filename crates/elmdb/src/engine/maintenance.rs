@@ -284,33 +284,29 @@ impl Database {
                 format!("{} isn't a database in format {}", source.display(), format::FORMAT_VERSION),
             ));
         }
-        let primary: Vec<(Vec<u8>, Vec<u8>)> = from
-            .iter(&rtxn)?
-            .collect::<heed::Result<Vec<_>>>()?
-            .into_iter()
-            .filter(|(k, _)| {
-                decode_key(k)
-                    .ok()
-                    .and_then(|p| match p.first() {
-                        Some(Part::String(tag)) => Prefix::from_tag(tag),
-                        _ => None,
-                    })
-                    .is_some_and(|p| p.kind() == PrefixKind::Primary)
-            })
-            .map(|(k, v)| (k.to_vec(), v.to_vec()))
-            .collect();
-        drop(rtxn);
-        env.prepare_for_closing().wait();
-        self.admin_unit(|t| {
+        // Retain one immutable source snapshot through retries, copying primary ranges directly into the write.
+        // No source values are retained after each put, and derived source rows are never traversed.
+        let result = self.admin_unit(|t| {
             let kept = t.scan(&Prefix::Meta.key().to_vec())?;
             t.db.clear(t.txn)?;
-            for (key, value) in kept.iter().chain(primary.iter()) {
+            for (key, value) in &kept {
                 t.put(key, value)?;
+            }
+            for prefix in Prefix::ALL.into_iter().filter(|prefix| prefix.kind() == PrefixKind::Primary) {
+                let (low, high) = crate::format::key::prefix_range(&prefix.key().to_vec());
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                for entry in from.range(&rtxn, &range)? {
+                    let (key, value) = entry?;
+                    t.put(key, value)?;
+                }
             }
             derive::rebuild(t, None)?;
             super::settle_indexes_in(t)?;
             Ok(())
-        })
+        });
+        drop(rtxn);
+        env.prepare_for_closing().wait();
+        result
     }
 
     /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes

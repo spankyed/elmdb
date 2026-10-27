@@ -22,6 +22,11 @@ use super::keys;
 use super::unit::{Read, Txn};
 use super::{ids, relations, text, values, vector};
 
+#[cfg(test)]
+pub(crate) fn fail_next_scratch() {
+    sorted::FAIL_NEXT_NEW.set(true);
+}
+
 /// One entity as primary data holds it
 struct Entity {
     id: String,
@@ -346,9 +351,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     format!("rebuild: {entity_type} has no index \"{name}\""),
                 ));
             }
-            for (key, _) in t.scan(&keys::index_range(entity_type, name, &[]))? {
-                t.del(&key)?;
-            }
+            t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
             text::clear(t, entity_type, name)?;
             t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
             let all = entities_of(t)?;
@@ -378,9 +381,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
         }
         None => {
             for prefix in COMPARED {
-                for (key, _) in t.scan(&prefix.key().to_vec())? {
-                    t.del(&key)?;
-                }
+                t.clear_prefix(&prefix.key().to_vec())?;
             }
             // Every declared index of every type with entities is built by a full rebuild, but a value index a build
             // couldn't finish, which keeps the entries that fit unmarked, as writes keep an unbuilt index's
@@ -410,7 +411,10 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     }
                 }
             }
-            for (key, value) in derive(t)? {
+            let mut scratch = sorted::Scratch::new()?;
+            derive_into(t, |key, value| scratch.push(key, value))?;
+            let mut entries = scratch.finish()?;
+            while let Some((key, value)) = entries.next()? {
                 t.put(&key, &value)?;
             }
             vector::rebuild_graphs(t)?;
