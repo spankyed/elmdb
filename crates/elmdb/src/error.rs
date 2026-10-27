@@ -30,6 +30,8 @@ pub enum ErrorCode {
     SchemaInvalid,
     /// The given schema changes the stored one in a way opening refuses, such as a short code prefix
     SchemaChangeRefused,
+    /// Another process changed the stored schema; close and reopen the handle before reading or writing
+    SchemaChanged,
     /// The files hold something other than an elmdb database
     NotADatabase,
     /// The database is in a format this version doesn't read
@@ -82,8 +84,8 @@ pub enum ErrorCode {
     UnitOpen,
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several
     UnknownIndex,
-    /// A durable write whose batch committed and whose sync then failed: the data is committed, and not yet known to
-    /// be on disk. Retrying the batch would apply it twice
+    /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
+    /// be on disk. Retrying the operation would apply it twice
     NotDurable,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
@@ -92,6 +94,12 @@ pub enum ErrorCode {
     DuplicateEdge,
     /// A short code or label numbering whose next number would pass 2^53 - 1, the largest JavaScript holds exactly
     NumbersExhausted,
+    /// The initial watch listener panicked; its registration was removed
+    CallbackPanicked,
+    /// The initial watch read panicked; its registration was removed
+    WatchPanicked,
+    /// Closing a database from its own watch callback would wait on the callback's operation
+    CallbackActive,
 }
 
 impl ErrorCode {
@@ -109,6 +117,7 @@ impl ErrorCode {
             Self::NoDatabase => "NO_DATABASE",
             Self::SchemaInvalid => "SCHEMA_INVALID",
             Self::SchemaChangeRefused => "SCHEMA_CHANGE_REFUSED",
+            Self::SchemaChanged => "SCHEMA_CHANGED",
             Self::NotADatabase => "NOT_A_DATABASE",
             Self::WrongFormat => "WRONG_FORMAT",
             Self::ValueInvalid => "VALUE_INVALID",
@@ -139,6 +148,9 @@ impl ErrorCode {
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
+            Self::CallbackPanicked => "CALLBACK_PANICKED",
+            Self::WatchPanicked => "WATCH_PANICKED",
+            Self::CallbackActive => "CALLBACK_ACTIVE",
         }
     }
 }
@@ -223,6 +235,9 @@ mod tests {
             ErrorCode::Cycle,
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
+            ErrorCode::CallbackPanicked,
+            ErrorCode::WatchPanicked,
+            ErrorCode::CallbackActive,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

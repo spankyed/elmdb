@@ -40,7 +40,8 @@ compares.
 
 A value is msgpack bytes, written by the caller and stored as given:
 
-- maps keep their keys as written, and a key named `__proto__` is a key;
+- maps keep their keys as written, including repeated keys, and a key named `__proto__` is a key. Deep equality
+  ignores entry order but preserves each entry's multiplicity;
 - `nil`, booleans, integers, floats, strings, binary, arrays and maps whose keys are strings, and of the extension
   types only msgpack's timestamp (type −1, how a JavaScript `Date` encodes); a write holding any other extension is
   refused (`VALUE_INVALID`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
@@ -78,9 +79,23 @@ and a load by the build after it. That is how our databases are converted once, 
 - The loads, in the order a load applies them: each entity in the order it was made, with every field it holds, the
   engine's own (`shortCode`, `trashedAt`, ...) among them; each relation in the order it was made, under its id; each
   embedding (`p/q`); each sequence (`p/s`), last, so a numbering goes on where it was.
-- A load opens the new database with the dump's schema, applies the loads unchecked in one unit and rebuilds everything
-  under `d/`, so what the data holds against the schema's rules is `check()`'s to report, as after any unchecked load.
-  A dump, or a load that fails, removes what it wrote.
+- Export spill-sorts only entity/relation identifiers, then emits one complete load at a time from the same snapshot.
+  Embeddings and sequences are visited directly. Scratch has a per-sorter 8 MiB spill threshold plus row/buffer
+  overhead; one load's decoded fields or embedding still needs its own memory. Original u64 creation order, field
+  order and dump bytes are preserved. Export scratch needs writable temporary storage and follows the cleanup
+  limitations in `engine.md`, Recovery resources.
+- A load applies unchecked batches in a private database in the destination directory, using at most 1,000 loads
+  or 8 MiB of encoded frames per batch plus the largest frame. Decoded values and rebuild state have separate
+  workload-dependent costs. It validates the footer/count and refuses trailing bytes, rebuilds derived data, then
+  closes and publishes the complete database without replacing any existing file. The destination is reserved
+  against this process's opens and publishers; coordinate its ownership across processes. Before publication,
+  failure removes only private staging files, leaving unrelated destination files intact and permitting retry.
+  A publication-sync error reports that the complete database is visible; never delete or overwrite it blindly.
+  Unix syncs affected directories; Windows requests write-through publication. A dump that fails removes its file.
+  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load.
+  An abruptly killed process can leave an unpublished `.elmdb-load-*` directory. A retry starts new private staging
+  and never adopts the partial database. Remove abandoned staging only after confirming its owner has stopped and
+  coordinating exclusive destination ownership; preserve unrelated files.
 - A load of a dump, dumped again, is byte-identical to it.
 
 The dump version is the file's, not the stored format's: it moves only when `Load` does.

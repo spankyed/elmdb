@@ -44,11 +44,35 @@ fn a_read_only_store_refuses_a_write_and_reads_what_is_there() {
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     let error = put(&store, "b", b"2").unwrap_err();
     assert_eq!(error.code, ErrorCode::ReadOnly);
+    assert_eq!(store.grow().unwrap_err().code, ErrorCode::ReadOnly);
+}
+
+#[test]
+fn a_windows_read_only_map_never_claims_unmapped_file_capacity() {
+    assert_eq!(read_only_map_size(32 * 4096, None), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096, Some(MAP_STEP)), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096, Some(16 * 4096)), 16 * 4096);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_read_only_open_and_adoption_follow_the_physical_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    store.close().unwrap();
+    let store =
+        Store::open(dir.path(), StoreOptions { read_only: true, map_size_bytes: Some(MAP_STEP * 2), ..quiet() })
+            .unwrap();
+    assert!(store.map_size() as u64 <= store.file_size());
+    store.adopt_map_size().unwrap();
+    assert!(store.map_size() as u64 <= store.file_size());
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
 }
 
 #[cfg(unix)]
 #[test]
-fn a_read_only_store_reads_files_this_user_cannot_write() {
+fn a_read_only_store_refuses_files_without_reader_registration() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
@@ -58,9 +82,14 @@ fn a_read_only_store_reads_files_this_user_cannot_write() {
     for file in &files {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
     }
-    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
-    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
-    store.close().unwrap();
+    match Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }) {
+        Err(error) => assert_eq!(error.code, ErrorCode::Io),
+        // An elevated user can still write the lock file: it retains ordinary LMDB reader registration.
+        Ok(store) => {
+            assert!(std::fs::OpenOptions::new().write(true).open(dir.path().join("lock.mdb")).is_ok());
+            store.close().unwrap();
+        }
+    }
     for file in &files {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
@@ -428,4 +457,211 @@ fn a_close_returns_though_a_wait_for_durability_is_still_held() {
     std::thread::spawn(move || sent.send(store.close()).unwrap());
     closed.recv_timeout(Duration::from_secs(5)).expect("the close returned").unwrap();
     durable.wait().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn child_read_only_requires_registration() {
+    let Ok(path) = std::env::var("ELMDB_REVIEW_READ_ONLY") else { return };
+    println!("ELMDB_READ_ONLY_CHILD_ENTERED");
+    let path = std::path::Path::new(&path);
+    let can_register = std::fs::OpenOptions::new().write(true).open(path.join("lock.mdb")).is_ok();
+    match Store::open(path, StoreOptions { read_only: true, ..quiet() }) {
+        Ok(store) => {
+            assert!(can_register, "a reader without lock-file access must not open beside a writer");
+            store.close().unwrap();
+        }
+        Err(error) => assert_eq!(error.code, ErrorCode::Io),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_read_only_process_requires_registration_while_a_writer_is_open() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let lock = directory.path().join("lock.mdb");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "store::tests::child_read_only_requires_registration", "--nocapture"])
+        .env("ELMDB_REVIEW_READ_ONLY", directory.path())
+        .output()
+        .unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ELMDB_READ_ONLY_CHILD_ENTERED"),
+        "the selected child regression must actually run"
+    );
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    store.close().unwrap();
+}
+
+#[test]
+fn backup_failure_owns_only_its_private_file_and_releases_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"old").unwrap();
+    store.copy_to(target.path()).unwrap();
+    put(&store, "value", b"new").unwrap();
+    let sentinel = target.path().join("data.mdb.partial");
+    std::fs::write(&sentinel, b"belongs to someone else").unwrap();
+    backup::HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(|point, path| {
+            if point == backup::Point::Ready {
+                assert!(path.file_name().unwrap().to_string_lossy().starts_with(".elmdb-backup-"));
+                return Err(Error::new(ErrorCode::Io, "injected before publication"));
+            }
+            Ok(())
+        }))
+    });
+    let failed = store.copy_to(target.path());
+    backup::HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(failed.unwrap_err().code, ErrorCode::Io);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"belongs to someone else");
+    assert!(
+        std::fs::read_dir(target.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".elmdb-backup-"))
+    );
+    let earlier = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&earlier, "value").as_deref(), Some(&b"old"[..]));
+    earlier.close().unwrap();
+    store.copy_to(target.path()).unwrap();
+    let copied = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copied, "value").as_deref(), Some(&b"new"[..]));
+}
+
+#[test]
+fn backup_reserves_destination_against_open_and_another_publisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    put(&store, "value", b"complete").unwrap();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (resume, continued) = std::sync::mpsc::channel();
+    let destination = target.path().to_owned();
+    let worker_store = store.clone();
+    let worker = std::thread::spawn(move || {
+        backup::HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |point, _| {
+                if point == backup::Point::Ready {
+                    entered.send(()).map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
+                    continued
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
+                }
+                Ok(())
+            }))
+        });
+        let result = worker_store.copy_to(&destination);
+        backup::HOOK.with_borrow_mut(|hook| *hook = None);
+        result
+    });
+    ready.recv_timeout(Duration::from_secs(5)).expect("publisher reached ready point");
+    let opened = Store::open(target.path(), quiet());
+    let published = store.copy_to(target.path());
+    resume.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(matches!(opened, Err(Error { code: ErrorCode::AlreadyOpen, .. })));
+    assert_eq!(published.unwrap_err().code, ErrorCode::AlreadyOpen);
+    let copy = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    backup::HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(|point, _| {
+            if point == backup::Point::Published {
+                return Err(Error::new(ErrorCode::Io, "injected sync failure"));
+            }
+            Ok(())
+        }))
+    });
+    let result = store.copy_to(target.path());
+    backup::HOOK.with_borrow_mut(|hook| *hook = None);
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"));
+    let copy = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("one/two");
+    #[cfg(unix)]
+    assert_eq!(backup::directories_to_sync(&target), [target.clone(), root.path().join("one"), root.path().to_owned()]);
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    store.copy_to(&target).unwrap();
+    let names: Vec<_> = std::fs::read_dir(&target).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["data.mdb"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(target.join("data.mdb")).unwrap().file_attributes() & 0x100,
+            0,
+            "a published backup must not retain FILE_ATTRIBUTE_TEMPORARY"
+        );
+    }
+    let copy = Store::open(&target, quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn a_read_only_environment_requires_a_real_lock_table() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    let mut options = EnvOpenOptions::new().read_txn_without_tls();
+    // SAFETY: this private test database has no other open handle or writer. NO_LOCK deliberately simulates
+    // LMDB's EROFS fallback; no database data is accessed through this unregistered environment.
+    let env = unsafe { options.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK).open(dir.path()) }.unwrap();
+    let error = require_registered_reader(&env, dir.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("no lock table"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires an isolated privileged mount namespace; scripts/check-read-only-mount.py runs it in CI"]
+fn read_only_mount_requires_reader_registration() {
+    assert_eq!(std::env::var("ELMDB_TEST_READ_ONLY_MOUNT").as_deref(), Ok("1"));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "proof", b"registered").unwrap();
+    store.close().unwrap();
+    assert!(Command::new("mount").arg("--bind").arg(dir.path()).arg(dir.path()).status().unwrap().success());
+    struct Mount(std::path::PathBuf);
+    impl Drop for Mount {
+        fn drop(&mut self) {
+            let _ = Command::new("umount").arg(&self.0).status();
+        }
+    }
+    let _mount = Mount(dir.path().to_owned());
+    assert!(Command::new("mount").args(["-o", "remount,bind,ro"]).arg(dir.path()).status().unwrap().success());
+    let error = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() })
+        .err()
+        .expect("a read-only mount must not open without a lock table");
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("registration"));
+    println!("ELMDB_READ_ONLY_MOUNT_REFUSED");
 }

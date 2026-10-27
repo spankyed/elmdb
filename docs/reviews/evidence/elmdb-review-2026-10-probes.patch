@@ -1,0 +1,126 @@
+--- a/crates/elmdb/src/store/mod.rs
++++ b/crates/elmdb/src/store/mod.rs
+@@ -657,0 +658,3 @@
++#[cfg(test)]
++pub(crate) static REVIEW_FAIL_SYNC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
+@@ -661,0 +665,4 @@
++        #[cfg(test)]
++        if REVIEW_FAIL_SYNC.load(Ordering::SeqCst) {
++            return Err(Error::new(ErrorCode::Io, "review injected sync failure"));
++        }
+--- a/crates/elmdb/src/engine/tests/tracked.rs
++++ b/crates/elmdb/src/engine/tests/tracked.rs
+@@ -218,0 +219,112 @@
++
++
++#[test]
++fn review_listener_panic_disables_watch() {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    let dir = tempfile::tempdir().unwrap();
++    let db = open(&dir);
++    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":1}})]).unwrap();
++    let count = Arc::new(AtomicUsize::new(0));
++    let c = count.clone();
++    let id = db.watch(reads(vec![row("Task-1")], None), Box::new(move |_| {
++        if c.fetch_add(1, Ordering::SeqCst) == 1 { panic!("listener failure"); }
++    })).unwrap();
++    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++        write(&db, vec![json!({"op":"set","id":"Task-1","fields":{"a":2}})]).unwrap();
++    }));
++    assert!(failed.is_err());
++    write(&db, vec![json!({"op":"set","id":"Task-1","fields":{"a":3}})]).unwrap();
++    assert_eq!(count.load(Ordering::SeqCst), 2, "watch remains registered but no longer invokes listener");
++    assert!(db.track_stats().0 > 0);
++    db.unwatch(id);
++}
++
++#[test]
++fn review_check_accepts_cycle_loaded_unchecked() {
++    let dir = tempfile::tempdir().unwrap();
++    let db = open(&dir);
++    let loads = vec![
++       json!({"load":"entity","id":"Task-1","fields":{}}),
++       json!({"load":"entity","id":"Task-2","fields":{}}),
++       json!({"load":"relation","id":"Relation-1","kind":"parent_of","source":"Task-1","target":"Task-2"}),
++       json!({"load":"relation","id":"Relation-2","kind":"parent_of","source":"Task-2","target":"Task-1"})
++    ].into_iter().map(|v| serde_json::from_value(v).unwrap()).collect::<Vec<_>>();
++    db.bulk_load(&loads).unwrap();
++    let report = db.check().unwrap();
++    assert!(report.differences.is_empty(), "{:?}", report);
++    assert!(report.violations.is_empty(), "cycle is not reported: {:?}", report);
++}
++
++#[test]
++fn review_check_accepts_duplicate_unindexed_unique_values() {
++    let dir = tempfile::tempdir().unwrap();
++    let db = open(&dir);
++    let value = "a".repeat(257);
++    let loads = ["Task-1", "Task-2"].into_iter().map(|id|
++        serde_json::from_value(json!({"load":"entity","id":id,"fields":{"slug":value}})).unwrap()
++    ).collect::<Vec<_>>();
++    db.bulk_load(&loads).unwrap();
++    let report = db.check().unwrap();
++    assert!(report.differences.is_empty(), "{:?}", report);
++    assert!(report.violations.is_empty(), "duplicate is not reported: {:?}", report);
++}
++
++
++#[test]
++fn review_reset_commits_without_notifying_when_sync_fails() {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    let dir = tempfile::tempdir().unwrap();
++    let db = open(&dir);
++    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":1}})]).unwrap();
++    db.close().unwrap();
++    let db = Database::open(dir.path(), crate::OpenOptions::default()).unwrap();
++    let count = Arc::new(AtomicUsize::new(0));
++    let c = count.clone();
++    db.watch(reads(vec![row("Task-1")], None), Box::new(move |_| { c.fetch_add(1, Ordering::SeqCst); })).unwrap();
++    crate::store::REVIEW_FAIL_SYNC.store(true, Ordering::SeqCst);
++    let result = db.reset();
++    crate::store::REVIEW_FAIL_SYNC.store(false, Ordering::SeqCst);
++    assert_eq!(result.unwrap_err().code, crate::ErrorCode::Io);
++    let bytes = db.read(&reads(vec![row("Task-1")], None)).unwrap();
++    let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
++    assert!(answer[0]["row"].is_null(), "reset committed");
++    assert_eq!(count.load(Ordering::SeqCst), 1, "watch was not notified");
++    assert!(db.close().is_err());
++}
++
++#[test]
++fn review_callback_close_cannot_obtain_exclusive_store() {
++    use std::sync::atomic::{AtomicBool, Ordering};
++    let dir = tempfile::tempdir().unwrap();
++    let db = Arc::new(open(&dir));
++    let weak = Arc::downgrade(&db);
++    let closed = Arc::new(AtomicBool::new(true));
++    let c = closed.clone();
++    let id = db.watch(reads(vec![row("Task-1")], None), Box::new(move |_| {
++        let db = weak.upgrade().unwrap();
++        c.store(db.close_within(Some(std::time::Duration::ZERO)).unwrap(), Ordering::SeqCst);
++    })).unwrap();
++    assert!(!closed.load(Ordering::SeqCst));
++    db.unwatch(id);
++    db.close().unwrap();
++}
++
++
++#[test]
++fn review_schema_sync_failure_leaves_memory_and_disk_disagreeing() {
++    use std::sync::atomic::Ordering;
++    let dir = tempfile::tempdir().unwrap();
++    let db = open(&dir);
++    db.close().unwrap();
++    let db = Database::open(dir.path(), crate::OpenOptions::default()).unwrap();
++    let mut new_schema = super::schema();
++    new_schema.types.get_mut("Task").unwrap().fields.remove("a");
++    crate::store::REVIEW_FAIL_SYNC.store(true, Ordering::SeqCst);
++    let result = db.set_schema(new_schema);
++    crate::store::REVIEW_FAIL_SYNC.store(false, Ordering::SeqCst);
++    assert_eq!(result.unwrap_err().code, crate::ErrorCode::Io);
++    assert!(db.schema().unwrap().types["Task"].fields.contains_key("a"));
++    assert!(db.close().is_err());
++    let reopened = Database::open(dir.path(), crate::OpenOptions { syncs:false, ..Default::default() }).unwrap();
++    assert!(!reopened.schema().unwrap().types["Task"].fields.contains_key("a"));
++}

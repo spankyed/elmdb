@@ -238,7 +238,7 @@ pub fn key_fits(key: &[u8], id: &str, entity_type: &str, index: &str) -> Result<
 /// and with it what the index can't file (a string past `MAX_INDEXED_STRING`, a map, a timestamp), which only a walk of
 /// the type's rows finds. A single field's value or each element of its list; a compound index's fields together, when
 /// each is present and none is a list
-fn unique_keys(fields: &[Option<Value>]) -> Vec<Vec<Value>> {
+pub(super) fn unique_keys(fields: &[Option<Value>]) -> Vec<Vec<Value>> {
     let mut keys: Vec<Vec<Value>> = Vec::new();
     let mut push = |key: Vec<Value>| {
         if !keys.iter().any(|k| same_key(k, &key)) {

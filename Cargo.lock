@@ -444,6 +444,7 @@ dependencies = [
  "icu_collator",
  "icu_locale_core",
  "levenshtein_automata",
+ "libc",
  "parking_lot",
  "proptest",
  "rand 0.10.3",
@@ -477,12 +478,15 @@ name = "elmdb-node"
 version = "0.0.0"
 dependencies = [
  "elmdb",
+ "libc",
  "napi",
  "napi-build",
  "napi-derive",
  "process_path",
  "rmp-serde",
  "serde_json",
+ "sha2",
+ "tempfile",
 ]
 
 [[package]]

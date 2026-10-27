@@ -429,48 +429,79 @@ pub fn restore(
 
 /// The graph changes the unit's writes journaled, made in the graphs as it commits, each graph then built once
 pub fn flush(t: &mut Txn<'_, '_>) -> Result<()> {
-    let journal = t.scan(&Prefix::VectorJournal.key().to_vec())?;
-    if journal.is_empty() {
-        return Ok(());
-    }
-    let mut by_index: BTreeMap<(String, String), Vec<(u32, bool)>> = BTreeMap::new();
-    for (key, value) in &journal {
-        let mut parts = decode_key(key)?;
-        let item = match parts.pop() {
-            Some(Part::Number(n)) => n as u32,
-            _ => return Err(corrupt("journal")),
-        };
-        let (Some(Part::String(index)), Some(Part::String(entity_type))) = (parts.pop(), parts.pop()) else {
-            return Err(corrupt("journal"));
-        };
-        let added = values::decode(value)?.as_bool().unwrap_or(false);
-        by_index.entry((entity_type, index)).or_default().push((item, added));
-    }
-    for (key, _) in &journal {
-        t.del(key)?;
-    }
-    for ((entity_type, index), changes) in by_index {
-        let Some(def) = vector_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index) else { continue };
-        let Some((number, _)) = graph_of(t, &entity_type, &index)? else { continue };
-        let mut adds = Vec::new();
-        for (item, added) in &changes {
-            if !added {
-                continue;
-            }
-            let Some(chunk) = t.get(&keys::vector_item_key(Prefix::VectorItem, &entity_type, &index, *item))? else {
-                continue;
+    let prefix = Prefix::VectorJournal.key().to_vec();
+    let mut current: Option<(String, String)> = None;
+    let mut graph: Option<(VectorIndex, u16)> = None;
+    let finish = |t: &mut Txn<'_, '_>, graph: Option<&(VectorIndex, u16)>| -> Result<()> {
+        if let Some((def, number)) = graph {
+            apply(t, def, *number, &[], &[], false)?;
+        }
+        Ok(())
+    };
+    loop {
+        let mut batch = Vec::new();
+        t.visit(&prefix, |key, value| {
+            batch.push((key.to_vec(), value.to_vec()));
+            batch.len() < 1000
+        })?;
+        if batch.is_empty() {
+            break;
+        }
+        for (key, value) in batch {
+            let mut parts = decode_key(&key)?;
+            let Some(Part::Number(item)) = parts.pop() else { return Err(corrupt("journal")) };
+            let (Some(Part::String(index)), Some(Part::String(entity_type))) = (parts.pop(), parts.pop()) else {
+                return Err(corrupt("journal"));
             };
-            let chunk = values::decode(&chunk)?;
-            let parts = chunk.as_array().ok_or_else(|| corrupt("item"))?;
-            let id = parts.first().and_then(Value::as_str).ok_or_else(|| corrupt("item"))?;
-            let n = parts.get(1).and_then(Value::as_u64).ok_or_else(|| corrupt("item"))? as u32;
-            if let Some(stored) = t.get(&keys::vector(&entity_type, &index, id, n))? {
-                adds.push((*item, decode_vector(&stored)?.vector));
+            let pair = (entity_type, index);
+            if current.as_ref() != Some(&pair) {
+                finish(t, graph.as_ref())?;
+                graph = match vector_indexes(t.schema, &pair.0).into_iter().find(|i| i.name == pair.1) {
+                    Some(def) => graph_of(t, &pair.0, &pair.1)?.map(|(number, _)| (def, number)),
+                    None => None,
+                };
+                current = Some(pair.clone());
+            }
+            t.del(&key)?;
+            let Some((def, number)) = &graph else { continue };
+            let item = item as u32;
+            let added = values::decode(&value)?.as_bool().unwrap_or(false);
+            let vector = if added {
+                match t.get(&keys::vector_item_key(Prefix::VectorItem, &pair.0, &pair.1, item))? {
+                    Some(chunk) => {
+                        let chunk = values::decode(&chunk)?;
+                        let parts = chunk.as_array().ok_or_else(|| corrupt("item"))?;
+                        let id = parts.first().and_then(Value::as_str).ok_or_else(|| corrupt("item"))?;
+                        let n = parts.get(1).and_then(Value::as_u64).ok_or_else(|| corrupt("item"))? as u32;
+                        t.get(&keys::vector(&pair.0, &pair.1, id, n))?
+                            .map(|bytes| decode_vector(&bytes).map(|v| v.vector))
+                            .transpose()?
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            macro_rules! update {
+                ($db:expr) => {{
+                    let db = $db.ok_or_else(|| {
+                        Error::new(ErrorCode::ReadOnly, "This database has no graph databases to write vectors to")
+                    })?;
+                    let writer = Writer::new(db, *number, def.dims);
+                    if let Some(vector) = &vector {
+                        writer.add_item(t.txn, item, vector).map_err(graph_error)?;
+                    } else if !added {
+                        writer.del_item(t.txn, item).map_err(graph_error)?;
+                    }
+                }};
+            }
+            match def.metric {
+                Metric::L2 => update!(t.db.euclidean),
+                _ => update!(t.db.cosine),
             }
         }
-        let removes: Vec<u32> = changes.iter().filter(|(_, added)| !added).map(|(item, _)| *item).collect();
-        apply(t, &def, number, &removes, &adds, false)?;
     }
+    finish(t, graph.as_ref())?;
     Ok(())
 }
 
@@ -577,21 +608,21 @@ pub fn rebuild_graphs(t: &mut Txn<'_, '_>) -> Result<()> {
 
 /// What a vector index should hold of a type's entities, chunks and pending markers, from their fields and stored
 /// embeddings, as `check()` compares
-pub fn entries(
+pub fn entries_into(
     r: &impl Read,
     entity_type: &str,
     index: &VectorIndex,
     ids: &[String],
-) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut out = BTreeMap::new();
+    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+) -> Result<()> {
     for id in ids {
         for (n, text) in chunks_of(index, &field_values(r, index, id)?).iter().enumerate() {
             let n = n as u32;
             let hash = hash_of(text);
-            out.insert(
+            emit(
                 keys::vector_chunk_key(Prefix::VectorChunk, entity_type, &index.name, id, n),
                 encode_chunk(&hash, text),
-            );
+            )?;
             let embedded = match r.get(&keys::vector(entity_type, &index.name, id, n))? {
                 Some(stored) => {
                     let stored = decode_vector(&stored)?;
@@ -600,14 +631,14 @@ pub fn entries(
                 None => false,
             };
             if !embedded {
-                out.insert(
+                emit(
                     keys::vector_chunk_key(Prefix::VectorPending, entity_type, &index.name, id, n),
                     values::encode(&Value::Nil),
-                );
+                )?;
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// One chunk waiting for its embedding
@@ -819,9 +850,7 @@ pub fn clear(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<()> 
     for prefix in
         [Prefix::VectorChunk, Prefix::VectorPending, Prefix::VectorItem, Prefix::VectorItemOf, Prefix::VectorJournal]
     {
-        for (key, _) in t.scan(&keys::vector_index_range(prefix, entity_type, index))? {
-            t.del(&key)?;
-        }
+        t.clear_prefix(&keys::vector_index_range(prefix, entity_type, index))?;
     }
     t.del(&keys::vector_graph(entity_type, index))
 }

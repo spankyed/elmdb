@@ -14,3 +14,10 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [Field types from apack's shapes](typed-schema.md) | Decided: codegen sends each field's type, so elmdb checks writes the compiler can't see |
 | [One plan algebra](plan-algebra.md) | First three planner fixes and EXPLAIN; later, filters as operations on bitmaps |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
+
+## Development improvements
+
+- [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
+  benchmarks, concurrency models and diagnostics; planned, with adoption gates.
+- [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
+  failpoints, heap assertions, per-process tests, model-based properties, profiling; planned.

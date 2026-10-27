@@ -6,6 +6,10 @@
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
 
+mod backup;
+#[cfg(unix)]
+pub(crate) use backup::directories_to_sync as publication_directories;
+pub(crate) use backup::publish_new;
 pub mod sync;
 
 use std::collections::HashSet;
@@ -74,10 +78,38 @@ pub const MAP_STEP: usize = 64 << 20;
 const MAX_GROWTHS: usize = 16;
 
 /// The map's size for a data file of `file_bytes`: twice the file, so a database can double before its first growth,
-/// and a step at least. On Windows LMDB sizes the file to the map, so this is also what an open costs on disk there
+/// and a step at least. This is writable mapping capacity, independent of the file's current physical length.
 pub fn initial_map_size(file_bytes: u64) -> usize {
     let wanted = (file_bytes as usize).saturating_mul(2).max(MAP_STEP);
     wanted.div_ceil(MAP_STEP) * MAP_STEP
+}
+
+// Windows read-only sections map only the current file, not a writer's reserved capacity. The logical bound
+// must not exceed that view: transaction renewal then reports MAP_RESIZED before accessing newly appended pages.
+#[cfg(any(windows, test))]
+pub(crate) fn read_only_map_size(file_bytes: u64, requested: Option<usize>) -> usize {
+    let physical = usize::try_from(file_bytes).unwrap_or(usize::MAX);
+    requested.unwrap_or(physical).min(physical)
+}
+
+/// A transaction that committed, with its sync outcome kept apart until in-memory state and observers are finalized.
+pub(crate) struct Commit {
+    pub sequence: u64,
+    pub synced: Result<()>,
+}
+
+impl Commit {
+    pub fn finish(self) -> Result<()> {
+        self.synced.map_err(|error| {
+            Error::new(
+                ErrorCode::NotDurable,
+                format!(
+                    "The operation committed (sequence {}), but its sync failed: {}. Do not retry the operation",
+                    self.sequence, error.message
+                ),
+            )
+        })
+    }
 }
 
 pub struct Store {
@@ -107,7 +139,18 @@ fn open_paths() -> &'static Mutex<HashSet<PathBuf>> {
 }
 
 /// Releases a path's registration unless the open that took it succeeded
-struct Registration(Option<PathBuf>);
+pub(crate) struct Registration(Option<PathBuf>);
+
+/// Reserve an existing canonical destination against opens and publishers in this process.
+pub(crate) fn reserve_destination(target: &Path) -> Result<Registration> {
+    if !open_paths().lock().expect("the open-paths lock is never poisoned").insert(target.to_owned()) {
+        return Err(Error::new(
+            ErrorCode::AlreadyOpen,
+            format!("The database at {} is open or being published; use another directory", target.display()),
+        ));
+    }
+    Ok(Registration(Some(target.to_owned())))
+}
 
 impl Drop for Registration {
     fn drop(&mut self) {
@@ -124,6 +167,29 @@ pub(crate) static FAIL_STAMP_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// A test's stand-in for a disk that fills: the next commit of the environment at this path fails, once
 #[cfg(test)]
 pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_WRITE_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static FAIL_NEXT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_RESET_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
+// mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
+fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
+    let _reader = env.read_txn()?;
+    if env.info().number_of_readers == 0 {
+        return Err(Error::new(
+            ErrorCode::Io,
+            format!(
+                "Cannot open {} with LMDB reader registration: no lock table is mapped. Grant write access to lock.mdb on a writable filesystem, or use a writable copy",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
 
 impl Store {
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self> {
@@ -147,7 +213,11 @@ impl Store {
         let file_bytes = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
         let open = |flags: EnvFlags| {
             let mut builder = EnvOpenOptions::new().read_txn_without_tls();
-            builder.max_dbs(8).map_size(options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes)));
+            let map_size = options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes));
+            #[cfg(windows)]
+            let map_size =
+                if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
+            builder.max_dbs(8).map_size(map_size);
             // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
             // flushed by group commit's syncs, and a read-only environment is never written
             unsafe {
@@ -157,31 +227,40 @@ impl Store {
             // LMDB's, written only through LMDB
             unsafe { builder.open(&canonical) }
         };
-        let denied =
-            |e: &heed::Error| matches!(e, heed::Error::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied);
-        let env = match open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }) {
-            // Files this user can't write, which no writer of theirs can be changing either: read without the lock
-            // file a reader registers in, which LMDB would otherwise have to write
-            Err(e) if options.read_only && denied(&e) => open(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK),
-            opened => opened,
-        }
-        .map_err(|e| match e {
-            heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
-                ErrorCode::NotADatabase,
-                format!(
-                    "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version, \
+        let env =
+            open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }).map_err(|e| match e {
+                heed::Error::Io(ref io) if options.read_only && io.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Error::new(
+                        ErrorCode::Io,
+                        format!(
+                            "Cannot open {} with LMDB reader registration: {e}. Grant read access to data.mdb and write access to lock.mdb, or use a writable copy",
+                            canonical.display()
+                        ),
+                    )
+                }
+                heed::Error::Mdb(heed::MdbError::Invalid | heed::MdbError::VersionMismatch) => Error::new(
+                    ErrorCode::NotADatabase,
+                    format!(
+                        "{} isn't a file this LMDB reads: {e}. Files lmdb-js wrote are in its own LMDB data version, \
                      which elmdb doesn't read; re-create the database with elmdb",
-                    data.display()
+                        data.display()
+                    ),
                 ),
-            ),
-            e => e.into(),
-        })?;
+                e => e.into(),
+            })?;
 
+        if options.read_only {
+            require_registered_reader(&env, &canonical)?;
+        }
         let db = Self::open_db(&env, &canonical, options.read_only)?;
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer(env.clone())),
+                Box::new(EnvSyncer {
+                    env: env.clone(),
+                    #[cfg(test)]
+                    path: canonical.clone(),
+                }),
                 Box::new(SystemClock),
             )
         });
@@ -366,16 +445,18 @@ impl Store {
         f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
     ) -> Result<(T, u64)> {
-        let (t, sequence, synced) = self.write_committed(f, durable)?;
-        synced.map(|()| (t, sequence))
+        let (t, commit) = self.write_committed(f, durable)?;
+        let sequence = commit.sequence;
+        commit.finish()?;
+        Ok((t, sequence))
     }
 
     /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
-    pub fn write_committed<T>(
+    pub(crate) fn write_committed<T>(
         &self,
         mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
-    ) -> Result<(T, u64, Result<()>)> {
+    ) -> Result<(T, Commit)> {
         self.check_writable()?;
         if self.unit_is_open() {
             return Err(Error::new(
@@ -385,22 +466,36 @@ impl Store {
         }
         let mut growths = 0;
         loop {
+            #[cfg(test)]
+            let _ = BEFORE_WRITE_RESERVATION.try_with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
+            // Serialize claiming the native writer with begin's unit reservation. Otherwise a unit can slip
+            // between the earlier check and write_txn, leaving a caller waiting while it holds a schema guard.
+            let open = self.unit.lock().expect("the unit's lock is never poisoned");
+            if *open {
+                return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: write through it or end it first"));
+            }
             let guard = self.gate();
             let mut txn = match self.env.write_txn() {
                 Ok(txn) => txn,
                 Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                     drop(guard);
+                    drop(open);
                     self.adopt_map_size()?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
             };
+            drop(open);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
                 Ok((t, sequence)) => {
                     let synced = self.committed(durable);
-                    return Ok((t, sequence, synced));
+                    return Ok((t, Commit { sequence, synced }));
                 }
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
                     growths += 1;
@@ -430,7 +525,9 @@ impl Store {
         let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
         #[cfg(test)]
-        if FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some() {
+        if FAIL_NEXT_COMMIT.with(|flag| flag.replace(false))
+            || FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some()
+        {
             drop(txn);
             return Err(Error::new(ErrorCode::Io, "No space left on device"));
         }
@@ -461,6 +558,33 @@ impl Store {
                 commit.durable().wait()?;
             }
         }
+        Ok(())
+    }
+
+    /// Advance LMDB's physical generation after a reset, without changing logical data or sequence. LMDB cannot
+    /// reuse the immediately preceding transaction's freed pages: without this checkpoint, the next bulk load
+    /// allocates another database-sized set of pages and leaves costly free-page records for later small writes.
+    /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
+    pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
+        self.check_writable()?;
+        if self.unit_is_open() {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
+        }
+        let _guard = self.gate();
+        self.drop_idle();
+        let mut txn = self.env.write_txn()?;
+        let key = meta_key(meta::SEQUENCE);
+        let value = self
+            .db
+            .get(&txn, &key)?
+            .ok_or_else(|| Error::new(ErrorCode::Corrupted, "Reset has no committed sequence"))?
+            .to_vec();
+        self.db.put(&mut txn, &key, &value)?;
+        #[cfg(test)]
+        if FAIL_RESET_CHECKPOINT.with(|flag| flag.replace(false)) {
+            return Err(Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
+        }
+        txn.commit()?;
         Ok(())
     }
 
@@ -532,6 +656,7 @@ impl Store {
 
     /// Doubles the map, holding every transaction of this process off while it does
     pub fn grow(&self) -> Result<()> {
+        self.check_writable()?;
         let _gate = self.gate.write();
         self.drop_idle();
         let size = self.env.info().map_size;
@@ -546,8 +671,17 @@ impl Store {
     fn adopt_map_size(&self) -> Result<()> {
         let _gate = self.gate.write();
         self.drop_idle();
-        // SAFETY: as in `grow`; a size of 0 adopts the size the file's meta records
-        unsafe { self.env.resize(0) }?;
+        #[cfg(windows)]
+        let size = if self.read_only {
+            read_only_map_size(std::fs::metadata(self.path.join("data.mdb"))?.len(), None)
+        } else {
+            0
+        };
+        #[cfg(not(windows))]
+        let size = 0;
+        // SAFETY: as in `grow`; a size of 0 adopts the recorded capacity. Windows read-only mappings instead use
+        // physical file length, so the next external extension is detected before any page outside that view is read.
+        unsafe { self.env.resize(size) }?;
         Ok(())
     }
 
@@ -603,35 +737,12 @@ impl Store {
     }
 
     /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed. The
-    /// copy is written beside it, synced and renamed into place, so a failed copy leaves an earlier backup whole; a
-    /// target open in this process is refused, the copy's file truncating the one its map reads
+    /// copy uses an owned temporary file, synced and atomically replaced while the destination is reserved against
+    /// opens/publishers in this process. Failure before publication preserves an earlier backup; a later directory
+    /// sync failure reports that the complete copy is visible and a retry is safe. The caller owns the destination
+    /// exclusively against other processes; a backup artifact must not be an actively used database
     pub fn copy_to(&self, target: &Path) -> Result<()> {
-        std::fs::create_dir_all(target)?;
-        let target = target.canonicalize()?;
-        if open_paths().lock().expect("the open-paths lock is never poisoned").contains(&target) {
-            return Err(Error::new(
-                ErrorCode::AlreadyOpen,
-                format!("The database at {} is open in this process: back up into another directory", target.display()),
-            ));
-        }
-        let partial = target.join("data.mdb.partial");
-        loop {
-            // The copy reads through the map in a transaction of its own, so a growth must wait for it to finish
-            let guard = self.gate();
-            match self.env.copy_to_path(&partial, heed::CompactionOption::Enabled) {
-                Ok(file) => {
-                    file.sync_all()?;
-                    break;
-                }
-                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                    drop(guard);
-                    self.adopt_map_size()?;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        std::fs::rename(&partial, target.join("data.mdb"))?;
-        Ok(())
+        backup::copy(self, target)
     }
 
     /// Bytes the data file holds on disk
@@ -639,7 +750,8 @@ impl Store {
         std::fs::metadata(self.path.join("data.mdb")).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// The bytes under a meta key
+    /// The bytes under a meta key, for store assertions
+    #[cfg(test)]
     pub fn meta(&self, name: &str) -> Result<Option<Vec<u8>>> {
         self.read(|txn, db| Ok(db.get(txn, &meta_key(name))?.map(<[u8]>::to_vec)))
     }
@@ -655,11 +767,22 @@ impl Drop for Store {
     }
 }
 
-struct EnvSyncer(Env<WithoutTls>);
+#[cfg(test)]
+pub(crate) static FAIL_SYNC_AT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+struct EnvSyncer {
+    env: Env<WithoutTls>,
+    #[cfg(test)]
+    path: PathBuf,
+}
 
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
-        self.0.force_sync().map_err(Into::into)
+        #[cfg(test)]
+        if FAIL_SYNC_AT.lock().unwrap().contains(&self.path) {
+            return Err(Error::new(ErrorCode::Io, "Injected sync failure"));
+        }
+        self.env.force_sync().map_err(Into::into)
     }
 }
 

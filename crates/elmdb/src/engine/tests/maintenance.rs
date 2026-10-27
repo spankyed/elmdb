@@ -281,3 +281,131 @@ fn a_dump_and_a_load_each_write_something_new_and_a_damaged_dump_or_a_failed_loa
     assert!(!target.join("data.mdb").exists(), "a failed load leaves no database behind");
     crate::dump::load(&path, &target).expect("the target takes a second load");
 }
+
+#[test]
+fn scratch_failure_during_rebuild_and_replace_aborts_all_destination_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-original", "fields":{"title":"keep"}})]).unwrap();
+    let other = open(&source);
+    write(&other, vec![json!({"op":"create", "type":"Task", "id":"Task-replacement", "fields":{"title":"new"}})])
+        .unwrap();
+    other.close().unwrap();
+    let before = loads_of(&db);
+    let sequence = db.sequence().unwrap();
+    for replacement in [false, true] {
+        crate::engine::derive::fail_next_scratch();
+        let result = if replacement { db.replace_with(source.path()) } else { db.rebuild(None) };
+        assert_eq!(result.unwrap_err().code, crate::ErrorCode::Io);
+        assert_eq!(db.sequence().unwrap(), sequence);
+        assert_eq!(loads_of(&db), before);
+        assert_eq!(row(&db, "Task-original").unwrap()["title"], "keep");
+        assert!(row(&db, "Task-replacement").is_none());
+        assert!(db.check().unwrap().is_clean());
+    }
+    db.replace_with(source.path()).unwrap();
+    assert!(row(&db, "Task-original").is_none());
+    assert_eq!(row(&db, "Task-replacement").unwrap()["title"], "new");
+}
+
+#[test]
+fn single_index_rebuilds_spill_and_late_uniqueness_failure_rolls_back() {
+    use crate::engine::unit::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    for i in 0..100 {
+        write(
+            &db,
+            vec![
+                json!({"op":"create","type":"Task","id":format!("Task-{i:03}"),
+            "fields":{"slug":format!("slug-{i:03}"),"a":[i,i+1]}}),
+                json!({"op":"create","type":"Note","id":format!("Note-{i:03}"),
+            "fields":{"a":format!("common searchable words unique{i}"),"b":"running runners"}}),
+            ],
+        )
+        .unwrap();
+    }
+    let derived = |db: &Database| {
+        db.snapshot(|r| {
+            let mut out = Vec::new();
+            for prefix in crate::format::Prefix::ALL {
+                if prefix.kind() == crate::format::PrefixKind::Derived {
+                    out.extend(r.scan(&prefix.key().to_vec())?);
+                }
+            }
+            Ok(out)
+        })
+        .unwrap()
+    };
+    let derived_before = derived(&db);
+    let before = loads_of(&db);
+    super::super::derive::sorted::with_budget(256, || {
+        for (ty, index) in [("Task", "a"), ("Task", "slug"), ("Note", "text")] {
+            db.rebuild(Some((ty, index))).unwrap();
+        }
+    });
+    assert_eq!(derived(&db), derived_before, "spill rebuild must match the independently maintained derived bytes");
+    assert_eq!(loads_of(&db), before);
+    assert!(db.check().unwrap().is_clean());
+    for (ty, index) in [("Task", "a"), ("Task", "slug"), ("Note", "text")] {
+        super::super::derive::fail_next_scratch();
+        let error = db.rebuild(Some((ty, index))).unwrap_err();
+        assert_eq!(error.code, crate::ErrorCode::Io);
+    }
+    db.bulk_load(&[
+        Load::Entity {
+            id: "Task-duplicate-one".into(),
+            fields: BTreeMap::from([("slug".into(), "zz-duplicate".into())]),
+            trashed: false,
+        },
+        Load::Entity {
+            id: "Task-duplicate-two".into(),
+            fields: BTreeMap::from([("slug".into(), "zz-duplicate".into())]),
+            trashed: false,
+        },
+    ])
+    .unwrap();
+    let before = db.snapshot(|r| r.scan(&[])).unwrap();
+    let sequence = db.sequence().unwrap();
+    super::super::derive::sorted::with_budget(128, || {
+        assert_eq!(db.rebuild(Some(("Task", "slug"))).unwrap_err().code, crate::ErrorCode::Unique);
+    });
+    assert_eq!(db.snapshot(|r| r.scan(&[])).unwrap(), before, "a late duplicate must roll back all earlier writes");
+    assert_eq!(db.sequence().unwrap(), sequence);
+}
+
+#[test]
+fn unique_rebuild_does_not_merge_distinct_holders_with_a_corrupt_shared_sequence() {
+    use crate::engine::{keys, values};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    db.bulk_load(&[
+        Load::Entity {
+            id: "Task-a".into(),
+            fields: BTreeMap::from([("slug".into(), "duplicate".into())]),
+            trashed: false,
+        },
+        Load::Entity {
+            id: "Task-b".into(),
+            fields: BTreeMap::from([("slug".into(), "duplicate".into())]),
+            trashed: false,
+        },
+    ])
+    .unwrap();
+    db.store()
+        .unwrap()
+        .write(
+            |txn, raw| {
+                raw.put(
+                    txn,
+                    &keys::entity("Task-b"),
+                    &values::encode(&rmpv::Value::Array(vec![1.into(), false.into()])),
+                )?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(db.rebuild(Some(("Task", "slug"))).unwrap_err().code, crate::ErrorCode::Unique);
+}

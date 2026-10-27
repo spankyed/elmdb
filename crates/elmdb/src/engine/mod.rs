@@ -21,7 +21,7 @@ mod reads;
 mod relations;
 mod text;
 pub mod tracking;
-mod unit;
+pub(crate) mod unit;
 mod values;
 mod vector;
 pub mod watch;
@@ -30,24 +30,39 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use heed::RwTxn;
-use parking_lot::RawRwLockRecursive;
 use parking_lot::lock_api::ArcRwLockReadGuard;
+use parking_lot::{RawRwLockRecursive, RwLock};
 
-use crate::database::Database;
+use crate::database::{Database, EngineSchema};
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
-use crate::store::Store;
+use crate::store::{Commit, Store};
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
 pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
-/// A sync that failed after its commit: the data is committed, as the sequence says, and not yet known to be on disk
-fn not_durable(error: Error, sequence: u64) -> Error {
-    Error::new(
-        ErrorCode::NotDurable,
-        format!("The batch committed (sequence {sequence}), but its sync failed: {}", error.message),
-    )
+#[cfg(test)]
+thread_local! {
+    static BEFORE_READ_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Finalizes every user-visible commit before reporting its sync outcome. `None` invalidates every owner for
+/// operations whose writes were not logged key by key.
+fn finish_commit(
+    tracks: &watch::SharedTracks,
+    store: &Store,
+    schema: &RwLock<Arc<EngineSchema>>,
+    mut changes: ChangeSet,
+    written: Option<&std::collections::HashSet<Vec<u8>>>,
+    commit: Commit,
+) -> Result<ChangeSet> {
+    let touched = tracks.lock().touched(written);
+    changes.sequence = commit.sequence;
+    changes.touched = touched.tokens;
+    watch::deliver(tracks, store, schema, &touched.watches);
+    commit.finish()?;
+    Ok(changes)
 }
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
@@ -166,91 +181,126 @@ pub(crate) fn drop_index_data(
 /// What the stored data holds that changing the schema from `stored` to `given` answers to (`schema::Held`): one seek
 /// per type with entities, one per type for its codes' prefix, and a walk of the relations only when `given` adds a
 /// relation kind, stopping once each added kind is found
-pub(crate) fn held(store: &Store, stored: &Schema, given: &Schema) -> Result<crate::schema::Held> {
+pub(crate) fn held_in(
+    txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    db: crate::store::Db,
+    stored: &EngineSchema,
+    given: &Schema,
+) -> Result<crate::schema::Held> {
     use crate::format::key::{Part, decode, prefix_range};
     use std::ops::Bound;
-    store.read(|txn, db| {
-        let mut held = crate::schema::Held::default();
-        for trashed in [false, true] {
-            let (mut low, high) = prefix_range(&keys::all_of_types(trashed));
-            loop {
-                let range = (Bound::Included(low.as_slice()), Bound::Excluded(high.as_slice()));
-                let Some(entry) = db.range(txn, &range)?.next() else { break };
-                let (key, _) = entry?;
-                let Some(Part::String(entity_type)) = decode(key)?.into_iter().nth(1) else { break };
-                low = prefix_range(&keys::type_range(trashed, &entity_type)).1;
-                held.types.insert(entity_type);
-            }
+    stored.validate(txn, db)?;
+    let mut held = crate::schema::Held::default();
+    for trashed in [false, true] {
+        let (mut low, high) = prefix_range(&keys::all_of_types(trashed));
+        loop {
+            let range = (Bound::Included(low.as_slice()), Bound::Excluded(high.as_slice()));
+            let Some(entry) = db.range(txn, &range)?.next() else { break };
+            let (key, _) = entry?;
+            let Some(Part::String(entity_type)) = decode(key)?.into_iter().nth(1) else { break };
+            low = prefix_range(&keys::type_range(trashed, &entity_type)).1;
+            held.types.insert(entity_type);
         }
-        for entity_type in &held.types {
-            let range = prefix_range(&keys::index_range(entity_type, keys::SHORT_CODE_INDEX, &[]));
-            let range = (Bound::Included(range.0.as_slice()), Bound::Excluded(range.1.as_slice()));
-            if let Some(entry) = db.range(txn, &range)?.next()
-                && let Some(Part::String(code)) = decode(entry?.0)?.into_iter().nth(3)
-                && let Some((prefix, _)) = code.rsplit_once('-')
-            {
-                held.short_codes.insert(entity_type.clone(), prefix.to_owned());
-            }
+    }
+    for entity_type in &held.types {
+        let range = prefix_range(&keys::index_range(entity_type, keys::SHORT_CODE_INDEX, &[]));
+        let range = (Bound::Included(range.0.as_slice()), Bound::Excluded(range.1.as_slice()));
+        if let Some(entry) = db.range(txn, &range)?.next()
+            && let Some(Part::String(code)) = decode(entry?.0)?.into_iter().nth(3)
+            && let Some((prefix, _)) = code.rsplit_once('-')
+        {
+            held.short_codes.insert(entity_type.clone(), prefix.to_owned());
         }
-        let mut sought: std::collections::BTreeSet<&String> =
-            given.relations.keys().filter(|kind| !stored.relations.contains_key(*kind)).collect();
-        if !sought.is_empty() {
-            let s = unit::Snapshot { txn, db, schema: stored };
-            let mut failed = None;
-            s.visit(&keys::all_relations(), |_, bytes| {
-                match rmp_serde::from_slice::<relations::Stored>(bytes) {
-                    Ok(relation) => {
-                        if let Some(kind) = sought.take(&relation.kind) {
-                            held.kinds.insert(kind.clone());
-                        }
+    }
+    let mut sought: std::collections::BTreeSet<&String> =
+        given.relations.keys().filter(|kind| !stored.relations.contains_key(*kind)).collect();
+    if !sought.is_empty() {
+        let s = unit::Snapshot { txn, db, schema: stored };
+        let mut failed = None;
+        s.visit(&keys::all_relations(), |_, bytes| {
+            match rmp_serde::from_slice::<relations::Stored>(bytes) {
+                Ok(relation) => {
+                    if let Some(kind) = sought.take(&relation.kind) {
+                        held.kinds.insert(kind.clone());
                     }
-                    Err(e) => failed = Some(e),
                 }
-                failed.is_none() && !sought.is_empty()
+                Err(e) => failed = Some(e),
+            }
+            failed.is_none() && !sought.is_empty()
+        })?;
+        if let Some(e) = failed {
+            return Err(Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")));
+        }
+    }
+    Ok(held)
+}
+
+type IndexList = Vec<(String, String)>;
+
+fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
+    let mut empty = Vec::new();
+    let mut unbuilt = Vec::new();
+    for entity_type in r.schema().types.keys() {
+        let mut has_entities = false;
+        for trashed in [false, true] {
+            r.visit(&keys::type_range(trashed, entity_type), |_, _| {
+                has_entities = true;
+                false
             })?;
-            if let Some(e) = failed {
-                return Err(Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")));
+        }
+        for index in derive::index_names(r.schema(), entity_type) {
+            if !derive::is_built(r, entity_type, &index)? {
+                if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
             }
         }
-        Ok(held)
+    }
+    Ok((empty, unbuilt))
+}
+
+/// Marks empty types' indexes built inside the mutation that changes their contents or declaration.
+pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
+    let (empty, unbuilt) = unbuilt_indexes(t)?;
+    for (entity_type, index) in empty {
+        t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+    }
+    Ok(unbuilt)
+}
+
+#[cfg(test)]
+thread_local! { pub(crate) static FAIL_NEXT_INDEX_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Read pending index work without committing marker repairs while a caller is reporting a refused mutation.
+pub(crate) fn remaining_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
+    #[cfg(test)]
+    if FAIL_NEXT_INDEX_REFRESH.replace(false) {
+        return Err(Error::new(ErrorCode::Io, "injected index refresh failure"));
+    }
+    store.read(|txn, db| {
+        schema.validate(txn, db)?;
+        let (empty, unbuilt) = unbuilt_indexes(&unit::Snapshot { txn, db, schema })?;
+        Ok(empty.into_iter().chain(unbuilt).collect())
     })
 }
 
-/// Marks built every unbuilt index of a type that has no entities, and answers the rest, which need a build
-pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<Vec<(String, String)>> {
+/// Settle empty-type markers with their committed sync outcome kept separate from the pending work.
+pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> Result<(IndexList, Option<Commit>)> {
     let (empty, unbuilt) = store.read(|txn, db| {
-        let s = unit::Snapshot { txn, db, schema };
-        let mut empty = Vec::new();
-        let mut unbuilt = Vec::new();
-        for entity_type in schema.types.keys() {
-            let mut has_entities = false;
-            for trashed in [false, true] {
-                s.visit(&keys::type_range(trashed, entity_type), |_, _| {
-                    has_entities = true;
-                    false
-                })?;
-            }
-            for index in derive::index_names(schema, entity_type) {
-                if !derive::is_built(&s, entity_type, &index)? {
-                    if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
-                }
-            }
-        }
-        Ok((empty, unbuilt))
+        schema.validate(txn, db)?;
+        unbuilt_indexes(&unit::Snapshot { txn, db, schema })
     })?;
     if !empty.is_empty() && !store.is_read_only() {
-        store.write(
-            |txn, db| {
-                for (entity_type, index) in &empty {
-                    db.put(txn, &keys::index_built(entity_type, index), &values::encode(&true.into()))?;
-                }
-                Ok(())
-            },
-            // Opening leaves nothing owed, as the schema's write doesn't
-            true,
-        )?;
+        return store
+            .write_committed(
+                |txn, db| {
+                    schema.validate(txn, db)?;
+                    let mut state = UnitState::default();
+                    settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })
+                },
+                true,
+            )
+            .map(|(unbuilt, commit)| (unbuilt, Some(commit)));
     }
-    Ok(unbuilt)
+    Ok((unbuilt, None))
 }
 
 pub(crate) use builder::Builder;
@@ -281,8 +331,11 @@ impl Database {
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
     pub fn check(&self) -> Result<derive::CheckReport> {
         let store = self.store()?;
-        let schema = self.engine_schema();
-        store.read(|txn, db| derive::check(&unit::Snapshot { txn, db, schema: &schema }))
+        let schema = self.schema_guard();
+        store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            derive::check(&unit::Snapshot { txn, db, schema: &schema })
+        })
     }
 
     /// Deletes derived data and writes what primary data derives, for every index or, with one, that index, in one
@@ -319,21 +372,40 @@ impl Database {
         })
     }
 
-    fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
-        let schema = self.writing_schema();
+    pub(crate) fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
+        self.admin_unit_with_checkpoint(f, false)
+    }
+
+    pub(crate) fn admin_unit_with_checkpoint(
+        &self,
+        f: impl Fn(&mut Txn<'_, '_>) -> Result<()>,
+        recycle: bool,
+    ) -> Result<()> {
+        let schema = self.schema_guard();
         let store = self.store()?;
         let now = now_ms();
-        store.write(
+        let ((), mut commit) = store.write_committed(
             |txn, db| {
+                schema.validate(txn, db)?;
                 let mut state = UnitState::default();
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
                 vector::flush(&mut t)
             },
-            true,
+            !recycle,
         )?;
+        if recycle {
+            // Recycling is only a space/performance optimization. Even if its transaction aborts, sync the atomic
+            // reset before reporting success; only that required sync determines its durability outcome.
+            let _ = store.recycle_reset_pages();
+            commit.synced = store.committed(true);
+        }
         drop(schema);
-        self.touched_everything(&store)
+        self.finish_admin_commit(&store, commit)
+    }
+
+    pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
+        finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
@@ -354,9 +426,10 @@ impl Database {
     /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.schema_guard();
         let failures = self.builder().as_ref().map(|b| b.failures()).unwrap_or_default();
         store.read(|txn, db| {
+            schema.validate(txn, db)?;
             let s = unit::Snapshot { txn, db, schema: &schema };
             let mut out = Vec::new();
             for entity_type in schema.types.keys() {
@@ -377,9 +450,18 @@ impl Database {
     /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/architecture/engine.md`, Reads)
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.schema_guard();
+        #[cfg(test)]
+        BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
+            if let Some(pause) = hook.take() {
+                pause();
+            }
+        });
         let Some(token) = reads.track else {
-            return store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads));
+            return store.read(|txn, db| {
+                schema.validate(txn, db)?;
+                reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads)
+            });
         };
         // Filed whether or not the reads failed: what they read before failing decides when they'd answer otherwise
         watch::read_tracked(&self.tracks, &store, &schema, reads, token)
@@ -402,23 +484,16 @@ impl Database {
 
     /// Runs `reads` and hands `listener` the answer, then runs them again after each commit that writes into what they
     /// read, handing over each answer that differs from the one before. A listener is called after the commit, outside
-    /// its transaction, on the thread that committed
+    /// its transaction, on the thread that committed. A panicking listener is removed; an initial panic returns
+    /// `CALLBACK_PANICKED`, while later panics do not change the committed operation's outcome
     pub fn watch(&self, reads: plan::Reads, listener: watch::Listener) -> Result<u64> {
         let store = self.store()?;
-        watch::watch(&self.tracks, &store, &self.engine_schema(), reads, listener)
+        watch::watch(&self.tracks, &store, &self.observing_schema(), reads, listener)
     }
 
     /// Ends a watch
     pub fn unwatch(&self, id: u64) {
         watch::unwatch(&self.tracks, id);
-    }
-
-    /// After a commit whose writes aren't logged key by key (an admin change, a reset, a load): every tracked read and
-    /// watch is touched
-    pub(crate) fn touched_everything(&self, store: &Store) -> Result<()> {
-        let ids = self.tracks.lock().all_watches();
-        watch::deliver(&self.tracks, store, &self.engine_schema(), &ids);
-        Ok(())
     }
 
     /// `read` with the reads as msgpack bytes, as the binding takes them
@@ -428,12 +503,13 @@ impl Database {
 
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
-        let schema = self.writing_schema();
+        let schema = self.schema_guard();
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
-        let ((results, mut changes, written), sequence, synced) = store.write_committed(
+        let ((results, changes, written), commit) = store.write_committed(
             |txn, db| {
+                schema.validate(txn, db)?;
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
@@ -444,11 +520,7 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let touched = self.tracks.lock().touched(written.as_ref());
-        changes.sequence = sequence;
-        changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &store, &self.engine_schema(), &touched.watches);
-        synced.map_err(|e| not_durable(e, sequence))?;
+        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
         Ok((results, changes))
     }
 
@@ -456,17 +528,26 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn snapshot<T>(&self, f: impl FnOnce(&unit::Snapshot<'_, '_>) -> Result<T>) -> Result<T> {
         let store = self.store()?;
-        let schema = self.engine_schema();
-        store.read(|txn, db| f(&unit::Snapshot { txn, db, schema: &schema }))
+        let schema = self.schema_guard();
+        store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            f(&unit::Snapshot { txn, db, schema: &schema })
+        })
     }
 
     /// Opens a unit that stays open across calls until it is committed or aborted. One unit is open at a time, and
     /// while it is, `write` refuses (`UNIT_OPEN`): its writes go through the unit
     pub fn begin(&self) -> Result<Unit> {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
-        let held = self.writing_schema();
+        let held = self.schema_guard();
         let store = self.store()?;
         let (txn, gate) = store.begin()?;
+        if let Err(error) = held.validate(&txn, store.db()) {
+            drop(txn);
+            drop(gate);
+            store.end_unit();
+            return Err(error);
+        }
         let schema = Arc::clone(&held);
         drop(held);
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
@@ -477,6 +558,7 @@ impl Database {
             txn: Some(txn),
             state: UnitState::new(logging),
             tracks: Arc::clone(&self.tracks),
+            schemas: self.observing_schema(),
             poisoned: None,
             gate: Some(gate),
             schema,
@@ -496,7 +578,8 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
-    schema: Arc<Schema>,
+    schema: Arc<EngineSchema>,
+    schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
     _thread: PhantomData<*const ()>,
@@ -593,18 +676,21 @@ impl Unit {
             self.abort();
             return Err(error);
         }
-        let mut changes = ChangeSet::of(&self.state.events);
+        let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.store.end_unit();
-        changes.sequence = committed?;
+        let sequence = committed?;
         let synced = self.store.committed(durable);
-        let touched = self.tracks.lock().touched(self.state.written.as_ref());
-        changes.touched = touched.tokens;
-        watch::deliver(&self.tracks, &self.store, &self.schema, &touched.watches);
-        synced.map_err(|e| not_durable(e, changes.sequence))?;
-        Ok(changes)
+        finish_commit(
+            &self.tracks,
+            &self.store,
+            &self.schemas,
+            changes,
+            self.state.written.as_ref(),
+            Commit { sequence, synced },
+        )
     }
 
     /// Ends the unit, keeping nothing of it

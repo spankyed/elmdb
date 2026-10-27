@@ -19,6 +19,15 @@ process_path.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
 [build-dependencies]
 napi-build.workspace = true
 

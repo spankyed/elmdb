@@ -56,3 +56,16 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linux; on dispatch and pull requests, the
 full matrix — macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding
 and running every suite, the model and crash harnesses included, on it.
+
+Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
+
+## Maintenance memory paths
+
+Forced-small spill budgets exercise value/text/vector single-index rebuilding and dump ordering. Selected rebuilds
+must match independently maintained derived bytes; a late unique conflict must roll back every earlier write, and
+corrupt shared entity sequences must not collapse distinct holders before validation. Vector journal tests cross
+multiple batches and index groups. A streaming-only read fixture refuses collecting range scans during export and
+checks creation order and consumer cancellation. External-sort tests check online run compaction, last-insert-wins
+across levels, oversized rows and intermediate-merge failure cleanup. These are intermediate-storage assertions, not
+an absolute heap or RSS cap for LMDB or hannoy. Dated large-fixture observations and disposable regression failures
+are recorded in [maintenance memory evidence](../evidence/maintenance-memory-2026-10-27.md).

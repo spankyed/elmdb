@@ -13,8 +13,10 @@ matter; `durable()` then resolves at once.
 
 The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
-engine can run it again without the caller. On Windows LMDB sizes the file to the map, which is why it starts no
-larger.
+engine can run it again without the caller. Mapping capacity and physical file length are separate. On Windows,
+a read-only view covers the current physical file: its configured bound is capped to that length at open and when
+adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
+the writable capacity. Writable mappings retain the normal capacity policy.
 
 An open refuses files that aren't an elmdb database (`NOT_A_DATABASE`, which names lmdb-js for files lmdb-js
 wrote) and a database in another format (`WRONG_FORMAT`), and a new database is stamped with its format, and
@@ -24,7 +26,29 @@ A database is one directory. A program that needs data with its own life cycle o
 and `runs` (its flow run history), which reset and back up independently.
 
 Several processes may open one database: one writes at a time, LMDB's lock serializing them, and a read-only open
-reads while the app writes (apack's `apack db`).
+reads while the app writes (apack's `apack db`). Read-only access still requires writable reader registration in
+LMDB's lock file. A permission failure or LMDB's implicit unregistered EROFS fallback is refused. After opening,
+elmdb starts a reader and verifies that a lock-table reader slot exists before accessing database contents.
+
+The Node binding acquires an exclusive OS process claim before its first database open. One binary owns the process
+claim until process exit, including after its databases close or its first worker ends. Another physical binding copy
+is refused with `ALREADY_LOADED`; a process-claim I/O failure is refused with `IO`. Independent processes have independent
+claims. Linux binds an abstract Unix datagram socket whose name hashes the ELF loader's per-exec randomness and PID.
+Every binding copy sees the same identity without account lookup, home storage or /proc; independently executed
+containers with equal PIDs have independent identities even when sharing a network namespace. The hash avoids
+publishing the loader randomness itself. The socket is never used for messaging and its handle remains open until
+process exit. Network-namespace changes after loading are outside this contract, as is using an inherited binding
+after fork without exec.
+
+macOS atomically reserves receive-right name `0x000e1d03` in the process's own Mach IPC table. This requires neither
+launchd registration nor filesystem state. Occupation of that reserved name, including by an unrelated component,
+refuses before LMDB opens; it never chooses another name. The error retains `ALREADY_LOADED` but explains that
+either another binding or an unrelated component may own the name; macOS does not identify its owner. Windows uses
+a session-local PID-named kernel event with a non-inheritable handle retained until process exit. The kernel reclaims these claims on ordinary exit and hard
+termination. No coordination files are created, and temporary-directory cleanup cannot split a live claim.
+Failed acquisition is retryable; only success is cached. OS restrictions that deny the required kernel operation
+are reported as IO rather than falling back to an unprotected open. The shipped targets are Linux, macOS and Windows;
+other targets refuse process-claim acquisition as unsupported.
 
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
@@ -35,6 +59,18 @@ the same path, taking the lock first, replaces them and a close removes them.
 
 Types, fields, relation kinds, roles and indexes are declared as data (`schema.md`), stored in the database, and
 compared at open. A type, field, relation kind or role the schema doesn't declare is refused everywhere it is named.
+
+A handle caches its declaration and the stored schema's SHA-256 fingerprint. Each schema-dependent read, export,
+write, unit begin and background build validates that fingerprint inside its transaction. If another process has
+changed it, `SCHEMA_CHANGED` refuses the operation before using stale rules or changing data; close and reopen the
+handle. `schema()` reports the handle's cached declaration. Schema changes compute their effects and primary-data
+inventory inside the same write transaction that installs them, so concurrent data cannot invalidate the decision.
+Local reads hold the schema guard through snapshot execution; export captures its schema/snapshot pair before
+releasing that guard for callbacks. Post-commit watch queries fetch the current declaration for every rerun.
+
+Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
+snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
+callbacks. Coordinate writes in one process when observers must hear every commit.
 
 ## Reads: plans
 
@@ -123,13 +159,27 @@ on disk, and rejects if the sync it waits on fails. A failed sync is final until
 mark the pages it couldn't write clean and drop them (PostgreSQL's "fsyncgate"), so a later sync that succeeds proves
 nothing about them, and every later commit is built on them; every wait after it rejects, naming it. A write or a
 commit passed `durable` commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made
-and its change set delivered. `close()` syncs what is owed, and reports a sync that failed.
+and its change set delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after
+notifying watches, with committed data and in-memory schema already installed. Empty-index markers are settled inside
+the schema/reset/replace transaction, not by a second commit. A caller must not retry the mutation as though it had been
+refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
+The failed call does not return its touched-token list: callers managing tracked tokens must conservatively invalidate
+all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
+`close()` syncs what is owed, and reports a sync that failed.
+
+After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
+without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
+bulk load reuse the reset's freed pages: LMDB protects the immediately preceding generation even with no readers.
+The checkpoint runs before reset's required sync. If it aborts, reset still syncs its committed mutation; only the
+space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
+failure/page-reuse regressions are recorded in [remediation evidence](../evidence/elmdb-remediation.md).
 
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
-database exists (`m/sequence`, raised by every commit, a reset's and a replace's included). A batch's result carries
+database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
+checkpoint does not raise it). A batch's result carries
 the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
@@ -142,13 +192,25 @@ in either order. `db.sequence` is the last commit's.
   change set names the tokens whose keys and ranges it wrote into (`touched`), found through that index in
   O(log N + matches) a key, so a commit's cost doesn't grow with the reads being tracked; a unit logs the keys it
   writes only while some token is tracked. `db.untrack(token)` drops what a token holds, and a caller re-running its
-  reads drops it first. Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
+  reads drops it first. It also cancels dependency registration by any read already in flight under that token.
+  Tracked queries normally execute outside the tracking mutex. The commit sequence is checked under that mutex
+  before dependencies are filed: an intervening commit retries the query once, then a second conflict uses the locked
+  path. This bounds retries under continuous writes and preserves notification ordering. In-flight token reads keep
+  write logging enabled; removing a token cancels their registrations. The same sequence validation applies to watches.
+  Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
   that wrote into what it read. A commit whose writes aren't logged key by key — `reset`, `replaceWith`, `setSchema`,
   `bulkLoad` and the admin changes — is one the caller hears as writing everything.
 - `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
-  after the commit, outside its transaction, on the thread that committed.
+  after the commit, outside its transaction, on the thread that committed. An unwinding listener panic removes that
+  watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
+  its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
+  A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does
+  not strand other watches. An initial read panic returns `WATCH_PANICKED`, distinct from a listener panic.
+  The callback guard also covers destruction of listener captures, including their last database reference.
+  This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
+  returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a
@@ -165,7 +227,14 @@ hears every one as touching everything (`db.sequence` rises with it). Each that 
 unit is open.
 
 - `backup(dir)`: LMDB's copy of one read transaction, compacted (`mdb_env_copy2` with `MDB_CP_COMPACT`), which opens
-  as a database of its own.
+  as a database of its own. A private temporary file is synced and atomically published; the destination is reserved
+  against this process's opens and other publishers. The caller must coordinate exclusive destination ownership
+  across other processes: a backup artifact is not an actively used database. Failure before publication preserves
+  the old backup. Unix backup data files are private to the creating user (mode 0600); arrange ownership/permissions
+  explicitly before restoring under another account. Unix syncs affected directories; Windows clears the temporary
+  file attribute before requesting a write-through replacement. If directory sync
+  fails after publication, `IO` reports that the complete new backup is visible and retrying is safe. Filesystem and
+  device durability still depend on the platform honoring its sync operations.
 - `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
   this database's schema, in one durable unit, the database staying open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
@@ -174,8 +243,12 @@ unit is open.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
-  doesn't declare, a `ref` naming no entity, a relation with a missing end or past its kind's cardinality. heed exposes
-  no walk of LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
+  doesn't declare, a `ref` naming no entity (including nested lists), duplicate unique values, and relations with
+  missing ends, self-links, disallowed endpoint types, invalid/missing info, duplicate unique pairs, excessive
+  cardinality or cycles in acyclic kinds. Constraint auditing reads primary values/relations even when an index is
+  damaged or unbuilt; rebuilding cannot hide these violations. Unique values include values an index cannot store,
+  and use the write contract's numeric, map, single-field list and compound equality rules. heed exposes no walk of
+  LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
 - `rebuild(index?)`: deletes derived data, every index's or one index's, and writes what primary data derives, in one
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
@@ -183,7 +256,10 @@ unit is open.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
-  unbuilt, and `indexStatus()` names them. Closing stops a build between chunks, and the next open finishes it.
+  unbuilt, and `indexStatus()` names them. Each chunk seeks after its last entity sequence in both live/trash
+  ranges and sorts only their bounded candidates: at most 2 × (chunk size + 1) rows in temporary storage. Cursor
+  visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
+  a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role. It refuses a name the schema still declares.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
@@ -195,6 +271,79 @@ unit is open.
 - `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
   one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).
 
+### Recovery resources
+
+Derived-entry sorting, single-index rebuild staging and dump identifier ordering use owned scratch files. Each
+sorter spills at 8 MiB of payload capacities and per-row metadata, plus row-buffer spare capacity and the largest row.
+Text rebuilding can have two sorters active: memberships and final entries. The threshold is per sorter, not an
+operation-wide allowance. A merge keeps one head from each of at most 16 runs plus pending/current rows and I/O buffers.
+Equal-sized runs are compacted as they arrive, keeping at most 15 paths per level rather than a path for every spill.
+Sorting D emitted rows costs O(D log D) comparisons and temporary disk proportional to their encoded bytes.
+
+A single-index rebuild scans primary records rather than trusting derived type ranges. Value entries spill directly;
+unique entries sort by value and holder so conflicts are checked with one adjacent group, without a map of all values.
+Text document memberships spill and merge into one posting bitmap at a time, rather than retaining every term's
+bitmap. Vector identifiers spill; graph updates drain journal batches of at most 1,000 rows, decode one added vector
+at a time, and build each affected graph once after its updates. Rebuild deletes batches of at most 1,000 keys without
+retaining their values. Every replacement remains one atomic transaction, including failures after partial writes.
+
+These bounds concern intermediate collections. One decoded entity and its index expansion, a final text posting,
+hannoy's graph builder, and LMDB's dirty/resident pages have separate workload-dependent costs. A list-valued field
+can emit an entry per indexable element; compound value indexes take scalar fields. Full check/rebuild also retain
+entity/graph inventories, primary constraint/uniqueness auditing and output reports; the complete operation does not
+have an 8 MiB or constant-RSS bound. Replacement streams primary ranges from one source snapshot. The historical
+measurements below concern full rebuilds; later single-index/export observations have their own [dated evidence](../evidence/maintenance-memory-2026-10-27.md).
+
+The recorded operating envelope is the explicit synthetic shapes in the
+[remediation evidence](../evidence/elmdb-remediation.md), measured on 2026-10-26 on a 32 GiB macOS host with local
+storage, fresh processes and uncontrolled filesystem cache. It is not a row-count guarantee for arbitrary schemas
+or a latency SLA. The reference shape has 100,000 entities with 1,024-byte bodies, 199,997 relations, a unique slug
+value index, a nonunique state value index, and one title/body text index. Earlier full rebuild/empty-destination replacement measured 14.04/22.73 s
+and 879,200/992,400 KiB peak RSS, meeting the preselected 2 GiB process / 30 s writer-occupancy upper-bound budget.
+At twice that population, measured rebuild/empty-destination replacement used 1,876,128/1,856,864 KiB and 28.12/47.69 s: replacement
+exceeds the reference time budget, so schedule a longer maintenance window. Those replacement figures exclude
+clearing a populated incumbent and do not establish its time, memory or disk budget. A private staged load of that larger
+dump took 79.64 s and 1,932,001,280 bytes RSS. The recorded 2,000-vector (1,536 dimensions) and 2,000-row/64-KiB
+value profiles also pass recovery and independent restoration checks; they do not establish arbitrary vector capacity.
+
+For these measured shapes with an empty replacement destination, reserve at least 2 GiB on the scratch filesystem
+and the current data-file size plus 2 GiB of free destination space per active recovery operation; add space for a dump if retaining one. These are
+planning allowances over those measured macOS artifacts/scratch, not enforced quotas or universal bounds. They
+are not validated allowances for replacing a populated destination: its old pages and incoming contents coexist
+until commit, so measure its copy-on-write peak separately with `replace-populated`.
+Add both allowances when the filesystems share a volume; check them separately when temporary storage is elsewhere.
+Measure Windows disk allocation separately; a mapping's reserved capacity does not establish physical file length.
+Use `scripts/measure-recovery.mjs` on an owned representative
+copy before using materially larger values, more relations, higher-dimensional/more numerous vectors, different
+vocabulary, compound/list indexes or an unmeasured schema. Keep one recovery operation active while measuring.
+The `replace` runner creates an empty destination; `replace-populated` first prepares an incumbent copy and then
+replaces it atomically. The latter's total elapsed/RSS/disk figures include incumbent preparation, so elapsed time
+is a conservative writer-occupancy upper bound rather than an isolated transaction timing.
+The runner refuses to adopt an existing workload directory and can sample scratch with `--observe`; sampled peaks
+are lower bounds. `TMPDIR`/the platform temporary directory controls scratch placement. On a tmpfs/RAM disk,
+scratch consumes memory as well as the process's RSS; choose a disk-backed location for large recovery work.
+Normal return/error drops remove scratch. SIGKILL, abort or power loss can leave `elmdb-check-*` directories.
+Use a private per-operation scratch parent and remove it only after the owning process has exited; no automatic
+age-based cleanup or scratch quota is provided.
+
+Dump export spill-sorts entity and relation identifiers by their original u64 sequence, then reads each complete row
+from the same snapshot. Relations' full payloads are not retained in the sorter. Vector and sequence ranges use
+fallible cursor visits, stopping on the first output error. The Rust `primary_loads` API delivers owned loads to its
+callback; callers choosing to collect them own that additional memory. One entity's fields, one relation payload or
+one embedding can still be large. Both ordinary failure and unwinding release owned scratch; hard-exit cleanup has
+the limitations above. Export retains the existing dump version and byte ordering (`format.md`, Dumps).
+
+Check and backup take read snapshots rather than the LMDB writer, but long snapshots pin pages and can delay map
+growth. Rebuild/replacement hold the destination writer for their atomic transaction; their entire measured operation
+time is a conservative occupancy upper bound. Dump loading writes only a private staging database until no-clobber
+publication. Linux prefers exclusive rename with an atomic hard-link fallback when exclusive rename is unsupported;
+macOS uses exclusive rename and Windows uses no-replace MoveFileExW. The requested publication and synchronization
+semantics must be available; unsupported operations return an error. The actual coverage and unvalidated configurations
+are described in [filesystems.md](filesystems.md).
+A scratch or pre-publication failure aborts/removes owned work and preserves the earlier database or
+backup. Retrying after an explicit post-publication sync error must respect whether a complete result is already
+visible (`format.md`, Dumps). Filesystem/device sync behavior remains a platform dependency.
+
 ## Errors
 
 Every failure elmdb reports carries a code from one enum, the same in Rust and TypeScript (`ErrorCode`): an `Error`
@@ -203,3 +352,5 @@ elmdb sees it, with N-API's own code. LMDB's own errors map to
 codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compiled out of a release build (heed's
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
+
+Filesystem support and deployment-specific validation requirements are stated in [filesystems.md](filesystems.md).

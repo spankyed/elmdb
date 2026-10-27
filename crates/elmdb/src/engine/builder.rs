@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use crate::database::EngineSchema;
 use crate::error::ErrorCode;
-use crate::schema::Schema;
 use crate::store::Store;
 
 use super::derive::build_chunk;
@@ -29,6 +29,7 @@ pub struct IndexFailure {
 struct State {
     queue: VecDeque<(String, String)>,
     busy: bool,
+    active: Option<(String, String)>,
     stopping: bool,
     failures: Vec<IndexFailure>,
 }
@@ -41,7 +42,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn start(store: Arc<Store>, schema: Arc<Schema>) -> Self {
+    pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>) -> Self {
         let shared: Arc<(Mutex<State>, Condvar)> = Arc::default();
         let thread = {
             let shared = Arc::clone(&shared);
@@ -69,6 +70,12 @@ impl Builder {
     /// kept in, which a schema change and a close take to stop it
     pub fn waiter(&self) -> Waiter {
         Waiter(Arc::clone(&self.shared))
+    }
+
+    /// Work left after stop joins the worker, including an interrupted chunk's index.
+    pub fn pending(&self) -> Vec<(String, String)> {
+        let state = self.shared.0.lock().expect("the builder's lock is never poisoned");
+        state.active.iter().chain(state.queue.iter()).cloned().collect()
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
@@ -123,7 +130,7 @@ impl Drop for Builder {
     }
 }
 
-fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
+fn run(store: &Store, schema: &EngineSchema, shared: &(Mutex<State>, Condvar)) {
     let (lock, changed) = shared;
     loop {
         let (entity_type, index) = {
@@ -134,6 +141,7 @@ fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
                 }
                 if let Some(next) = state.queue.pop_front() {
                     state.busy = true;
+                    state.active = Some(next.clone());
                     break next;
                 }
                 state.busy = false;
@@ -148,6 +156,7 @@ fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
             }
             let chunk = store.write(
                 |txn, db| {
+                    schema.validate(txn, db)?;
                     let mut state = UnitState::default();
                     let mut t = Txn { txn, db, state: &mut state, schema, now: 0.0 };
                     build_chunk(&mut t, &entity_type, &index, after, CHUNK)
@@ -173,6 +182,7 @@ fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
             }
         }
         let mut state = lock.lock().expect("the builder's lock is never poisoned");
+        state.active = None;
         state.busy = !state.queue.is_empty();
         changed.notify_all();
     }

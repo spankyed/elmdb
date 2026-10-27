@@ -460,3 +460,56 @@ fn re_embedding_a_chunk_names_a_tracked_near() {
     let (_, changes) = db.write(&crate::engine::tests::batch(vec![again]), false).unwrap();
     assert_eq!(changes.touched, [5]);
 }
+
+#[test]
+fn single_vector_rebuild_spills_identifiers_and_preserves_embeddings_and_neighbors() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    embed_pending(&db, topic);
+    let expected = ids(&db, docs(), json!([{ "step":"near","vector":[1.0,0.0,0.0],"k":3 }]));
+    super::super::derive::sorted::with_budget(1, || db.rebuild(Some(("Doc", "meaning")))).unwrap();
+    assert_eq!(ids(&db, docs(), json!([{ "step":"near","vector":[1.0,0.0,0.0],"k":3 }])), expected);
+    assert!(db.check().unwrap().is_clean());
+    super::super::derive::fail_next_scratch();
+    assert_eq!(db.rebuild(Some(("Doc", "meaning"))).unwrap_err().code, ErrorCode::Io);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn vector_flush_drains_multiple_journal_batches_and_index_groups() {
+    use crate::engine::unit::Read;
+    let dir = tempfile::tempdir().unwrap();
+    let mut defs = indexes();
+    defs["other"] = json!({"kind":"vector","from":["title"],"dims":DIMS,"model":"m1","metric":"l2"});
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema_with(defs)), syncs: false, ..Default::default() })
+            .unwrap();
+    let count = 1005;
+    write(
+        &db,
+        (0..count)
+            .map(|i| {
+                json!({"op":"create","type":"Doc","id":format!("Doc-{i:04}"),
+        "fields":{"title":"one chunk"}})
+            })
+            .collect(),
+    )
+    .unwrap();
+    let mut ops = Vec::new();
+    for index in ["meaning", "other"] {
+        let pending = read(&db, json!({"read":"pendingEmbeddings","type":"Doc","index":index,"limit":2000})).unwrap();
+        let chunks = pending["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), count);
+        for chunk in chunks {
+            ops.push(json!({"op":"embed","id":chunk["id"],"index":index,"chunk":chunk["chunk"],
+            "hash":chunk["hash"],"model":"m1","vector":[1.0,0.5,0.25]}));
+        }
+    }
+    write(&db, ops).unwrap();
+    assert!(
+        db.snapshot(|r| r.scan(&crate::format::Prefix::VectorJournal.key().to_vec())).unwrap().is_empty(),
+        "commit must drain every journal batch and index group"
+    );
+    assert!(db.check().unwrap().is_clean());
+}

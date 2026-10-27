@@ -145,7 +145,8 @@ These are TypeScript's `?` and `| null`, kept apart because they mean different 
 
 A `ref` lets `check()` report ids that name no entity and lets a plan follow one like an edge, without the field being
 a relation. A relation is the better choice when the link has a kind, info or an order; a `ref` suits a foreign key
-such as a chunk's `indexId`.
+such as a chunk's `indexId`. Missing-target auditing also follows nested lists whose declared element type is `ref`;
+violations identify the element path. Strings inside `object` and `any` remain opaque.
 
 ## Relations
 
@@ -276,3 +277,15 @@ the registered packs' fragments, refusing a name two packs declare and naming bo
 - **`declaredBy`** as the pack's id.
 
 `additionalFields` is `refuse` for every apack type, since every field a pack writes is in its shape.
+
+
+## Concurrent processes
+
+Declarations and index changes commit atomically. A schema change evaluates existing primary data under that same
+write transaction; another process cannot insert data between the decision and the change. An already open handle
+validates its cached schema fingerprint inside each schema-dependent transaction and returns `SCHEMA_CHANGED` when
+the stored declaration differs. Close and reopen the handle to adopt it. An explicit `setSchema` evaluates its requested
+declaration against the current stored one; it does not silently adopt a conflicting concurrent change.
+
+A stale handle also refuses `setSchema`, including a request identical to the newer stored declaration. Close and
+reopen before proposing schema changes; a setter cannot silently adopt or overwrite another process's declaration.

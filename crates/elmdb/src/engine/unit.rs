@@ -67,6 +67,16 @@ pub trait Read {
     /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Fallible streaming visit: stop at the first consumer error without collecting the range.
+    fn try_visit(&self, prefix: &[u8], mut each: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
+        let mut result = Ok(());
+        self.visit(prefix, |key, value| {
+            result = each(key, value);
+            result.is_ok()
+        })?;
+        result
+    }
+
     fn schema(&self) -> &Schema;
     /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);
@@ -224,6 +234,24 @@ impl Txn<'_, '_> {
         self.log(key);
         self.db.delete(self.txn, key)?;
         Ok(())
+    }
+
+    /// Delete bounded batches of keys, seeking from the beginning after each batch has been removed. Values are
+    /// never copied, and already removed rows are not revisited. Preserve normal undo/tracking through del.
+    pub(crate) fn clear_prefix(&mut self, prefix: &[u8]) -> Result<()> {
+        loop {
+            let mut keys = Vec::new();
+            self.visit(prefix, |key, _| {
+                keys.push(key.to_vec());
+                keys.len() < 1000
+            })?;
+            if keys.is_empty() {
+                return Ok(());
+            }
+            for key in keys {
+                self.del(&key)?;
+            }
+        }
     }
 
     pub fn event(&mut self, event: Event) {
