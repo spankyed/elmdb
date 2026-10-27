@@ -474,3 +474,117 @@ fn a_read_only_process_requires_registration_while_a_writer_is_open() {
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     store.close().unwrap();
 }
+
+#[test]
+fn backup_failure_owns_only_its_private_file_and_releases_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"old").unwrap();
+    store.copy_to(target.path()).unwrap();
+    put(&store, "value", b"new").unwrap();
+    let sentinel = target.path().join("data.mdb.partial");
+    std::fs::write(&sentinel, b"belongs to someone else").unwrap();
+    backup::HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(|point, path| {
+            if point == backup::Point::Ready {
+                assert!(path.file_name().unwrap().to_string_lossy().starts_with(".elmdb-backup-"));
+                return Err(Error::new(ErrorCode::Io, "injected before publication"));
+            }
+            Ok(())
+        }))
+    });
+    let failed = store.copy_to(target.path());
+    backup::HOOK.with_borrow_mut(|hook| *hook = None);
+    assert_eq!(failed.unwrap_err().code, ErrorCode::Io);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"belongs to someone else");
+    assert!(
+        std::fs::read_dir(target.path()).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".elmdb-backup-"))
+    );
+    let earlier = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&earlier, "value").as_deref(), Some(&b"old"[..]));
+    earlier.close().unwrap();
+    store.copy_to(target.path()).unwrap();
+    let copied = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copied, "value").as_deref(), Some(&b"new"[..]));
+}
+
+#[test]
+fn backup_reserves_destination_against_open_and_another_publisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    put(&store, "value", b"complete").unwrap();
+    let (entered, ready) = std::sync::mpsc::channel();
+    let (resume, continued) = std::sync::mpsc::channel();
+    let destination = target.path().to_owned();
+    let worker_store = store.clone();
+    let worker = std::thread::spawn(move || {
+        backup::HOOK.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move |point, _| {
+                if point == backup::Point::Ready {
+                    entered.send(()).map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
+                    continued
+                        .recv_timeout(Duration::from_secs(5))
+                        .map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
+                }
+                Ok(())
+            }))
+        });
+        let result = worker_store.copy_to(&destination);
+        backup::HOOK.with_borrow_mut(|hook| *hook = None);
+        result
+    });
+    ready.recv_timeout(Duration::from_secs(5)).expect("publisher reached ready point");
+    let opened = Store::open(target.path(), quiet());
+    let published = store.copy_to(target.path());
+    resume.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    assert!(matches!(opened, Err(Error { code: ErrorCode::AlreadyOpen, .. })));
+    assert_eq!(published.unwrap_err().code, ErrorCode::AlreadyOpen);
+    let copy = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    backup::HOOK.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(|point, _| {
+            if point == backup::Point::Published {
+                return Err(Error::new(ErrorCode::Io, "injected sync failure"));
+            }
+            Ok(())
+        }))
+    });
+    let result = store.copy_to(target.path());
+    backup::HOOK.with_borrow_mut(|hook| *hook = None);
+    let error = result.unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"));
+    let copy = Store::open(target.path(), quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let target = root.path().join("one/two");
+    #[cfg(unix)]
+    assert_eq!(backup::directories_to_sync(&target), [target.clone(), root.path().join("one"), root.path().to_owned()]);
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    store.copy_to(&target).unwrap();
+    let names: Vec<_> = std::fs::read_dir(&target).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names, ["data.mdb"]);
+    let copy = Store::open(&target, quiet()).unwrap();
+    assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}

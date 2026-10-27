@@ -6,6 +6,7 @@
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
 
+mod backup;
 pub mod sync;
 
 use std::collections::HashSet;
@@ -638,35 +639,12 @@ impl Store {
     }
 
     /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed. The
-    /// copy is written beside it, synced and renamed into place, so a failed copy leaves an earlier backup whole; a
-    /// target open in this process is refused, the copy's file truncating the one its map reads
+    /// copy uses an owned temporary file, synced and atomically replaced while the destination is reserved against
+    /// opens/publishers in this process. Failure before publication preserves an earlier backup; a later directory
+    /// sync failure reports that the complete copy is visible and a retry is safe. The caller owns the destination
+    /// exclusively against other processes; a backup artifact must not be an actively used database
     pub fn copy_to(&self, target: &Path) -> Result<()> {
-        std::fs::create_dir_all(target)?;
-        let target = target.canonicalize()?;
-        if open_paths().lock().expect("the open-paths lock is never poisoned").contains(&target) {
-            return Err(Error::new(
-                ErrorCode::AlreadyOpen,
-                format!("The database at {} is open in this process: back up into another directory", target.display()),
-            ));
-        }
-        let partial = target.join("data.mdb.partial");
-        loop {
-            // The copy reads through the map in a transaction of its own, so a growth must wait for it to finish
-            let guard = self.gate();
-            match self.env.copy_to_path(&partial, heed::CompactionOption::Enabled) {
-                Ok(file) => {
-                    file.sync_all()?;
-                    break;
-                }
-                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                    drop(guard);
-                    self.adopt_map_size()?;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-        std::fs::rename(&partial, target.join("data.mdb"))?;
-        Ok(())
+        backup::copy(self, target)
     }
 
     /// Bytes the data file holds on disk

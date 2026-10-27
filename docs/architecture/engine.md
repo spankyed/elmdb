@@ -185,7 +185,12 @@ hears every one as touching everything (`db.sequence` rises with it). Each that 
 unit is open.
 
 - `backup(dir)`: LMDB's copy of one read transaction, compacted (`mdb_env_copy2` with `MDB_CP_COMPACT`), which opens
-  as a database of its own.
+  as a database of its own. A private temporary file is synced and atomically published; the destination is reserved
+  against this process's opens and other publishers. The caller must coordinate exclusive destination ownership
+  across other processes: a backup artifact is not an actively used database. Failure before publication preserves
+  the old backup. Unix syncs affected directories; Windows requests a write-through replacement. If directory sync
+  fails after publication, `IO` reports that the complete new backup is visible and retrying is safe. Filesystem and
+  device durability still depend on the platform honoring its sync operations.
 - `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
   this database's schema, in one durable unit, the database staying open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
