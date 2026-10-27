@@ -170,8 +170,25 @@ pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static BEFORE_WRITE_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static FAIL_NEXT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     pub(crate) static FAIL_RESET_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+// LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
+// mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
+fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
+    let _reader = env.read_txn()?;
+    if env.info().number_of_readers == 0 {
+        return Err(Error::new(
+            ErrorCode::Io,
+            format!(
+                "Cannot open {} with LMDB reader registration: no lock table is mapped. Grant write access to lock.mdb on a writable filesystem, or use a writable copy",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 impl Store {
@@ -232,6 +249,9 @@ impl Store {
                 e => e.into(),
             })?;
 
+        if options.read_only {
+            require_registered_reader(&env, &canonical)?;
+        }
         let db = Self::open_db(&env, &canonical, options.read_only)?;
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
@@ -446,16 +466,30 @@ impl Store {
         }
         let mut growths = 0;
         loop {
+            #[cfg(test)]
+            BEFORE_WRITE_RESERVATION.with_borrow_mut(|hook| {
+                if let Some(hook) = hook.take() {
+                    hook();
+                }
+            });
+            // Serialize claiming the native writer with begin's unit reservation. Otherwise a unit can slip
+            // between the earlier check and write_txn, leaving a caller waiting while it holds a schema guard.
+            let open = self.unit.lock().expect("the unit's lock is never poisoned");
+            if *open {
+                return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: write through it or end it first"));
+            }
             let guard = self.gate();
             let mut txn = match self.env.write_txn() {
                 Ok(txn) => txn,
                 Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                     drop(guard);
+                    drop(open);
                     self.adopt_map_size()?;
                     continue;
                 }
                 Err(e) => return Err(e.into()),
             };
+            drop(open);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {

@@ -26,6 +26,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: refuse unregistered readers on an actual read-only mount
+        run: python3 scripts/check-read-only-mount.py
       - run: cargo xtask check-generated
       - run: cargo xtask check-one-lmdb
       - name: binding
@@ -58,6 +60,9 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+      - name: prove the Windows backup attribute regression fires
+        if: runner.os == 'Windows'
+        run: python scripts/check-windows-backup-mutation.py
       # On Windows, @napi-rs/cli 3.10.9's build times out on its own filesystem-reconciliation lock, so the binding
       # is built by cargo and named as napi's loader expects; everywhere else napi builds it
       - name: binding

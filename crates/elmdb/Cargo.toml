@@ -45,6 +45,9 @@ schemars = { workspace = true, optional = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 heed = { workspace = true, features = ["posix-sem"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true
 

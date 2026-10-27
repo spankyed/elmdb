@@ -444,6 +444,7 @@ dependencies = [
  "icu_collator",
  "icu_locale_core",
  "levenshtein_automata",
+ "libc",
  "parking_lot",
  "proptest",
  "rand 0.10.3",

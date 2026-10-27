@@ -463,6 +463,7 @@ fn a_close_returns_though_a_wait_for_durability_is_still_held() {
 #[test]
 fn child_read_only_requires_registration() {
     let Ok(path) = std::env::var("ELMDB_REVIEW_READ_ONLY") else { return };
+    println!("ELMDB_READ_ONLY_CHILD_ENTERED");
     let path = std::path::Path::new(&path);
     let can_register = std::fs::OpenOptions::new().write(true).open(path.join("lock.mdb")).is_ok();
     match Store::open(path, StoreOptions { read_only: true, ..quiet() }) {
@@ -489,6 +490,10 @@ fn a_read_only_process_requires_registration_while_a_writer_is_open() {
         .output()
         .unwrap();
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ELMDB_READ_ONLY_CHILD_ENTERED"),
+        "the selected child regression must actually run"
+    );
     assert!(
         output.status.success(),
         "{}\n{}",
@@ -609,6 +614,54 @@ fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     store.copy_to(&target).unwrap();
     let names: Vec<_> = std::fs::read_dir(&target).unwrap().map(|e| e.unwrap().file_name()).collect();
     assert_eq!(names, ["data.mdb"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        assert_eq!(
+            std::fs::metadata(target.join("data.mdb")).unwrap().file_attributes() & 0x100,
+            0,
+            "a published backup must not retain FILE_ATTRIBUTE_TEMPORARY"
+        );
+    }
     let copy = Store::open(&target, quiet()).unwrap();
     assert_eq!(get(&copy, "value").as_deref(), Some(&b"complete"[..]));
+}
+
+#[test]
+fn a_read_only_environment_requires_a_real_lock_table() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    let mut options = EnvOpenOptions::new().read_txn_without_tls();
+    // SAFETY: this private test database has no other open handle or writer. NO_LOCK deliberately simulates
+    // LMDB's EROFS fallback; no database data is accessed through this unregistered environment.
+    let env = unsafe { options.flags(EnvFlags::READ_ONLY | EnvFlags::NO_LOCK).open(dir.path()) }.unwrap();
+    let error = require_registered_reader(&env, dir.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("no lock table"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires an isolated privileged mount namespace; scripts/check-read-only-mount.py runs it in CI"]
+fn read_only_mount_requires_reader_registration() {
+    assert_eq!(std::env::var("ELMDB_TEST_READ_ONLY_MOUNT").as_deref(), Ok("1"));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "proof", b"registered").unwrap();
+    store.close().unwrap();
+    assert!(Command::new("mount").arg("--bind").arg(dir.path()).arg(dir.path()).status().unwrap().success());
+    struct Mount(std::path::PathBuf);
+    impl Drop for Mount {
+        fn drop(&mut self) {
+            let _ = Command::new("umount").arg(&self.0).status();
+        }
+    }
+    let _mount = Mount(dir.path().to_owned());
+    assert!(Command::new("mount").args(["-o", "remount,bind,ro"]).arg(dir.path()).status().unwrap().success());
+    let error = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() })
+        .err()
+        .expect("a read-only mount must not open without a lock table");
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("registration"));
+    println!("ELMDB_READ_ONLY_MOUNT_REFUSED");
 }

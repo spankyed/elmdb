@@ -110,9 +110,24 @@ fn move_file(source: &Path, target: &Path, replace: bool) -> std::io::Result<()>
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn MoveFileExW(source: *const u16, target: *const u16, flags: u32) -> i32;
+        fn GetFileAttributesW(path: *const u16) -> u32;
+        fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
     }
     let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
     let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: source is a live terminated path. Preserve unrelated attributes while clearing tempfile's hint
+    // before publishing a durable file; a failed attribute update leaves the owned temporary file unpublished.
+    let attributes = unsafe { GetFileAttributesW(source.as_ptr()) };
+    if attributes == u32::MAX {
+        return Err(std::io::Error::last_os_error());
+    }
+    if attributes & 0x100 != 0 {
+        let remaining = attributes & !0x100;
+        // SAFETY: the same valid source path is retained; NORMAL is used when no other attribute remains.
+        if unsafe { SetFileAttributesW(source.as_ptr(), if remaining == 0 { 0x80 } else { remaining }) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
     const REPLACE_EXISTING: u32 = 1;
     const WRITE_THROUGH: u32 = 8;
     // SAFETY: both pointers refer to live, NUL-terminated UTF-16 path buffers. The temporary file is closed and in
@@ -129,7 +144,30 @@ pub(crate) fn publish_new(source: &Path, target: &Path) -> std::io::Result<()> {
     {
         move_file(source, target, false)
     }
-    #[cfg(not(windows))]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+        let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+        #[cfg(target_os = "linux")]
+        // SAFETY: both paths remain live terminated strings; AT_FDCWD uses their absolute paths and
+        // RENAME_NOREPLACE atomically refuses an existing destination without requiring hard links.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                libc::AT_FDCWD,
+                source.as_ptr(),
+                libc::AT_FDCWD,
+                target.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        #[cfg(target_os = "macos")]
+        // SAFETY: the two live terminated paths are on the same volume; RENAME_EXCL refuses replacement atomically.
+        let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
+        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         std::fs::hard_link(source, target)
     }
