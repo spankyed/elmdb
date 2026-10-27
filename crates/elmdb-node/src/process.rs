@@ -47,11 +47,35 @@ fn acquire(path: &Path) -> io::Result<File> {
     }
 }
 
+/// Keep the accepted Windows image and its OnceLock mapped after its first worker unloads it. A leaked claim
+/// handle alone survives DLL unloading, but a reloaded image would lose the static and reject its own old claim.
+#[cfg(windows)]
+fn pin_module() -> io::Result<()> {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut c_void) -> i32;
+    }
+    const FROM_ADDRESS: u32 = 0x0000_0004;
+    const PIN: u32 = 0x0000_0001;
+    let mut module = std::ptr::null_mut();
+    // SAFETY: FROM_ADDRESS interprets the second argument as an address, not a wide string. This function's
+    // address belongs to the currently executing binding image; module points to valid output storage. PIN retains
+    // that image until process termination, so no FreeLibrary call is required or appropriate for this handle.
+    let success = unsafe { GetModuleHandleExW(FROM_ADDRESS | PIN, pin_module as *const () as *const u16, &mut module) };
+    if success == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+}
+
 /// Claims the process before this binary opens any database. Each independently loaded binary owns its own `OnceLock`
 /// and independently opened file handle, so only one wins even when first opens race across worker threads.
 pub fn claim() -> Result<(), Code> {
     static CLAIMED: OnceLock<io::Result<File>> = OnceLock::new();
-    match CLAIMED.get_or_init(|| acquire(&claim_file())) {
+    match CLAIMED.get_or_init(|| {
+        let claim = acquire(&claim_file())?;
+        #[cfg(windows)]
+        pin_module()?;
+        Ok(claim)
+    }) {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let mine = process_path::get_dylib_path()
