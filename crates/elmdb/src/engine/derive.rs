@@ -2,6 +2,10 @@
 //! compares with what is stored and `rebuild()` writes in its place. An index is read only once built (its `d/xb`
 //! marker); writes keep every index whether built or not, so building one fills in what predates it.
 
+mod audit;
+#[cfg(test)]
+use audit::{PrimaryGraph, audit_cycles};
+
 use std::collections::BTreeMap;
 
 use rmpv::Value;
@@ -10,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::Prefix;
 use crate::format::key::{Part, decode as decode_key};
-use crate::schema::{Cardinality, Schema};
+use crate::schema::Schema;
 
 use super::entities::{self, ValueIndex, entries_of, value_indexes};
 use super::keys;
@@ -279,121 +283,11 @@ pub fn check(r: &impl Read) -> Result<CheckReport> {
     for key in actual.keys().filter(|k| !expected.contains_key(*k)) {
         differences.push(Difference { key: key_text(key), kind: "extra".into() });
     }
-    let mut violations = violations(r)?;
+    let mut violations = audit::violations(r)?;
     for message in vector::check_items(r, r.schema())? {
         violations.push(Violation { subject: "vector graph".into(), message });
     }
     Ok(CheckReport { differences, violations })
-}
-
-/// Rows that break the schema's rules: a missing required field, a value its field doesn't take, a field its type
-/// doesn't declare, a dangling reference, and relations past their kind's cardinality or with a missing end
-fn violations(r: &impl Read) -> Result<Vec<Violation>> {
-    let schema: &Schema = r.schema();
-    let mut out = Vec::new();
-    for e in entities_of(r)? {
-        let t = ids::type_of(&e.id);
-        let Some(def) = schema.types.get(t) else { continue };
-        let fields = entities::fields(r, &e.id)?;
-        let held: std::collections::HashSet<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
-        for (name, field) in &def.fields {
-            if !field.optional && !held.contains(name.as_str()) {
-                out.push(Violation { subject: e.id.clone(), message: format!("lacks {name}, which every {t} holds") });
-            }
-        }
-        for (name, bytes) in &fields {
-            if entities::field::RESERVED.contains(&name.as_str()) {
-                continue;
-            }
-            let value = values::decode(bytes)?;
-            match def.fields.get(name) {
-                Some(field) => {
-                    if let Err(e2) = values::check_field(t, name, field, &value) {
-                        out.push(Violation { subject: e.id.clone(), message: e2.message });
-                    }
-                    if let crate::schema::ValueType::Ref { .. } = field.value
-                        && let Some(target) = value.as_str()
-                        && entities::record(r, target)?.is_none()
-                    {
-                        out.push(Violation {
-                            subject: e.id.clone(),
-                            message: format!("{name} names {target}, which no entity has"),
-                        });
-                    }
-                }
-                None if def.additional_fields == crate::schema::AdditionalFields::Refuse => {
-                    out.push(Violation {
-                        subject: e.id.clone(),
-                        message: format!("holds {name}, which {t} doesn't declare"),
-                    });
-                }
-                None => {}
-            }
-        }
-    }
-    // A unique index whose entries name more than one entity: data loaded unchecked can hold such values. Every type
-    // with entities has the built-in ones, declared or not
-    let mut types: std::collections::BTreeSet<String> = schema.types.keys().cloned().collect();
-    for e in entities_of(r)? {
-        types.insert(ids::type_of(&e.id).to_owned());
-    }
-    for entity_type in &types {
-        for index in value_indexes(schema, entity_type).into_iter().filter(|i| i.unique) {
-            let mut holders: BTreeMap<Vec<u8>, (Vec<Part>, Vec<String>)> = BTreeMap::new();
-            for (key, id) in r.scan(&keys::index_range(entity_type, &index.name, &[]))? {
-                let mut parts = decode_key(&key)?;
-                parts.drain(..3);
-                parts.pop();
-                let holder = values::decode(&id)?.as_str().unwrap_or_default().to_owned();
-                holders.entry(crate::format::key::encode(&parts)).or_insert_with(|| (parts, Vec::new())).1.push(holder);
-            }
-            for (parts, ids) in holders.into_values().filter(|(_, ids)| ids.len() > 1) {
-                out.push(Violation {
-                    subject: ids.join(", "),
-                    message: format!("hold the same {entity_type}.{} value {parts:?}, which is unique", index.name),
-                });
-            }
-        }
-    }
-    // Cardinality counts far ends, not edges (`schema.md`, Relations): a second edge of a kind that isn't unique, to
-    // the same far end, leaves a target one source, as the write that allowed it found
-    let mut targets_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
-    let mut sources_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
-    for (key, bytes) in r.scan(&keys::all_relations())? {
-        let relation = key_text(&key);
-        let s: relations::Stored = rmp_serde::from_slice(&bytes)
-            .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")))?;
-        for end in [&s.source, &s.target] {
-            if entities::record(r, end)?.is_none() {
-                out.push(Violation { subject: relation.clone(), message: format!("joins {end}, which no entity has") });
-            }
-        }
-        targets_of.entry((s.source.clone(), s.kind.clone())).or_default().insert(s.target.clone());
-        sources_of.entry((s.target.clone(), s.kind.clone())).or_default().insert(s.source.clone());
-    }
-    for (kind, def) in &schema.relations {
-        let one_source = matches!(def.cardinality, Cardinality::OneToMany | Cardinality::OneToOne);
-        let one_target = matches!(def.cardinality, Cardinality::ManyToOne | Cardinality::OneToOne);
-        for ((end, k), far) in &sources_of {
-            let n = far.len();
-            if k == kind && one_source && n > 1 {
-                out.push(Violation {
-                    subject: end.clone(),
-                    message: format!("has {n} {kind} sources, and a {kind} target has one"),
-                });
-            }
-        }
-        for ((end, k), far) in &targets_of {
-            let n = far.len();
-            if k == kind && one_target && n > 1 {
-                out.push(Violation {
-                    subject: end.clone(),
-                    message: format!("has {n} {kind} targets, and a {kind} source has one"),
-                });
-            }
-        }
-    }
-    Ok(out)
 }
 
 /// Deletes every compared derived key, and with `index` only that index's entries, then writes what primary data
@@ -488,6 +382,32 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
     Ok(())
 }
 
+/// Seek both type ranges after the saved place, reading at most one chunk plus lookahead from each. Only these
+/// bounded candidates are sorted; earlier chunks are never walked again. At fixed chunk size visits grow linearly
+/// with the population, and temporary row storage is at most 2 * (limit + 1).
+fn build_rows(t: &Txn<'_, '_>, entity_type: &str, after: u64, limit: usize) -> Result<(Vec<(u64, String)>, usize)> {
+    let mut candidates = Vec::new();
+    let mut visited = 0;
+    let (txn, db) = t.raw();
+    for trashed in [false, true] {
+        let low = keys::of_type(trashed, entity_type, after);
+        let (_, high) = crate::format::key::prefix_range(&keys::type_range(trashed, entity_type));
+        let range = (std::ops::Bound::Excluded(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+        for entry in db.range(txn, &range)?.take(limit.saturating_add(1)) {
+            let (key, id) = entry?;
+            visited += 1;
+            let seq = match decode_key(key)?.pop() {
+                Some(Part::Number(n)) => n as u64,
+                _ => return Err(Error::new(ErrorCode::Corrupted, "An entity's type-range place doesn't read")),
+            };
+            candidates.push((seq, values::decode(id)?.as_str().unwrap_or_default().to_owned()));
+        }
+    }
+    candidates.sort_by_key(|(seq, _)| *seq);
+    candidates.truncate(limit.saturating_add(1));
+    Ok((candidates, visited))
+}
+
 /// Builds one index of a type over the entities after place `after`, at most `limit` of them, answering the last
 /// place built or `None` when the whole type is done (and the marker written). Refuses an entry a unique index holds
 /// for another entity (`UNIQUE`), which leaves the index unbuilt
@@ -498,20 +418,7 @@ pub fn build_chunk(
     after: u64,
     limit: usize,
 ) -> Result<Option<u64>> {
-    let mut ranged: Vec<(u64, String)> = Vec::new();
-    for trashed in [false, true] {
-        for (key, id) in t.scan(&keys::type_range(trashed, entity_type))? {
-            let seq = match decode_key(&key)?.pop() {
-                Some(Part::Number(n)) => n as u64,
-                _ => 0,
-            };
-            if seq > after {
-                ranged.push((seq, values::decode(&id)?.as_str().unwrap_or_default().to_owned()));
-            }
-        }
-    }
-    ranged.sort_by_key(|(seq, _)| *seq);
-    let chunk: Vec<(u64, String)> = ranged.into_iter().take(limit + 1).collect();
+    let (chunk, _) = build_rows(t, entity_type, after, limit)?;
     let done = chunk.len() <= limit;
     let mut last = after;
     let Some(index) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) else {
@@ -564,4 +471,74 @@ pub fn build_chunk(
         return Ok(None);
     }
     Ok(Some(last))
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+
+    #[test]
+    fn chunk_cursors_visit_linear_rows_across_mixed_live_and_trash_ranges() {
+        use super::super::unit::UnitState;
+        use crate::store::{Store, StoreOptions};
+        let schema = Schema::from_json(&serde_json::json!({"$schema":crate::schema::SCHEMA_LANGUAGE})).unwrap();
+        for size in [1024u64, 4096, 16384] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+            store
+                .write(
+                    |txn, db| {
+                        for seq in 1..=size {
+                            db.put(
+                                txn,
+                                &keys::of_type(seq % 3 == 0, "Node", seq),
+                                &values::encode(&format!("Node-{seq}").into()),
+                            )?;
+                        }
+                        let mut state = UnitState::new(false);
+                        let t = Txn { txn, db, state: &mut state, schema: &schema, now: 0.0 };
+                        let mut after = 0;
+                        let mut visited = 0;
+                        let mut count = 0;
+                        loop {
+                            let (rows, visits) = build_rows(&t, "Node", after, 64)?;
+                            visited += visits;
+                            assert!(rows.len() <= 65);
+                            let done = rows.len() <= 64;
+                            for (seq, id) in rows.into_iter().take(64) {
+                                count += 1;
+                                assert_eq!(seq, count);
+                                assert_eq!(id, format!("Node-{count}"));
+                                after = seq;
+                            }
+                            if done {
+                                break;
+                            }
+                        }
+                        assert_eq!(count, size);
+                        assert!(visited <= 3 * size as usize, "rows={size}, visited={visited}");
+                        println!("rows={size}, cursor_entries={visited}, chunk=64");
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn cycle_audit_handles_a_long_chain_and_parallel_forward_edges() {
+        let mut graph = PrimaryGraph::new();
+        for i in 0..20_000 {
+            graph.insert(i.to_string(), vec![((i + 1).to_string(), format!("edge-{i}"))]);
+        }
+        graph.get_mut("0").unwrap().push(("1".into(), "parallel".into()));
+        let mut violations = Vec::new();
+        audit_cycles("chain", &graph, &mut violations);
+        assert!(violations.is_empty());
+        graph.insert("20000".into(), vec![("0".into(), "back-edge".into())]);
+        audit_cycles("chain", &graph, &mut violations);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].subject, "back-edge");
+    }
 }

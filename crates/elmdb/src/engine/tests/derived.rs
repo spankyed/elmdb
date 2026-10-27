@@ -654,3 +654,362 @@ fn a_short_code_prefix_stored_codes_hold_stays_with_their_type() {
     // Declared again as it was, it takes its codes back
     with_schema(&dir, schema(json!({ "Note": { "shortCode": { "prefix": "NTE" } } }))).unwrap().close().unwrap();
 }
+
+#[test]
+fn check_reports_missing_references_through_nested_lists_before_and_after_rebuild() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(
+        &dir,
+        json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": {"Node": {"fields": {
+                "links": {"type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}},
+                "opaque": {"type":"any", "optional":true}
+            }}}
+        }),
+    )
+    .unwrap();
+    write(
+        &db,
+        vec![
+            json!({"op":"create", "type":"Node", "id":"Node-present", "fields":{"links":[]}}),
+            json!({"op":"create", "type":"Node", "id":"Node-root", "fields":{
+            "links":[["Node-present", "Node-missing"], ["Node-gone"]], "opaque":["Node-opaque"]}}),
+        ],
+    )
+    .unwrap();
+    for rebuilt in [false, true] {
+        if rebuilt {
+            db.rebuild(None).unwrap();
+        }
+        let report = db.check().unwrap();
+        assert_eq!(report.violations.len(), 2, "{report:?}");
+        assert!(report.violations.iter().all(|v| v.subject == "Node-root"));
+        assert!(report.violations.iter().any(|v| v.message.contains("links[0][1] names Node-missing")));
+        assert!(report.violations.iter().any(|v| v.message.contains("links[1][0] names Node-gone")));
+    }
+}
+
+#[test]
+fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild() {
+    use crate::engine::{keys, relations::Stored};
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(
+        &dir,
+        json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": {"Node":{"fields":{}}, "Other":{"fields":{}}},
+            "relations": {
+                "strict": {"cardinality":"many-to-many", "unique":true, "acyclic":true,
+                    "endpoints":[{"source":"Node", "target":"Node"}], "info":{"type":"integer"}},
+                "refs": {"cardinality":"many-to-many", "info":{
+                    "type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}}}
+            }
+        }),
+    )
+    .unwrap();
+    write(
+        &db,
+        vec![
+            json!({"op":"create", "type":"Node", "id":"Node-a"}),
+            json!({"op":"create", "type":"Node", "id":"Node-b"}),
+            json!({"op":"create", "type":"Node", "id":"Node-c"}),
+            json!({"op":"create", "type":"Other", "id":"Other-o"}),
+        ],
+    )
+    .unwrap();
+    let rows = [
+        ("forward", "strict", "Node-a", "Node-b", Some(1.into())),
+        ("cycle", "strict", "Node-b", "Node-a", Some(2.into())),
+        ("duplicate", "strict", "Node-a", "Node-b", Some(3.into())),
+        ("self", "strict", "Node-a", "Node-a", Some(4.into())),
+        ("endpoint", "strict", "Other-o", "Node-a", Some(5.into())),
+        ("required", "strict", "Node-a", "Node-c", None),
+        ("typed", "strict", "Node-c", "Node-b", Some("wrong".into())),
+        ("missing", "strict", "Node-a", "Node-missing", Some(8.into())),
+        (
+            "nested",
+            "refs",
+            "Node-a",
+            "Node-b",
+            Some(rmpv::Value::Array(vec![rmpv::Value::Array(vec!["Node-missing".into()])])),
+        ),
+    ];
+    damage(&db, |txn, d| {
+        for (seq, (id, kind, source, target, info)) in rows.iter().enumerate() {
+            let stored = Stored {
+                kind: (*kind).into(),
+                source: (*source).into(),
+                target: (*target).into(),
+                info: info.clone(),
+                seq: seq as u64 + 1,
+            };
+            d.put(txn, &keys::relation(&format!("Relation-{id}")), &rmp_serde::to_vec_named(&stored).unwrap())?;
+        }
+        Ok(())
+    });
+    // No derived edge was written: auditing must find these directly in primary rows.
+    let before = db.check().unwrap().violations;
+    for (subject, message) in [
+        ("Relation-cycle", "cycle"),
+        ("Relation-duplicate", "unique pair"),
+        ("Relation-self", "itself"),
+        ("Relation-endpoint", "doesn't join"),
+        ("Relation-required", "required info"),
+        ("Relation-typed", "integer"),
+        ("Relation-missing", "no entity"),
+        ("Relation-nested", "info[0][0]"),
+    ] {
+        assert!(
+            before.iter().any(|v| v.subject.contains(subject) && v.message.contains(message)),
+            "missing {subject}: {message}; {before:?}"
+        );
+    }
+    db.rebuild(None).unwrap();
+    assert_eq!(db.check().unwrap().violations, before, "rebuild cannot hide primary violations");
+}
+
+#[test]
+fn uniqueness_audit_reads_primary_values_including_unindexed_values() {
+    use crate::engine::{keys, values};
+    use rmpv::Value;
+    let cases = [
+        ("long string", Value::from("x".repeat(300)), Value::from("x".repeat(300)), true),
+        (
+            "unordered map",
+            Value::Map(vec![("a".into(), 1.into()), ("b".into(), true.into())]),
+            Value::Map(vec![("b".into(), true.into()), ("a".into(), Value::F64(1.0))]),
+            true,
+        ),
+        (
+            "duplicate map keys",
+            Value::Map(vec![("a".into(), 1.into()), ("a".into(), 2.into())]),
+            Value::Map(vec![("a".into(), 2.into()), ("a".into(), 1.into())]),
+            true,
+        ),
+        ("bytes", Value::Binary(vec![1, 2, 3]), Value::Binary(vec![1, 2, 3]), true),
+        ("timestamp", Value::Ext(-1, vec![0, 0, 0, 1]), Value::Ext(-1, vec![0, 0, 0, 1]), true),
+        ("numeric representation", 1.into(), Value::F64(1.0), true),
+        ("signed zero", Value::F64(-0.0), Value::F64(0.0), true),
+        ("null", Value::Nil, Value::Nil, true),
+        ("list elements", Value::Array(vec![7.into(), 7.into()]), 7.into(), false),
+    ];
+    for (name, first, second, compound) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let db = with_schema(
+            &dir,
+            notes(
+                json!({
+                    "v":{"type":"any", "optional":true, "nullable":true},
+                    "other":{"type":"any", "optional":true}
+                }),
+                json!({
+                    "one":{"kind":"value", "fields":["v"], "unique":true},
+                    "pair":{"kind":"value", "fields":["v","other"], "unique":true}
+                }),
+            ),
+        )
+        .unwrap();
+        write(
+            &db,
+            vec![
+                json!({"op":"create", "type":"Note", "id":"Note-1"}),
+                json!({"op":"create", "type":"Note", "id":"Note-2"}),
+            ],
+        )
+        .unwrap();
+        damage(&db, |txn, d| {
+            for (id, value) in [("Note-1", &first), ("Note-2", &second)] {
+                d.put(txn, &keys::value(id, "v"), &values::encode(value))?;
+                d.put(txn, &keys::value(id, "other"), &values::encode(&"tuple".into()))?;
+            }
+            Ok(())
+        });
+        for rebuilt in [false, true] {
+            if rebuilt {
+                db.rebuild(None).unwrap();
+            }
+            let report = db.check().unwrap();
+            assert_eq!(report.violations.len(), if compound { 2 } else { 1 }, "{name}: {report:?}");
+            assert!(report.violations.iter().all(|v| v.subject == "Note-1, Note-2"), "{name}: {report:?}");
+            assert!(report.violations.iter().any(|v| v.message.contains("Note.one")), "{name}: {report:?}");
+            assert_eq!(report.violations.iter().any(|v| v.message.contains("Note.pair")), compound, "{name}");
+        }
+    }
+}
+
+#[test]
+fn chunked_index_build_resumes_across_mutations_and_reopening() {
+    use crate::engine::{
+        derive, keys,
+        unit::{Read, Txn, UnitState},
+    };
+    fn clear(db: &Database) {
+        let store = db.store().unwrap();
+        let schema = db.engine_schema();
+        store
+            .write(
+                |txn, d| {
+                    let mut state = UnitState::new(false);
+                    let mut t = Txn { txn, db: d, state: &mut state, schema: &schema, now: 0.0 };
+                    for (key, _) in t.scan(&keys::index_range("Task", "a", &[]))? {
+                        t.del(&key)?;
+                    }
+                    t.del(&keys::index_built("Task", "a"))?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+    }
+    fn chunk(db: &Database, after: u64) -> Option<u64> {
+        let store = db.store().unwrap();
+        let schema = db.engine_schema();
+        store
+            .write(
+                |txn, d| {
+                    let mut state = UnitState::new(false);
+                    derive::build_chunk(
+                        &mut Txn { txn, db: d, state: &mut state, schema: &schema, now: 0.0 },
+                        "Task",
+                        "a",
+                        after,
+                        3,
+                    )
+                },
+                false,
+            )
+            .unwrap()
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        (1..=12).map(|i| json!({"op":"create", "type":"Task", "id":format!("Task-{i}"), "fields":{"a":i}})).collect(),
+    )
+    .unwrap();
+    clear(&db);
+    let mut after = chunk(&db, 0).unwrap();
+    write(
+        &db,
+        vec![
+            json!({"op":"trash", "id":"Task-2"}),
+            json!({"op":"trash", "id":"Task-8"}),
+            json!({"op":"destroy", "id":"Task-5"}),
+            json!({"op":"create", "type":"Task", "id":"Task-13", "fields":{"a":13}}),
+            json!({"op":"set", "id":"Task-9", "fields":{"a":999}}),
+        ],
+    )
+    .unwrap();
+    while let Some(next) = chunk(&db, after) {
+        assert!(next > after);
+        after = next;
+    }
+    assert!(db.check().unwrap().is_clean());
+    clear(&db);
+    assert!(chunk(&db, 0).is_some());
+    db.close().unwrap();
+    let reopened = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    reopened.wait_for_index_builds().unwrap();
+    let report = reopened.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    assert!(reopened.index_status().unwrap().iter().find(|s| s.entity_type == "Task" && s.index == "a").unwrap().built);
+}
+
+#[test]
+fn rebuild_is_checked_against_independent_query_expectations_not_only_check() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, (1..=3).map(|i| json!({"op":"create", "type":"Task", "id":format!("Task-{i}")})).collect()).unwrap();
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean());
+    let reads = serde_json::from_value(json!({"reads":[
+        {"read":"query", "plan":{"start":{"from":"types", "types":["Task"]}, "terminal":{"answer":"count"}}},
+        {"read":"query", "plan":{"start":{"from":"types", "types":["Task"]}, "terminal":{"answer":"ids"}}}
+    ]}))
+    .unwrap();
+    let bytes = db.read(&reads).unwrap();
+    let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    assert_eq!(answer[0]["n"], 3, "a shared derive/check bug must not define the expected count");
+    assert_eq!(answer[1]["ids"], json!(["Task-1", "Task-2", "Task-3"]));
+}
+
+#[test]
+fn unchecked_field_audit_covers_every_declared_value_type_and_presence_rule() {
+    use crate::engine::maintenance::Load;
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(
+        &dir,
+        json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": {"Other":{"fields":{}}, "Node":{"fields":{
+                "required":{"type":"string"}, "s":{"type":"string"}, "n":{"type":"number"},
+                "i":{"type":"integer"}, "b":{"type":"boolean"}, "bytes":{"type":"bytes"},
+                "choice":{"type":"enum", "values":["yes"]}, "reference":{"type":"ref", "to":["Node"]},
+                "list":{"type":"list", "of":{"type":"number"}}, "object":{"type":"object"},
+                "nonnull":{"type":"string"}, "anything":{"type":"any"}
+            }}}
+        }),
+    )
+    .unwrap();
+    db.bulk_load(&[
+        Load::Entity { id: "Other-present".into(), fields: Default::default(), trashed: false },
+        Load::Entity {
+            id: "Node-root".into(),
+            fields: serde_json::from_value(json!({
+                "s":true, "n":"x", "i":1.5, "b":0, "bytes":[], "choice":"no", "reference":"Other-present",
+                "list":[false], "object":[], "nonnull":null, "anything":{"opaque":["Node-missing"]}, "extra":true
+            }))
+            .unwrap(),
+            trashed: false,
+        },
+    ])
+    .unwrap();
+    let report = db.check().unwrap();
+    assert_eq!(report.violations.len(), 12, "{report:?}");
+    for field in ["required", "s", "n", "i", "b", "bytes", "choice", "reference", "list", "object", "nonnull", "extra"]
+    {
+        assert!(
+            report.violations.iter().any(|v| v.subject == "Node-root" && v.message.contains(field)),
+            "missing {field}: {report:?}"
+        );
+    }
+    assert!(report.violations.iter().all(|v| !v.message.contains("anything")), "any is opaque");
+}
+
+#[test]
+fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
+    use crate::engine::maintenance::Load;
+    for (cardinality, expected) in [("many-to-many", 0), ("one-to-many", 1), ("many-to-one", 1), ("one-to-one", 2)] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = with_schema(
+            &dir,
+            json!({"$schema":crate::schema::SCHEMA_LANGUAGE,
+                "types":{"Node":{"fields":{}}}, "relations":{"links":{"cardinality":cardinality}}
+            }),
+        )
+        .unwrap();
+        let mut loads: Vec<Load> = ["Node-a", "Node-b", "Node-c"]
+            .into_iter()
+            .map(|id| Load::Entity { id: id.into(), fields: Default::default(), trashed: false })
+            .collect();
+        for (i, (source, target)) in
+            [("Node-a", "Node-b"), ("Node-a", "Node-c"), ("Node-b", "Node-c"), ("Node-a", "Node-b")]
+                .into_iter()
+                .enumerate()
+        {
+            loads.push(Load::Relation {
+                id: format!("Relation-{i}"),
+                kind: "links".into(),
+                source: source.into(),
+                target: target.into(),
+                info: None,
+            });
+        }
+        db.bulk_load(&loads).unwrap();
+        let report = db.check().unwrap();
+        assert_eq!(report.violations.len(), expected, "{cardinality}: {report:?}");
+        db.rebuild(None).unwrap();
+        assert_eq!(db.check().unwrap().violations, report.violations);
+    }
+}

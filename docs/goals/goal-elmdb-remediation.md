@@ -67,7 +67,7 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 - Phase 2 local checkpoints: elmdb `af141adb2c7745fceca7fb5af410159fdc9fa30b`; monorepo `5edd51adf7`.
   Shared commit finalization preserves committed schema and notifies observers before reporting failed sync. EARS
   refreshes declaration caches and notifies committed admin changes before rethrowing. Full local checks and firing
-  mutations are recorded in implementation evidence. Next deliverable: Phase 4 constraint auditing and bounded index construction.
+  mutations are recorded in implementation evidence. Next deliverable: Phase 5 recovery bounds, snapshot pairing and backup publication.
   Phase 3 implements panic cleanup, callback-close refusal and bounded optimistic token/watch registration.
   Deterministic and mutation regressions pass. Alternating 20,000-row measurements reproduced 167–322 ms prior
   tracking-lock waits; current nonconflicting waits were zero and paced token/watch waits about 21 ms, with
@@ -76,9 +76,23 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   locally; fresh platform verification and final integration remain pending. Checkpoint `5146508` is pushed;
   monorepo validation exposed callback-TLS teardown panics hidden by passing Vitest totals. A `try_with` correction
   and bounded TLS-destruction regression pass all required Rust/binding checks and 198 EARS tests without fatal
-  diagnostics. Commit the correction, then update the temporary monorepo pin to that commit. CLI typecheck passes;
-  build prerequisite default-setup output and validate prepared permission cases plus the affected database suite
-  (session 2370) before committing that integration correction. See implementation evidence.
+  diagnostics. Correction `27c76ae` and monorepo checkpoint `547279e4d6` are committed/pushed. CLI typecheck,
+  all three permission cases and the full 71-test database integration suite pass; query and dry-run fixtures now
+  preserve reader registration. No local check session remains running. Phase 4 recursive reference auditing has a passing focused
+  regression and demonstrated pre-fix failure. Primary relation auditing now covers cycles, duplicate pairs,
+  self-links, endpoints and required/typed info; the independent unchecked fixture passes before/after rebuild,
+  20,000-node graph test passes. Primary-value uniqueness now covers unindexed values and exact compound/list
+  rules; its independent before/after-rebuild fixture passes and fails on old code. Cursor-based chunks have bounded
+  candidates and measured linear visits; mutation and resume/reopen tests pass. Combined required checks completed
+  in session 53202; the rebuilt binding/typecheck and all 33 Node tests pass. Auditing is now a separate derive/audit.rs module;
+  all field types, presence/null rules and cardinalities have passing unchecked fixtures. Historical short-code
+  prefixes and removed roles remain valid after admin/schema changes; primary short-code uniqueness is audited.
+  H04 is resolved locally by a shared-derivation mutation that keeps check clean but fails independent query counts.
+  Local staged review is complete; checkpoint commits/pushes and platform/integration verification remain pending.
+  Latest Windows CI exposed accepted-DLL reload rejection after worker exit (R01); a local Windows module-pin
+  correction has host-only checks, no Windows proof yet. Prescribed VM SSH timed out and Azure read-only lookup
+  hit an authentication security-defaults block; no resource/network changes were made. These source/docs changes
+  are local and separate from the built TLS pin. See implementation evidence.
   Revalidate upstream inputs before integrating them under D11.
 - No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
   checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
@@ -197,7 +211,7 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 | R01/R02 opening and process safety | Implemented locally; checkpoint `2414390` | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
 | R03 committed outcomes and AgentBuddy notifications | Implemented locally; `af141ad` / `5edd51adf7` | Implementation evidence; fault injection, mutation tests, 198 EARS / eight backup tests | Remote checks and final integration |
 | R05/R06 lifecycle and H03 contention | Implemented locally; Phase 3 checkpoint | Implementation evidence; bounded regressions, mutation tests, alternating measurements | Final checks, supported-platform matrix and integration |
-| R04 auditing and R07 bounded construction | Missing | Review E02/E03 and source complexity | Phase 4 |
+| R04 auditing and R07 bounded construction | Implemented locally; Phase 4 checkpoint | Primary fixtures, firing mutations, cursor counts and restart tests | Supported-platform checks and final integration |
 | R08 recovery envelope and H01/H02/H04 disposition | Missing | Review source assessment | Phase 5 |
 | Current-upstream integration and required gates | Missing | None | Phase 6; no future-feature dependency |
 | Current reference docs, review dispositions, Outcome and closure | Missing | None | Phase 6 |

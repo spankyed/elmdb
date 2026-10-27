@@ -358,3 +358,149 @@ because the isolated worktree lacked `packages/default-setup/dist`; a single pre
 focused cases and affected database suite is now running in session 2370. Logs use prefix
 `/private/tmp/elmdb-remediation-phase3-` with suffixes `default-setup.log`, `cli-permissions.log`, `cli-db.log`.
 No app launch or live-data access is involved.
+
+
+### TLS checkpoint and start of constraint remediation
+
+TLS correction committed/pushed as `27c76ae646c19a44c6fdd6715ca8d652a8080a84`; its platform matrix is
+https://github.com/spankyed/elmdb/actions/runs/40421747228. The monorepo now provisionally pins this correction.
+EARS 198 tests passed without fatal diagnostics; CLI typecheck passed. The default-setup prerequisite built once,
+and two permission tests passed. The full CLI database suite then passed 70 and failed a second fixture still
+chmodding the lock file read-only during dry runs. That fixture now protects only data.mdb too; the new lock-access
+refusal test continues proving the fail-safe behavior. All three permission cases and the full affected suite are
+running in session 74761, final logs `phase3-cli-permissions-final.log` and `phase3-cli-db-final.log` under the
+existing temporary-log prefix. Do not restart the strict chain to diagnose this already isolated failure.
+
+Phase 4 begins locally with recursive missing-reference auditing. The new nested-list fixture has one present and
+two missing targets plus an opaque `any` string; it asserts exactly two element-path violations both before and
+after rebuild. Focused test passed. Copying the new test onto the pre-fix audit in the disposable source produced
+zero violations instead of two (exit 101), proving the regression fires. Logs:
+`/private/tmp/elmdb-remediation-phase4-references.log` and `-references-mutation.log`. These Phase 4 changes are
+uncommitted and are not part of the rebuilt/pinned TLS checkpoint. Remaining primary uniqueness/relation auditing
+and bounded builder traversal are still required; this is not R04 closure.
+
+
+Final CLI validation passed: three permission cases and all 71 database integration tests, using the corrected
+TLS binding. Logs: `/private/tmp/elmdb-remediation-phase3-cli-permissions-final.log` and `-cli-db-final.log`.
+Monorepo checkpoint `547279e4d6d3f231d822e2b9621deb76e920895b` commits both fixture corrections and pins
+`27c76ae646c19a44c6fdd6715ca8d652a8080a84`; it was pushed to the owned remediation branch. No production CLI
+behavior changed. Session 74761 is terminal. Existing remote strict-chain consumers and the latest engine platform
+matrix still require terminal observation; no broad workflow rerun was dispatched.
+
+
+## Phase 4 relation auditing and Windows lifetime investigation — 2026-10-26
+
+Primary relation auditing now checks self-links, endpoint type pairs, required/typed info, nested info references,
+unique pairs and acyclic kinds. Graphs come from primary rows, not derived edges. Iterative three-color DFS visits
+each edge once with expected constant-time hash lookups; deterministic root sorting costs O(V log V), and graph
+memory is O(V + E). Cardinality now visits each endpoint group once rather than rescanning all groups for every
+schema kind. Existing distinct-far-end semantics are preserved.
+
+The independent fixture writes nine unchecked primary rows, with no derived edges. It proves specific violations
+for all new relation checks, then proves rebuild leaves the violation list identical. The new case passes; copied
+onto the pre-fix audit it fails on the missing cycle report (only the old missing-end report appears). Logs:
+`/private/tmp/elmdb-remediation-phase4-relations.log` and `-relations-mutation.log`. A direct graph case checks
+20,000 nodes, an acyclic chain and parallel forward edges, then one back edge: exactly one cycle report. Log:
+`/private/tmp/elmdb-remediation-phase4-cycles.log`. All 23 derived tests and focused clippy pass (`-derived-final.log`,
+`-clippy-final.log`). These changes remain uncommitted; primary-value uniqueness and R07 are not implemented yet.
+
+The latest completed Windows job 121917617450 (run 40421747228) now gets past path quoting but rejects the
+accepted image after its first worker exits: the main thread's first open receives `ALREADY_LOADED`. Log:
+`/private/tmp/elmdb-remediation-phase3-windows.log`. This demonstrates that retaining a claim handle is insufficient
+if Windows unloads the DLL and a later load reinitializes its Rust static. R01 is still open across platforms.
+
+The local Windows-only correction pins the accepted image after acquiring its claim, using
+[GetModuleHandleExW FROM_ADDRESS + PIN](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexw).
+Microsoft documents that PIN keeps the module mapped until process termination. The address identifies this
+executing image rather than a basename. A pin error drops the just-acquired handle and refuses opening with IO.
+Only the accepted image is pinned; independent rejected copies still cannot acquire the lock. This keeps the static
+and handle alive together rather than adding a second ownership-metadata protocol. Local claim tests (two) and
+node-crate clippy pass; neither executes the cfg(windows) path. No Windows pass is claimed.
+
+The prescribed Windows VM was probed read-only: SSH timed out after ten seconds. Azure instance-view lookup
+failed with AADSTS530035 (security-defaults authentication block), so no current power state was established.
+No login, network-rule change, VM start/stop or new workflow was attempted. Focused Windows validation awaits
+restored access or the next converged platform gate; the Windows-only pin remains uncommitted. Other goal work
+can proceed independently. Latest remote strict-chain consumers are still active; integration-2's diagnosed
+permission-fixture failure is corrected locally and in monorepo checkpoint `547279e4d6`.
+
+
+## Phase 4 primary uniqueness and bounded traversal — 2026-10-26
+
+Uniqueness auditing no longer reads stored index entries. It groups primary entity values per type/index, using
+the write contract's key extraction (single-field list elements; complete non-list compound tuples). Numeric
+representations and map field order are canonicalized for ordinary ordered grouping, so long strings, bytes,
+timestamps and maps remain auditable without an index key. Duplicate-key MessagePack maps are permitted by the
+current value decoder, while `values::same` on them is not an equivalence relation; these take an exact-comparison
+fallback rather than silently changing write semantics. Ordinary grouping avoids quadratic pairwise comparison;
+with A ambiguous tuples and N ordinary tuples the fallback is O(A*N + A²). This unusual-input cost is explicit,
+not a claim of universal O(N log N). Primary value storage during audit remains part of R08's resource investigation.
+
+The independent fixture covers long strings, reordered maps with equivalent numeric representations, duplicate-key
+maps, bytes, timestamps, integer/float equality, signed zero, null and list/compound distinctions. Each corrupts
+primary fields directly, proves specific unique violations before rebuild, then proves they remain after rebuild.
+The test passes; pre-fix derived-index auditing fails on the first long-string case. Logs:
+`/private/tmp/elmdb-remediation-phase4-unique.log` and `-unique-mutation.log`. Focused clippy passes.
+
+Index build chunks now seek both live/trash cursors after the saved sequence, collect at most limit+1 rows per
+range, and sort only those bounded candidates. Temporary candidate storage is at most 2*(limit+1); visits are
+linear at fixed chunk size, with O(C log C) sorting per chunk. At C=64, actual cursor entries were 1,991 / 8,231 /
+33,191 for 1,024 / 4,096 / 16,384 mixed live/trash rows. The test verifies every sequence/id once in merged order.
+Removing the per-range limit in a disposable copy fails the bound at 1,024 rows (8,704 visits). Logs:
+`/private/tmp/elmdb-remediation-phase4-cursors.log` and `-cursors-mutation.log`.
+
+A real index fixture resumes manual chunks around inserts, deletion, field edits and live/trash movement both
+below and above the cursor, then checks every derived key. A second interrupted build closes/reopens and completes
+through the background builder; check is clean and the index marker is built. Log:
+`/private/tmp/elmdb-remediation-phase4-resume.log`. All focused cases pass.
+
+The combined required workspace/generated/dependency/binding checks are running once in session 39330, logs
+`/private/tmp/elmdb-remediation-phase4-workspace-clippy.log`, `-workspace.log`, `-build.log`, `-types.log`,
+`-node.log`. These Phase 4 changes and Windows-only module pin remain uncommitted. R04's full declared-constraint
+inventory and H04's independent verification still need final coverage review; resource and platform closure remain
+pending. Do not infer the goal is complete from these focused cases.
+
+
+## Phase 4 inventory review and H04 — 2026-10-26
+
+Constraint auditing is now isolated in `engine/derive/audit.rs`; reconstruction and bounded build traversal stay
+in derive.rs. The extraction initially missed the explicit value_indexes import; corrected before passing suites.
+All 26 then-current derived tests and both direct graph/cursor tests passed after extraction. The earlier combined
+check session 39330 completed with all 33 Node tests passing, but predates this module extraction and is not the
+final source gate.
+
+Inventory review considered short-code prefixes and retained roles. A trial current-prefix audit made the existing
+rename-into-populated-type regression fail: admin rename deliberately retains old short codes. That check and its
+trial test were removed, preserving the demonstrated contract. Prefix validation is a creation rule, not a global
+invariant of historical primary data. Short-code uniqueness is audited from primary values. Missing legacy codes
+and removed-role data remain allowed, consistent with schema.md's retained-declaration-removal contract.
+
+A new unchecked field fixture asserts exactly twelve specific violations: missing required field, refused extra
+field, nonnullable null, and wrong values for string, number, integer, boolean, bytes, enum, ref target type, list
+element and object. A populated any field stays opaque. It passes (`phase4-field-inventory.log`). A separate fixture
+checks all four relation cardinalities, parallel edges counting only once per far end, and identical reports after
+rebuild; it passes (`phase4-cardinality-inventory.log`). Logs use the existing `/private/tmp/elmdb-remediation-` prefix.
+
+H04 conclusion: check/rebuild share reconstruction, so check alone cannot prove that shared derivation correct.
+The independent fixture creates exactly three known entities, rebuilds, checks, then asserts query count three and
+the exact three IDs. Mutating shared count derivation to n+1 in a disposable copy leaves check clean but makes the
+independent count assertion fail (four versus three). Log: `phase4-independent-mutation.log`. The correct source
+passes in the derived suite. An initial assertion used count rather than the protocol's n field; it was corrected
+before the meaningful mutation run. Together with unchecked primary fixtures and their firing proofs, this closes
+H04's investigation locally while preserving model/query assertions as independent evidence, not treating shared
+check as its own oracle. Final integrated verification still applies.
+
+Current converged checks are session 53202 with log prefix `phase4-final-`: workspace clippy, 229 engine tests
+(two measurements ignored), CLI/binding/xtask suites, generated/dependency checks passed; binding rebuild continues.
+The later two inventory tests passed separately and focused lint logs to `phase4-inventory-clippy.log`. No production source changed after this final pipeline started. Do not start
+a replacement binding build. The Windows module-pin path remains unproved on Windows.
+
+
+Final Phase 4 local checks completed: session 53202 is terminal, rebuilt binding/typecheck and all 33 Node tests
+passed (`phase4-final-build.log`, `-types.log`, `-node.log`). Workspace tests passed 229 engine cases with two
+measurements ignored, plus CLI one, binding two and xtask two; the later field/cardinality inventory cases passed
+separately. Focused lint passed after those test-only additions. All current staged production changes were covered
+by the final build; afterward only stale comments and prose wrapping were cleaned up. R04/R07 and H04 have local
+implementation/evidence; supported-platform checks and final integration remain outstanding. Phase 5 now owns
+recovery resource measurement, schema/snapshot pairing and backup publication. The audit/builder and Windows
+module-lifetime changes are separate logical checkpoints; the latter still requires real Windows verification.

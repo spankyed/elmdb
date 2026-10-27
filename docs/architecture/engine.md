@@ -194,8 +194,12 @@ unit is open.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
-  doesn't declare, a `ref` naming no entity, a relation with a missing end or past its kind's cardinality. heed exposes
-  no walk of LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
+  doesn't declare, a `ref` naming no entity (including nested lists), duplicate unique values, and relations with
+  missing ends, self-links, disallowed endpoint types, invalid/missing info, duplicate unique pairs, excessive
+  cardinality or cycles in acyclic kinds. Constraint auditing reads primary values/relations even when an index is
+  damaged or unbuilt; rebuilding cannot hide these violations. Unique values include values an index cannot store,
+  and use the write contract's numeric, map, single-field list and compound equality rules. heed exposes no walk of
+  LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
 - `rebuild(index?)`: deletes derived data, every index's or one index's, and writes what primary data derives, in one
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
@@ -203,7 +207,10 @@ unit is open.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
-  unbuilt, and `indexStatus()` names them. Closing stops a build between chunks, and the next open finishes it.
+  unbuilt, and `indexStatus()` names them. Each chunk seeks after its last entity sequence in both live/trash
+  ranges and sorts only their bounded candidates: at most 2 × (chunk size + 1) rows in temporary storage. Cursor
+  visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
+  a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role. It refuses a name the schema still declares.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.

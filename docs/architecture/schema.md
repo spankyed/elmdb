@@ -145,7 +145,8 @@ These are TypeScript's `?` and `| null`, kept apart because they mean different 
 
 A `ref` lets `check()` report ids that name no entity and lets a plan follow one like an edge, without the field being
 a relation. A relation is the better choice when the link has a kind, info or an order; a `ref` suits a foreign key
-such as a chunk's `indexId`.
+such as a chunk's `indexId`. Missing-target auditing also follows nested lists whose declared element type is `ref`;
+violations identify the element path. Strings inside `object` and `any` remain opaque.
 
 ## Relations
 
