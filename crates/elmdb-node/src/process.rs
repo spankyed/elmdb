@@ -1,5 +1,5 @@
 //! One elmdb binary per process. Windows uses a process-named kernel event independent of environment settings.
-//! On Unix, every binary independently opens the same process claim file in a fixed shared directory and takes a
+//! On Unix, every binary independently opens the same process claim file in private per-account state and takes a
 //! nonblocking exclusive lock before opening LMDB. The winning binary keeps its handle for the process lifetime,
 //! across database closes and worker teardown; another copy cannot acquire it. The file is never unlinked: replacing
 //! its inode while a lock is held would let a second binary lock the replacement. A stale file holds no claim once
@@ -10,22 +10,67 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
 #[cfg(unix)]
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use napi::Result;
 
 use crate::Code;
 
 #[cfg(unix)]
-fn claim_file() -> PathBuf {
-    // Every copy uses the same namespace, independent of mutable temporary-directory settings.
-    #[cfg(unix)]
-    {
-        // SAFETY: getuid has no preconditions; the real user id keeps private stale files of other users out of
-        // this namespace when the OS reuses a PID.
-        let user = unsafe { libc::getuid() };
-        PathBuf::from("/tmp").join(format!("elmdb-binding-{user}-{}.lock", std::process::id()))
+fn claim_file() -> io::Result<PathBuf> {
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{DirBuilderExt, MetadataExt},
+    };
+    // The account database is independent of HOME/TMP settings, including worker-local JS environments.
+    // SAFETY: geteuid has no preconditions. getpwuid_r receives writable, correctly sized storage; returned
+    // strings are copied before that storage is dropped, and only a successful non-null result is dereferenced.
+    let uid = unsafe { libc::geteuid() };
+    let mut buffer = vec![0u8; 16384];
+    let home = loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        // SAFETY: all pointers refer to live output storage for the duration of this reentrant call.
+        let status =
+            unsafe { libc::getpwuid_r(uid, entry.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut found) };
+        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+            continue;
+        }
+        if status != 0 {
+            return Err(io::Error::from_raw_os_error(status));
+        }
+        if found.is_null() {
+            return Err(io::Error::other("the current account has no home directory"));
+        }
+        // SAFETY: successful getpwuid_r initialized entry and its pw_dir string in buffer.
+        let entry = unsafe { entry.assume_init() };
+        if entry.pw_dir.is_null() {
+            return Err(io::Error::other("the current account has no home directory"));
+        }
+        // SAFETY: pw_dir is a terminated string owned by the still-live buffer.
+        break PathBuf::from(std::ffi::OsStr::from_bytes(unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) }.to_bytes()));
+    };
+    if !home.is_absolute() {
+        return Err(io::Error::other("the account home directory must be absolute"));
     }
+    let state = home.join(".elmdb");
+    let directory = state.join("process-claims");
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)?;
+    for path in [&state, &directory] {
+        let metadata = std::fs::symlink_metadata(path)?;
+        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} must be a private directory owned by this user", path.display()),
+            ));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    let namespace = std::fs::metadata("/proc/self/ns/pid")?.ino().to_string();
+    #[cfg(not(target_os = "linux"))]
+    let namespace = "host";
+    Ok(directory.join(format!("elmdb-binding-{uid}-{}-{namespace}.lock", std::process::id())))
 }
 
 #[cfg(unix)]
@@ -91,7 +136,7 @@ fn acquire_event(name: &str) -> io::Result<Claim> {
 fn acquire_claim() -> io::Result<Claim> {
     #[cfg(unix)]
     {
-        acquire(&claim_file())
+        acquire(&claim_file()?)
     }
     #[cfg(windows)]
     {
@@ -99,7 +144,7 @@ fn acquire_claim() -> io::Result<Claim> {
     }
 }
 
-/// Keep the accepted Windows image and its OnceLock mapped after its first worker unloads it. A leaked claim
+/// Keep the accepted Windows image and its static claim mapped after its first worker unloads it. A leaked claim
 /// handle alone survives DLL unloading, but a reloaded image would lose the static and reject its own old claim.
 #[cfg(windows)]
 fn pin_module() -> io::Result<()> {
@@ -118,17 +163,24 @@ fn pin_module() -> io::Result<()> {
     if success == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
-/// Claims the process before this binary opens any database. Each independently loaded binary owns its own `OnceLock`
+/// Claims the process before this binary opens any database. Each independently loaded binary owns its own claim mutex
 /// and independently acquired OS handle, so only one wins even when first opens race across worker threads.
 pub fn claim() -> Result<(), Code> {
-    static CLAIMED: OnceLock<io::Result<Claim>> = OnceLock::new();
-    match CLAIMED.get_or_init(|| {
+    static CLAIMED: Mutex<Option<Claim>> = Mutex::new(None);
+    let mut held = CLAIMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.is_some() {
+        return Ok(());
+    }
+    match (|| {
         let claim = acquire_claim()?;
         #[cfg(windows)]
         pin_module()?;
-        Ok(claim)
-    }) {
-        Ok(_) => Ok(()),
+        Ok::<_, io::Error>(claim)
+    })() {
+        Ok(claim) => {
+            *held = Some(claim);
+            Ok(())
+        }
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let mine = process_path::get_dylib_path()
                 .map_or_else(|| "an unknown file".to_owned(), |p| p.display().to_string());
