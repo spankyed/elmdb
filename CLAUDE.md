@@ -143,6 +143,9 @@ Held by the types and the engine specs, which say more than a rule over names co
   data in place. The connection notifies views and refreshes schema declarations before rethrowing this code. A caller
   must not retry it as an uncommitted refusal; `lastCommit()` reports the current sequence without parsing an error
   message. A failure before commit leaves data/declarations unchanged and emits no commit notification.
+- **`SCHEMA_CHANGED` is an uncommitted refusal.** Another process changed the stored declaration after this handle
+  opened. The code propagates without commit notifications or adopting the refused declaration. Close the database,
+  reopen it and create a new engine to use the stored schema; `schema()` on the earlier handle is its cached one.
 - **A backup is elmdb's compacted copy** (`backup`), and a restore its `replaceWith`, the database staying open: both
   run through `@apackdev/host/backup`'s `databaseBackupStore`. `DATABASE_FORMAT` (`elmdb/1`) is what a backup records
   of where its files came from; opening them is what decides whether they are readable. The format stays 1, changed in

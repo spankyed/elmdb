@@ -220,13 +220,13 @@ describe('watch', () => {
 });
 
 /** Native methods require their own receiver; the wrapper changes only the outcome after a real commit. */
-function committedFailure(method: keyof EarsDatabase, before = false) {
+function committedFailure(method: keyof EarsDatabase, before = false, refusalCode: 'IO' | 'SCHEMA_CHANGED' = 'IO') {
   return (database: EarsDatabase): EarsDatabase => new Proxy(database, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);
       if (key !== method) return typeof value === 'function' ? value.bind(target) : value;
       return (...args: unknown[]) => {
-        if (before) throw Object.assign(new Error('refused before commit'), { code: 'IO' });
+        if (before) throw Object.assign(new Error('refused before commit'), { code: refusalCode });
         (value as (...args: unknown[]) => unknown).apply(target, args);
         throw Object.assign(new Error('the sync failed after commit'), { code: 'NOT_DURABLE' });
       };
@@ -282,6 +282,22 @@ describe('admin committed errors', () => {
     expect(w.runs()).toBe(1);
     expect(e.lastCommit()).toBe(sequence);
     expect(() => e.query('Novel').count()).toThrow();
+  });
+
+  it('does not notify or adopt declarations after a SCHEMA_CHANGED refusal', async () => {
+    e = engine({ wrap: committedFailure('setSchema', true, 'SCHEMA_CHANGED') });
+    e.create('Task', { title: 'before' });
+    const w = watched(titles);
+    await settled();
+    const sequence = e.lastCommit();
+    expect(() => e.admin.declare({ types: { Novel: { required: [] } }, relations: {}, roles: [] }))
+      .toThrow(expect.objectContaining({ code: 'SCHEMA_CHANGED' }));
+    await settled();
+    expect(w.last()).toEqual(['before']);
+    expect(w.runs()).toBe(1);
+    expect(e.lastCommit()).toBe(sequence);
+    expect(() => e.query('Novel').count()).toThrow();
+    w.stop();
   });
 
   it('notifies a replacement that commits and then reports failed sync', async () => {
