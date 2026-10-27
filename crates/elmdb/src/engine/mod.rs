@@ -355,10 +355,18 @@ impl Database {
     }
 
     pub(crate) fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
+        self.admin_unit_with_checkpoint(f, false)
+    }
+
+    pub(crate) fn admin_unit_with_checkpoint(
+        &self,
+        f: impl Fn(&mut Txn<'_, '_>) -> Result<()>,
+        recycle: bool,
+    ) -> Result<()> {
         let schema = self.schema_guard();
         let store = self.store()?;
         let now = now_ms();
-        let ((), commit) = store.write_committed(
+        let ((), mut commit) = store.write_committed(
             |txn, db| {
                 schema.validate(txn, db)?;
                 let mut state = UnitState::default();
@@ -366,8 +374,14 @@ impl Database {
                 f(&mut t)?;
                 vector::flush(&mut t)
             },
-            true,
+            !recycle,
         )?;
+        if recycle {
+            // Recycling is only a space/performance optimization. Even if its transaction aborts, sync the atomic
+            // reset before reporting success; only that required sync determines its durability outcome.
+            let _ = store.recycle_reset_pages();
+            commit.synced = store.committed(true);
+        }
         drop(schema);
         self.finish_admin_commit(&store, commit)
     }

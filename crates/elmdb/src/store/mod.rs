@@ -163,6 +163,7 @@ pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
 #[cfg(test)]
 thread_local! {
     pub(crate) static FAIL_NEXT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(crate) static FAIL_RESET_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl Store {
@@ -511,6 +512,33 @@ impl Store {
                 commit.durable().wait()?;
             }
         }
+        Ok(())
+    }
+
+    /// Advance LMDB's physical generation after a reset, without changing logical data or sequence. LMDB cannot
+    /// reuse the immediately preceding transaction's freed pages: without this checkpoint, the next bulk load
+    /// allocates another database-sized set of pages and leaves costly free-page records for later small writes.
+    /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
+    pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
+        self.check_writable()?;
+        if self.unit_is_open() {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
+        }
+        let _guard = self.gate();
+        self.drop_idle();
+        let mut txn = self.env.write_txn()?;
+        let key = meta_key(meta::SEQUENCE);
+        let value = self
+            .db
+            .get(&txn, &key)?
+            .ok_or_else(|| Error::new(ErrorCode::Corrupted, "Reset has no committed sequence"))?
+            .to_vec();
+        self.db.put(&mut txn, &key, &value)?;
+        #[cfg(test)]
+        if FAIL_RESET_CHECKPOINT.with(|flag| flag.replace(false)) {
+            return Err(Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
+        }
+        txn.commit()?;
         Ok(())
     }
 

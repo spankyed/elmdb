@@ -823,3 +823,33 @@ large-value profiles. Logs use `/private/tmp/elmdb-remediation-phase5-final-reco
 do not edit production source or start competing expensive work while this measurement chain runs.
 Final restored-artifact validation and operating-envelope reference documentation remain required after it.
 Cross-process schema pairing, final upstream/app integration, strict CI and finding dispositions are still open.
+
+## Atomic reset page recycling — validated checkpoint, 2026-10-26
+
+Repeated shipped EARS hydrate/reset cycles exposed a remediation regression introduced in af141ad: matched
+upstream/current focused medians were 108.552/175.498 ms for 1,000 creates and 57.904/91.554 ms for short codes.
+First checkpoint 2414390 matched upstream. Correctly rebuilt 27c76ae and af141ad reproduce it; disabling the new
+schema fingerprint check does not fix it. Restoring only old reset removes it. Disposable native provenance and
+counterfactual logs are retained under `/private/tmp/elmdb-remediation-phase6-*`; the initial phase3 build reused
+a cloned artifact due to archive mtimes and its result is excluded. Subsequent sources were refreshed before builds.
+
+Pinned LMDB excludes the immediately preceding transaction's freed pages. Atomic reset/reload leaves ~172 MB /
+5,261 free pages versus old two-transaction reset's ~86 MB / 15 free pages; ensuing small writes remain expensive.
+Retain atomic reset and its index markers, then optionally rewrite the sequence read inside a physical checkpoint,
+before required sync. This permits page reuse without a logical sequence increment or observer event. If recycling
+aborts, required sync still runs; successful durability and committed-error semantics remain authoritative.
+
+Five focused commit tests pass. Disposable mutations fire: omitted checkpoint grows file from 4,505,600 to 8,830,976
+bytes; propagated optional failure produces incorrect IO refusal; logical checkpoint commit produces sequence 4
+instead of 3. Logs `-phase6-reset-{commits,reuse-mutation,fallback-mutation,sequence-mutation}.log`.
+All required gates pass in 65838: 253 engine tests / two ignored measurements, workspace fmt/clippy/tests,
+generated/single-LMDB checks, rebuilt native binding, type checks and 35 Node tests. Logs `-phase6-reset-final-*`.
+
+Complete shipped EARS benchmark 93318 passes all 24 cases, same Mac/owned 50k entity, 200k attribute, 100k relation
+fixture, syncs enabled, one expensive owner; machine otherwise uncontrolled. Final medians: hydrate 1238.394 ms,
+hub 772.706 ms, creates 102.744 ms, short codes 59.086 ms. Final complete-suite medians are within the matched
+upstream focused baseline's range (case selection/order differs); read/watch cases also complete. Full samples:
+`-phase6-reset-ears-bench.{log,json}`. Final EARS/model/watch 199 and backup eight tests pass in 41968; no fatal,
+TLS teardown, panic or SIGABRT diagnostics. Root typecheck already passed on identical app source. Upstream
+revalidation still yields elmdb main 3afdf37 and apack master 5574f84, both ancestors, zero incoming commits.
+Final combined platform and strict-chain CI remain required before goal closure.

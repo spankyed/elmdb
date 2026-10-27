@@ -142,3 +142,69 @@ fn a_failed_commit_keeps_schema_and_data_and_notifies_nobody() {
         assert_eq!(*seen.lock().unwrap(), 1, "{operation}");
     }
 }
+
+#[test]
+fn reset_checkpoint_preserves_one_logical_commit_and_falls_back_on_failure() {
+    for fail_checkpoint in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+        write(&db, vec![json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":1}})]).unwrap();
+        let seen = Arc::new(Mutex::new(0));
+        let into = seen.clone();
+        db.watch(
+            Reads { reads: vec![ReadOp::Row { id: "Task-1".into() }], track: None },
+            Box::new(move |_| *into.lock().unwrap() += 1),
+        )
+        .unwrap();
+        let before = db.sequence().unwrap();
+        crate::store::FAIL_RESET_CHECKPOINT.with(|flag| flag.set(fail_checkpoint));
+        db.reset().unwrap();
+        assert!(!crate::store::FAIL_RESET_CHECKPOINT.with(|flag| flag.get()));
+        assert_eq!(db.sequence().unwrap(), before + 1);
+        assert_eq!(*seen.lock().unwrap(), 2);
+        assert!(db.check().unwrap().is_clean());
+        db.close().unwrap();
+        let reopened = Database::open(dir.path(), OpenOptions::default()).unwrap();
+        assert_eq!(reopened.sequence().unwrap(), before + 1);
+        assert_eq!(reopened.stats().unwrap().types.get("Task").map(|s| s.live).unwrap_or(0), 0);
+    }
+}
+
+#[test]
+fn repeated_reset_and_load_reuse_the_freed_database_pages() {
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { syncs: false, schema: Some(schema()), ..Default::default() }).unwrap();
+    let loads: Vec<crate::engine::maintenance::Load> = (0..2000)
+        .map(|i| {
+            serde_json::from_value(
+                json!({"load":"entity","id":format!("Task-{i}"),"fields":{"a":i,"title":"x".repeat(1024)}}),
+            )
+            .unwrap()
+        })
+        .collect();
+    db.bulk_load(&loads).unwrap();
+    let first = db.store().unwrap().file_size();
+    for _ in 0..4 {
+        db.reset().unwrap();
+        db.bulk_load(&loads).unwrap();
+    }
+    let after = db.store().unwrap().file_size();
+    assert!(after < first * 3 / 2 + 1024 * 1024, "reset/load grew from {first} to {after} bytes");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn reset_checkpoint_respects_an_active_read_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":1}})]).unwrap();
+    db.snapshot(|snapshot| {
+        let held = super::entities::record(snapshot, "Task-1")?;
+        db.reset()?;
+        assert_eq!(super::entities::record(snapshot, "Task-1")?, held);
+        Ok(())
+    })
+    .unwrap();
+    assert!(db.snapshot(|s| super::entities::record(s, "Task-1")).unwrap().is_none());
+}

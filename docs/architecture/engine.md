@@ -148,11 +148,19 @@ the schema/reset/replace transaction, not by a second commit. A caller must not 
 refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
 `close()` syncs what is owed, and reports a sync that failed.
 
+After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
+without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
+bulk load reuse the reset's freed pages: LMDB protects the immediately preceding generation even with no readers.
+The checkpoint runs before reset's required sync. If it aborts, reset still syncs its committed mutation; only the
+space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
+failure/page-reuse regressions are recorded in [remediation evidence](../evidence/elmdb-remediation.md).
+
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
-database exists (`m/sequence`, raised by every commit, a reset's and a replace's included). A batch's result carries
+database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
+checkpoint does not raise it). A batch's result carries
 the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.

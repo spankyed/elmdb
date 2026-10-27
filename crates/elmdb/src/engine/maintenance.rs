@@ -234,24 +234,27 @@ impl Database {
         self.store()?.copy_to(target.as_ref())
     }
 
-    /// Every entry removed but the database's own (its format and schema), in one durable unit, the database staying
-    /// open
+    /// Atomically removes every entry but the database's own (its format and schema), with durable completion,
+    /// the database staying open
     pub fn reset(&self) -> Result<()> {
-        self.admin_unit(|t| {
-            let kept = t.scan(&Prefix::Meta.key().to_vec())?;
-            t.db.clear(t.txn)?;
-            if let Some(cosine) = t.db.cosine {
-                cosine.clear(t.txn)?;
-            }
-            if let Some(euclidean) = t.db.euclidean {
-                euclidean.clear(t.txn)?;
-            }
-            for (key, value) in kept {
-                t.put(&key, &value)?;
-            }
-            super::settle_indexes_in(t)?;
-            Ok(())
-        })
+        self.admin_unit_with_checkpoint(
+            |t| {
+                let kept = t.scan(&Prefix::Meta.key().to_vec())?;
+                t.db.clear(t.txn)?;
+                if let Some(cosine) = t.db.cosine {
+                    cosine.clear(t.txn)?;
+                }
+                if let Some(euclidean) = t.db.euclidean {
+                    euclidean.clear(t.txn)?;
+                }
+                for (key, value) in kept {
+                    t.put(&key, &value)?;
+                }
+                super::settle_indexes_in(t)?;
+                Ok(())
+            },
+            true,
+        )
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
