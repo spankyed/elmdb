@@ -419,3 +419,32 @@ are still unavailable on an error-only NOT_DURABLE return: callers invalidate al
 committed-error payload is a future API decision, not an undocumented promise of precise error-path invalidation.
 
 New focused regressions and their firing evidence are recorded in the [reconciliation evidence](../evidence/elmdb-remediation.md#independent-review-reconciliation--2026-10-27).
+
+## Process-claim follow-up review — 2026-10-27
+
+This review started from engine eaed455 and app 547d8958dd. It supersedes the home-directory claim design above.
+Claims now use kernel-owned objects on every shipped platform: Linux abstract Unix sockets, a macOS task-local Mach
+receive-right reservation, and the existing Windows named event. No claim files or account/home/proc lookups remain.
+Linux identity hashes loader randomness plus PID, avoiding both raw-randomness disclosure and ordinary equal-PID
+container collisions. The claim remains independent of JavaScript environment settings. Failed acquisitions remain
+retryable, and kernel cleanup covers process termination rather than relying on a timer or exit callback.
+
+The previous home/proc requirements and weak cleanup assertion were confirmed. The specific assertion that all Linux
+NFS flock emulation silently permits duplicate handles was not reproduced against an NFS server; it is not presented
+as a demonstrated data-loss trigger. Removing filesystem coordination eliminates reliance on remote lock semantics.
+macOS reserves a fixed IPC name and fails closed if it is occupied; unsupported kernel operations fail with IO.
+Namespace changes and fork-without-exec after loading are outside the Linux claim contract.
+
+Three lower-priority code findings are also repaired: callback tracking remains available during TLS destruction,
+interrupted index-build work survives a failed schema change followed by failed index inventory, and Linux dump
+publication falls back to atomic hard-link creation for unsupported exclusive rename. Collision and other rename
+failures do not trigger fallback. Real NFS/exFAT/SMB certification remains separate from injected-error tests.
+
+Full recovery value/vector emission was already streamed. Single-index collections and dump export remain explicit
+follow-ups. The populated-replacement measurement was already recorded under the preceding evidence section:
+15,687.079 ms including preparation on the stated 100k-row profile, not a replacement-only timing. The harness now
+separates preparation and operation elapsed time for future measurements while retaining whole-process RSS and disk
+observations. No old total is retroactively relabeled as an isolated operation measurement.
+
+See the [finding-by-finding disposition](../evidence/elmdb-remediation.md#process-claim-follow-up-review--2026-10-27)
+for tests, demonstrated failures and remaining limits. apack needs only an updated engine revision pin.

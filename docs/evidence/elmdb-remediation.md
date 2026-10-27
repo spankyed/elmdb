@@ -1367,3 +1367,46 @@ Measured rebuilt binding SHA-256: `a14e782d38aa9ca5ed7101760580aaa42314e8b29a904
 
 Reconciled implementation checkpoint: `381b069f43b93b6178cc66a887f97f773a4b9762` (claims `e1eb300`, storage
 `33a17bd`, lifecycle/schema `ef91662`, recovery `381b069`). The following documentation checkpoint changes prose only.
+
+## Process-claim follow-up review — 2026-10-27
+
+Baseline: engine eaed455754f166cfa951028bcf5d5cc4641ee3db and app 547d8958dd929bc778ee72c4ae65bb701c2ff2c2.
+The library-adoption plan commit between that baseline and this work changes documentation only. All edits and builds
+use the isolated remediation worktrees.
+
+| Finding | Verification and disposition |
+|---|---|
+| R01 remote-home locking | Filesystem dependence removed. Linux binds a process-specific abstract datagram socket; macOS reserves one task-local Mach receive-right name; Windows retains its named event. The blanket NFS same-process bypass was not reproduced on a real NFS server; no such reproduction is claimed |
+| R01 missing account / unusable home / no proc | Confirmed requirements in the previous code; removed. Linux identity comes from ELF auxiliary-vector randomness and PID, hashed before publication. CI runs the actual binding under a numeric UID with no account entry, HOME=/nonexistent and /proc hidden in a private mount namespace, and asserts a second binary is refused before creating its database |
+| R01 persistent files / home dot-directory | Removed for new claims. Kernel objects disappear when references close or the process terminates. No periodic touch, home writes, filesystem selection or stale-claim collector remains. Files left by earlier builds are not automatically deleted |
+| R01 cleanup test | Removed the obsolete-path deletion assertion. New tests check independent kernel handles conflict and can be reclaimed, success-only caching retries failures, and actual database open creates no home coordination files. Existing two-binary, concurrent-worker, worker-unload, child-process and environment-mutation tests remain |
+| R01 platform constraints | macOS reserves task IPC name 0x000e1d03 and fails closed if occupied, including by an unrelated component. Linux assumes no network-namespace change or inherited binding use after fork without exec. Kernel-operation denial is an IO error; no unprotected fallback |
+| Full recovery versus single-index/export memory | Full check/rebuild streaming remains implemented. Single-index value/text collections, primary inventories, per-entity expansion, uniqueness holders, vector/text aggregation and dump output remain workload-dependent follow-ups |
+| Populated replacement evidence | The preceding 100k-row populated result was already recorded: 15,687.079 ms including incumbent preparation, 1,060,048 KiB RSS, sampled scratch/disk and independent content checks. It is not a replacement-only timing or arbitrary-incumbent allowance. Future harness reports separate preparationMs and operationElapsedMs; RSS/disk still include preparation |
+| Linux publication without exclusive rename | Fixed: ENOSYS, EINVAL and EOPNOTSUPP fall back to hard-link publication of the complete immutable private file. Existing destinations remain untouched; EEXIST, EACCES and EIO do not use fallback. Tests inject unsupported-operation errors; they do not certify an actual NFS deployment |
+| Delivery during thread-exit destruction | Fixed: destructor-free TLS points to pinned delivery-stack nodes, preserving nested callback identity without allocation. An actual TLS destructor writes a watched database and its listener still receives CALLBACK_ACTIVE on close |
+| Builder stopped after two schema failures | Fixed: stopping retains queued and active index names. If schema application and index inventory both fail, restart the interrupted work against the held schema while preserving the original error and secondary context. A deterministic pending-work regression verifies completion without reopening |
+| Existing accepted fixes and app behavior | Preserved. No app behavior changes are required beyond pinning the new engine revision. No public protocol or database format changes |
+
+### Firing evidence and validation
+
+The no-home-write Node regression fails against the previously built binding with actual `created files` output:
+`/private/tmp/elmdb-review3-claim-before.log`. The corrected binding is checked by the full Node suite.
+Disposable source mutations independently restore the old callback TLS implementation and discard interrupted builder
+work. Both fail their selected runtime assertions, not compilation or zero-test selection:
+`/private/tmp/elmdb-review3-tls-mutation.log` and `/private/tmp/elmdb-review3-builder-mutation.log`.
+
+Linux CI additionally runs `scripts/check-process-claim-linux.py` in a private mount namespace and
+`scripts/check-process-publication-mutations.py` on disposable copies. The latter must observe actual runtime failures
+when socket exclusion and the unsupported-rename fallback are individually removed. These platform-specific results
+must be read from the fresh CI run; the earlier eaed455 matrix is historical evidence only.
+
+Required local gate logs use `/private/tmp/elmdb-review3-`: `clippy.log`, `rust.log`, `generated.log`, `one-lmdb.log`,
+`binding-build.log`, `binding-types.log` and `node.log`. Final immutable engine/app revisions and CI acceptance links
+are recorded on their PRs after the corresponding runs finish. No merge or release is authorized by this work.
+
+At the local checkpoint, formatting and warning-denying workspace lint pass, as do 266 engine tests (two manual
+measurements ignored), the CLI, two binding Rust tests, two xtask tests, generated protocol, single-LMDB validation,
+release binding build, TypeScript and all 37 Node tests. The new timing fields were smoke-tested on a separate owned
+100-row/64-byte synthetic fixture; this is harness verification, not a new production-scale resource allowance.
+Receipt: `/private/tmp/elmdb-review3-small-replace.log`.

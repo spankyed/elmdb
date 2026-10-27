@@ -266,3 +266,43 @@ fn a_failed_schema_commit_keeps_its_error_when_recovery_sees_a_new_declaration()
     assert_eq!(reopened.schema(), Some(schema("b")));
     assert!(reopened.check().unwrap().is_clean());
 }
+
+#[test]
+fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+        .unwrap();
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let store = db.store().unwrap();
+    store
+        .write(
+            |txn, raw| {
+                raw.delete(txn, &crate::engine::keys::index_built("Task", "lookup"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    // Deterministically represent a stopped worker with pending work, avoiding a scheduler-dependent race with a
+    // fast single-row build. set_schema must retain this queue even when its recovery inventory cannot be read.
+    let mut builder = crate::engine::Builder::start(store.clone(), db.engine_schema());
+    builder.stop();
+    builder.queue([("Task".into(), "lookup".into())]);
+    *db.builder() = Some(builder);
+    crate::database::BEFORE_SCHEMA_RECOVERY.with_borrow_mut(|hook| {
+        *hook = Some(Box::new(|| {
+            crate::engine::FAIL_NEXT_INDEX_REFRESH.set(true);
+        }))
+    });
+    crate::store::FAIL_NEXT_COMMIT.set(true);
+    let error = db.set_schema(schema("b")).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("refreshing index state also failed"));
+    db.wait_for_index_builds().unwrap();
+    assert!(db.index_status().unwrap().iter().all(|index| index.built));
+    assert_eq!(db.schema(), Some(schema("a")));
+    assert!(db.check().unwrap().is_clean());
+    drop(store);
+    db.close().unwrap();
+}

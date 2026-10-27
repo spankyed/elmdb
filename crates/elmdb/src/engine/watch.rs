@@ -2,7 +2,6 @@
 //! caller's tokens and under the database's own watches, and the watches, each a set of reads run again after every
 //! commit that wrote into what it read last, its listener handed each answer that differs from the one before.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -18,31 +17,45 @@ use super::tracking::{ReadSet, Recording, TrackIndex};
 use super::unit::Snapshot;
 
 thread_local! {
-    static CALLBACKS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    // A destructor-free TLS cell remains usable while other TLS destructors deliver watches. Nodes live on the
+    // synchronous delivery stack, so this needs neither heap allocation nor a destructor to free per-thread state.
+    static CALLBACKS: std::cell::Cell<*const CallbackScope> = const { std::cell::Cell::new(std::ptr::null()) };
 }
 
-/// Records nested callbacks on this thread; identity is valid while delivery owns its tracks Arc.
-struct CallbackScope;
+/// A pinned node in this thread's stack of nested deliveries.
+struct CallbackScope {
+    tracks: usize,
+    previous: *const Self,
+}
 
 impl CallbackScope {
-    fn enter(tracks: &SharedTracks) -> Self {
-        CALLBACKS.with_borrow_mut(|active| active.push(Arc::as_ptr(tracks) as usize));
-        Self
+    fn run<R>(tracks: &SharedTracks, run: impl FnOnce() -> R) -> R {
+        let scope = std::pin::pin!(Self { tracks: Arc::as_ptr(tracks) as usize, previous: CALLBACKS.get() });
+        CALLBACKS.set(&*scope);
+        run()
     }
 }
 
 impl Drop for CallbackScope {
     fn drop(&mut self) {
-        CALLBACKS.with_borrow_mut(|active| {
-            active.pop();
-        });
+        CALLBACKS.set(self.previous);
     }
 }
 
 pub(crate) fn in_callback(tracks: &SharedTracks) -> bool {
-    // N-API can close databases from thread-exit destructors after this TLS value was destroyed. No callback
-    // scope can remain on that thread at that point, so unavailable state means no active callback.
-    CALLBACKS.try_with(|active| active.borrow().contains(&(Arc::as_ptr(tracks) as usize))).unwrap_or(false)
+    let identity = Arc::as_ptr(tracks) as usize;
+    let mut node = CALLBACKS.get();
+    while !node.is_null() {
+        // SAFETY: every published node is pinned on this thread's synchronous CallbackScope::run stack. Its Drop
+        // restores the previous pointer before its storage expires, including during unwinding. No pointer crosses
+        // threads and each tracks identity remains valid while delivery borrows its SharedTracks.
+        let scope = unsafe { &*node };
+        if scope.tracks == identity {
+            return true;
+        }
+        node = scope.previous;
+    }
+    false
 }
 
 /// Who filed a read set: a caller, by the token its reads named, or one of the database's watches
@@ -191,49 +204,50 @@ pub(crate) fn deliver(
     for &id in ids {
         // The scope also covers listener destruction: its captures may own the last database reference while
         // a committing unit still holds the store. Database::drop must not wait on that same stack frame.
-        let _scope = CallbackScope::enter(tracks);
-        let mut listener = {
-            let mut held = tracks.lock();
-            let Some(watching) = held.watches.get_mut(&id) else { continue };
-            match watching.listener.take() {
-                Some(listener) => Some(listener),
-                None => {
-                    watching.again = true;
-                    continue;
-                }
-            }
-        };
-        let mut calling_listener = false;
-        let outcome = catch_unwind(AssertUnwindSafe(|| {
-            while let Some((answer, changed)) = read_watch(tracks, store, schema, id) {
-                if changed {
-                    calling_listener = true;
-                    listener.as_mut().expect("listener remains local until restored")(&answer);
-                    calling_listener = false;
-                }
+        CallbackScope::run(tracks, || {
+            let mut listener = {
                 let mut held = tracks.lock();
-                let Some(watching) = held.watches.get_mut(&id) else {
-                    held.index.remove(&Owner::Watch(id));
-                    break;
-                };
-                if !watching.again {
-                    watching.listener = listener.take();
-                    break;
+                let Some(watching) = held.watches.get_mut(&id) else { return };
+                match watching.listener.take() {
+                    Some(listener) => Some(listener),
+                    None => {
+                        watching.again = true;
+                        return;
+                    }
                 }
+            };
+            let mut calling_listener = false;
+            let outcome = catch_unwind(AssertUnwindSafe(|| {
+                while let Some((answer, changed)) = read_watch(tracks, store, schema, id) {
+                    if changed {
+                        calling_listener = true;
+                        listener.as_mut().expect("listener remains local until restored")(&answer);
+                        calling_listener = false;
+                    }
+                    let mut held = tracks.lock();
+                    let Some(watching) = held.watches.get_mut(&id) else {
+                        held.index.remove(&Owner::Watch(id));
+                        break;
+                    };
+                    if !watching.again {
+                        watching.listener = listener.take();
+                        break;
+                    }
+                }
+            }));
+            let dropped = catch_unwind(AssertUnwindSafe(|| drop(listener.take())));
+            if outcome.is_err() || dropped.is_err() {
+                unwatch(tracks, id);
+                panicked.push((
+                    id,
+                    if calling_listener || dropped.is_err() {
+                        ErrorCode::CallbackPanicked
+                    } else {
+                        ErrorCode::WatchPanicked
+                    },
+                ));
             }
-        }));
-        let dropped = catch_unwind(AssertUnwindSafe(|| drop(listener.take())));
-        if outcome.is_err() || dropped.is_err() {
-            unwatch(tracks, id);
-            panicked.push((
-                id,
-                if calling_listener || dropped.is_err() {
-                    ErrorCode::CallbackPanicked
-                } else {
-                    ErrorCode::WatchPanicked
-                },
-            ));
-        }
+        });
     }
     panicked
 }

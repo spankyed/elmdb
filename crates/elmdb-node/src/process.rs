@@ -1,111 +1,96 @@
-//! One elmdb binary per process. Windows uses a process-named kernel event independent of environment settings.
-//! On Unix, every binary independently opens the same process claim file in private per-account state and takes a
-//! nonblocking exclusive lock before opening LMDB. The winning binary keeps its handle for the process lifetime,
-//! across database closes and worker teardown; another copy cannot acquire it. The file is never unlinked: replacing
-//! its inode while a lock is held would let a second binary lock the replacement. A stale file holds no claim once
-//! the owning process ends, so PID reuse needs no cleanup.
+//! One elmdb binary per process. Claims are kernel-owned and disappear at process exit: an abstract Unix socket
+//! on Linux, a receive right at a reserved task-local Mach name on macOS, and a named event on Windows. No account
+//! database, home directory, temporary file, cleanup thread or /proc mount participates in claim acquisition.
 
-#[cfg(unix)]
-use std::fs::{File, OpenOptions, TryLockError};
 use std::io;
-#[cfg(unix)]
-use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use napi::Result;
 
 use crate::Code;
 
-#[cfg(unix)]
-fn claim_file() -> io::Result<PathBuf> {
-    use std::os::unix::{
-        ffi::OsStrExt,
-        fs::{DirBuilderExt, MetadataExt},
-    };
-    // The account database is independent of HOME/TMP settings, including worker-local JS environments.
-    // SAFETY: geteuid has no preconditions. getpwuid_r receives writable, correctly sized storage; returned
-    // strings are copied before that storage is dropped, and only a successful non-null result is dereferenced.
-    let uid = unsafe { libc::geteuid() };
-    let mut buffer = vec![0u8; 16384];
-    let home = loop {
-        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
-        let mut found = std::ptr::null_mut();
-        // SAFETY: all pointers refer to live output storage for the duration of this reentrant call.
-        let status =
-            unsafe { libc::getpwuid_r(uid, entry.as_mut_ptr(), buffer.as_mut_ptr().cast(), buffer.len(), &mut found) };
-        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
-            buffer.resize(buffer.len() * 2, 0);
-            continue;
-        }
-        if status != 0 {
-            return Err(io::Error::from_raw_os_error(status));
-        }
-        if found.is_null() {
-            return Err(io::Error::other("the current account has no home directory"));
-        }
-        // SAFETY: successful getpwuid_r initialized entry and its pw_dir string in buffer.
-        let entry = unsafe { entry.assume_init() };
-        if entry.pw_dir.is_null() {
-            return Err(io::Error::other("the current account has no home directory"));
-        }
-        // SAFETY: pw_dir is a terminated string owned by the still-live buffer.
-        break PathBuf::from(std::ffi::OsStr::from_bytes(unsafe { std::ffi::CStr::from_ptr(entry.pw_dir) }.to_bytes()));
-    };
-    if !home.is_absolute() {
-        return Err(io::Error::other("the account home directory must be absolute"));
-    }
-    let state = home.join(".elmdb");
-    let directory = state.join("process-claims");
-    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(&directory)?;
-    for path in [&state, &directory] {
-        let metadata = std::fs::symlink_metadata(path)?;
-        if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("{} must be a private directory owned by this user", path.display()),
-            ));
-        }
-    }
-    #[cfg(target_os = "linux")]
-    let namespace = std::fs::metadata("/proc/self/ns/pid")?.ino().to_string();
-    #[cfg(not(target_os = "linux"))]
-    let namespace = "host";
-    Ok(directory.join(format!("elmdb-binding-{uid}-{}-{namespace}.lock", std::process::id())))
-}
-
-#[cfg(unix)]
-fn acquire(path: &Path) -> io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let file = options.open(path)?;
-    use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata()?;
-    // SAFETY: geteuid has no preconditions. Only our effective user can own the claim inode; otherwise its owner
-    // could unlink it in the shared sticky directory while we hold the lock and allow a second claim.
-    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the process claim must be a regular file owned by this user",
-        ));
-    }
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(TryLockError::WouldBlock) => {
-            Err(io::Error::new(io::ErrorKind::WouldBlock, "the process is already claimed"))
-        }
-        Err(TryLockError::Error(error)) => Err(error),
-    }
-}
-
-#[cfg(unix)]
-type Claim = File;
+#[cfg(target_os = "linux")]
+type Claim = std::os::unix::net::UnixDatagram;
+#[cfg(target_os = "macos")]
+type Claim = MachClaim;
 #[cfg(windows)]
 type Claim = std::os::windows::io::OwnedHandle;
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+type Claim = ();
+
+#[cfg(target_os = "linux")]
+fn claim_address() -> io::Result<std::os::unix::net::SocketAddr> {
+    use sha2::{Digest, Sha256};
+    use std::os::linux::net::SocketAddrExt;
+    // AT_RANDOM is installed by the ELF loader and shared by every binary in this process. Hash its 16 bytes:
+    // publishing them directly would expose random material also used by libc's stack protector. Including the PID
+    // distinguishes forked children; fresh exec randomness distinguishes equal PIDs in containers sharing a netns.
+    // SAFETY: getauxval has no pointer arguments. A nonzero AT_RANDOM points to 16 loader-owned bytes that remain
+    // live for the process lifetime. No environment variable or /proc read supplies this address.
+    let random = unsafe { libc::getauxval(libc::AT_RANDOM) } as *const u8;
+    if random.is_null() {
+        return Err(io::Error::other("the ELF loader did not supply process identity randomness"));
+    }
+    let mut digest = Sha256::new();
+    digest.update(b"elmdb-binding-process-claim-v2");
+    // SAFETY: the non-null loader-owned AT_RANDOM region contains exactly 16 readable bytes, as specified above.
+    digest.update(unsafe { std::slice::from_raw_parts(random, 16) });
+    digest.update(std::process::id().to_ne_bytes());
+    let name = format!("elmdb-binding-{:x}", digest.finalize());
+    std::os::unix::net::SocketAddr::from_abstract_name(name)
+}
+
+#[cfg(target_os = "linux")]
+fn acquire_claim() -> io::Result<Claim> {
+    Claim::bind_addr(&claim_address()?).map_err(|error| {
+        if error.kind() == io::ErrorKind::AddrInUse {
+            io::Error::new(io::ErrorKind::WouldBlock, "the process is already claimed")
+        } else {
+            error
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MachClaim(u32);
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    static mach_task_self_: u32;
+    fn mach_port_allocate_name(task: u32, right: u32, name: u32) -> i32;
+    fn mach_port_mod_refs(task: u32, name: u32, right: u32, delta: i32) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for MachClaim {
+    fn drop(&mut self) {
+        // SAFETY: this claim uniquely owns one receive right in the current task. Reducing its reference count
+        // destroys that right. Static successful claims are never dropped; this also permits isolated unit tests.
+        unsafe { mach_port_mod_refs(mach_task_self_, self.0, 1, -1) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_claim() -> io::Result<Claim> {
+    // Reserve one name in this task's IPC table, not launchd's service namespace. The nonzero generation is a legal
+    // Mach name. All copies must use exactly this name, even if occupied by an unrelated component: fail closed
+    // rather than selecting another name and admitting two LMDB implementations. No filesystem or entitlement to
+    // register a launchd service is needed. The slot and receive right are reclaimed with the task, including SIGKILL.
+    const NAME: u32 = 0x000e_1d03;
+    const RECEIVE: u32 = 1;
+    // SAFETY: mach_task_self names our live task; RECEIVE and NAME describe a new task-owned receive right.
+    match unsafe { mach_port_allocate_name(mach_task_self_, RECEIVE, NAME) } {
+        0 => Ok(MachClaim(NAME)),
+        libc::KERN_NAME_EXISTS => Err(io::Error::new(io::ErrorKind::WouldBlock, "the process claim name is occupied")),
+        status => Err(io::Error::other(format!("cannot reserve the Mach process claim (status {status})"))),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn acquire_claim() -> io::Result<Claim> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "process claims require Linux, macOS or Windows"))
+}
 
 #[cfg(windows)]
 fn acquire_event(name: &str) -> io::Result<Claim> {
@@ -133,15 +118,9 @@ fn acquire_event(name: &str) -> io::Result<Claim> {
     Ok(handle)
 }
 
+#[cfg(windows)]
 fn acquire_claim() -> io::Result<Claim> {
-    #[cfg(unix)]
-    {
-        acquire(&claim_file()?)
-    }
-    #[cfg(windows)]
-    {
-        acquire_event(&format!("Local\\elmdb-binding-{}", std::process::id()))
-    }
+    acquire_event(&format!("Local\\elmdb-binding-{}", std::process::id()))
 }
 
 /// Keep the accepted Windows image and its static claim mapped after its first worker unloads it. A leaked claim
@@ -167,20 +146,13 @@ fn pin_module() -> io::Result<()> {
 /// and independently acquired OS handle, so only one wins even when first opens race across worker threads.
 pub fn claim() -> Result<(), Code> {
     static CLAIMED: Mutex<Option<Claim>> = Mutex::new(None);
-    let mut held = CLAIMED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if held.is_some() {
-        return Ok(());
-    }
-    match (|| {
+    match claim_once(&CLAIMED, || {
         let claim = acquire_claim()?;
         #[cfg(windows)]
         pin_module()?;
         Ok::<_, io::Error>(claim)
-    })() {
-        Ok(claim) => {
-            *held = Some(claim);
-            Ok(())
-        }
+    }) {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let mine = process_path::get_dylib_path()
                 .map_or_else(|| "an unknown file".to_owned(), |p| p.display().to_string());
@@ -198,33 +170,33 @@ pub fn claim() -> Result<(), Code> {
     }
 }
 
-#[cfg(all(test, unix))]
+/// Cache only successful claims. An acquisition failure must remain retryable without reloading the binding.
+fn claim_once<T>(slot: &Mutex<Option<T>>, acquire: impl FnOnce() -> io::Result<T>) -> io::Result<()> {
+    let mut held = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.is_none() {
+        *held = Some(acquire()?);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn independent_handles_conflict_and_an_unowned_file_can_be_reused() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("claim");
-        let first = acquire(&path).unwrap();
-        assert_eq!(acquire(&path).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    fn failed_claims_are_retryable_and_success_is_cached() {
+        let slot = Mutex::new(None::<()>);
+        assert!(claim_once(&slot, || Err(io::Error::other("transient failure"))).is_err());
+        claim_once(&slot, || Ok(())).unwrap();
+        claim_once(&slot, || panic!("a successful claim must not be reacquired")).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn independent_kernel_claims_conflict_and_are_reclaimed_on_close() {
+        let first = acquire_claim().unwrap();
+        assert_eq!(acquire_claim().unwrap_err().kind(), io::ErrorKind::WouldBlock);
         drop(first);
-        acquire(&path).unwrap();
-    }
-
-    #[test]
-    fn a_symbolic_link_cannot_redirect_the_process_claim() {
-        let directory = tempfile::tempdir().unwrap();
-        let target = directory.path().join("target");
-        File::create(&target).unwrap();
-        let path = directory.path().join("claim");
-        std::os::unix::fs::symlink(&target, &path).unwrap();
-        assert!(acquire(&path).is_err());
-    }
-
-    #[test]
-    fn an_io_failure_does_not_grant_a_claim() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(acquire(directory.path()).is_err());
+        acquire_claim().unwrap();
     }
 }

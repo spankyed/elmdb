@@ -36,6 +36,10 @@ jobs:
           npm run build
           npm run typecheck
           npm test
+      - name: process claim without an account, home directory or proc mount
+        run: python3 scripts/check-process-claim-linux.py
+      - name: prove kernel-claim and publication fallback assertions fire
+        run: python3 scripts/check-process-publication-mutations.py
       - name: the generated loader and declarations are committed
         run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts
 

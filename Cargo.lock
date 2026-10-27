@@ -485,6 +485,7 @@ dependencies = [
  "process_path",
  "rmp-serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 

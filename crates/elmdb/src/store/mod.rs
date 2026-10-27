@@ -467,8 +467,8 @@ impl Store {
         let mut growths = 0;
         loop {
             #[cfg(test)]
-            BEFORE_WRITE_RESERVATION.with_borrow_mut(|hook| {
-                if let Some(hook) = hook.take() {
+            let _ = BEFORE_WRITE_RESERVATION.try_with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
                     hook();
                 }
             });

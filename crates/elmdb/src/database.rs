@@ -193,9 +193,12 @@ impl Database {
         }
         // The builder works to the schema it was started with, so it stops first and starts again on the one held
         // after, whichever that is
-        if let Some(mut builder) = self.builder().take() {
+        let interrupted = if let Some(mut builder) = self.builder().take() {
             builder.stop();
-        }
+            builder.pending()
+        } else {
+            Vec::new()
+        };
         let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
             *current = Arc::new(EngineSchema::new(applied.schema.clone()));
@@ -215,7 +218,7 @@ impl Database {
                 Ok(unbuilt) => unbuilt,
                 Err(secondary) => {
                     original.message.push_str(&format!("; refreshing index state also failed: {secondary}"));
-                    Vec::new()
+                    interrupted
                 }
             },
         };

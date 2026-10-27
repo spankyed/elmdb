@@ -421,6 +421,52 @@ fn database_cleanup_after_callback_tls_destruction_terminates() {
     Database::open(dir.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap().close().unwrap();
 }
 
+#[test]
+fn watch_delivery_from_thread_exit_destructors_is_guarded() {
+    if bounded_watch_child("engine::tests::tracked::watch_delivery_from_thread_exit_destructors_is_guarded") {
+        return;
+    }
+    struct OnExit(Option<Arc<Database>>);
+    impl Drop for OnExit {
+        fn drop(&mut self) {
+            if let Some(db) = self.0.take() {
+                write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-exit"})]).unwrap();
+                db.close().unwrap();
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_owned();
+    let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let delivered = seen.clone();
+    std::thread::spawn(move || {
+        thread_local! { static ON_EXIT: std::cell::RefCell<OnExit> = const { std::cell::RefCell::new(OnExit(None)) }; }
+        // Initialize this destructor before the callback state: the old callback Vec is destroyed first.
+        ON_EXIT.with_borrow(|slot| assert!(slot.0.is_none()));
+        let db = Arc::new(
+            Database::open(
+                &path,
+                crate::OpenOptions { schema: Some(super::schema()), syncs: false, ..Default::default() },
+            )
+            .unwrap(),
+        );
+        let weak = Arc::downgrade(&db);
+        db.watch(
+            reads(vec![tasks()], None),
+            Box::new(move |_| {
+                assert_eq!(weak.upgrade().unwrap().close().unwrap_err().code, crate::ErrorCode::CallbackActive);
+                delivered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        )
+        .unwrap();
+        ON_EXIT.with_borrow_mut(|slot| slot.0 = Some(db));
+    })
+    .join()
+    .unwrap();
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+    open(&dir).close().unwrap();
+}
+
 /// Run explicitly in release mode on an idle machine; reports times rather than enforcing a machine-specific limit.
 #[test]
 #[ignore = "tracking contention measurement"]

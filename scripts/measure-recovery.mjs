@@ -77,7 +77,7 @@ if (mode !== 'seed' && rowsArg === '--observe') {
 }
 const beforeBytes = diskBytes(root);
 const started = performance.now();
-let target;
+let target, preparationMs = 0, operationElapsedMs;
 if (mode === 'seed') {
   const db = Database.open(source, { schema, syncs: false });
   try {
@@ -122,7 +122,12 @@ if (mode === 'seed') {
     try { incumbent.backup(target); } finally { incumbent.close(); }
   }
   const destination = Database.open(target, { schema: workload.schema });
-  try { destination.replaceWith(source); } finally { destination.close(); }
+  preparationMs = performance.now() - started;
+  const operationStarted = performance.now();
+  try { destination.replaceWith(source); } finally {
+    destination.close();
+    operationElapsedMs = performance.now() - operationStarted;
+  }
 } else {
   const db = Database.open(source, { readOnly: mode === 'check' || mode === 'backup' });
   try {
@@ -141,10 +146,10 @@ if (mode === 'seed') {
 const elapsedMs = performance.now() - started;
 console.log(JSON.stringify({
   mode, root, target, profile: workload.profile ?? 'text', vectorDims: workload.vectorDims ?? 0, embeddings: workload.embeddings ?? 0, rows: workload.rows, bodyBytes: workload.bodyBytes, relations: workload.relations,
-  elapsedMs, maxRssKiB: process.resourceUsage().maxRSS,
+  elapsedMs, preparationMs, operationElapsedMs: operationElapsedMs ?? elapsedMs, maxRssKiB: process.resourceUsage().maxRSS,
   sourceFileBytes: fs.statSync(join(source, 'data.mdb')).size,
   logicalDiskBefore: beforeBytes, logicalDiskAfter: diskBytes(root),
-  writerOccupancyUpperBoundMs: ['replace', 'replace-populated', 'rebuild'].includes(mode) ? elapsedMs : mode === 'seed' ? null : 0,
+  writerOccupancyUpperBoundMs: ['replace', 'replace-populated', 'rebuild'].includes(mode) ? (operationElapsedMs ?? elapsedMs) : mode === 'seed' ? null : 0,
   destinationInitiallyPopulated: mode === 'replace-populated',
-  conditions: 'replace-populated includes incumbent backup preparation; fresh Node process; filesystem cache uncontrolled; seed syncs disabled, maintenance defaults; synthetic data',
+  conditions: 'elapsedMs/RSS include preparation; operationElapsedMs excludes incumbent preparation and includes destination close; fresh Node process; filesystem cache uncontrolled; seed syncs disabled, maintenance defaults; synthetic data',
 }));

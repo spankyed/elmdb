@@ -147,8 +147,8 @@ pub(crate) fn publish_new(source: &Path, target: &Path) -> std::io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
-        let source = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-        let target = std::ffi::CString::new(target.as_os_str().as_bytes())?;
+        let source_c = std::ffi::CString::new(source.as_os_str().as_bytes())?;
+        let target_c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
         #[cfg(target_os = "linux")]
         // SAFETY: both paths remain live terminated strings; AT_FDCWD uses their absolute paths and
         // RENAME_NOREPLACE atomically refuses an existing destination without requiring hard links.
@@ -156,19 +156,82 @@ pub(crate) fn publish_new(source: &Path, target: &Path) -> std::io::Result<()> {
             libc::syscall(
                 libc::SYS_renameat2,
                 libc::AT_FDCWD,
-                source.as_ptr(),
+                source_c.as_ptr(),
                 libc::AT_FDCWD,
-                target.as_ptr(),
+                target_c.as_ptr(),
                 libc::RENAME_NOREPLACE,
             )
         };
         #[cfg(target_os = "macos")]
         // SAFETY: the two live terminated paths are on the same volume; RENAME_EXCL refuses replacement atomically.
-        let result = unsafe { libc::renamex_np(source.as_ptr(), target.as_ptr(), libc::RENAME_EXCL) };
-        if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+        let result = unsafe { libc::renamex_np(source_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) };
+        let result = if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+        #[cfg(target_os = "linux")]
+        {
+            exclusive_rename_or_link(source, target, result)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            result
+        }
     }
     #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         std::fs::hard_link(source, target)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn exclusive_rename_or_link(source: &Path, target: &Path, renamed: std::io::Result<()>) -> std::io::Result<()> {
+    match renamed {
+        // Old kernels and filesystems such as NFS may not support exclusive rename. Linking the already synced
+        // private file publishes it atomically and also refuses an existing target; TempPath removes the source.
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)) => {
+            std::fs::hard_link(source, target)
+        }
+        result => result,
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod publication_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_exclusive_rename_falls_back_without_overwriting() {
+        for code in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source");
+            let target = dir.path().join("target");
+            std::fs::write(&source, b"complete").unwrap();
+            exclusive_rename_or_link(&source, &target, Err(std::io::Error::from_raw_os_error(code))).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"complete");
+            std::fs::remove_file(&source).unwrap();
+            std::fs::write(&source, b"replacement").unwrap();
+            assert_eq!(
+                exclusive_rename_or_link(&source, &target, Err(std::io::Error::from_raw_os_error(code)))
+                    .unwrap_err()
+                    .kind(),
+                std::io::ErrorKind::AlreadyExists
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"complete");
+        }
+    }
+
+    #[test]
+    fn other_rename_errors_do_not_attempt_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        std::fs::write(&source, b"complete").unwrap();
+        for code in [libc::EEXIST, libc::EACCES, libc::EIO] {
+            assert_eq!(
+                exclusive_rename_or_link(&source, &target, Err(std::io::Error::from_raw_os_error(code)))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(code)
+            );
+            assert!(!target.exists());
+        }
     }
 }

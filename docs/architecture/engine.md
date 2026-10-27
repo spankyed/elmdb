@@ -33,17 +33,21 @@ elmdb starts a reader and verifies that a lock-table reader slot exists before a
 The Node binding acquires an exclusive OS process claim before its first database open. One binary owns the process
 claim until process exit, including after its databases close or its first worker ends. Another physical binding copy
 is refused with `ALREADY_LOADED`; a process-claim I/O failure is refused with `IO`. Independent processes have independent
-claims. On Unix, coordination lives under the operating-system account's home at `.elmdb/process-claims`, in
-owner-controlled directories, outside temporary-directory age cleanup. Claims include effective UID and PID, plus
-Linux's PID-namespace inode, so containers sharing state do not collide merely because their namespace-local PIDs
-match. The account home comes from the account database, not mutable HOME/TMP settings. It must permit creation of
-private coordination state. Claim files must be regular, owned files and cannot be symlinks. They are never unlinked
-while live; unlocked files are reusable after PID reuse. Small zero-length claim files remain after exit. Do not
-age-delete this directory while elmdb processes are running; remove abandoned coordination files only after all
-such processes have exited. Automatic stale-file reclamation is not implemented because unlinking a claim during
-an open/lock race would defeat exclusion. Failed claims are retryable; only a successful handle is retained.
-Windows uses a session-local PID-named kernel event with a non-inheritable handle retained until process exit.
-Neither identity depends on mutable temporary-directory settings.
+claims. Linux binds an abstract Unix datagram socket whose name hashes the ELF loader's per-exec randomness and PID.
+Every binding copy sees the same identity without account lookup, home storage or /proc; independently executed
+containers with equal PIDs have independent identities even when sharing a network namespace. The hash avoids
+publishing the loader randomness itself. The socket is never used for messaging and its handle remains open until
+process exit. Network-namespace changes after loading are outside this contract, as is using an inherited binding
+after fork without exec.
+
+macOS atomically reserves receive-right name `0x000e1d03` in the process's own Mach IPC table. This requires neither
+launchd registration nor filesystem state. Occupation of that reserved name, including by an unrelated component,
+refuses before LMDB opens; it never chooses another name. Windows uses a session-local PID-named kernel event with
+a non-inheritable handle retained until process exit. The kernel reclaims these claims on ordinary exit and hard
+termination. No coordination files are created, and temporary-directory cleanup cannot split a live claim.
+Failed acquisition is retryable; only success is cached. OS restrictions that deny the required kernel operation
+are reported as IO rather than falling back to an unprotected open. The shipped targets are Linux, macOS and Windows;
+other targets refuse process-claim acquisition as unsupported.
 
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a

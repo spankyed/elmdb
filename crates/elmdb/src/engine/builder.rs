@@ -29,6 +29,7 @@ pub struct IndexFailure {
 struct State {
     queue: VecDeque<(String, String)>,
     busy: bool,
+    active: Option<(String, String)>,
     stopping: bool,
     failures: Vec<IndexFailure>,
 }
@@ -69,6 +70,12 @@ impl Builder {
     /// kept in, which a schema change and a close take to stop it
     pub fn waiter(&self) -> Waiter {
         Waiter(Arc::clone(&self.shared))
+    }
+
+    /// Work left after stop joins the worker, including an interrupted chunk's index.
+    pub fn pending(&self) -> Vec<(String, String)> {
+        let state = self.shared.0.lock().expect("the builder's lock is never poisoned");
+        state.active.iter().chain(state.queue.iter()).cloned().collect()
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
@@ -134,6 +141,7 @@ fn run(store: &Store, schema: &EngineSchema, shared: &(Mutex<State>, Condvar)) {
                 }
                 if let Some(next) = state.queue.pop_front() {
                     state.busy = true;
+                    state.active = Some(next.clone());
                     break next;
                 }
                 state.busy = false;
@@ -174,6 +182,7 @@ fn run(store: &Store, schema: &EngineSchema, shared: &(Mutex<State>, Condvar)) {
             }
         }
         let mut state = lock.lock().expect("the builder's lock is never poisoned");
+        state.active = None;
         state.busy = !state.queue.is_empty();
         changed.notify_all();
     }

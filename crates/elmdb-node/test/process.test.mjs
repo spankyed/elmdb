@@ -132,29 +132,6 @@ test('a claim outlives its first worker and database closes', { timeout: 20000 }
   assert.deepEqual(JSON.parse(stdout.trim()), ['ALREADY_LOADED', 'ALREADY_LOADED']);
 });
 
-if (process.platform !== 'win32') {
-  test('an unusable process claim refuses before creating a database', (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-io-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const printed = run(`
-      const fs = require('node:fs');
-      const root = require('node:path').join(require('node:os').userInfo().homedir, '.elmdb', 'process-claims');
-      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-      const ns = process.platform === 'linux' ? fs.statSync('/proc/self/ns/pid').ino : 'host';
-      const claim = require('node:path').join(root, 'elmdb-binding-' + process.geteuid() + '-' + process.pid + '-' + ns + '.lock');
-      fs.mkdirSync(claim);
-      try {
-        let code;
-        try { require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }); }
-        catch (e) { code = e.code; }
-        console.log(JSON.stringify({ code, created: fs.existsSync(${JSON.stringify(join(dir, 'a'))}) }));
-      } finally { fs.rmdirSync(claim); }
-    `);
-    assert.deepEqual(JSON.parse(printed), { code: 'IO', created: false });
-  });
-}
-
-
 test('changing temporary-directory settings cannot create another process claim', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-env-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -173,42 +150,29 @@ test('changing temporary-directory settings cannot create another process claim'
   assert.equal(printed, 'ALREADY_LOADED');
 });
 
+test('claim acquisition needs no usable home or temporary directory', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-no-home-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.equal(run(`
+    for (const key of ['HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR'])
+      process.env[key] = '/nonexistent/elmdb-test';
+    require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false }).close();
+    console.log('opened');
+  `), 'opened');
+});
+
 if (process.platform !== 'win32') {
-  test('a transient process claim failure can be retried', (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-retry-'));
+  test('claiming the process creates no home-directory coordination files', (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-no-files-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const printed = run(`
+    assert.equal(run(`
       const fs = require('node:fs');
       const root = require('node:path').join(require('node:os').userInfo().homedir, '.elmdb', 'process-claims');
-      fs.mkdirSync(root, { recursive: true, mode: 0o700 });
-      const ns = process.platform === 'linux' ? fs.statSync('/proc/self/ns/pid').ino : 'host';
-      const claim = require('node:path').join(root, 'elmdb-binding-' + process.geteuid() + '-' + process.pid + '-' + ns + '.lock');
-      fs.mkdirSync(claim);
-      const binding = require(${JSON.stringify(binary)});
-      let code;
-      try { binding.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }); }
-      catch (e) { code = e.code; }
-      finally { fs.rmdirSync(claim); }
-      binding.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
-      console.log(code);
-    `);
-    assert.equal(printed, 'IO');
-  });
-
-  test('temporary-directory cleanup cannot remove the live process claim', (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-cleanup-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    const copy = join(dir, 'copy.node');
-    copyFileSync(binary, copy);
-    const printed = run(`
-      const first = require(${JSON.stringify(binary)});
-      first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
-      require('node:fs').rmSync('/tmp/elmdb-binding-' + process.getuid() + '-' + process.pid + '.lock', { force: true });
-      let code;
-      try { require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false }).close(); code = 'opened'; }
-      catch (e) { code = e.code; }
-      console.log(code);
-    `);
-    assert.equal(printed, 'ALREADY_LOADED');
+      const prefix = 'elmdb-binding-' + process.geteuid() + '-' + process.pid + '-';
+      const snapshot = () => fs.existsSync(root) ? fs.readdirSync(root).filter(name => name.startsWith(prefix)).sort() : [];
+      const before = snapshot();
+      require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false }).close();
+      console.log(JSON.stringify(before) === JSON.stringify(snapshot()) ? 'unchanged' : 'created files');
+    `), 'unchanged');
   });
 }
