@@ -50,6 +50,12 @@ libc.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true
+dhat.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "maintenance"
+harness = false

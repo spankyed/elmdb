@@ -26,6 +26,12 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: maintenance heap assertions and benchmark smoke
+        run: |
+          set -o pipefail
+          cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture --color never 2>&1 | tee "$RUNNER_TEMP/maintenance-heap.log"
+          python3 -c 'import pathlib,sys; assert "test maintenance_heap_bounds ... ok" in pathlib.Path(sys.argv[1]).read_text(), "heap test did not execute"' "$RUNNER_TEMP/maintenance-heap.log"
+          cargo bench -p elmdb --bench maintenance -- --test
       - name: refuse unregistered readers on an actual read-only mount
         run: python3 scripts/check-read-only-mount.py
       - run: cargo xtask check-generated

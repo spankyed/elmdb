@@ -69,3 +69,12 @@ checks creation order and consumer cancellation. External-sort tests check onlin
 across levels, oversized rows and intermediate-merge failure cleanup. These are intermediate-storage assertions, not
 an absolute heap or RSS cap for LMDB or hannoy. Dated large-fixture observations and disposable regression failures
 are recorded in [maintenance memory evidence](../evidence/maintenance-memory-2026-10-27.md).
+
+## Repeatable maintenance measurements
+
+`cargo bench -p elmdb --bench maintenance` measures deterministic key encoding, selected value/text rebuilds,
+export and indexed limit queries. Criterion reports comparisons; timing is not a CI pass/fail budget.
+`cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture`
+runs one isolated dhat test, asserting workload-specific heap allowances for export and selected value/text
+rebuilds at 1k/10k entities. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
+their allocator. Scope, exclusions and baseline commands are in [maintenance verification](../roadmap/maintenance-verification.md).
