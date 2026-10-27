@@ -10,12 +10,12 @@ Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished
 document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
 elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 5 is
 apack/monorepo/docs/plans/field-types-from-shapes.md. Phases 1 and 2 are done; Phases 3 to 10 run on
-G7's branches, apack's in its worktree under one PR and elmdb's in its own checkout.
+G7's branches, apack's in its main checkout under one PR and elmdb's in its own checkout.
 
 Work in two repositories, both under ~/Develop/Projects:
 - elmdb: follow elmdb/CLAUDE.md and this goal's Constraints, on G7's elmdb branch.
-- apack/monorepo (apack): follow its CLAUDE.md, its docs/AGENTS.md and its user memory, in a
-  worktree (never the main checkout).
+- apack/monorepo (apack): follow its CLAUDE.md, its docs/AGENTS.md and its user memory, in its
+  main checkout, on G7's apack branch.
 
 Inspect current code before relying on a path or a figure here.
 
@@ -69,20 +69,18 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Remediation landed** (2026-10-27): the review's R01–R08 and H01–H04 (`docs/reviews/elmdb-review-2026-10.md`;
   goal archived at `docs/archive/goals/goal-elmdb-remediation.md`), elmdb #1 and #2 into `main` (`9359949`), apack
   #283 and #284 into `master` (`5838145675`), which pins elmdb `c345182`.
-- **Branches (G7):** apack's `session/elmdb-next` at `master`'s tip (`5838145675`), in
-  `~/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-next`, linked to elmdb's checkout with the binding built
-  at the pin; elmdb's `session/elmdb-next` cut again from `main` (`9359949`), in its own checkout. Neither holds Phase 3
+- **Branches (G7):** apack's `session/elmdb-next` at `master`'s tip (`5838145675`), checked out in
+  apack's main checkout (`~/Develop/Projects/apack/monorepo`), linked to elmdb's checkout with the binding built at
+  the pin; elmdb's `session/elmdb-next` cut again from `main` (`9359949`), in its own checkout. Neither holds Phase 3
   work yet; apack's PR opens with its first checkpoint.
-- **Starting state** (2026-10-27): in apack's worktree, the specs `packages/apack-ears/src/database.ts` reaches pass but
-  three repo checks, each needing what the worktree's first chain run writes (the chain's stamp store, and
-  `packages/apack-ui/.temp/api-types` from `api:check`). G8's copy at elmdb `9359949`: `check()` finds no derived
+- **Starting state** (2026-10-27): the specs `packages/apack-ears/src/database.ts` reaches pass at `5838145675`. G8's copy at elmdb `9359949`: `check()` finds no derived
   differences and the 17 known duplicate short codes.
 - **Next action:** Phase 3's call counter in `createConnection`, with its spec.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
-  - `dev:drive` in a linked worktree runs on the worktree's own profile, which persists; a reading names a fresh one
-    (`--profile <name>`).
+  - `dev:drive` in the main checkout runs on the default development profile, which persists; a reading names a fresh
+    one (`--profile <name>`).
   - **Known bug, open:** a message sent before the threads surface has its chat start goes out with `mode: ''`, is
     saved and answered by no flow (the Claude Code flow runs only on `mode == 'Claude Code'`). A chat-turn script waits
     for the surface's mode; the fix (the surface holding the send, or the backend refusing a mode-less message) is the
@@ -112,10 +110,10 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | G4 | Every phase that changes the engine reads apack's `npm run bench -w @apackdev/ears` and the single-row read through the binding before and after. A case slower by more than 10% is investigated and fixed when the cause is the change; one that remains is recorded in Outcome with its cause | this goal (as `goal-elmdb.md`'s D17) |
 | G5 | A finding that a decision here is wrong is acted on: the goal changes the decision and its owning document in one commit, with the evidence linked, and continues. Only removing a deliverable needs the user | this goal |
 | G6 | The goal commits, pushes and opens PRs as it needs to, in both repositories: elmdb's work on G7's elmdb branch, pushed at each checkpoint, apack's work on G7's branch, pushed at each checkpoint, under the one PR opened for it against `master`, its description kept current as each phase lands. **CI dispatches are limited:** one dispatch of a workflow per phase that needs it — elmdb's full matrix when a phase changes the binding or its build, apack's strict chain and macOS compiler cases at the end — plus one rerun after a fix. A failure is diagnosed locally or in the Linux container, never by dispatching again | the user, 2026-10-25 |
-| G7 | **One branch for the rest, in each repository.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in a new worktree (`npm run session:new -- elmdb-next`), under one PR against `master`; `master`'s later commits come in by merging `master`. elmdb's is on `session/elmdb-next` cut from `main`, in elmdb's own checkout: no elmdb worktree, since each holds a cold `target/` of up to 11 GB. Every apack checkout links that one checkout (`vendor/elmdb`), so its binding is rebuilt only between runs, never under a chain or an app run. apack's pin names commits on elmdb's branch, which is merged into `main` (fast-forward, so the pinned commits keep their hashes) before apack's PR lands | the user, 2026-10-25 and 2026-10-26 |
+| G7 | **One branch for the rest, in each repository.** Phase 2's branch landed on `master` with #278. apack's work for Phases 3 to 10 is on one new branch cut from `master`, `session/elmdb-next`, in apack's main checkout, under one PR against `master`; `master`'s later commits come in by merging `master`. elmdb's is on `session/elmdb-next` cut from `main`, in elmdb's own checkout: no elmdb worktree, since each holds a cold `target/` of up to 11 GB. Every apack checkout links that one checkout (`vendor/elmdb`), so its binding is rebuilt only between runs, never under a chain or an app run. apack's pin names commits on elmdb's branch, which is merged into `main` (fast-forward, so the pinned commits keep their hashes) before apack's PR lands | the user, 2026-10-25, 2026-10-26 and 2026-10-27 (apack's main checkout) |
 | G8 | **Production-shaped data** is loaded from the dump of the app's backup of 2026-10-17 (`~/Develop/backups/abuddy-backups/elmdb-dumps/agentbuddy-backup-2026-10-17T23-06-18-232Z.elmdb-dump`) by `elmdb load`, into a scratch directory outside both repositories, and is never committed; the dump and the backup are only read. It holds the backup's data in its own contract, with no schema (the README beside it). What a phase's schema refuses on its copy (the 17 duplicate short codes `docs/evidence/phase-7.md` found) is resolved on the copy and recorded | the dump's README; `format.md`, Dumps |
 | G9 | **Real chat turns** are measured, at most ten per reading, through the provider or CLI the app is configured with, on the user's existing login, in an app on an isolated data directory. A faked model would hide the streaming writes being measured. With no working login, Phase 3 measures flow runs and records why the chat turn is missing | this goal |
-| G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb and apack's worktree. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
+| G10 | **One writer.** The goal runs after `goal-elmdb.md` closes, as the only session editing elmdb's checkout and apack's main checkout. Changes it finds that aren't its own are left alone and recorded in Current handoff | this goal |
 | G11 | **Regexes are Rust's `regex` syntax**, RE2's family: linear in the text, with no lookaround or backreferences. A pattern using one is refused naming it. `search.md` documents the syntax | this goal |
 | G12 | **The run stops and reports** only when everything left depends on a failure it can't diagnose (Constraints, Failures), when a step would write or convert the user's real data rather than a copy, or when a deliverable would have to be removed (G5). A format change doesn't stop it: converting the user's data is the user's step | this goal |
 | G13 | **Live queries are `master`'s.** apack's live queries (views, `useView`, the features moved onto them; the plan archived at `docs/archive/plans/live-queries.md`) landed with #277 and #278. This goal changes them only where its own work makes it (G14), and keeps `engine.watch`'s contract: every phase that changes how the engine reads or writes keeps the watch specs and the model harness's watch property passing | `goal-elmdb.md`'s D30 |
