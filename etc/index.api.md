@@ -24,6 +24,44 @@ export interface BaseEntity {
 }
 
 // @public
+export interface CallCounting {
+    report(): CallReport;
+    start(): void;
+    stop(): CallReport;
+}
+
+// @public
+export type CallKind = 'read' | 'write' | 'unit';
+
+// @public
+export interface CallReport {
+    counting: boolean;
+    elapsedMs: number;
+    sites: CallSite[];
+    totals: Record<CallKind, {
+        calls: number;
+        ops: number;
+        ms: number;
+    }> & {
+        watchRuns: {
+            calls: number;
+            ms: number;
+        };
+    };
+}
+
+// @public
+export interface CallSite {
+    calls: number;
+    kind: CallKind;
+    ms: number;
+    ops: number;
+    site: string;
+    watch: boolean;
+    writes: number;
+}
+
+// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -137,6 +175,7 @@ export interface EarsAdmin {
     bulkLoad<T>(fn: () => T): T;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
+    readonly calls: CallCounting;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];

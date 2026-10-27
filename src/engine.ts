@@ -4,6 +4,7 @@
 // engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
 import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge } from './runtime.ts';
+import type { CallCounting } from './calls.ts';
 import { createConnection, runCommitted, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
@@ -157,6 +158,11 @@ export interface EarsAdmin {
   watchesSettled(): Promise<void>;
   /** How many watches are open, and how many keys and ranges their read sets hold */
   watchStats(): { watches: number; keys: number; ranges: number };
+  /**
+   * Counting the engine's calls to its database — reads, writes outside a unit, and units — with their time and the
+   * code that made each, off until started: what a measurement of the app's work reads
+   */
+  readonly calls: CallCounting;
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -357,6 +363,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     },
     watchesSettled: watches.settled,
     watchStats: watches.stats,
+    calls: connection.calls,
   };
 
   return { ...operations, admin };

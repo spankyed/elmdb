@@ -8,6 +8,7 @@ export {
 } from './engine.ts';
 export type { EarsDatabase, EarsUnit, SchemaChange, UnitOptions } from './database.ts';
 export type { WatchObserver, Watching } from './watch.ts';
+export type { CallCounting, CallKind, CallReport, CallSite } from './calls.ts';
 export type { EngineSchema, RelationRules } from './schema.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';
