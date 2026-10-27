@@ -166,14 +166,22 @@ export function crossing<T>(fn: () => T): T {
   }
 }
 
-/** Runs an operation and reports its committed state before returning or rethrowing a failed sync. A refusal
- * before commit does not call `notify`. Notification failures are outside the operation's catch. */
+/** Reports committed state before returning or rethrowing a failed sync. A refusal before commit does not notify.
+ * A failed refresh after NOT_DURABLE preserves both errors and the committed-outcome code; ordinary refresh errors
+ * propagate without being mistaken for operation failures. */
 export function runCommitted<T>(operation: () => T, notify: () => void): T {
   let result: T;
   try {
     result = operation();
   } catch (error) {
-    if ((error as { code?: unknown })?.code === 'NOT_DURABLE') notify();
+    if ((error as { code?: unknown })?.code === 'NOT_DURABLE') {
+      try { notify(); }
+      catch (notification) {
+        throw Object.assign(new AggregateError([error, notification],
+          'The operation committed but failed to sync, and refreshing committed state also failed', { cause: error }),
+        { code: 'NOT_DURABLE' });
+      }
+    }
     throw error;
   }
   notify();

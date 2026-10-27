@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
-import { createConnection, type Commit, type EarsDatabase } from '../../src/database.ts';
+import { createConnection, runCommitted, type Commit, type EarsDatabase } from '../../src/database.ts';
 
 let e: EngineUnderTest;
 beforeEach(() => { e = engine(); });
@@ -335,4 +335,17 @@ it('reports a committed load to connection listeners exactly once', () => {
   expect(heard).toHaveLength(1);
   expect(heard[0]).toEqual({ sequence: connection.lastCommit(), touched: 'all' });
   expect(e.query('Task').count()).toBe(1);
+});
+
+
+it('preserves failed durability when refreshing committed state also throws', () => {
+  const durability = Object.assign(new Error('sync failed'), { code: 'NOT_DURABLE' });
+  const refresh = new Error('schema refresh failed');
+  let failure: unknown;
+  try { runCommitted(() => { throw durability; }, () => { throw refresh; }); }
+  catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect((failure as AggregateError & { code: string }).code).toBe('NOT_DURABLE');
+  expect((failure as AggregateError).errors).toEqual([durability, refresh]);
+  expect((failure as Error).cause).toBe(durability);
 });
