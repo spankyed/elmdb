@@ -381,3 +381,30 @@ describe('declared indexes', () => {
     expect(engine.query('Task').where('status', Infinity).ids()).toEqual([]);
   });
 });
+
+describe('explain', () => {
+  it("answers the query's ids and each stage of its plan: the index it read, what it visited and kept", () => {
+    const indexed = freshEngine({ ...NAMES, rowRules: { Task: { required: [], indexes: ['status'] } } });
+    const ids = Array.from({ length: 30 }, (_, i) => indexed.create('Task', { status: i % 3 ? 'open' : 'done', rank: i % 4 }).id());
+    const explained = indexed.query('Task').has('rank').where('status', 'done').limit(5).explain();
+    expect(explained.ids).toEqual(indexed.query('Task').has('rank').where('status', 'done').limit(5).ids());
+    expect(explained.ids).toEqual(ids.filter((_, i) => i % 3 === 0).slice(0, 5));
+    expect(explained.stages.map(({ ms, ...stage }) => (expect(ms).toBeGreaterThanOrEqual(0), stage))).toEqual([
+      { stage: 'types', visited: 0, kept: 0 },
+      { stage: 'has', visited: 0, kept: 0 },
+      { stage: 'where', index: 'status', visited: 5, kept: 5 },
+      { stage: 'limit', visited: 5, kept: 5 },
+      { stage: 'ids', visited: 5, kept: 5 },
+    ]);
+    expect(explained.visited).toBe(5);
+    expect(explained.ms).toBeGreaterThanOrEqual(0);
+    // Without the index the start walks every task
+    const walked = indexed.query('Task').where('rank', 1).explain();
+    expect(walked.stages[1]).toMatchObject({ stage: 'where', index: 'none: walks the type', visited: 30, kept: walked.ids.length });
+  });
+
+  it('refuses a query with a where given a function, which runs outside the plan', () => {
+    const e = engine();
+    expect(() => e.query('Task').where('title', (v) => v === 'x').explain()).toThrow(expect.objectContaining({ code: 'NOT_EXPLAINABLE' }));
+  });
+});

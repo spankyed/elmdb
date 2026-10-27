@@ -141,6 +141,30 @@ export interface SearchHit<E extends string = string> {
   highlights?: SearchHighlights;
 }
 
+/** One stage of a query's plan as the database ran it: its start, a step or its terminal (`explain()`) */
+export interface QueryStage {
+  /** The stage's name: `types`, `ids` or `all` for the start, a step's (`where`, `orderBy`, …), the terminal's */
+  stage: string;
+  /** The value index it read, or `none: walks the type` for a lookup no built index covers */
+  index?: string;
+  /** What the stage before handed it, and what it read from the store itself */
+  visited: number;
+  /** What it handed on; for the terminal, what it answers */
+  kept: number;
+  /** Milliseconds spent in the stage's own work */
+  ms: number;
+}
+
+/** A query's ids, and how the database found them: every stage of its plan, the entities it read, and its time */
+export interface QueryExplanation<E extends string = string> {
+  ids: EARS.EntityId<E>[];
+  /** Entities the plan read from the store, its index entries included */
+  visited: number;
+  /** Milliseconds the read took in the database */
+  ms: number;
+  stages: QueryStage[];
+}
+
 /**
  * A short code, `<prefix>-<n>`: how a pack's generated shapes type `shortCode` for an entity type whose manifest entry
  * declares the prefix, and how the SDK's own shapes type theirs. `create` numbers it, and nothing writes it after
@@ -300,6 +324,12 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
   ): Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>;
   hits(options?: { highlights?: boolean }): SearchHit<E>[];
   ids(): EARS.EntityId<E>[];
+  /**
+   * The query's ids, with how the database found them: each stage of its plan — the index it read, the entities it
+   * visited and kept, its time. Refused (`NOT_EXPLAINABLE`) for a query with a `where` given a function, which runs
+   * outside the database's plan
+   */
+  explain(): QueryExplanation<E>;
   count(): number;
   /** The first entity's id, or undefined when the query reaches none */
   first(): EARS.EntityId<E> | undefined;
