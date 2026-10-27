@@ -22,13 +22,17 @@ def isolated(binary, node):
     with tempfile.TemporaryDirectory(prefix="elmdb-no-account-") as temporary:
         root = Path(temporary)
         os.chown(root, uid, uid)
+        first = root / "first.node"
         copy = root / "second.node"
+        # The runner's home may not be searchable by this numeric UID. Both physical binaries belong in the
+        # accessible fixture directory; otherwise module resolution fails before process claims are exercised.
+        shutil.copyfile(binary, first)
         shutil.copyfile(binary, copy)
         source = f"""
           const assert = require('node:assert/strict');
           const fs = require('node:fs');
           assert.equal(fs.existsSync('/proc/self'), false);
-          const first = require({json.dumps(binary)});
+          const first = require({json.dumps(str(first))});
           const second = require({json.dumps(str(copy))});
           first.Database.open({json.dumps(str(root / 'first'))}, {{syncs: false}}).close();
           assert.throws(() => second.Database.open({json.dumps(str(root / 'second'))}, {{syncs: false}}),
@@ -43,7 +47,7 @@ def isolated(binary, node):
             os.setuid(uid)
 
         ran = subprocess.run([node, "-e", source], env={**os.environ, "HOME": "/nonexistent", "TMPDIR": "/nonexistent"},
-                             preexec_fn=unprivileged, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             preexec_fn=unprivileged, cwd=root, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              timeout=30)
         print(ran.stdout, end="", flush=True)
         assert ran.returncode == 0 and "ELMDB_NO_ACCOUNT_HOME_OR_PROC_CLAIMED" in ran.stdout
