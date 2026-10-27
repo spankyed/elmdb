@@ -824,6 +824,263 @@ do not edit production source or start competing expensive work while this measu
 Final restored-artifact validation and operating-envelope reference documentation remain required after it.
 Cross-process schema pairing, final upstream/app integration, strict CI and finding dispositions are still open.
 
+
+## Phase 5 CLI recovery results and cross-process schema consistency — 2026-10-26
+
+The final CLI measurement chain (88967) is terminal success on recovery source 1e8245b. Each dump/load
+ran in a fresh CLI process; local macOS filesystem cache was uncontrolled. `/usr/bin/time -l` RSS is
+in bytes, unlike Node's KiB. These times do not claim percentiles or a general latency SLA.
+
+| Profile | Dump elapsed (s) / RSS (bytes) | Load elapsed (s) / RSS (bytes) | Dump bytes | Loaded data.mdb bytes |
+|---|---:|---:|---:|---:|
+| 200,000 one-KiB rows / 399,997 relations | 4.22 / 733265920 | 79.64 / 1932001280 | 269689505 | 1645887488 |
+| 2,000 1,536-dimensional vectors | 0.84 / 42336256 | 2.38 / 113246208 | 18348536 | 107266048 |
+| 2,000 64-KiB values / 3,997 relations | 0.71 / 170786816 | 34.97 / 344670208 | 131697509 | 295714816 |
+
+Logs: `/private/tmp/elmdb-remediation-recovery-{large,vector,large-values}-final-{dump,load}{,-time}.log`.
+Build log: `-phase5-final-recovery-cli-build.log`. Writer occupancy during load/rebuild is private to staging;
+publication never opens or changes an earlier destination. Final loaded-artifact validation and the current
+100,000-row reference remeasurement are active once in session 59111, using the rebuilt schema-safe binding.
+The verification source is `/private/tmp/elmdb-remediation-verify-loads.mjs`, log
+`-recovery-final-load-validation.log`; reference logs `-recovery-reference-rebuild-final.log` and
+`-recovery-reference-replace-final-current.log`. Only this serial chain owns expensive local execution.
+
+H01 cross-process consistency is confirmed and repaired locally. An open handle previously used its cached
+schema after another process changed the same index's fields, returning Task-1 instead of the expected
+Task-0 for a filter on field a. EngineSchema now caches the existing persisted SHA-256 fingerprint and
+its metadata key once. Each schema-dependent read/check/stats/export, tracked/watch snapshot, write/admin
+unit, explicit unit begin and background index chunk validates the fingerprint inside its own transaction.
+Mismatch returns the new Rust-defined SCHEMA_CHANGED code, instructing close/reopen, before stale rules
+or mutation execute. Validation adds one metadata lookup and fixed-size comparison, with no per-read
+schema serialization, hashing or key allocation. A refused explicit begin releases its transaction, gate
+and open-unit state. The generated protocol ErrorCode.ts includes the new code.
+
+Schema migration also validates the old fingerprint and computes primary inventory/diff in the same write
+transaction that installs the new declaration/index changes. That prevents both overwriting another
+process's intervening schema and making decisions against earlier primary data. Empty-index settling now
+returns the transaction's actual pending-build list if it had to write, rather than its earlier snapshot's
+list. Schema-guard naming now covers reads as well as writes. Cross-process writes do not dispatch
+process-local watch callbacks; sequence() already reads the persisted counter, as Store::sequence shows. The
+reference contract states that observers requiring every notification must coordinate writes in one process. This documents
+existing observer scope rather than claiming a new cross-process notification mechanism.
+
+Four deterministic Rust cases pass: stale read-only/writable handles refuse reads/exports/watches/mutations;
+a concurrent declaration refuses stale migration; concurrent insertion prevents another type taking its
+historical short-code prefix; and a stale background builder refuses before mixing old entries into a new
+index. Child processes have a 15-second observation/kill deadline. Existing six open/schema tests and 14
+tracked cases also pass. Logs use `-phase5-schema-version-` with `process.log`, `atomic-races-final.log`,
+`complete-cases.log`, `open.log`, `tracked.log`, and `complete-clippy.log`.
+
+Mutation evidence is explicit: disabling fingerprint validation fails both stale-read and migration races
+(`-phase5-schema-version-mutation.log`, exit 101), returning the wrong row and accepting a stale migration;
+it also fails the separate stale-builder case (`-phase5-schema-builder-mutation.log`, exit 101).
+The initial inventory mutation passed because its OLD-to-NEW prefix change was always forbidden. The fixture
+was corrected to remove Task and add Note with the same prefix, where refusal depends on the child's newly
+inserted Task row. Correct code passes; omitting inventory now fails (`-phase5-schema-inventory-mutation-fixed.log`,
+exit 101). The initial non-firing result is retained in `-phase5-schema-inventory-mutation.log`.
+
+The new Node child-process case was shown failing on the still-built earlier binding (missing expected
+exception, `-phase5-schema-binding-before.log`), then passes on the rebuilt binding. It covers synchronous,
+pooled and tracked pooled reads, write/begin refusal and correct results after reopening. All required
+combined-source gates pass in session 72904: formatting, workspace clippy/tests (250 engine tests passed,
+two measurements ignored), generated protocol/single-LMDB, rebuilt binding/typecheck and all 35 Node tests.
+Logs: `/private/tmp/elmdb-remediation-phase5-schema-final-{fmt,clippy,rust,generated,lmdb,binding,types,node}.log`.
+No source checkpoint commit or platform result for this H01 change is claimed yet. The prior recovery
+matrix [40431420372](https://github.com/spankyed/elmdb/actions/runs/40431420372) is terminal success, all
+eight jobs, on 1e8245b. Final operating bounds, upstream/app integration and strict CI remain required.
+
+
+## Phase 5 closure evidence and Phase 6 input revalidation — 2026-10-26
+
+H01 source checkpoint `744ebf809699fca3a8b8f254319241bad7f29755` is committed after required checks;
+its code and generated protocol match the current rebuilt binding. Subsequent local elmdb changes are reference/
+evidence/goal prose only. Final CLI-loaded artifacts from all three profiles pass current-binding check, independent
+entity/relation counts, last-row slug lookup and exact primary body comparison. The vector artifact also has no
+pending embeddings and a working nearest-vector query. Log: `-recovery-final-load-validation.log`; verification
+source: `/private/tmp/elmdb-remediation-verify-loads.mjs`. Session 59111 is terminal success.
+
+The preselected 100,000-row reference workload was remeasured on the schema-safe binding, serially:
+
+| Operation | Elapsed / writer upper bound (s) | RSS (KiB) | Sampled scratch peak (bytes) |
+|---|---:|---:|---:|
+| rebuild | 14.041 / 14.041 | 879200 | 330943140 |
+| replace | 22.730 / 22.730 | 992400 | 322101416 |
+
+Both meet the 2 GiB / 30 s reference investigation budget. Logs: `-recovery-reference-rebuild-final.log`,
+`-recovery-reference-replace-final-current.log`. These are fresh processes and uncontrolled-cache observations,
+not latency percentiles. Rebuild grew the source file to 967,639,040 bytes; replacement added 479,977,408 logical
+bytes. Peak sampled workload logical usage includes earlier retained artifacts (3,909,800,003 / 4,213,081,663 bytes).
+Scratch cleaned up. The reference docs now state the validated shapes, larger replacement's longer window,
+remaining workload-dependent state, bounded-sort merge head storage and conservative disk planning allowances.
+
+Actual process interruption was tested with the preserved current recovery CLI: after private data reached
+4,390,912 bytes, the harness killed only its known loader child with SIGKILL and waited for death. No public
+`data.mdb` existed; an unrelated sentinel was preserved. Retrying in the same destination succeeded in 78.708 s,
+restoring 200,000 entities, 1,200,000 fields, 399,997 relations and one sequence. The harness removed only the known
+abandoned directory its own killed child created, after confirming it had exited. Production retry never adopts
+partial staging and does not automatically delete directories another invocation may own. An abrupt kill can leave
+unpublished staging; the reference contract describes coordinated cleanup. No earlier database/backup is overwritten.
+Logs/source: `/private/tmp/elmdb-remediation-recovery-interrupted-load.log`,
+`/private/tmp/elmdb-remediation-interrupt-load.py`. The retried artifact separately passes current-binding audit,
+counts, exact body and slug lookup (`-recovery-interrupted-load-validation.log`). Sessions 33908 and 10134 are terminal.
+
+Upstream inputs were fetched under D11, with no tags and no feature branches. elmdb origin/main is
+`3afdf3700db041d08bcec9f0c7e13d66275ebe1a`; apack origin/master is
+`5574f84ceaee30392e3430b8a4981f0ba55dd9d9`. Each is already the corresponding remediation branch's merge base
+and ancestor (left-side rev-list count zero), so no merge or rebase is needed. The engine feature baseline is still
+f7bc8a5 plus documentation; apack contains elmdb v1/live queries, with goal-elmdb-next's later planner/type/
+compression/search phases unlanded and excluded by D9. Only currently implemented upstream behavior is accepted here.
+
+The isolated app now locally pins 744ebf8. A new observable EARS case proves SCHEMA_CHANGED propagates without
+notifying watches, advancing the committed sequence or adopting refused declarations. Its focused watch suite
+passes 24 tests; the full EARS suite passes 199 tests, including both independent model/watch harnesses. All eight
+host backup tests and the full repository typecheck pass. EARS/backup logs were explicitly scanned for fatal,
+thread panic, TLS, assertion and SIGABRT diagnostics; none appeared. Logs:
+`/private/tmp/elmdb-remediation-phase6-ears-schema-refusal.log`, `-phase6-ears.log`, `-phase6-backup.log`,
+`-phase6-typecheck.log`. Session 45542 is terminal. App changes remain uncommitted; no app has been launched.
+
+The repository's shipped-build EARS benchmark is active once in session 74568, the only expensive local owner.
+Log `/private/tmp/elmdb-remediation-phase6-ears-bench.log`, JSON `-phase6-ears-bench.json`. Its existing declared
+iterations/workload are unchanged; compare the phase-9 readings, record causes for >10% median regressions and use
+focused cases rather than broad reruns if diagnosis is needed. Final app strict CI remains required after convergence.
+
+
+## Phase 6 benchmark investigation — open, 2026-10-26
+
+The shipped-build benchmark completed successfully (session 74568), but two standalone write cases exceeded
+the package's historical performance threshold. The current full benchmark JSON includes actual medians; the dated
+phase-9/10 tables contain means, so the historical comparison is screening evidence rather than a matched median
+comparison. Current read cases improved against phase-9 means. Full benchmark mean/median (ms) are retained in
+`/private/tmp/elmdb-remediation-phase6-ears-bench.json` and its .log. Current standalone create mean was 180.325 ms
+(phase 9: 114.43); short codes 92.797 ms (58.21). This is not accepted or attributed by assumption.
+
+An exact upstream binding was built in `/private/tmp/elmdb-remediation-performance-baseline` from the fetched
+origin/main archive (3afdf37), with independently APFS-cloned target/dependencies. No source checkout was built or
+edited. A disposable app workspace `/private/tmp/elmdb-remediation-bench-app` has cloned dependencies and unchanged
+shipped EARS output. The focused comparison selects the two flagged cases plus their hydration/hub prerequisites,
+using the same workspace and changing its own elmdb link only between process exits. Both stages completed in
+session 14837. Logs/JSON use `-phase6-bench-{baseline,current}-focused`.
+
+| Case | Upstream median (ms) | Remediation median (ms) | Change |
+|---|---:|---:|---:|
+| hydrate | 1279.908 | 1244.465 | -2.8% |
+| hub link/destroy | 768.844 | 934.226 | +21.5% |
+| 1,000 creates | 108.552 | 175.498 | +61.7% |
+| 1,000 short codes | 57.904 | 91.554 | +58.1% |
+
+A standalone copy of those cases confirms the large-fixture regression without Vitest. With syncing disabled only
+in the disposable diagnostic fixture, upstream/remediation medians were 91.323/171.777 ms for creates,
+53.829/92.707 ms for short codes, and 674.220/923.577 ms for hub link/destroy. This rejects group-commit wakeups
+as the primary explanation. Logs `-phase6-syncs-off-{baseline,current}.log`; session 85465 is terminal.
+
+A separate small-fixture raw probe covers empty writes, explicit-id creates, generated-id creates and row reads,
+seven 1,000-operation rounds with syncing on/off. Its medians are within about 6% between bindings. It records
+actual mapped .node paths, proving upstream and remediation provenance. Source/logs:
+`/private/tmp/elmdb-remediation-phase6-write-probe.mjs`, `-write-probe-{baseline,current}.log`; 16591 is terminal.
+The regression therefore depends on the larger workload/state; it is not a general 60% N-API call regression.
+
+External macOS sampling was refused by the OS (sample asked for sudo); no security setting or privilege change
+was made. The known worker PID 23312 was confirmed exited afterward. The failed attempt is retained in
+`-phase6-write-profile-sampler.log`. A self-profiled standalone copy with V8 --prof does run and records mapped
+binding provenance, per-case user/system CPU and wall time. Processed native symbol names are unreliable (including
+unrelated SQLite/system names), so no native-function attribution is claimed from them. Source/script/logs:
+`/private/tmp/elmdb-remediation-bench-app/packages/apack-ears/bench/native-profile.ts`,
+`-phase6-native-profile-current{,-processed}.log`, `-phase6-v8-current.log`. Session 12494 is terminal.
+
+The no-fingerprint counterfactual completed: archive of 744ebf8 in
+`/private/tmp/elmdb-remediation-performance-nohash`, with only the fingerprint lookup disabled in that disposable
+copy. It is deliberately unsuitable for adoption; the real branch retains all schema checks. Focused medians
+were 1245.507 ms hydrate, 1011.168 ms hub, 188.318 ms creates and 96.926 ms short codes. Disabling the check does
+not repair the regression, so metadata lookup is rejected as its cause. Build/run sessions 20865/86395 are terminal;
+logs `-phase6-nohash-binding.log` and `-phase6-bench-nohash-focused.{log,json}`.
+
+The first remediation checkpoint, 241439064550cbee34d44510a0dc15a697558952, was independently archived/built in
+`/private/tmp/elmdb-remediation-performance-phase1` and mapped by the same unchanged focused fixture. Medians:
+hydrate 1233.491 ms, hub 774.268 ms, creates 102.287 ms, short codes 57.656 ms. These match upstream, excluding
+R01/R02 as the regression's origin. Build/run sessions 97322/43632 are terminal; logs
+`-phase6-phase1-binding.log` and `-phase6-bench-phase1-focused.{log,json}`. Next bisect checkpoint is 27c76ae,
+covering committed outcomes/lifecycle, built in the disposable phase3 archive. No production performance change
+has been made; this remains required Phase 6 work before final CI.
+
+Documentation correction: Store::sequence already reads persisted metadata and sees other processes' commits;
+the earlier prose claiming the counter was only cached was wrong. The reference/evidence wording is corrected.
+Cross-process watch notification scope remains process-local as already specified by apack's EARS contract.
+
+The first phase3 archive build reused the cloned core artifact because archive mtimes preceded it; run 50510 is
+excluded from attribution. Touching the candidate's Rust sources forced both engine and binding compilation in
+25827 (`-phase6-phase3-binding-rebuilt.log`). The corrected run 55926 reproduces the regression: medians
+1223.139 ms hydrate, 969.699 ms hub, 180.166 ms creates, 95.678 ms short codes. Logs/JSON
+`-phase6-bench-phase3-rebuilt-focused.*`. This locates introduction between 2414390 and 27c76ae. Candidate af141ad
+is being independently rebuilt with refreshed Rust-source mtimes to separate committed-outcome from lifecycle changes.
+
+The af141ad build 65338 explicitly rebuilt both crates; focused run 46353 is terminal with medians hydrate
+1234.885 ms, hub 946.757 ms, creates 174.356 ms and short codes 91.201 ms. This establishes introduction in R03,
+not lifecycle changes. `-phase6-phase2-binding.log`, `-phase6-bench-phase2-focused.{log,json}`.
+A disposable standalone fixture omitting only the repeated hydrate benchmark (initial graph hydrate retained)
+returns baseline-like medians on af141ad: hub 775.249 ms, creates 105.249 ms, short codes 56.810 ms. Run 79560
+is terminal; source `bench/native-profile-writes-only.ts` in the disposable app and log
+`-phase6-writes-only-phase2.log`. The regression depends on repeated reset/hydrate state, not ordinary writes alone.
+
+A deliberately unsafe-for-adoption counterfactual restores only the old two-transaction reset in an af141ad archive
+at `/private/tmp/elmdb-remediation-performance-reset-counterfactual`; final observer notification is omitted solely
+in this synthetic diagnostic. It must never be adopted as a repair because it discards R03's atomic/failure contract.
+Source mtimes are refreshed to force a core rebuild. Build 6342, log `-phase6-reset-counterfactual-binding.log`.
+
+Old-reset counterfactual build 6342 and focused run 36777 are terminal. Medians hydrate 1245.812 ms,
+hub 780.013 ms, creates 101.495 ms, short codes 57.849 ms: restoring only old reset removes the slowdown.
+Logs `-phase6-reset-counterfactual-binding.log`, `-phase6-bench-reset-counterfactual-focused.{log,json}`.
+This is reset-state attribution, not approval to restore the unsafe two-transaction implementation.
+
+A read-only diagnostic tool was linked from the pinned local LMDB archive and its own `mdb_stat.c` into
+`/private/tmp/elmdb-remediation-mdb-stat`; it only inspects owned synthetic databases. The disposable standalone
+`bench/native-profile-freelist.ts` records file sizes and free-page records at case boundaries, outside timed cases.
+Current phase2 inspection is run 90327, log `-phase6-freelist-phase2.log`. No production code changed.
+
+Free-page runs 90327 (atomic reset) / 63087 (old reset) are terminal. After repeated hydrate, atomic reset leaves
+172,326,912 bytes / 5,261 free pages, while old reset leaves 86,327,296 bytes / 15 free pages. Before creates,
+atomic reset has 274 free-page records / 5,184 free pages; old reset has four records / 944 free pages. Standalone
+create medians are 179.609/106.490 ms. These observations support page-recycling/write-amplification attribution;
+exact syscall attribution is not claimed. Both tools open only known synthetic paths. Logs
+`-phase6-freelist-{phase2,old-reset}.log`.
+
+Pinned local LMDB source `mdb.c` (`lmdb-master-sys-0.2.6`) shows mdb_find_oldest starts at writer transaction ID - 1,
+and mdb_page_alloc excludes free records at/after oldest. Thus the immediately preceding reset's free pages cannot
+be reused by bulk load until another physical transaction advances the generation. This is independent of dropping
+idle readers; removing idle readers alone cannot repair it. The engine must preserve snapshot protection.
+[Erigon's own LMDB freelist analysis](https://github.com/erigontech/erigon/wiki/LMDB-freelist) also describes free-page
+record persistence and its performance costs; local pinned source and direct measurements own the specific conclusion.
+
+Checkpoint diagnostic archive `/private/tmp/elmdb-remediation-performance-reset-checkpoint` retains current 744ebf8
+atomic reset, then adds a small physical transaction via Store.write before returning. This prototype also advances
+the logical sequence and is not suitable for adoption as written. Build 33539, log `-phase6-reset-checkpoint-binding.log`.
+The finite test is whether a generation checkpoint eliminates the regression before designing a version that preserves
+logical sequence, notification and committed-error contracts.
+
+Checkpoint diagnostic build 33539 and focused run 69496 are terminal. Current atomic reset plus a small generation
+checkpoint restores medians: hydrate 1228.238 ms, hub 771.836 ms, creates 102.874 ms, short codes 59.067 ms.
+`-phase6-reset-checkpoint-binding.log`, `-phase6-bench-reset-checkpoint-focused.{log,json}`.
+
+The working implementation now keeps the reset/empty-index markers atomic, then performs optional physical page
+recycling before the required durability wait. `Store::recycle_reset_pages` rewrites the sequence read within its
+own transaction, preserving logical sequence and any intervening writer. A failed optional checkpoint aborts and
+falls back to the required sync; it cannot turn a committed durable reset into a generic refusal. Existing finalization
+still delivers exactly one observer change and reports required sync failures as NOT_DURABLE. No new public API,
+format key, sequence bump or notification is introduced. Reference engine contract is updated.
+
+Focused five-test commit suite passes in 62494, including actual-sync checkpoint-failure fallback, exactly one
+logical sequence/notification, active snapshot preservation, and repeated clear/load page reuse. The initial attempt
+had an error-code spelling typo; after correction the resource fixture exposed an undeclared `body` field. The fixture
+now uses declared `title` and receives a clean audit. These were development failures, not passing evidence.
+`-phase6-reset-commits.log` records the corrected run.
+
+Three disposable mutations fire: omit checkpoint => file grows 4,505,600 to 8,830,976 bytes (37230);
+propagate optional checkpoint failure => erroneous IO refusal (75524);
+use logical commit for checkpoint => sequence 4 instead of 3 (58472).
+Logs `-phase6-reset-{reuse,fallback,sequence}-mutation.log`, copy `/private/tmp/elmdb-remediation-reset-mutation`.
+Only disposable sources were mutated. Final required gate chain 65838 is running serially under
+`-phase6-reset-final-{fmt,clippy,rust,generated,lmdb,binding,types,node}.log`; actual shipped-build performance and
+app validation must follow the rebuilt binding before commit/push/final CI.
+
 ## Atomic reset page recycling — validated checkpoint, 2026-10-26
 
 Repeated shipped EARS hydrate/reset cycles exposed a remediation regression introduced in af141ad: matched
@@ -853,3 +1110,11 @@ upstream focused baseline's range (case selection/order differs); read/watch cas
 TLS teardown, panic or SIGABRT diagnostics. Root typecheck already passed on identical app source. Upstream
 revalidation still yields elmdb main 3afdf37 and apack master 5574f84, both ancestors, zero incoming commits.
 Final combined platform and strict-chain CI remain required before goal closure.
+
+## Integrated local checkpoint — 2026-10-26
+
+Reset repair is committed as `24be744dc9a573d6609b97de53dfa6d1d3836b8f`; H01 is `744ebf8`. Required final host gates
+65838, complete shipped benchmark 93318 and final EARS/backup 41968 are terminal success, as detailed above. No
+expensive execution remains live. Both source checkouts remain untouched. Reference recovery bounds/sequence scope,
+format staging cleanup and dated review dispositions are reconciled locally; supported-platform and apack strict CI
+still decide final combined acceptance. Upstream hashes were freshly fetched and remain ancestral without merges.

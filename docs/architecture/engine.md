@@ -52,8 +52,8 @@ Local reads hold the schema guard through snapshot execution; export captures it
 releasing that guard for callbacks. Post-commit watch queries fetch the current declaration for every rerun.
 
 Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
-snapshots but do not dispatch this handle's watch callbacks or update its cached commit sequence; coordinate writes
-in one process when observers must hear every commit.
+snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
+callbacks. Coordinate writes in one process when observers must hear every commit.
 
 ## Reads: plans
 
@@ -246,6 +246,46 @@ unit is open.
   `check()` reports what the rules refuse.
 - `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
   one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).
+
+### Recovery resources
+
+`check()` and full `rebuild()` spill derived entries to owned scratch files: an 8 MiB capacity-accounted row
+buffer plus the largest row. A merge keeps one head from each of at most 16 input runs plus pending/current rows
+and I/O buffers, so merge memory also depends on the largest row. Sorting costs O(D log D) comparisons for D
+emitted entries and uses temporary disk proportional to their encoded bytes. Rebuild deletes batches of at most
+1,000 keys without retaining stored values. Replacement streams primary ranges from one source snapshot instead
+of collecting source data. These bound those intermediate collections, not the complete operation: entity/graph
+inventory, uniqueness auditing, text/vector aggregation, output reports and LMDB's dirty/resident pages remain
+workload-dependent. Compound value indexes can expand with the product of list cardinalities. Single-index rebuilds
+also retain index-specific work; the measurements below concern full rebuilds.
+
+The validated operating envelope is the explicit synthetic shapes in the
+[remediation evidence](../evidence/elmdb-remediation.md), measured on 2026-10-26 on a 32 GiB macOS host with local
+storage, fresh processes and uncontrolled filesystem cache. It is not a row-count guarantee for arbitrary schemas
+or a latency SLA. The reference shape has 100,000 entities with 1,024-byte bodies, 199,997 relations, unique slug
+and state value indexes, and one title/body text index. Current full rebuild/replacement measured 14.04/22.73 s
+and 879,200/992,400 KiB peak RSS, meeting the preselected 2 GiB process / 30 s writer-occupancy upper-bound budget.
+At twice that population, measured rebuild/replacement used 1,876,128/1,856,864 KiB and 28.12/47.69 s: replacement
+exceeds the reference time budget, so schedule a longer maintenance window. A private staged load of that larger
+dump took 79.64 s and 1,932,001,280 bytes RSS. The recorded 2,000-vector (1,536 dimensions) and 2,000-row/64-KiB
+value profiles also pass recovery and independent restoration checks; they do not establish arbitrary vector capacity.
+
+For these measured shapes, reserve at least 2 GiB on the scratch filesystem and the current data-file size plus
+2 GiB of free destination space per active recovery operation; add space for a dump if retaining one. These are
+conservative planning allowances over measured macOS artifacts/scratch, not enforced quotas or universal bounds.
+Add both allowances when the filesystems share a volume; check them separately when temporary storage is elsewhere.
+Windows file allocation follows map size (Opening), so measure its disk requirement separately. Use `scripts/measure-recovery.mjs` on an owned representative
+copy before using materially larger values, more relations, higher-dimensional/more numerous vectors, different
+vocabulary, compound/list indexes or an unmeasured schema. Keep one recovery operation active while measuring.
+The runner refuses to adopt an existing workload directory and can sample scratch with `--observe`; sampled peaks
+are lower bounds. `TMPDIR`/the platform temporary directory controls scratch placement.
+
+Check and backup take read snapshots rather than the LMDB writer, but long snapshots pin pages and can delay map
+growth. Rebuild/replacement hold the destination writer for their atomic transaction; their entire measured operation
+time is a conservative occupancy upper bound. Dump loading writes only a private staging database until no-clobber
+publication. A scratch or pre-publication failure aborts/removes owned work and preserves the earlier database or
+backup. Retrying after an explicit post-publication sync error must respect whether a complete result is already
+visible (`format.md`, Dumps). Filesystem/device sync behavior remains a platform dependency.
 
 ## Errors
 

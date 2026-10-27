@@ -40,64 +40,49 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 
 ## Current handoff
 
-- All edits/builds remain in isolated `session/elmdb-remediation` worktrees:
-  elmdb `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation`, based on
-  `4ea9e79f5ea9e0a32793b1a5a84c9d98b3403266`; monorepo
-  `/Users/spankyed/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-remediation`, based on
-  master `7ac1d99fb24649a7ce3e708035bae07cde45ee78`. Set ELMDB_DIR to isolated elmdb for app commands.
-  The 11 GB target seed was APFS-cloned, never linked; dependencies/build outputs are isolated. Source checkouts
-  remain untouched. No app launched or live database accessed.
-- User authorized implementation, commits, pushes, draft PRs and required CI on these branches. No merges outward,
-  tags or releases. PRs: [elmdb #1](https://github.com/spankyed/elmdb/pull/1) and
-  [apack #283](https://github.com/spankyed/apack/pull/283). Earlier push rejection was resolved by explicit approval.
-  goal-elmdb-next stays paused before Phase 3; do not wait for its future work. Revalidate upstream under D11
-  before final integration.
-- Phases 1–4 are committed/pushed: R01/R02 `2414390`, R03 `af141ad`, lifecycle/tracking `5146508`,
-  TLS teardown `27c76ae`, audit/bounded construction `42423db`, Windows module lifetime `6b839bd`.
-  Platform run [40424293465](https://github.com/spankyed/elmdb/actions/runs/40424293465) is terminal success
-  across all eight jobs at 6b839bd, including Windows. These results do not verify later Phase 5 code.
-- Monorepo is clean at `7c59b97310f754f909abc6ce49466c4b47858db6`, pinning 6b839bd. Committed-error caller
-  handling and CLI permission fixtures are committed. Latest app checks passed 198 EARS tests, eight backup tests
-  and EARS types with no fatal/TLS diagnostics. All 71 CLI database tests passed after fixture correction.
-  Original strict chain 40419289605 failed integration-2's old permission assumptions; other executed jobs passed.
-  A final green strict chain remains required. VM SSH timed out and Azure lookup hit an authentication block;
-  no network/resource/authentication changes were made. Windows behavior is now verified by CI instead.
-- Phase 5 local checkpoint source: backup publication `c32a87a`, local schema/snapshot pairing `7a4df3c`,
-  audit scratch sorting/text streaming `614170c`. Required host checks passed together in session 43978:
-  formatting, workspace clippy/tests (242 engine tests, two measurements ignored), generated/single-LMDB checks,
-  rebuilt binding/typecheck and all 34 Node tests. Disposable mutations prove backup ownership, read-gap,
-  watch schema refresh and duplicate sort winner regressions fire. H01 cross-process schema semantics remain
-  unresolved; local guards alone do not protect against another process changing declarations.
-- H02 now uses owned private files, held same-process destination reservation, atomic publication and Unix directory
-  sync/Windows write-through. Seven focused tests pass. Other-process destination ownership is explicitly the
-  caller's obligation; no power-cut guarantee is inferred from sync calls. Phase 5 platform validation is pending.
-- R08 remains open. Owned synthetic measurements are in implementation evidence and `scripts/measure-recovery.mjs`.
-  At 100,000 one-KiB entities/199,997 relations, baseline rebuild/replace upper bounds were ~11/~21 seconds.
-  At 200,000 entities, baseline check peaked at 3,438,112 KiB RSS; current check is clean at 1,600,848 KiB /
-  30.256 seconds, with 659,907,632 bytes sampled peak scratch and complete cleanup. This fits the selected 2 GiB
-  investigation budget for this shape, not a universal bound. CLI baseline dump/load at 100,000 rows took
-  2.10/77.46 seconds; load retained all decoded loads and peaked at 2,062,188,544 bytes RSS.
-- Local bounded loader uses private staging and batches, validates the footer/count/trailing bytes, closes/rebuilds,
-  then publishes without clobbering a destination. Existing dump/order/embedding tests and two new ownership/
-  late-failure/retry tests pass, as does clippy. Broad acceptance remains pending.
-  Reference load is terminal success: 36.06 s / 1,370,095,616 bytes RSS, versus baseline 77.46 s /
-  2,062,188,544 bytes. Six dump tests and clippy pass; overwrite-publication mutation fails as intended.
-  Unwind cleanup and explicit post-publication sync-failure state are tested. Abrupt process death may leave
-  an unpublished private staging directory. Both larger rebuild/replace measurement chains are terminal. Larger rebuild/replace exceeded 2 GiB, prompting bounded deletion, spilled rebuild and
-  direct source-primary copying. Measurements now peak at 1,876,128 / 1,856,864 KiB; elapsed upper bounds
-  are 28.118 / 47.693 s. Larger replacement exceeds the reference 30 s criterion; preserve that limitation.
-  Scratch-failure rollback/retry test passes and its swallowing-error mutation fails. Required combined-source
-  gates passed in session 74611 (246 engine tests, two measurements ignored; all required checks and 34 Node
-  tests). Loader/recovery source is committed as 97e2675 / bce836a; vector runner as 9c18fdc. The vector
-  and large-value profiles passed all five operations and separate restored-copy count/slug/vector checks.
-  Prior matrix 40429674942 is terminal success at e15b027; newer recovery platform checks remain required.
-  One final CLI build/dump/load measurement chain is active in session 88967 for the larger, vector and
-  large-value workloads. Keep source frozen and only this expensive owner until terminal; inspect its logs.
-  Next: complete bounded load/publication verification and remaining recovery measurements
-  (final reference measurements and large values/vector shape), cross-process schema pairing, then converged source checks,
-  app pin/strict CI, current reference contracts, finding dispositions and closure. Do not close acceptance early.
-  Preserved CLI baseline executable and exact source archive, mutation logs and measurement conditions are in
-  [implementation evidence](../evidence/elmdb-remediation.md). Keep one expensive local owner at a time.
+- Use only the two `session/elmdb-remediation` worktrees: elmdb
+  `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation`; apack
+  `/Users/spankyed/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-remediation`.
+  Set ELMDB_DIR to isolated elmdb for app commands. Source checkouts, dependencies and build outputs remain isolated;
+  the 11 GB target seed was APFS-cloned, never linked. No app or live database was opened.
+- Commit/push/PR/required CI are authorized on these branches. No outward merges, tags, publication or releases.
+  Draft PRs: [elmdb #1](https://github.com/spankyed/elmdb/pull/1), [apack #283](https://github.com/spankyed/apack/pull/283).
+  Keep goal-elmdb-next paused before Phase 3; neither future features nor landing remediation is a closure prerequisite.
+- All R01–R08 repairs and H01–H04 conclusions are implemented locally. Source checkpoints and firing proofs are in
+  [implementation evidence](../evidence/elmdb-remediation.md). Latest engine checkpoint:
+  `24be744dc9a573d6609b97de53dfa6d1d3836b8f` (reset page recycling), after `744ebf8` (cross-process schema consistency).
+  These two commits are not yet pushed. Remaining elmdb changes are owned reference/evidence/review/goal prose.
+- Required final host engine gates pass on 24be744: workspace fmt/clippy/tests, generated protocol/single-LMDB,
+  rebuilt binding/types and 35 Node tests; engine 253 passed, two measurement tests ignored. Logs
+  `/private/tmp/elmdb-remediation-phase6-reset-final-*`, terminal 65838. New reset sequence/notification, failure fallback,
+  snapshot and page-reuse tests pass; omission/fallback/sequence mutations all fire. Prior supported matrix
+  [40431420372](https://github.com/spankyed/elmdb/actions/runs/40431420372) passed all eight jobs on recovery 1e8245b;
+  final combined-source matrix including H01/reset remains required. Windows VM access failed earlier; no auth,
+  resource, network or security settings changed. Windows process lifetime is covered by prior passing platform CI.
+- The Phase 6 write regression is repaired, not deferred. R03's atomic reset removed a physical generation that
+  allowed LMDB to recycle the reset's freed pages; repeated load doubled the file and left expensive free-page state.
+  Optional checkpoint before required sync preserves logical sequence/notifications and normal durability fallback.
+  Actual complete shipped EARS benchmark (24 cases, terminal 93318) gives medians hydrate 1238.394 ms, hub 772.706 ms,
+  creates 102.744 ms, short codes 59.086 ms, within upstream's reference range. Full samples/log:
+  `/private/tmp/elmdb-remediation-phase6-reset-ears-bench.{json,log}`. Counterfactuals/build-cache exclusion are recorded;
+  do not remove schema checks or add a speculative cache. Measured Mac shape, syncs on, otherwise uncontrolled host.
+- R08 reference 100k one-KiB rows/199,997 relations rebuild/replace meet 2 GiB RSS / 30 s (14.041/22.730 s,
+  879,200/992,400 KiB). At 200k rows replacement takes 47.693 s; private load 79.64 s / 1,932,001,280 bytes RSS.
+  Vector/large-value, golden restoration and actual SIGKILL/retry proofs pass. Staging ownership, directory sync,
+  cross-process destination ownership and coordinated abandoned-stage cleanup are documented. Shape and filesystem
+  limits are explicit; no universal memory/latency/power-cut promise. Review dispositions are appended, with final gates pending.
+- Fresh upstream revalidation after the repair: elmdb main `3afdf3700db041d08bcec9f0c7e13d66275ebe1a`, apack master
+  `5574f84ceaee30392e3430b8a4981f0ba55dd9d9`; both ancestors/merge bases, zero incoming commits. No merge/rebase needed.
+  Tested features are landed v1/live queries; future planner/type/compression/search work stays with the paused next goal.
+- App HEAD remains `7c59b97310`; owned edits currently pin 744ebf8, add SCHEMA_CHANGED refusal/no-notification coverage,
+  and document reopening. Update the pin to the final committed elmdb checkpoint before committing/pushing app changes.
+  Current rebuilt repair passes all 199 EARS/model/watch and eight backup tests (terminal 41968), no fatal/TLS/panic
+  diagnostics. Full root typecheck already passed on identical app source. Original strict 40419289605 failed old
+  permission fixtures; corrected 547279e4d6 passes all 71 CLI DB cases. New final strict chain is still required.
+- No live expensive owner: all handles are terminal. Next: review/commit owned prose, pin/commit app, push both branches,
+  update PRs, obtain final elmdb matrix and apack `strict_chain=true` results. Respect one expensive local owner and the
+  app's Linux/native boundary; CI is final acceptance, not a debug loop. Re-evaluate upstream if it advances.
+  Then update dispositions/acceptance, write Outcome, archive the goal and repair links. Goal remains active until done.
 
 ## Decisions
 
@@ -214,9 +199,9 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 | R03 committed outcomes and AgentBuddy notifications | Implemented locally; `af141ad` / `5edd51adf7` | Implementation evidence; fault injection, mutation tests, 198 EARS / eight backup tests | Remote checks and final integration |
 | R05/R06 lifecycle and H03 contention | Implemented locally; Phase 3 checkpoint | Implementation evidence; bounded regressions, mutation tests, alternating measurements | Final checks, supported-platform matrix and integration |
 | R04 auditing and R07 bounded construction | Implemented locally; Phase 4 checkpoint | Primary fixtures, firing mutations, cursor counts and restart tests | Supported-platform checks and final integration |
-| R08 recovery envelope and H01/H02/H04 disposition | Missing | Review source assessment | Phase 5 |
-| Current-upstream integration and required gates | Missing | None | Phase 6; no future-feature dependency |
-| Current reference docs, review dispositions, Outcome and closure | Missing | None | Phase 6 |
+| R08 recovery envelope and H01/H02/H04 disposition | Implemented locally; 97e2675 / bce836a / 744ebf8 and reference contracts | Measured reference/larger/vector/large-value profiles, SIGKILL/retry/restoration, schema races and firing mutations | Final integrated gates and finding dispositions |
+| Current-upstream integration and required gates | Integrated locally; current upstream is ancestral | Final local engine/EARS/backup/type gates and complete shipped benchmark | Final combined platform matrix and apack strict CI; no future-feature dependency |
+| Current reference docs, review dispositions, Outcome and closure | Reference contracts/dispositions drafted | Implementation evidence and dated review addition | Final gates, accepted dispositions, Outcome and archival |
 
 ## Constraints
 
