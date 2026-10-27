@@ -10,13 +10,14 @@ import { Packr } from 'msgpackr';
 
 const { Database } = createRequire(import.meta.url)('../crates/elmdb-node/index.js');
 const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
-const [mode, directory, rowsArg = '10000', bytesArg = '1024'] = process.argv.slice(2);
+const [mode, directory, rowsArg = '10000', bytesArg = '1024', profile = 'text'] = process.argv.slice(2);
 const modes = ['seed', 'check', 'rebuild', 'replace', 'backup'];
-if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|replace|backup <owned-workload-dir> [rows] [body-bytes]');
+if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|replace|backup <owned-workload-dir> [rows] [body-bytes] [text|vector]');
 const root = resolve(directory);
 const source = join(root, 'source');
 const manifestPath = join(root, 'workload.json');
 const owner = 'elmdb-recovery-measure-v1';
+if (!['text', 'vector'].includes(profile)) throw new Error('Profile must be text or vector');
 const schema = {
   $schema: 'https://elmdb.dev/schema/1.json',
   relations: { refs: { cardinality: 'many-to-many' } },
@@ -28,6 +29,9 @@ const schema = {
     text: { kind: 'text', fields: { title: {}, body: {} } },
   } } },
 };
+if (profile === 'vector') {
+  schema.types.Note.indexes.meaning = { kind: 'vector', from: ['body'], dims: 1536, model: 'synthetic-recovery' };
+}
 function diskBytes(path) {
   return fs.readdirSync(path, { withFileTypes: true }).reduce((sum, entry) => {
     const child = join(path, entry.name);
@@ -41,7 +45,7 @@ if (mode === 'seed') {
     throw new Error('Rows must be 1..1000000 and body bytes 1..262144');
   }
   fs.mkdirSync(root); // Refuse an existing directory rather than adopting somebody else's data.
-  workload = { owner, rows, bodyBytes, relations: Math.max(0, rows - 1) + Math.max(0, rows - 2), schema };
+  workload = { owner, profile, vectorDims: profile === 'vector' ? 1536 : 0, rows, bodyBytes, relations: Math.max(0, rows - 1) + Math.max(0, rows - 2), schema };
   fs.writeFileSync(manifestPath, JSON.stringify(workload, null, 2));
 } else {
   workload = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
@@ -91,6 +95,25 @@ if (mode === 'seed') {
       }
       db.write(packr.pack({ ops, now: 1000 }));
     }
+    if (workload.vectorDims) {
+      let embedded = 0;
+      for (;;) {
+        const [pending] = packr.unpack(db.readSync(packr.pack({
+          reads: [{ read: 'pendingEmbeddings', type: 'Note', index: 'meaning', limit: 100 }],
+        })));
+        if (!pending.chunks.length) break;
+        const ops = pending.chunks.map((chunk) => {
+          const ordinal = ++embedded;
+          return { op: 'embed', id: chunk.id, index: 'meaning', chunk: chunk.chunk, hash: chunk.hash,
+            model: 'synthetic-recovery', vector: Array.from({ length: workload.vectorDims }, (_, j) =>
+              Math.sin(ordinal * (j + 1) * 0.001)) };
+        });
+        const result = packr.unpack(db.write(packr.pack({ ops, now: 1000 })));
+        if (result.results.some(row => row.kind !== 'done')) throw new Error('Synthetic embedding refused');
+      }
+      workload.embeddings = embedded;
+      fs.writeFileSync(manifestPath, JSON.stringify(workload, null, 2));
+    }
   } finally { db.close(); }
 } else if (mode === 'replace') {
   target = fs.mkdtempSync(join(root, 'replace-'));
@@ -113,7 +136,7 @@ if (mode === 'seed') {
 }
 const elapsedMs = performance.now() - started;
 console.log(JSON.stringify({
-  mode, root, target, rows: workload.rows, bodyBytes: workload.bodyBytes, relations: workload.relations,
+  mode, root, target, profile: workload.profile ?? 'text', vectorDims: workload.vectorDims ?? 0, embeddings: workload.embeddings ?? 0, rows: workload.rows, bodyBytes: workload.bodyBytes, relations: workload.relations,
   elapsedMs, maxRssKiB: process.resourceUsage().maxRSS,
   sourceFileBytes: fs.statSync(join(source, 'data.mdb')).size,
   logicalDiskBefore: beforeBytes, logicalDiskAfter: diskBytes(root),
