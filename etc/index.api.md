@@ -48,6 +48,7 @@ export interface CallReport {
             ms: number;
         };
     };
+    watches: WatchCount[];
 }
 
 // @public
@@ -164,7 +165,7 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
-    watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
+    watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
     wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
@@ -751,6 +752,18 @@ export interface Upsert {
 }
 
 // @public
+export const WATCH_SCHEDULE: WatchSchedule;
+
+// @public
+export interface WatchCount {
+    label: string;
+    // (undocumented)
+    ms: number;
+    runs: number;
+    skipped: number;
+}
+
+// @public
 export interface Watching {
     stop(): void;
 }
@@ -759,6 +772,21 @@ export interface Watching {
 export interface WatchObserver<T> {
     error?(error: unknown, commit: number): void;
     next(value: T, commit: number): void;
+}
+
+// @public
+export interface WatchOptions {
+    label?: string;
+}
+
+// @public
+export interface WatchSchedule {
+    // (undocumented)
+    delayFactor: number;
+    // (undocumented)
+    flushSliceMs: number;
+    // (undocumented)
+    minimumGapMs: number;
 }
 
 // @public

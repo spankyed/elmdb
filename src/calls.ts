@@ -27,6 +27,17 @@ export interface CallSite {
   ms: number;
 }
 
+/** One watch's runs while counting ran */
+export interface WatchCount {
+  /** The watch's label, or where it was opened */
+  label: string;
+  /** How many times it ran again after a commit, and the milliseconds those runs took */
+  runs: number;
+  ms: number;
+  /** Commits that landed while it was already waiting to run: states its next run skipped */
+  skipped: number;
+}
+
 /** Every call counted since counting started */
 export interface CallReport {
   /** Whether counting is still running */
@@ -40,6 +51,8 @@ export interface CallReport {
   };
   /** Every site, the most time first */
   sites: CallSite[];
+  /** Every watch that ran or skipped a state, the most time first */
+  watches: WatchCount[];
 }
 
 /** Counting an engine's calls: started, read while it runs, and stopped */
@@ -73,9 +86,12 @@ function framesOf(stack: string): string[] {
   return frames;
 }
 
-/** A path from its `packages/` or `node_modules/` directory on, which is where two checkouts' paths stop differing */
+/**
+ * A path from its last `packages/`, `node_modules/` or `packs/` directory on, which is where two checkouts' paths, or
+ * two data directories' installed packs, stop differing
+ */
 function shortened(frame: string): string {
-  const at = frame.search(/\/(packages|node_modules)\//);
+  const at = Math.max(...['/packages/', '/node_modules/', '/packs/'].map((dir) => frame.lastIndexOf(dir)));
   return at === -1 ? frame : frame.slice(at + 1);
 }
 
@@ -92,14 +108,20 @@ export function callSite(): string {
 /** One count's tallies, and a unit being counted until it commits or aborts */
 export interface CallTally {
   record(kind: CallKind, site: string, watch: boolean, ops: number, ms: number, writes?: number): void;
-  watchRun(ms: number): void;
+  watchRun(label: string, ms: number): void;
+  watchSkipped(label: string): void;
   report(counting: boolean): CallReport;
 }
 
 export function createCallTally(): CallTally {
   const started = performance.now();
   const sites = new Map<string, CallSite>();
-  let watchRuns = { calls: 0, ms: 0 };
+  const watches = new Map<string, WatchCount>();
+  const watchOf = (label: string) => {
+    let held = watches.get(label);
+    if (!held) watches.set(label, held = { label, runs: 0, ms: 0, skipped: 0 });
+    return held;
+  };
   return {
     record(kind, site, watch, ops, ms, writes = 0) {
       const key = `${kind}\u0000${watch}\u0000${site}`;
@@ -111,16 +133,25 @@ export function createCallTally(): CallTally {
         held.ms += ms;
       } else sites.set(key, { site, kind, watch, calls: 1, ops, writes, ms });
     },
-    watchRun(ms) {
-      watchRuns = { calls: watchRuns.calls + 1, ms: watchRuns.ms + ms };
+    watchRun(label, ms) {
+      const held = watchOf(label);
+      held.runs += 1;
+      held.ms += ms;
+    },
+    watchSkipped(label) {
+      watchOf(label).skipped += 1;
     },
     report(counting) {
       const totals = {
         read: { calls: 0, ops: 0, ms: 0 },
         write: { calls: 0, ops: 0, ms: 0 },
         unit: { calls: 0, ops: 0, ms: 0 },
-        watchRuns: { ...watchRuns },
+        watchRuns: { calls: 0, ms: 0 },
       };
+      for (const watch of watches.values()) {
+        totals.watchRuns.calls += watch.runs;
+        totals.watchRuns.ms += watch.ms;
+      }
       for (const entry of sites.values()) {
         const total = totals[entry.kind];
         total.calls += entry.calls;
@@ -132,6 +163,7 @@ export function createCallTally(): CallTally {
         elapsedMs: performance.now() - started,
         totals,
         sites: [...sites.values()].map((entry) => ({ ...entry })).sort((a, b) => b.ms - a.ms),
+        watches: [...watches.values()].map((watch) => ({ ...watch })).sort((a, b) => b.ms - a.ms),
       };
     },
   };

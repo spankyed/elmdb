@@ -11,7 +11,7 @@ import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
 import { idSuffix } from './utils.ts';
-import { createWatches, type WatchObserver, type Watching } from './watch.ts';
+import { createWatches, type WatchObserver, type WatchOptions, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /** An entity as a read gives it: its id and type, and every attribute it holds */
@@ -105,10 +105,12 @@ export interface Ears {
   /**
    * Runs `read` and hands `observer` its result, then runs it again after every commit that wrote into what it read,
    * handing over each result that differs from the last, with the number of the commit it reflects. Never inside a
-   * write: deliveries come once the writing code has returned, a burst of commits as one. `read` must be a pure read of
-   * the engine; what it reads anywhere else isn't tracked, and its result goes stale when that changes
+   * write: deliveries come once the writing code has returned, a burst of commits as one, and however fast commits come
+   * a watch runs again at most once per gap its own cost sets (`WATCH_SCHEDULE`). `read` must be a pure read of the
+   * engine; what it reads anywhere else isn't tracked, and its result goes stale when that changes. `label` names it
+   * where its cost is reported
    */
-  watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void)): Watching;
+  watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
   /** The number of the last commit the engine's database made, or 0: what a watch's delivery is compared against */
   lastCommit(): number;
 }
@@ -253,7 +255,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     };
   };
 
-  const watches = createWatches(connection);
+  const watches = createWatches(connection, { warn });
 
   const operations: Ears = {
     query, create, upsert, write, isEntityType, isRelationKind, isRole,

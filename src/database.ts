@@ -229,6 +229,8 @@ export interface Connection {
   lastCommit(): number;
   /** Counting the calls this connection makes, off until started */
   readonly calls: CallCounting;
+  /** The count being kept, while counting runs: what the watch scheduler records each watch's runs into */
+  tally(): CallTally | undefined;
 }
 
 export function createConnection(database: EarsDatabase, { freeze = false }: { freeze?: boolean } = {}): Connection {
@@ -419,12 +421,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     track(token, fn) {
       const outer = tracking;
       tracking = token;
-      const start = tally && performance.now();
       try {
         return fn();
       } finally {
         tracking = outer;
-        if (tally && start !== undefined) tally.watchRun(performance.now() - start);
       }
     },
     untrack: (token) => database.untrack(token),
@@ -439,5 +439,6 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     committedEverything: () => committed({ sequence: database.sequence, touched: 'all' }),
     lastCommit: () => database.sequence,
     calls,
+    tally: () => tally,
   };
 }
