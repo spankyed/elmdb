@@ -1,6 +1,8 @@
 # Libraries for safer implementation and easier development
 
-Status: planned, 2026-10-27. No dependency changes are made by this plan.
+Status: partial implementation, 2026-10-27. Criterion maintenance benchmarks are implemented;
+stages 1 and 3–5 remain planned.
+See [current verification scope](maintenance-verification.md) for commands, evidence and remaining benchmark coverage.
 
 ## Purpose and scope
 
@@ -128,5 +130,7 @@ expensive builds and benchmarks under one execution owner and use isolated workt
 Demonstrate new correctness assertions failing on disposable mutations rather than modifying a shared working tree.
 
 Completion means the accepted stages have reviewable implementations and evidence, and every evaluated-but-deferred
-stage has a written decision. This plan does not resolve streaming dump inventories, safe crash cleanup, structured
+stage has a written decision. Single-index rebuilding and dump export already stream/spill their intermediate
+collections (c78c623).
+This plan does not resolve remaining full-audit inventories, safe crash cleanup, structured
 committed-error metadata or filesystem certification; those remain distinct follow-ups in the review dispositions.

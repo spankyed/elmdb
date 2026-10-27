@@ -18,6 +18,10 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 ## Development improvements
 
 - [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
-  benchmarks, concurrency models and diagnostics; planned, with adoption gates.
+  benchmarks, concurrency models and diagnostics; initial benchmarks implemented, other stages planned.
 - [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
-  failpoints, heap assertions, per-process tests, model-based properties, profiling; planned.
+  failpoints, heap assertions, per-process tests, model-based properties, profiling; initial heap gates implemented,
+  other stages planned.
+
+[Maintenance verification after remediation](maintenance-verification.md) reconciles completed memory paths,
+current benchmark/heap gates and outstanding operational work.

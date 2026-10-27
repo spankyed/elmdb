@@ -1,6 +1,7 @@
 # Tooling for tests that can fail, faults by name, and measured bounds
 
-Status: planned, 2026-10-27. No dependency changes are made by this plan.
+Status: partial implementation, 2026-10-27. Stage 3 now has dedicated dhat assertions for selected value/text
+rebuilding and export. Other stages remain planned. See [current verification scope](maintenance-verification.md).
 
 ## Purpose and scope
 
@@ -69,8 +70,10 @@ Acceptance:
 - Tests for each bound engine.md, Recovery resources, claims: full `check()` and `rebuild()` derivation stays
   within the spill threshold plus the stated overheads, on fixtures large enough that an unbounded collection
   exceeds it. A mutation that collects one index's entries into a `Vec` fails it.
-- The documented unbounded phases (single-index rebuild, dump export) get a test that records their peak, so
-  streaming them later has a baseline and their limit is not mistaken for a bound.
+- Single-index rebuild and dump export now stream/spill intermediate collections (c78c623). Dedicated heap
+  assertions exercise export and selected value/text rebuilds at two input sizes. Extend coverage to selected
+  vector rebuilds and isolated full derivation; remaining full-check/rebuild inventories and reports require
+  separate observations rather than an invented constant-heap guarantee.
 - dhat measures the Rust heap only. LMDB's mapped pages and the process RSS remain `scripts/measure-recovery.mjs`'s.
 
 ## 4. One process per test
