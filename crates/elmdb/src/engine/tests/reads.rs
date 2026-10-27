@@ -475,11 +475,17 @@ fn a_unit_reads_its_own_writes() {
     .unwrap();
     let plan: Plan = serde_json::from_value(json!({ "start": types(&["Task"]), "steps": [{ "step": "where", "field": "status", "value": "open" }], "terminal": { "answer": "ids" } })).unwrap();
     let inside = decode(
-        &unit.read(&Reads { reads: vec![ReadOp::Query { plan: plan.clone(), visits: false }], track: None }).unwrap(),
+        &unit
+            .read(&Reads {
+                reads: vec![ReadOp::Query { plan: plan.clone(), visits: false, explain: false }],
+                track: None,
+            })
+            .unwrap(),
     );
     assert_eq!(inside[0]["ids"], json!([A, C, D, "Task-e"]));
-    let outside =
-        decode(&f.db.read(&Reads { reads: vec![ReadOp::Query { plan, visits: false }], track: None }).unwrap());
+    let outside = decode(
+        &f.db.read(&Reads { reads: vec![ReadOp::Query { plan, visits: false, explain: false }], track: None }).unwrap(),
+    );
     assert_eq!(outside[0]["ids"], json!([A, C, D]), "a reader sees none of an open unit");
     unit.abort();
 }

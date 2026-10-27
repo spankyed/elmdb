@@ -22,12 +22,18 @@ pub struct Reads {
 #[serde(tag = "read", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum ReadOp {
     /// A plan's answer; with `visits`, wrapped as `{ kind: "visited", answer, visited }`, `visited` counting the
-    /// entities its start and walks reached, which says whether a filter walked rows an index could have answered
+    /// entities its start and walks reached, which says whether a filter walked rows an index could have answered.
+    /// With `explain`, wrapped as `{ kind: "explained", answer, visited, ms, stages }` instead: each stage of the plan —
+    /// its start, each step and its terminal — with the index it read, the entities it visited and kept, and the
+    /// milliseconds spent in it (`docs/architecture/engine.md`, EXPLAIN)
     Query {
         plan: Plan,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         visits: bool,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        explain: bool,
     },
     /// The entity's row: its id, type and every field; `null` for an id no entity has. It reads through the trash
     Row { id: String },

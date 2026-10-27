@@ -6,6 +6,7 @@ mod derived;
 mod lifecycle;
 mod maintenance;
 mod model;
+mod plans;
 mod reads;
 mod schema_versions;
 mod tracked;

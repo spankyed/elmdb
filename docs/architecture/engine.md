@@ -101,9 +101,33 @@ A plan is a scope, a start, steps and a terminal:
   entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
-their answer, and a live type's `count` is read off its counter. A `where` or `withRole` straight after a type start
-reads a built value index on that one field (a `where` on a value other than null): a compound index is not read, since
-it holds no entry for an entity missing another of its fields, and without such an index the type's entities are walked.
+their answer, and a live type's `count` is read off its counter. The planner makes three choices, none of which changes
+an answer:
+
+- **A type start's filters are read from an index.** A `where` or `withRole` straight after a type start reads a built
+  value index on that one field (a `where` on a value other than null): a compound index is not read, since it holds no
+  entry for an entity missing another of its fields, and without such an index the type's entities are walked. Further
+  along the filters a type start begins with (`where`, `withRole`, `has`, `lacks`, `ofType`, `within`, which keep the
+  same set in any order), the first `where` or `withRole` every start type has a built index for is read instead of
+  the walk, and the filters before it are checked against each match. A filter after any other step filters what
+  reaches it.
+- **An index lookup visits its matches as it reads them.** One value's entries are keyed by place, so they come in
+  creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
+- **`orderBy` then `limit` holds the first `limit`**, in order with ties kept as they came, rather than sorting the whole
+  set: the set is still read, and the memory is the limit's.
+
+A query asked for its `visits` answers how many entities its start and walks read from the store, index entries
+included, which is what says whether a filter walked rows an index could have answered.
+
+**EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
+have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
+its terminal, in order — as `{ stage, index?, visited, kept, ms }`. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+…); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
+is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
+what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
+the stages' times add up to at most the whole. A stage a driving index answered, a filter before it, visits and keeps
+nothing of its own: the stage reading the index does its filtering. EXPLAIN times each crossing between stages, so its
+`ms` is the explained read's, a little above the plain one's.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last
 committed one, which a commit in any process moves), and opens one otherwise; a commit here drops the idle ones, so none

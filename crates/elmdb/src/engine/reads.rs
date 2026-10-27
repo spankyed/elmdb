@@ -1,7 +1,8 @@
 //! Running reads (`plan.rs`) against a snapshot or a unit's transaction, and writing their answers as one msgpack
 //! envelope. A query pulls ids through its steps one at a time, so `first`, `exists`, `count` and `limit` stop once they
 //! have their answer; a step needing the whole set (`orderBy`, `reverse`, `distinct`, the deep walks) collects it.
-//! A `where` or `withRole` straight after a type start reads a value index where one covers the field.
+//! A type start's leading filters are read from a value index where one covers a `where` or `withRole` among them, its
+//! matches visited as they are read; `orderBy` followed by `limit` holds only the first `limit`.
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
@@ -43,7 +44,7 @@ pub fn run(r: &impl Read, reads: &[ReadOp]) -> Result<Vec<u8>> {
 pub fn run_counted(r: &impl Read, plan: &Plan) -> Result<(Vec<u8>, Visited)> {
     let mut out = Vec::new();
     let mut visited = Visited::default();
-    answer(r, &ReadOp::Query { plan: plan.clone(), visits: false }, &mut out, &mut visited)?;
+    answer(r, &ReadOp::Query { plan: plan.clone(), visits: false, explain: false }, &mut out, &mut visited)?;
     Ok((out, visited))
 }
 
@@ -86,8 +87,18 @@ fn may_hold_proto(bytes: &[u8]) -> bool {
 
 fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited) -> Result<()> {
     match read {
-        ReadOp::Query { plan, visits: false } => query(r, plan, out, visited),
-        ReadOp::Query { plan, visits: true } => {
+        ReadOp::Query { plan, explain: true, .. } => {
+            let stages = Stages::new(plan);
+            let mut w = W(out);
+            w.map(5);
+            w.kind("explained");
+            w.str("answer");
+            query_with(r, plan, w.0, visited, Some(&stages))?;
+            stages.write(plan, visited.entities, &mut W(out));
+            Ok(())
+        }
+        ReadOp::Query { plan, visits: false, .. } => query(r, plan, out, visited),
+        ReadOp::Query { plan, visits: true, .. } => {
             let mut w = W(out);
             w.map(3);
             w.kind("visited");
@@ -338,6 +349,8 @@ struct Query<'r, R: Read> {
     r: &'r R,
     plan: &'r Plan,
     visited: Cell<u64>,
+    /// What each stage did, for a read asked to explain itself
+    stages: Option<&'r Stages>,
     /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
     hits: RefCell<HashMap<String, (Hit, String)>>,
 }
@@ -345,6 +358,14 @@ struct Query<'r, R: Read> {
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
 
 impl<R: Read> Query<'_, R> {
+    /// One entity read from the store, by the start or by a step reading an index or walking a type
+    fn count_visit(&self) {
+        self.visited.set(self.visited.get() + 1);
+        if let Some(stages) = self.stages {
+            stages.read();
+        }
+    }
+
     /// Whether a step may reach the entity: in the store, and out of the trash for a live query
     fn alive(&self, id: &str) -> Result<bool> {
         Ok(match entities::record(self.r, id)? {
@@ -383,7 +404,7 @@ impl<R: Read> Query<'_, R> {
             }
         }
         let mut go = |id: &str| -> Result<bool> {
-            self.visited.set(self.visited.get() + 1);
+            self.count_visit();
             visit(id)
         };
         let mut outcome: Result<bool> = Ok(true);
@@ -427,6 +448,18 @@ impl<R: Read> Query<'_, R> {
 
     /// Visits the ids after the first `upto` steps; false when `visit` stopped the walk
     fn pull(&self, upto: usize, visit: &mut Visit<'_>) -> Result<bool> {
+        let Some(stages) = self.stages else { return self.stage(upto, visit) };
+        // Stage `upto` runs until it hands an id on, and the stage it hands to runs until it returns
+        let _running = stages.enter(upto);
+        self.stage(upto, &mut |id| {
+            stages.kept(upto);
+            let _receiving = stages.enter(upto + 1);
+            visit(id)
+        })
+    }
+
+    /// Stage `upto` of the plan: its start, or its `upto`th step over the stages before it
+    fn stage(&self, upto: usize, visit: &mut Visit<'_>) -> Result<bool> {
         if upto == 0 {
             return match &self.plan.start {
                 Start::Types { types } => {
@@ -440,7 +473,7 @@ impl<R: Read> Query<'_, R> {
                 Start::Ids { ids } => {
                     for id in ids {
                         if self.admits(id)? {
-                            self.visited.set(self.visited.get() + 1);
+                            self.count_visit();
                             if !visit(id)? {
                                 return Ok(false);
                             }
@@ -465,7 +498,7 @@ impl<R: Read> Query<'_, R> {
                     all.sort_by_key(|(seq, _)| *seq);
                     for (_, id) in all {
                         if self.admits(&id)? {
-                            self.visited.set(self.visited.get() + 1);
+                            self.count_visit();
                             if !visit(&id)? {
                                 return Ok(false);
                             }
@@ -489,11 +522,15 @@ impl<R: Read> Query<'_, R> {
             Step::Where { field: name, value } => {
                 if before == 0
                     && let Some(types) = self.start_types()
-                    && name != field::ENTITY_TYPE
-                    && !value.is_nil()
-                    && let Some(part) = values::index_part(value)
+                    && let Some(part) = indexable(name, value)
                 {
                     return self.holding(types, name, &part, value, visit);
+                }
+                if self.driver() == Some(before)
+                    && let Some(types) = self.start_types()
+                    && let Some(part) = indexable(name, value)
+                {
+                    return self.holding(types, name, &part, value, &mut |id| self.past_filters(before, id, visit));
                 }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
             }
@@ -515,6 +552,13 @@ impl<R: Read> Query<'_, R> {
                     && let Some(types) = self.start_types()
                 {
                     return self.holding(types, field::ROLE, &Part::String(role.clone()), &probe, visit);
+                }
+                if self.driver() == Some(before)
+                    && let Some(types) = self.start_types()
+                {
+                    let part = Part::String(role.clone());
+                    return self
+                        .holding(types, field::ROLE, &part, &probe, &mut |id| self.past_filters(before, id, visit));
                 }
                 self.pull(before, &mut |id| if self.matches(id, field::ROLE, &probe)? { visit(id) } else { Ok(true) })
             }
@@ -563,6 +607,11 @@ impl<R: Read> Query<'_, R> {
                 let take = if n.is_nan() { 0 } else { n.floor() as i64 };
                 if take <= 0 {
                     return Ok(true);
+                }
+                if before > 0
+                    && let Step::OrderBy { field: name, descending } = &self.plan.steps[before - 1]
+                {
+                    return each(self.first_ordered(before - 1, name, *descending, take as usize)?, visit);
                 }
                 let mut taken = 0i64;
                 let mut stopped = false;
@@ -685,7 +734,7 @@ impl<R: Read> Query<'_, R> {
                 }
             };
             for hit in text::search::search(self.r, entity_type, &text_index, &raw, options, within.as_ref(), now)? {
-                self.visited.set(self.visited.get() + 1);
+                self.count_visit();
                 let place = match &order {
                     Some(order) => (order.get(hit.id.as_str()).copied().unwrap_or(usize::MAX), 0),
                     None if self.admits(&hit.id)? => (at, hit.seq),
@@ -761,7 +810,7 @@ impl<R: Read> Query<'_, R> {
                     super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
                 let mut admitted = Vec::new();
                 for (id, distance) in nearest {
-                    self.visited.set(self.visited.get() + 1);
+                    self.count_visit();
                     if except == Some(id.as_str()) || (among.is_none() && !self.admits(&id)?) {
                         continue;
                     }
@@ -866,6 +915,71 @@ impl<R: Read> Query<'_, R> {
         each(ids, visit)
     }
 
+    /// The step a type start's leading filters are read from: the first `where` or `withRole` among the filters the
+    /// plan starts with that every start type has a built index for, when no step before it is one. The filters
+    /// before it keep the same set in any order, so the index's matches are read and the earlier filters checked
+    /// against each, in the creation order a walk of the type would have visited them
+    fn driver(&self) -> Option<usize> {
+        let types = self.start_types()?;
+        for (at, step) in self.plan.steps.iter().enumerate() {
+            let field = match step {
+                Step::Where { field: name, value } => indexable(name, value).map(|_| name.as_str()),
+                Step::WithRole { .. } => Some(field::ROLE),
+                Step::OfType { .. } | Step::Within { .. } | Step::Has { .. } | Step::Lacks { .. } => None,
+                _ => return None,
+            };
+            if let Some(name) = field
+                && types.iter().all(|t| index_on(self.r, t, name).is_some())
+            {
+                return Some(at);
+            }
+        }
+        None
+    }
+
+    /// Visits `id` if every one of the first `upto` steps, the filters before a driving index, keeps it
+    fn past_filters(&self, upto: usize, id: &str, visit: &mut Visit<'_>) -> Result<bool> {
+        for step in &self.plan.steps[..upto] {
+            let kept = match step {
+                Step::OfType { entity_type } => {
+                    id.strip_prefix(entity_type.as_str()).is_some_and(|rest| rest.starts_with('-'))
+                }
+                Step::Within { ids } => ids.iter().any(|kept| kept == id),
+                Step::Where { field: name, value } => self.matches(id, name, value)?,
+                Step::Has { field: name } => get(self.r, id, name)?.is_some(),
+                Step::Lacks { field: name } => get(self.r, id, name)?.is_none(),
+                Step::WithRole { role } => self.matches(id, field::ROLE, &Value::from(role.as_str()))?,
+                _ => unreachable!("a driving index is preceded only by filters"),
+            };
+            if !kept {
+                return Ok(true);
+            }
+        }
+        visit(id)
+    }
+
+    /// The first `take` ids after the first `upto` steps in `name`'s order, as sorting them all and taking the first
+    /// would answer, equal values in the order they came: only `take` are held at once
+    fn first_ordered(&self, upto: usize, name: &str, descending: bool, take: usize) -> Result<Vec<String>> {
+        let collator = collator(&self.r.schema().collation)?;
+        let order = |a: &SortKey, b: &SortKey| {
+            let o = compare(&collator, a, b);
+            if descending { o.reverse() } else { o }
+        };
+        let mut kept: Vec<(SortKey, String)> = Vec::with_capacity(take.min(1024) + 1);
+        self.pull(upto, &mut |id| {
+            let key = sort_key(get_value(self.r, id, name)?.as_ref());
+            // After every equal one already held, so the earlier of two equals stays first
+            let at = kept.partition_point(|(held, _)| order(held, &key) != Ordering::Greater);
+            if at < take {
+                kept.insert(at, (key, id.to_owned()));
+                kept.truncate(take);
+            }
+            Ok(true)
+        })?;
+        Ok(kept.into_iter().map(|(_, id)| id).collect())
+    }
+
     /// Every id after the first `upto` steps
     fn collect(&self, upto: usize) -> Result<Vec<String>> {
         let mut ids = Vec::new();
@@ -889,23 +1003,31 @@ impl<R: Read> Query<'_, R> {
     /// or by walking the type's rows
     fn holding(&self, types: &[String], name: &str, part: &Part, probe: &Value, visit: &mut Visit<'_>) -> Result<bool> {
         for t in types {
-            match index_on(self.r, t, name) {
+            let index = index_on(self.r, t, name);
+            if let Some(stages) = self.stages {
+                stages.reads_index(index.as_deref().unwrap_or("none: walks the type"));
+            }
+            match index {
                 Some(index) => {
-                    let mut found: Vec<(u64, String)> = Vec::new();
-                    for (key, id) in self.r.scan(&keys::index_range(t, &index, std::slice::from_ref(part)))? {
-                        let seq = match decode_key(&key)?.pop() {
-                            Some(Part::Number(n)) => n as u64,
-                            _ => 0,
-                        };
-                        found.push((seq, values::decode(&id)?.as_str().unwrap_or_default().to_owned()));
-                    }
-                    found.sort_by_key(|(seq, _)| *seq);
-                    found.dedup_by(|a, b| a.1 == b.1);
-                    for (_, id) in found {
-                        self.visited.set(self.visited.get() + 1);
-                        if self.admits(&id)? && !visit(&id)? {
-                            return Ok(false);
+                    // One value's entries are keyed by place, so the range is already in creation order, an entity once:
+                    // it is visited as it is read, and a step stopped early reads no further
+                    let mut outcome: Result<bool> = Ok(true);
+                    self.r.visit(&keys::index_range(t, &index, std::slice::from_ref(part)), |_, id| {
+                        let step = (|| -> Result<bool> {
+                            let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
+                            self.count_visit();
+                            if self.admits(&id)? { visit(&id) } else { Ok(true) }
+                        })();
+                        match step {
+                            Ok(true) => true,
+                            other => {
+                                outcome = other;
+                                false
+                            }
                         }
+                    })?;
+                    if !outcome? {
+                        return Ok(false);
                     }
                 }
                 None => {
@@ -1006,6 +1128,178 @@ impl<R: Read> Query<'_, R> {
         }
         each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
     }
+}
+
+/// What each stage of one plan did, while a read asked to explain it runs: stage 0 is the start, stage `n` the plan's
+/// `n`th step, and the last the terminal. The stage running is the one whose code holds the thread: a stage runs until
+/// it hands an id to the next, which runs until it returns, so each stage's time is its own and not its callers'
+struct Stages {
+    /// Per stage: entities read from the store, ids handed on, the index it read, and nanoseconds spent in it
+    read: Vec<Cell<u64>>,
+    kept: Vec<Cell<u64>>,
+    index: RefCell<Vec<Option<String>>>,
+    nanos: Vec<Cell<u64>>,
+    running: Cell<usize>,
+    since: Cell<std::time::Instant>,
+    started: std::time::Instant,
+}
+
+/// Puts back the stage that ran before, charging the time since to the one ending
+struct Entered<'s> {
+    stages: &'s Stages,
+    previous: usize,
+}
+
+impl Drop for Entered<'_> {
+    fn drop(&mut self) {
+        self.stages.switch(self.previous);
+    }
+}
+
+impl Stages {
+    fn new(plan: &Plan) -> Self {
+        let n = plan.steps.len() + 2;
+        let now = std::time::Instant::now();
+        Stages {
+            read: (0..n).map(|_| Cell::new(0)).collect(),
+            kept: (0..n).map(|_| Cell::new(0)).collect(),
+            index: RefCell::new(vec![None; n]),
+            nanos: (0..n).map(|_| Cell::new(0)).collect(),
+            // Before any step pulls, the terminal is what runs
+            running: Cell::new(n - 1),
+            since: Cell::new(now),
+            started: now,
+        }
+    }
+
+    fn switch(&self, to: usize) {
+        let now = std::time::Instant::now();
+        let at = self.running.get();
+        self.nanos[at].set(self.nanos[at].get() + (now - self.since.get()).as_nanos() as u64);
+        self.since.set(now);
+        self.running.set(to);
+    }
+
+    fn enter(&self, stage: usize) -> Entered<'_> {
+        let previous = self.running.get();
+        self.switch(stage);
+        Entered { stages: self, previous }
+    }
+
+    fn read(&self) {
+        let at = self.running.get();
+        self.read[at].set(self.read[at].get() + 1);
+    }
+
+    fn kept(&self, stage: usize) {
+        self.kept[stage].set(self.kept[stage].get() + 1);
+    }
+
+    fn reads_index(&self, name: &str) {
+        let at = self.running.get();
+        let mut index = self.index.borrow_mut();
+        index[at] = Some(match index[at].take() {
+            Some(held) if held != name => format!("{held}, {name}"),
+            _ => name.to_owned(),
+        });
+    }
+
+    /// The rest of the `explained` answer after its `answer`: `visited`, `ms` and `stages`
+    fn write(&self, plan: &Plan, visited: u64, w: &mut W<'_>) {
+        self.switch(self.running.get());
+        let ms = |nanos: u64| nanos as f64 / 1e6;
+        w.str("visited");
+        w.uint(visited);
+        w.str("ms");
+        rmp::encode::write_f64(w.0, ms(self.started.elapsed().as_nanos() as u64)).expect("a Vec");
+        w.str("stages");
+        let n = self.read.len();
+        w.array(n as u32);
+        let index = self.index.borrow();
+        for at in 0..n {
+            let name = match at {
+                0 => start_name(&plan.start),
+                _ if at == n - 1 => terminal_name(&plan.terminal),
+                _ => step_name(&plan.steps[at - 1]),
+            };
+            // A stage visits what the stage before handed it, and what it read from the store itself
+            let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
+            w.map(if index[at].is_some() { 5 } else { 4 });
+            w.str("stage");
+            w.str(name);
+            if let Some(index) = &index[at] {
+                w.str("index");
+                w.str(index);
+            }
+            w.str("visited");
+            w.uint(received + self.read[at].get());
+            w.str("kept");
+            // The terminal keeps what it answers: what the last step handed it
+            w.uint(if at == n - 1 { received } else { self.kept[at].get() });
+            w.str("ms");
+            rmp::encode::write_f64(w.0, ms(self.nanos[at].get())).expect("a Vec");
+        }
+    }
+}
+
+fn start_name(start: &Start) -> &'static str {
+    match start {
+        Start::Types { .. } => "types",
+        Start::Ids { .. } => "ids",
+        Start::All => "all",
+    }
+}
+
+fn step_name(step: &Step) -> &'static str {
+    match step {
+        Step::OfType { .. } => "ofType",
+        Step::Within { .. } => "within",
+        Step::Where { .. } => "where",
+        Step::Has { .. } => "has",
+        Step::Lacks { .. } => "lacks",
+        Step::WithRole { .. } => "withRole",
+        Step::LinkedWith { .. } => "linkedWith",
+        Step::LinkedTo { .. } => "linkedTo",
+        Step::LinkedFrom { .. } => "linkedFrom",
+        Step::UnlinkedTo { .. } => "unlinkedTo",
+        Step::UnlinkedFrom { .. } => "unlinkedFrom",
+        Step::Out { .. } => "out",
+        Step::In { .. } => "in",
+        Step::Descendants { .. } => "descendants",
+        Step::Ancestors { .. } => "ancestors",
+        Step::OrderBy { .. } => "orderBy",
+        Step::Reverse => "reverse",
+        Step::Limit { .. } => "limit",
+        Step::Distinct { .. } => "distinct",
+        Step::After { .. } => "after",
+        Step::Near { .. } => "near",
+        Step::Like { .. } => "like",
+        Step::Hybrid { .. } => "hybrid",
+        Step::Search { .. } => "search",
+    }
+}
+
+fn terminal_name(terminal: &Terminal) -> &'static str {
+    match terminal {
+        Terminal::Ids => "ids",
+        Terminal::Count => "count",
+        Terminal::First => "first",
+        Terminal::Last => "last",
+        Terminal::Exists => "exists",
+        Terminal::Rows { .. } => "rows",
+        Terminal::FirstRow { .. } => "firstRow",
+        Terminal::Edges { .. } => "edges",
+        Terminal::GroupBy { .. } => "groupBy",
+        Terminal::Hits { .. } => "hits",
+    }
+}
+
+/// A `where` a value index can answer: a value an index holds, on a field that isn't the entity's type
+fn indexable(name: &str, value: &Value) -> Option<Part> {
+    if name == field::ENTITY_TYPE || value.is_nil() {
+        return None;
+    }
+    values::index_part(value)
 }
 
 fn each(ids: Vec<String>, visit: &mut Visit<'_>) -> Result<bool> {
@@ -1150,6 +1444,16 @@ impl SameValue {
 }
 
 fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -> Result<()> {
+    query_with(r, plan, out, visited, None)
+}
+
+fn query_with(
+    r: &impl Read,
+    plan: &Plan,
+    out: &mut Vec<u8>,
+    visited: &mut Visited,
+    stages: Option<&Stages>,
+) -> Result<()> {
     if let Start::Types { types } = &plan.start {
         let unknown: Vec<&String> = types.iter().filter(|t| !r.schema().types.contains_key(*t)).collect();
         if !unknown.is_empty() {
@@ -1171,7 +1475,7 @@ fn query(r: &impl Read, plan: &Plan, out: &mut Vec<u8>, visited: &mut Visited) -
             format!("A plan holds at most {MAX_STEPS} steps, and this one {}", plan.steps.len()),
         ));
     }
-    let q = Query { r, plan, visited: Cell::new(0), hits: RefCell::new(HashMap::new()) };
+    let q = Query { r, plan, visited: Cell::new(0), stages, hits: RefCell::new(HashMap::new()) };
     let last = plan.steps.len();
     let mut w = W(out);
     match &plan.terminal {
