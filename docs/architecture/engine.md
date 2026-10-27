@@ -43,6 +43,18 @@ the same path, taking the lock first, replaces them and a close removes them.
 Types, fields, relation kinds, roles and indexes are declared as data (`schema.md`), stored in the database, and
 compared at open. A type, field, relation kind or role the schema doesn't declare is refused everywhere it is named.
 
+A handle caches its declaration and the stored schema's SHA-256 fingerprint. Each schema-dependent read, export,
+write, unit begin and background build validates that fingerprint inside its transaction. If another process has
+changed it, `SCHEMA_CHANGED` refuses the operation before using stale rules or changing data; close and reopen the
+handle. `schema()` reports the handle's cached declaration. Schema changes compute their effects and primary-data
+inventory inside the same write transaction that installs them, so concurrent data cannot invalidate the decision.
+Local reads hold the schema guard through snapshot execution; export captures its schema/snapshot pair before
+releasing that guard for callbacks. Post-commit watch queries fetch the current declaration for every rerun.
+
+Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
+snapshots but do not dispatch this handle's watch callbacks or update its cached commit sequence; coordinate writes
+in one process when observers must hear every commit.
+
 ## Reads: plans
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack

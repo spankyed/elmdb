@@ -1,0 +1,198 @@
+//! Cross-process declarations cannot be paired with an earlier handle's cached schema.
+
+use super::{batch, write};
+use crate::schema::Schema;
+use crate::{Database, ErrorCode, OpenOptions};
+use serde_json::json;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+fn schema(field: &str) -> Schema {
+    Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
+        "fields":{"a":{"type":"string"},"b":{"type":"string"}},
+        "indexes":{"lookup":{"kind":"value","fields":[field]}}
+    }}}))
+    .unwrap()
+}
+
+fn query() -> crate::engine::plan::Reads {
+    serde_json::from_value(json!({"reads":[{"read":"query", "plan":{
+        "start":{"from":"types","types":["Task"]},
+        "steps":[{"step":"where","field":"a","value":"match"}],"terminal":{"answer":"ids"}
+    }}]}))
+    .unwrap()
+}
+
+fn change_in_child(path: &Path) {
+    run_child(path, "schema");
+}
+
+fn run_child(path: &Path, mode: &str) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "engine::tests::schema_versions::cross_process_schema_changes_refuse_stale_reads_and_mutations",
+            "--nocapture",
+        ])
+        .env("ELMDB_SCHEMA_CHILD", path)
+        .env("ELMDB_SCHEMA_CHILD_MODE", mode)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            assert!(status.success());
+            return;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("schema child timed out");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn cross_process_schema_changes_refuse_stale_reads_and_mutations() {
+    if let Some(path) = std::env::var_os("ELMDB_SCHEMA_CHILD") {
+        let db = Database::open(path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        if std::env::var("ELMDB_SCHEMA_CHILD_MODE").unwrap_or_default() == "insert" {
+            write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})])
+                .unwrap();
+        } else {
+            db.set_schema(schema("b")).unwrap();
+            db.wait_for_index_builds().unwrap();
+        }
+        db.close().unwrap();
+        return;
+    }
+    for read_only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db =
+            Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+                .unwrap();
+        write(
+            &db,
+            vec![
+                json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}}),
+                json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":"other","b":"match"}}),
+            ],
+        )
+        .unwrap();
+        if read_only {
+            db.close().unwrap();
+            db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        }
+        change_in_child(dir.path());
+        assert_eq!(db.read(&query()).unwrap_err().code, ErrorCode::SchemaChanged);
+        let mut tracked = query();
+        tracked.track = Some(1);
+        assert_eq!(db.read(&tracked).unwrap_err().code, ErrorCode::SchemaChanged);
+        db.untrack(1);
+        assert_eq!(db.check().unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.stats().unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.index_status().unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(
+            db.primary_loads(|_| panic!("stale export must not run")).unwrap_err().code,
+            ErrorCode::SchemaChanged
+        );
+        let dump = dir.path().join("stale.dump");
+        assert_eq!(crate::dump::dump(&db, &dump).unwrap_err().code, ErrorCode::SchemaChanged);
+        assert!(!dump.exists());
+        let heard = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let into = heard.clone();
+        let watch = db
+            .watch(query(), Box::new(move |answer| *into.lock().unwrap() = answer.as_ref().err().map(|e| e.code)))
+            .unwrap();
+        assert_eq!(*heard.lock().unwrap(), Some(ErrorCode::SchemaChanged));
+        db.unwatch(watch);
+        if !read_only {
+            assert_eq!(db.write(&batch(vec![]), false).unwrap_err().code, ErrorCode::SchemaChanged);
+            assert_eq!(db.bulk_load(&[]).unwrap_err().code, ErrorCode::SchemaChanged);
+            assert_eq!(db.reset().unwrap_err().code, ErrorCode::SchemaChanged);
+            assert_eq!(db.rebuild(None).unwrap_err().code, ErrorCode::SchemaChanged);
+            assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged);
+            assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged, "failed begin releases unit state");
+        }
+        db.close().unwrap();
+        let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        let answer: serde_json::Value = rmp_serde::from_slice(&db.read(&query()).unwrap()).unwrap();
+        assert_eq!(answer[0]["ids"], json!(["Task-0"]));
+        assert!(db.check().unwrap().is_clean());
+    }
+}
+
+#[test]
+fn a_schema_change_refuses_if_another_process_changes_its_input_before_the_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+        .unwrap();
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    let mut proposed = serde_json::to_value(schema("a")).unwrap();
+    proposed["types"]["Task"]["fields"]["newField"] = json!({"type":"any", "optional":true});
+    let proposed = Schema::from_json(&proposed).unwrap();
+    let path = dir.path().to_owned();
+    crate::database::BEFORE_SCHEMA_WRITE.with_borrow_mut(|hook| *hook = Some(Box::new(move || change_in_child(&path))));
+    assert_eq!(db.set_schema(proposed).unwrap_err().code, ErrorCode::SchemaChanged);
+    db.close().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert_eq!(db.schema(), Some(schema("b")), "the other process's declaration survived the stale migration");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_schema_change_rechecks_primary_inventory_in_its_write_transaction() {
+    let with_code = |prefix: &str| {
+        let mut value = serde_json::to_value(schema("a")).unwrap();
+        value["types"]["Task"]["shortCode"] = json!({"prefix":prefix});
+        Schema::from_json(&value).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(with_code("OLD")), syncs: false, ..Default::default() })
+            .unwrap();
+    let path = dir.path().to_owned();
+    crate::database::BEFORE_SCHEMA_WRITE
+        .with_borrow_mut(|hook| *hook = Some(Box::new(move || run_child(&path, "insert"))));
+    let mut proposed = serde_json::to_value(with_code("OLD")).unwrap();
+    let task = proposed["types"].as_object_mut().unwrap().remove("Task").unwrap();
+    proposed["types"]["Note"] = task;
+    let proposed = Schema::from_json(&proposed).unwrap();
+    assert_eq!(db.set_schema(proposed).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+    assert_eq!(db.schema(), Some(with_code("OLD")));
+    assert!(db.check().unwrap().is_clean());
+    assert!(super::row(&db, "Task-0").is_some());
+}
+
+#[test]
+fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+        .unwrap();
+    write(
+        &db,
+        vec![
+            json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}}),
+            json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":"other","b":"match"}}),
+        ],
+    )
+    .unwrap();
+    change_in_child(dir.path());
+    let mut builder = crate::engine::Builder::start(db.store().unwrap(), db.engine_schema());
+    builder.queue([("Task".into(), "lookup".into())]);
+    builder.waiter().wait();
+    let failures = builder.failures();
+    builder.stop();
+    drop(builder);
+    assert_eq!(failures.len(), 1);
+    assert!(failures[0].message.contains("schema") && failures[0].message.contains("reopen"));
+    db.close().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert!(
+        db.check().unwrap().is_clean(),
+        "the earlier builder did not mix old index entries into the new declaration"
+    );
+}

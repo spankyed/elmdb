@@ -13,6 +13,11 @@ use crate::schema::{Effect, SCHEMA_LANGUAGE, Schema, SchemaChange, diff};
 use crate::store::sync::Durable;
 use crate::store::{Store, StoreOptions, put_meta};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static BEFORE_SCHEMA_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// How a database is opened
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
@@ -58,7 +63,7 @@ pub struct Database {
     /// The schema the engine holds writes to: the database's, or one declaring nothing. A write holds it read-locked
     /// from before its transaction until it commits, and `set_schema` write-locked, so no write commits under a
     /// schema that changed while it ran
-    engine_schema: Arc<RwLock<Arc<Schema>>>,
+    engine_schema: Arc<RwLock<Arc<EngineSchema>>>,
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
     builder: Mutex<Option<crate::engine::Builder>>,
@@ -74,6 +79,38 @@ fn empty_schema() -> Schema {
         roles: Default::default(),
         relations: Default::default(),
         types: Default::default(),
+    }
+}
+
+/// A declaration and its cached SHA-256 fingerprint. Validate inside each transaction before using cached rules;
+/// another process may have changed declarations after this handle opened. No schema serialization occurs per read.
+pub(crate) struct EngineSchema {
+    schema: Schema,
+    hash: Option<Vec<u8>>,
+    hash_key: Vec<u8>,
+}
+
+impl EngineSchema {
+    pub(crate) fn new(schema: Option<Schema>) -> Self {
+        let hash = schema.as_ref().map(|schema| schema.hash().into_bytes());
+        Self { schema: schema.unwrap_or_else(empty_schema), hash, hash_key: crate::store::meta_key(meta::SCHEMA_HASH) }
+    }
+
+    pub(crate) fn validate(&self, txn: &heed::RoTxn<'_, heed::AnyTls>, db: crate::store::Db) -> Result<()> {
+        if db.get(txn, &self.hash_key)? != self.hash.as_deref() {
+            return Err(Error::new(
+                ErrorCode::SchemaChanged,
+                "Another process changed the database schema; close and reopen this handle before reading or writing",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for EngineSchema {
+    type Target = Schema;
+    fn deref(&self) -> &Schema {
+        &self.schema
     }
 }
 
@@ -103,7 +140,7 @@ impl Database {
             let _ = store.close();
             return Err(error);
         }
-        let engine_schema = Arc::new(schema.clone().unwrap_or_else(empty_schema));
+        let engine_schema = Arc::new(EngineSchema::new(schema.clone()));
         let store = Arc::new(store);
         let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
             let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&engine_schema));
@@ -157,7 +194,7 @@ impl Database {
         }
         let applied = apply_schema(&store, Some(schema));
         if let Ok(applied) = &applied {
-            *current = Arc::new(applied.schema.clone().unwrap_or_else(empty_schema));
+            *current = Arc::new(EngineSchema::new(applied.schema.clone()));
             *self.schema.write() = applied.schema.clone();
         }
         let unbuilt = match &applied {
@@ -187,17 +224,17 @@ impl Database {
     }
 
     #[cfg(test)]
-    pub(crate) fn engine_schema(&self) -> Arc<Schema> {
+    pub(crate) fn engine_schema(&self) -> Arc<EngineSchema> {
         Arc::clone(&self.engine_schema.read())
     }
 
     /// Shared schema source for watches delivered after a unit ends, including later callback-driven changes.
-    pub(crate) fn observing_schema(&self) -> Arc<RwLock<Arc<Schema>>> {
+    pub(crate) fn observing_schema(&self) -> Arc<RwLock<Arc<EngineSchema>>> {
         Arc::clone(&self.engine_schema)
     }
 
-    /// The engine's schema, held read-locked for a write's length (`engine_schema`)
-    pub(crate) fn writing_schema(&self) -> RwLockReadGuard<'_, Arc<Schema>> {
+    /// The engine's schema, held read-locked while an operation takes and uses its transaction
+    pub(crate) fn schema_guard(&self) -> RwLockReadGuard<'_, Arc<EngineSchema>> {
         self.engine_schema.read()
     }
 
@@ -316,7 +353,7 @@ struct AppliedSchema {
 }
 
 fn unchanged_schema(store: &Store, schema: Option<Schema>) -> Result<AppliedSchema> {
-    let unbuilt = crate::engine::settle_indexes(store, schema.as_ref().unwrap_or(&empty_schema()))?;
+    let unbuilt = crate::engine::settle_indexes(store, &EngineSchema::new(schema.clone()))?;
     Ok(AppliedSchema { schema, report: OpenReport::default(), unbuilt, commit: None })
 }
 
@@ -330,37 +367,45 @@ fn apply_schema(store: &Store, given: Option<Schema>) -> Result<AppliedSchema> {
     if stored.as_ref().is_some_and(|s| s.hash() == given.hash()) {
         return unchanged_schema(store, stored);
     }
-    let stored_or_empty = stored.clone().unwrap_or_else(empty_schema);
-    let held = crate::engine::held(store, &stored_or_empty, &given)?;
-    let changes = diff(&stored_or_empty, &given, &held);
+    let version = EngineSchema::new(stored);
     if store.is_read_only() {
         return Err(Error::new(
             ErrorCode::SchemaChangeRefused,
             format!("The database at {} is open read-only, so its schema can't change", store.path().display()),
         ));
     }
-    let refused: Vec<String> = changes.iter().filter(|c| c.effect == Effect::Refused).map(|c| c.path.clone()).collect();
-    if !refused.is_empty() {
-        return Err(Error::new(
-            ErrorCode::SchemaChangeRefused,
-            format!("The schema changes what can't change once stored: {}", refused.join(", ")),
-        ));
-    }
     let canonical = given.canonical();
     let hash = given.hash();
-    let (unbuilt, commit) = store.write_committed(
+    #[cfg(test)]
+    BEFORE_SCHEMA_WRITE.with_borrow_mut(|hook| {
+        if let Some(hook) = hook.take() {
+            hook();
+        }
+    });
+    let ((unbuilt, changes), commit) = store.write_committed(
         |txn, db| {
+            let held = crate::engine::held_in(txn, db, &version, &given)?;
+            let changes = diff(&version, &given, &held);
+            let refused: Vec<String> =
+                changes.iter().filter(|c| c.effect == Effect::Refused).map(|c| c.path.clone()).collect();
+            if !refused.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::SchemaChangeRefused,
+                    format!("The schema changes what can't change once stored: {}", refused.join(", ")),
+                ));
+            }
             crate::engine::drop_index_data(db, txn, &changes)?;
             put_meta(txn, db.main, meta::SCHEMA, canonical.as_bytes())?;
             put_meta(txn, db.main, meta::SCHEMA_HASH, hash.as_bytes())?;
             let mut state = crate::engine::unit::UnitState::default();
-            crate::engine::settle_indexes_in(&mut crate::engine::unit::Txn {
+            let unbuilt = crate::engine::settle_indexes_in(&mut crate::engine::unit::Txn {
                 txn,
                 db,
                 state: &mut state,
                 schema: &given,
                 now: 0.0,
-            })
+            })?;
+            Ok((unbuilt, changes))
         },
         true,
     )?;

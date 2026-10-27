@@ -33,7 +33,7 @@ use heed::RwTxn;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RwLock};
 
-use crate::database::Database;
+use crate::database::{Database, EngineSchema};
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
 use crate::store::{Commit, Store};
@@ -52,7 +52,7 @@ thread_local! {
 fn finish_commit(
     tracks: &watch::SharedTracks,
     store: &Store,
-    schema: &RwLock<Arc<Schema>>,
+    schema: &RwLock<Arc<EngineSchema>>,
     mut changes: ChangeSet,
     written: Option<&std::collections::HashSet<Vec<u8>>>,
     commit: Commit,
@@ -181,54 +181,58 @@ pub(crate) fn drop_index_data(
 /// What the stored data holds that changing the schema from `stored` to `given` answers to (`schema::Held`): one seek
 /// per type with entities, one per type for its codes' prefix, and a walk of the relations only when `given` adds a
 /// relation kind, stopping once each added kind is found
-pub(crate) fn held(store: &Store, stored: &Schema, given: &Schema) -> Result<crate::schema::Held> {
+pub(crate) fn held_in(
+    txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    db: crate::store::Db,
+    stored: &EngineSchema,
+    given: &Schema,
+) -> Result<crate::schema::Held> {
     use crate::format::key::{Part, decode, prefix_range};
     use std::ops::Bound;
-    store.read(|txn, db| {
-        let mut held = crate::schema::Held::default();
-        for trashed in [false, true] {
-            let (mut low, high) = prefix_range(&keys::all_of_types(trashed));
-            loop {
-                let range = (Bound::Included(low.as_slice()), Bound::Excluded(high.as_slice()));
-                let Some(entry) = db.range(txn, &range)?.next() else { break };
-                let (key, _) = entry?;
-                let Some(Part::String(entity_type)) = decode(key)?.into_iter().nth(1) else { break };
-                low = prefix_range(&keys::type_range(trashed, &entity_type)).1;
-                held.types.insert(entity_type);
-            }
+    stored.validate(txn, db)?;
+    let mut held = crate::schema::Held::default();
+    for trashed in [false, true] {
+        let (mut low, high) = prefix_range(&keys::all_of_types(trashed));
+        loop {
+            let range = (Bound::Included(low.as_slice()), Bound::Excluded(high.as_slice()));
+            let Some(entry) = db.range(txn, &range)?.next() else { break };
+            let (key, _) = entry?;
+            let Some(Part::String(entity_type)) = decode(key)?.into_iter().nth(1) else { break };
+            low = prefix_range(&keys::type_range(trashed, &entity_type)).1;
+            held.types.insert(entity_type);
         }
-        for entity_type in &held.types {
-            let range = prefix_range(&keys::index_range(entity_type, keys::SHORT_CODE_INDEX, &[]));
-            let range = (Bound::Included(range.0.as_slice()), Bound::Excluded(range.1.as_slice()));
-            if let Some(entry) = db.range(txn, &range)?.next()
-                && let Some(Part::String(code)) = decode(entry?.0)?.into_iter().nth(3)
-                && let Some((prefix, _)) = code.rsplit_once('-')
-            {
-                held.short_codes.insert(entity_type.clone(), prefix.to_owned());
-            }
+    }
+    for entity_type in &held.types {
+        let range = prefix_range(&keys::index_range(entity_type, keys::SHORT_CODE_INDEX, &[]));
+        let range = (Bound::Included(range.0.as_slice()), Bound::Excluded(range.1.as_slice()));
+        if let Some(entry) = db.range(txn, &range)?.next()
+            && let Some(Part::String(code)) = decode(entry?.0)?.into_iter().nth(3)
+            && let Some((prefix, _)) = code.rsplit_once('-')
+        {
+            held.short_codes.insert(entity_type.clone(), prefix.to_owned());
         }
-        let mut sought: std::collections::BTreeSet<&String> =
-            given.relations.keys().filter(|kind| !stored.relations.contains_key(*kind)).collect();
-        if !sought.is_empty() {
-            let s = unit::Snapshot { txn, db, schema: stored };
-            let mut failed = None;
-            s.visit(&keys::all_relations(), |_, bytes| {
-                match rmp_serde::from_slice::<relations::Stored>(bytes) {
-                    Ok(relation) => {
-                        if let Some(kind) = sought.take(&relation.kind) {
-                            held.kinds.insert(kind.clone());
-                        }
+    }
+    let mut sought: std::collections::BTreeSet<&String> =
+        given.relations.keys().filter(|kind| !stored.relations.contains_key(*kind)).collect();
+    if !sought.is_empty() {
+        let s = unit::Snapshot { txn, db, schema: stored };
+        let mut failed = None;
+        s.visit(&keys::all_relations(), |_, bytes| {
+            match rmp_serde::from_slice::<relations::Stored>(bytes) {
+                Ok(relation) => {
+                    if let Some(kind) = sought.take(&relation.kind) {
+                        held.kinds.insert(kind.clone());
                     }
-                    Err(e) => failed = Some(e),
                 }
-                failed.is_none() && !sought.is_empty()
-            })?;
-            if let Some(e) = failed {
-                return Err(Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")));
+                Err(e) => failed = Some(e),
             }
+            failed.is_none() && !sought.is_empty()
+        })?;
+        if let Some(e) = failed {
+            return Err(Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")));
         }
-        Ok(held)
-    })
+    }
+    Ok(held)
 }
 
 type IndexList = Vec<(String, String)>;
@@ -263,16 +267,20 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
 }
 
 /// Settles an existing schema at open; a read-only database only reports what still needs building.
-pub(crate) fn settle_indexes(store: &Store, schema: &Schema) -> Result<IndexList> {
-    let (empty, unbuilt) = store.read(|txn, db| unbuilt_indexes(&unit::Snapshot { txn, db, schema }))?;
+pub(crate) fn settle_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
+    let (empty, unbuilt) = store.read(|txn, db| {
+        schema.validate(txn, db)?;
+        unbuilt_indexes(&unit::Snapshot { txn, db, schema })
+    })?;
     if !empty.is_empty() && !store.is_read_only() {
-        store.write(
+        return store.write(
             |txn, db| {
+                schema.validate(txn, db)?;
                 let mut state = UnitState::default();
-                settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 }).map(|_| ())
+                settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })
             },
             true,
-        )?;
+        );
     }
     Ok(unbuilt)
 }
@@ -305,8 +313,11 @@ impl Database {
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
     pub fn check(&self) -> Result<derive::CheckReport> {
         let store = self.store()?;
-        let schema = self.writing_schema();
-        store.read(|txn, db| derive::check(&unit::Snapshot { txn, db, schema: &schema }))
+        let schema = self.schema_guard();
+        store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            derive::check(&unit::Snapshot { txn, db, schema: &schema })
+        })
     }
 
     /// Deletes derived data and writes what primary data derives, for every index or, with one, that index, in one
@@ -344,11 +355,12 @@ impl Database {
     }
 
     pub(crate) fn admin_unit(&self, f: impl Fn(&mut Txn<'_, '_>) -> Result<()>) -> Result<()> {
-        let schema = self.writing_schema();
+        let schema = self.schema_guard();
         let store = self.store()?;
         let now = now_ms();
         let ((), commit) = store.write_committed(
             |txn, db| {
+                schema.validate(txn, db)?;
                 let mut state = UnitState::default();
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
@@ -382,9 +394,10 @@ impl Database {
     /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let store = self.store()?;
-        let schema = self.writing_schema();
+        let schema = self.schema_guard();
         let failures = self.builder().as_ref().map(|b| b.failures()).unwrap_or_default();
         store.read(|txn, db| {
+            schema.validate(txn, db)?;
             let s = unit::Snapshot { txn, db, schema: &schema };
             let mut out = Vec::new();
             for entity_type in schema.types.keys() {
@@ -405,7 +418,7 @@ impl Database {
     /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/architecture/engine.md`, Reads)
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
-        let schema = self.writing_schema();
+        let schema = self.schema_guard();
         #[cfg(test)]
         BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
             if let Some(pause) = hook.take() {
@@ -413,7 +426,10 @@ impl Database {
             }
         });
         let Some(token) = reads.track else {
-            return store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads));
+            return store.read(|txn, db| {
+                schema.validate(txn, db)?;
+                reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads)
+            });
         };
         // Filed whether or not the reads failed: what they read before failing decides when they'd answer otherwise
         watch::read_tracked(&self.tracks, &store, &schema, reads, token)
@@ -455,12 +471,13 @@ impl Database {
 
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
-        let schema = self.writing_schema();
+        let schema = self.schema_guard();
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
         let ((results, changes, written), commit) = store.write_committed(
             |txn, db| {
+                schema.validate(txn, db)?;
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
@@ -479,17 +496,26 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn snapshot<T>(&self, f: impl FnOnce(&unit::Snapshot<'_, '_>) -> Result<T>) -> Result<T> {
         let store = self.store()?;
-        let schema = self.writing_schema();
-        store.read(|txn, db| f(&unit::Snapshot { txn, db, schema: &schema }))
+        let schema = self.schema_guard();
+        store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            f(&unit::Snapshot { txn, db, schema: &schema })
+        })
     }
 
     /// Opens a unit that stays open across calls until it is committed or aborted. One unit is open at a time, and
     /// while it is, `write` refuses (`UNIT_OPEN`): its writes go through the unit
     pub fn begin(&self) -> Result<Unit> {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
-        let held = self.writing_schema();
+        let held = self.schema_guard();
         let store = self.store()?;
         let (txn, gate) = store.begin()?;
+        if let Err(error) = held.validate(&txn, store.db()) {
+            drop(txn);
+            drop(gate);
+            store.end_unit();
+            return Err(error);
+        }
         let schema = Arc::clone(&held);
         drop(held);
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
@@ -520,8 +546,8 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
-    schema: Arc<Schema>,
-    schemas: Arc<RwLock<Arc<Schema>>>,
+    schema: Arc<EngineSchema>,
+    schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
     _thread: PhantomData<*const ()>,

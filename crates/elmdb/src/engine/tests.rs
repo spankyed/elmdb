@@ -7,6 +7,7 @@ mod lifecycle;
 mod maintenance;
 mod model;
 mod reads;
+mod schema_versions;
 mod tracked;
 
 use serde_json::{Value as Json, json};

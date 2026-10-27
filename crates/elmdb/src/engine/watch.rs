@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use parking_lot::{Mutex, RwLock};
 
+use crate::database::EngineSchema;
 use crate::error::{Error, ErrorCode, Result};
-use crate::schema::Schema;
 use crate::store::Store;
 
 use super::plan::Reads;
@@ -130,8 +130,9 @@ impl Tracks {
 /// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
 /// taken read nothing, so the whole store stands for what they read: any commit then names them, where an empty read
 /// set would leave whoever filed it on the failure for good
-pub fn run_tracked(store: &Store, schema: &Schema, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
+pub(crate) fn run_tracked(store: &Store, schema: &EngineSchema, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
     let ran = store.read(|txn, db| {
+        schema.validate(txn, db)?;
         let snapshot = Snapshot { txn, db, schema };
         let recording = Recording::new(&snapshot);
         let answer = super::reads::run(&recording, &reads.reads);
@@ -141,10 +142,10 @@ pub fn run_tracked(store: &Store, schema: &Schema, reads: &Reads) -> (Result<Vec
 }
 
 /// Registers a watch of `reads` and delivers its first answer
-pub fn watch(
+pub(crate) fn watch(
     tracks: &SharedTracks,
     store: &Store,
-    schema: &RwLock<Arc<Schema>>,
+    schema: &RwLock<Arc<EngineSchema>>,
     reads: Reads,
     listener: Listener,
 ) -> Result<u64> {
@@ -176,7 +177,12 @@ pub fn unwatch(tracks: &SharedTracks, id: u64) {
 /// runs outside it, so it may read, write or end a watch itself. A watch a commit names while
 /// its listener runs is run again once the listener returns. A read that fails is handed to the listener as such.
 /// An unwinding listener is removed and its id returned; other listeners still run
-pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &RwLock<Arc<Schema>>, ids: &[u64]) -> Vec<u64> {
+pub(crate) fn deliver(
+    tracks: &SharedTracks,
+    store: &Store,
+    schema: &RwLock<Arc<EngineSchema>>,
+    ids: &[u64],
+) -> Vec<u64> {
     let mut panicked = Vec::new();
     for &id in ids {
         let mut listener = {
@@ -222,7 +228,7 @@ pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &RwLock<Arc<Schema>
 fn read_watch(
     tracks: &SharedTracks,
     store: &Store,
-    schema: &RwLock<Arc<Schema>>,
+    schema: &RwLock<Arc<EngineSchema>>,
     id: u64,
 ) -> Option<(Result<Vec<u8>>, bool)> {
     // Acquire schema before tracking: writes take the same order. Drop this guard before any listener runs.
@@ -282,10 +288,10 @@ impl Drop for PendingRead {
 /// Executes outside the tracking lock when no commit intervenes. Validation and dependency registration share the
 /// commit-notification lock: a later commit names the filed read. One retry avoids unnecessary serialization; a
 /// second conflict falls back to the locked path, bounding retries even under continuous writes.
-pub fn read_tracked(
+pub(crate) fn read_tracked(
     tracks: &SharedTracks,
     store: &Store,
-    schema: &Schema,
+    schema: &EngineSchema,
     reads: &Reads,
     token: u32,
 ) -> Result<Vec<u8>> {

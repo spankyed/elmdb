@@ -4,6 +4,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { Packr } from 'msgpackr';
 
 const { Database } = createRequire(import.meta.url)('../index.js');
@@ -69,4 +71,40 @@ test('pooled reads keep query results coherent while an index changes fields', a
     }
     db.untrack(round);
   }
+});
+
+
+test('a child-process schema change refuses stale pooled and synchronous reads until reopen', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-schema-child-'));
+  const schema = (field) => ({
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Task: { fields: { a: { type: 'string' }, b: { type: 'string' } },
+      indexes: { lookup: { kind: 'value', fields: [field] } } } },
+  });
+  const db = Database.open(dir, { syncs: false, schema: schema('a') });
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  db.write(packr.pack({ ops: [
+    { op: 'create', type: 'Task', id: 'Task-0', fields: { a: 'match', b: 'other' } },
+    { op: 'create', type: 'Task', id: 'Task-1', fields: { a: 'other', b: 'match' } },
+  ] }));
+  const loader = fileURLToPath(new URL('../index.js', import.meta.url));
+  execFileSync(process.execPath, ['-e', `
+    const { Database } = require(${JSON.stringify(loader)});
+    const db = Database.open(${JSON.stringify(dir)}, { syncs: false });
+    db.setSchema(${JSON.stringify(schema('b'))});
+    db.waitForIndexBuilds();
+    db.close();
+  `], { timeout: 15000 });
+  const reads = { reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Task'] },
+    steps: [{ step: 'where', field: 'a', value: 'match' }], terminal: { answer: 'ids' } } }] };
+  assert.throws(() => db.readSync(packr.pack(reads)), { code: 'SCHEMA_CHANGED' });
+  await assert.rejects(db.read(packr.pack(reads)), { code: 'SCHEMA_CHANGED' });
+  await assert.rejects(db.read(packr.pack({ ...reads, track: 1 })), { code: 'SCHEMA_CHANGED' });
+  db.untrack(1);
+  assert.throws(() => db.write(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
+  assert.throws(() => db.begin(), { code: 'SCHEMA_CHANGED' });
+  db.close();
+  const reopened = Database.open(dir, { syncs: false });
+  try { assert.deepEqual(packr.unpack(reopened.readSync(packr.pack(reads)))[0].ids, ['Task-0']); }
+  finally { reopened.close(); }
 });

@@ -30,6 +30,8 @@ pub enum ErrorCode {
     SchemaInvalid,
     /// The given schema changes the stored one in a way opening refuses, such as a short code prefix
     SchemaChangeRefused,
+    /// Another process changed the stored schema; close and reopen the handle before reading or writing
+    SchemaChanged,
     /// The files hold something other than an elmdb database
     NotADatabase,
     /// The database is in a format this version doesn't read
@@ -113,6 +115,7 @@ impl ErrorCode {
             Self::NoDatabase => "NO_DATABASE",
             Self::SchemaInvalid => "SCHEMA_INVALID",
             Self::SchemaChangeRefused => "SCHEMA_CHANGE_REFUSED",
+            Self::SchemaChanged => "SCHEMA_CHANGED",
             Self::NotADatabase => "NOT_A_DATABASE",
             Self::WrongFormat => "WRONG_FORMAT",
             Self::ValueInvalid => "VALUE_INVALID",

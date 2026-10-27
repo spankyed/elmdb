@@ -277,3 +277,12 @@ the registered packs' fragments, refusing a name two packs declare and naming bo
 - **`declaredBy`** as the pack's id.
 
 `additionalFields` is `refuse` for every apack type, since every field a pack writes is in its shape.
+
+
+## Concurrent processes
+
+Declarations and index changes commit atomically. A schema change evaluates existing primary data under that same
+write transaction; another process cannot insert data between the decision and the change. An already open handle
+validates its cached schema fingerprint inside each schema-dependent transaction and returns `SCHEMA_CHANGED` when
+the stored declaration differs. Close and reopen the handle to adopt it. An explicit `setSchema` evaluates its requested
+declaration against the current stored one; it does not silently adopt a conflicting concurrent change.

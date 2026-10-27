@@ -7,8 +7,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
+use crate::database::EngineSchema;
 use crate::error::ErrorCode;
-use crate::schema::Schema;
 use crate::store::Store;
 
 use super::derive::build_chunk;
@@ -41,7 +41,7 @@ pub struct Builder {
 }
 
 impl Builder {
-    pub fn start(store: Arc<Store>, schema: Arc<Schema>) -> Self {
+    pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>) -> Self {
         let shared: Arc<(Mutex<State>, Condvar)> = Arc::default();
         let thread = {
             let shared = Arc::clone(&shared);
@@ -123,7 +123,7 @@ impl Drop for Builder {
     }
 }
 
-fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
+fn run(store: &Store, schema: &EngineSchema, shared: &(Mutex<State>, Condvar)) {
     let (lock, changed) = shared;
     loop {
         let (entity_type, index) = {
@@ -148,6 +148,7 @@ fn run(store: &Store, schema: &Schema, shared: &(Mutex<State>, Condvar)) {
             }
             let chunk = store.write(
                 |txn, db| {
+                    schema.validate(txn, db)?;
                     let mut state = UnitState::default();
                     let mut t = Txn { txn, db, state: &mut state, schema, now: 0.0 };
                     build_chunk(&mut t, &entity_type, &index, after, CHUNK)

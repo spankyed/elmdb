@@ -312,8 +312,11 @@ impl Database {
     /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes
     pub fn stats(&self) -> Result<Stats> {
         let store = self.store()?;
-        let schema = self.writing_schema();
-        let mut stats = store.read(|txn, db| stats_of(&super::unit::Snapshot { txn, db, schema: &schema }))?;
+        let schema = self.schema_guard();
+        let mut stats = store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            stats_of(&super::unit::Snapshot { txn, db, schema: &schema })
+        })?;
         stats.file_bytes = store.file_size();
         stats.map_bytes = store.map_size() as u64;
         Ok(stats)
@@ -333,10 +336,11 @@ impl Database {
         f: impl FnOnce(Option<&crate::schema::Schema>, &super::unit::Snapshot<'_, '_>) -> Result<T>,
     ) -> Result<T> {
         let store = self.store()?;
-        let held = self.writing_schema();
+        let held = self.schema_guard();
         let schema = std::sync::Arc::clone(&held);
         let declared = self.schema();
         store.read(|txn, db| {
+            schema.validate(txn, db)?;
             drop(held);
             f(declared.as_ref(), &super::unit::Snapshot { txn, db, schema: &schema })
         })
