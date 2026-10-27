@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phase 3 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phase 3 done the same day (`docs/evidence/next-phase-3.md`). Phase 4 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -69,18 +69,24 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Remediation landed** (2026-10-27): the review's R01–R08 and H01–H04 (`docs/reviews/elmdb-review-2026-10.md`;
   goal archived at `docs/archive/goals/goal-elmdb-remediation.md`), elmdb #1 and #2 into `main` (`9359949`), apack
   #283 and #284 into `master` (`5838145675`), which pins elmdb `c345182`.
-- **Branches (G7):** apack's `session/elmdb-next` at `master`'s tip (`5838145675`), checked out in
-  apack's main checkout (`~/Develop/Projects/apack/monorepo`), linked to elmdb's checkout with the binding built at
-  the pin; elmdb's `session/elmdb-next` cut again from `main` (`9359949`), in its own checkout. Neither holds Phase 3
-  work yet; apack's PR opens with its first checkpoint.
-- **Starting state** (2026-10-27): the specs `packages/apack-ears/src/database.ts` reaches pass at `5838145675`. G8's copy at elmdb `9359949`: `check()` finds no derived
-  differences and the 17 known duplicate short codes.
-- **Next action:** Phase 3's call counter in `createConnection`, with its spec.
+- **Branches (G7):** apack's `session/elmdb-next`, cut from `master` at `5838145675`, checked out in apack's main
+  checkout (`~/Develop/Projects/apack/monorepo`), linked to elmdb's checkout with the binding built at the pin, under
+  PR #285; elmdb's `session/elmdb-next` cut again from `main` (`9359949`), in its own checkout. G8's copy at elmdb
+  `9359949`: `check()` finds no derived differences and the 17 known duplicate short codes.
+- **Phase 3 done** (2026-10-27): the call counter (`admin.calls`, apack `48fbb9c3d1`) and the watch scheduler
+  (`WATCH_SCHEDULE`, `19214e4d38`), each with its specs; the readings, the stress reading and G4's bench in
+  `docs/evidence/next-phase-3.md`. No loop the readings show reached a measurable share of its action: elmdb is under
+  1% of a chat turn's wall time. The apack chain has not run on these commits yet; G6's strict chain is at the end.
+- **Next action:** Phase 4, the planner's three fixes and EXPLAIN, starting from the indexed `where` with a `limit`
+  (the stress reading's page view reads about 6,700 matches for 50 rows, 2.1 ms a run).
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
-  - `dev:drive` in the main checkout runs on the default development profile, which persists; a reading names a fresh
-    one (`--profile <name>`).
+  - A reading of the app is taken against a held session, `npm run dev:open -- --fresh --rm` (a development app on a
+    throwaway profile), with one-shots: `dev:query` runs console code in the app's backend (`engineCalls.start()`,
+    `engineCalls.stop()`), `dev:eval` in its window (sending the threads surface `SEND_MESSAGE` or `SEND_COMMAND`).
+    A `drive/` script's app is a test app and gets no `engineCalls`. Stopping the session's command by its task, rather
+    than with Ctrl-C, leaves the throwaway profile behind: `apack profiles rm <name>` removes it.
   - **Known bug, open:** a message sent before the threads surface has its chat start goes out with `mode: ''`, is
     saved and answered by no flow (the Claude Code flow runs only on `mode == 'Claude Code'`). A chat-turn script waits
     for the surface's mode; the fix (the surface holding the send, or the backend refusing a mode-less message) is the
@@ -137,14 +143,15 @@ Final unless marked open. Each cites the document that owns it; change the owner
 - **Deliverable:**
   - A count of a user action's calls to elmdb, in development only: reads, writes outside a unit, units and their
     writes, and the time spent in each, by call site. Kept at the one place every call crosses
-    (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:eval`.
-  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven from `drive/`, each counting
+    (`createConnection`, `packages/apack-ears/src/database.ts`), off unless asked for, and read through `dev:query` (console code's `engineCalls`).
+  - Readings of a chat turn (a message sent and its reply streamed) and a flow run, driven through `drive`'s one-shots, each counting
     the views' re-runs too: a write re-runs every view whose read set it touched.
   - **Watches bounded under any write rate (G14)**, in `createWatches` and nowhere a view or a writer has to opt in:
     - **Latest wins:** a watch has at most one run pending; commits arriving meanwhile mark it dirty, and intermediate
       states are skipped.
-    - **Cost-proportional delay:** a watch that just ran waits a gap proportional to its last run's time before running
-      again, so a cheap watch stays immediate and an expensive one backs off.
+    - **Cost-proportional delay:** a watch that just ran waits a gap proportional to its last run's time, and at least a
+      frame, before running again, so a cheap watch stays immediate and an expensive one backs off. The floor is what
+      bounds a watch whose run costs nearly nothing, which a gap proportional to its cost alone would not.
     - **A budget per flush:** a flush spends at most a fixed slice on re-runs, and the watches left run next, in turn.
     - **Visible:** per watch, runs a second, time a run and commits skipped, in the count above; and a development
       warning naming a watch that keeps exceeding its budget.
@@ -251,7 +258,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
-| A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | missing | | all |
+| A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
 | The planner's three fixes and EXPLAIN (P4) | missing | | all |
 | Field types from apack's shapes (P5) | missing | | all |
 | Text postings in blocks, gated (P6) | missing | | all |
