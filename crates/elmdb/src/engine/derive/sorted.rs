@@ -13,7 +13,8 @@ const FAN_IN: usize = 16;
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static FAIL_NEXT_NEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub(in crate::engine) static TEST_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(in crate::engine) static FAIL_NEXT_NEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(PartialEq, Eq)]
@@ -46,9 +47,9 @@ impl PartialOrd for Head {
     }
 }
 
-pub(super) struct Scratch {
+pub(in crate::engine) struct Scratch {
     directory: tempfile::TempDir,
-    runs: Vec<PathBuf>,
+    runs: Vec<(PathBuf, usize)>,
     rows: Vec<Row>,
     bytes: usize,
     next_order: u64,
@@ -57,7 +58,7 @@ pub(super) struct Scratch {
 }
 
 impl Scratch {
-    pub(super) fn new() -> Result<Self> {
+    pub(in crate::engine) fn new() -> Result<Self> {
         #[cfg(test)]
         if FAIL_NEXT_NEW.replace(false) {
             return Err(std::io::Error::other("injected scratch creation failure").into());
@@ -69,10 +70,19 @@ impl Scratch {
             bytes: 0,
             next_order: 0,
             next_file: 0,
-            budget: MEMORY_BYTES,
+            budget: {
+                #[cfg(test)]
+                {
+                    TEST_BUDGET.get().unwrap_or(MEMORY_BYTES)
+                }
+                #[cfg(not(test))]
+                {
+                    MEMORY_BYTES
+                }
+            },
         })
     }
-    pub(super) fn push(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
+    pub(in crate::engine) fn push(&mut self, key: Vec<u8>, value: Vec<u8>) -> Result<()> {
         self.bytes = self
             .bytes
             .saturating_add(key.capacity())
@@ -102,43 +112,60 @@ impl Scratch {
         }
         file.flush()?;
         self.bytes = 0;
-        self.runs.push(path);
+        self.runs.push((path, 0));
+        // Compact equal-sized levels as runs arrive. At most FAN_IN-1 runs per level remain; retaining every
+        // original path would itself grow with the dataset. Each row participates in O(log runs) merges.
+        while let Some((_, level)) = self.runs.last() {
+            let level = *level;
+            let start = self.runs.len().saturating_sub(FAN_IN);
+            if self.runs.len() < FAN_IN || self.runs[start..].iter().any(|(_, at)| *at != level) {
+                break;
+            }
+            let paths: Vec<_> = self.runs.drain(start..).map(|(path, _)| path).collect();
+            let target = self.path();
+            merge(&paths, &target)?;
+            for path in paths {
+                std::fs::remove_file(path)?;
+            }
+            self.runs.push((target, level + 1));
+        }
         Ok(())
     }
-    pub(super) fn finish(mut self) -> Result<Sorted> {
+    pub(in crate::engine) fn finish(mut self) -> Result<Sorted> {
         self.flush()?;
         if self.runs.is_empty() {
             let path = self.path();
             writer(&path)?.flush()?;
-            self.runs.push(path);
+            self.runs.push((path, 0));
         }
         // Always merge even one run: repeated keys must keep the last emitted value, as BTreeMap::insert did.
         loop {
             let runs = std::mem::take(&mut self.runs);
             for group in runs.chunks(FAN_IN) {
                 let path = self.path();
-                merge(group, &path)?;
-                for old in group {
+                let paths: Vec<_> = group.iter().map(|(path, _)| path.clone()).collect();
+                merge(&paths, &path)?;
+                for old in paths {
                     std::fs::remove_file(old)?;
                 }
-                self.runs.push(path);
+                self.runs.push((path, 0));
             }
             if self.runs.len() == 1 {
                 break;
             }
         }
-        let reader = BufReader::new(File::open(&self.runs[0])?);
+        let reader = BufReader::new(File::open(&self.runs[0].0)?);
         Ok(Sorted { reader, _directory: self.directory })
     }
 }
 
-pub(super) struct Sorted {
+pub(in crate::engine) struct Sorted {
     // Close the reader before deleting its directory, including on Windows.
     reader: BufReader<File>,
     _directory: tempfile::TempDir,
 }
 impl Sorted {
-    pub(super) fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    pub(in crate::engine) fn next(&mut self) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         Ok(read_row(&mut self.reader)?.map(|row| (row.key, row.value)))
     }
 }
@@ -201,6 +228,18 @@ fn merge(paths: &[PathBuf], target: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+pub(in crate::engine) fn with_budget<T>(bytes: usize, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<usize>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_BUDGET.set(self.0);
+        }
+    }
+    let _restore = Restore(TEST_BUDGET.replace(Some(bytes)));
+    run()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
@@ -224,6 +263,39 @@ mod tests {
         drop(sorted);
         assert!(!path.exists());
     }
+    #[test]
+    fn incoming_runs_compact_without_retaining_every_path() {
+        let mut scratch = Scratch::new().unwrap();
+        scratch.budget = 1;
+        let mut expected = BTreeMap::new();
+        for i in 0..1024u64 {
+            let key = (i % 71).to_be_bytes().to_vec();
+            let value = i.to_be_bytes().to_vec();
+            expected.insert(key.clone(), value.clone());
+            scratch.push(key, value).unwrap();
+            assert!(scratch.runs.len() <= 45, "path metadata must compact while accepting rows");
+        }
+        let mut sorted = scratch.finish().unwrap();
+        for row in expected {
+            assert_eq!(sorted.next().unwrap(), Some(row));
+        }
+        assert!(sorted.next().unwrap().is_none());
+    }
+
+    #[test]
+    fn an_intermediate_merge_failure_removes_its_private_files() {
+        let mut scratch = Scratch::new().unwrap();
+        scratch.budget = 1;
+        let path = scratch.directory.path().to_owned();
+        File::create(path.join("run-16")).unwrap();
+        for i in 0..15u64 {
+            scratch.push(i.to_be_bytes().to_vec(), vec![]).unwrap();
+        }
+        assert!(scratch.push(15u64.to_be_bytes().to_vec(), vec![]).is_err());
+        drop(scratch);
+        assert!(!path.exists());
+    }
+
     #[test]
     fn interrupted_or_failed_sorting_removes_owned_scratch() {
         let mut scratch = Scratch::new().unwrap();

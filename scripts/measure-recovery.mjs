@@ -1,6 +1,6 @@
 // Synthetic recovery workloads only. Run each operation in a fresh process; resourceUsage includes native RSS.
 // node scripts/measure-recovery.mjs seed /private/tmp/elmdb-recovery-run 10000 1024
-// node scripts/measure-recovery.mjs check|rebuild|replace|replace-populated|backup /private/tmp/elmdb-recovery-run
+// node scripts/measure-recovery.mjs check|rebuild|rebuild-value|rebuild-text|rebuild-vector|replace|replace-populated|backup /private/tmp/elmdb-recovery-run
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +11,8 @@ import { Packr } from 'msgpackr';
 const { Database } = createRequire(import.meta.url)('../crates/elmdb-node/index.js');
 const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
 const [mode, directory, rowsArg = '10000', bytesArg = '1024', profile = 'text'] = process.argv.slice(2);
-const modes = ['seed', 'check', 'rebuild', 'replace', 'replace-populated', 'backup'];
-if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|replace|replace-populated|backup <owned-workload-dir> [rows] [body-bytes] [text|vector]');
+const modes = ['seed', 'check', 'rebuild', 'rebuild-value', 'rebuild-text', 'rebuild-vector', 'replace', 'replace-populated', 'backup'];
+if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|rebuild-value|rebuild-text|rebuild-vector|replace|replace-populated|backup <owned-workload-dir> [rows] [body-bytes] [text|vector]');
 const root = resolve(directory);
 const source = join(root, 'source');
 const manifestPath = join(root, 'workload.json');
@@ -136,6 +136,10 @@ if (mode === 'seed') {
       if (report.differences.length || report.violations.length) throw new Error(JSON.stringify(report));
     } else if (mode === 'rebuild') {
       db.rebuild();
+    } else if (mode.startsWith('rebuild-')) {
+      const index = { 'rebuild-value': 'slug', 'rebuild-text': 'text', 'rebuild-vector': 'meaning' }[mode];
+      if (mode === 'rebuild-vector' && !workload.vectorDims) throw new Error('This workload has no vector index');
+      db.rebuild('Note', index);
     } else if (mode === 'backup') {
       target = fs.mkdtempSync(join(root, 'backup-'));
       db.backup(target);
@@ -149,7 +153,7 @@ console.log(JSON.stringify({
   elapsedMs, preparationMs, operationElapsedMs: operationElapsedMs ?? elapsedMs, maxRssKiB: process.resourceUsage().maxRSS,
   sourceFileBytes: fs.statSync(join(source, 'data.mdb')).size,
   logicalDiskBefore: beforeBytes, logicalDiskAfter: diskBytes(root),
-  writerOccupancyUpperBoundMs: ['replace', 'replace-populated', 'rebuild'].includes(mode) ? (operationElapsedMs ?? elapsedMs) : mode === 'seed' ? null : 0,
+  writerOccupancyUpperBoundMs: (['replace', 'replace-populated', 'rebuild'].includes(mode) || mode.startsWith('rebuild-')) ? (operationElapsedMs ?? elapsedMs) : mode === 'seed' ? null : 0,
   destinationInitiallyPopulated: mode === 'replace-populated',
   conditions: 'elapsedMs/RSS include preparation; operationElapsedMs excludes incumbent preparation and includes destination close; fresh Node process; filesystem cache uncontrolled; seed syncs disabled, maintenance defaults; synthetic data',
 }));

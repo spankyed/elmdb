@@ -399,21 +399,6 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
     if stats.documents == 0 { t.del(&key) } else { t.put(&key, &encode_stats(&stats)) }
 }
 
-/// What a text index of a type should hold, from the entities at their places
-pub fn entries(
-    r: &impl Read,
-    entity_type: &str,
-    index: &TextIndex,
-    of: &[(u64, String)],
-) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    entries_into(r, entity_type, index, of, |key, value| {
-        out.insert(key, value);
-        Ok(())
-    })?;
-    Ok(out)
-}
-
 pub fn entries_into(
     r: &impl Read,
     entity_type: &str,
@@ -421,38 +406,95 @@ pub fn entries_into(
     of: &[(u64, String)],
     mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
 ) -> Result<()> {
-    let name = index.name.as_str();
-    let mut postings: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
-    let mut words: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
-    let mut stats = Stats { documents: 0, lengths: vec![0; index.fields.len()] };
+    let mut entries = Entries::new(entity_type, index)?;
     for (seq, id) in of {
-        let doc = document_of(index, &field_values(r, index, id)?);
+        entries.entity(r, *seq, id, &mut emit)?;
+    }
+    entries.finish(emit)
+}
+
+/// Accumulate term/document memberships on disk; only one document and one final posting bitmap are held at a time.
+pub(super) struct Entries<'a> {
+    entity_type: &'a str,
+    index: &'a TextIndex,
+    memberships: super::derive::sorted::Scratch,
+    stats: Stats,
+}
+
+impl<'a> Entries<'a> {
+    pub(super) fn new(entity_type: &'a str, index: &'a TextIndex) -> Result<Self> {
+        Ok(Self {
+            entity_type,
+            index,
+            memberships: super::derive::sorted::Scratch::new()?,
+            stats: Stats { documents: 0, lengths: vec![0; index.fields.len()] },
+        })
+    }
+
+    pub(super) fn entity(
+        &mut self,
+        r: &impl Read,
+        seq: u64,
+        id: &str,
+        mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        let doc = document_of(self.index, &field_values(r, self.index, id)?);
         if doc.is_empty() {
-            continue;
+            return Ok(());
         }
+        let name = self.index.name.as_str();
+        let mut membership = |key| {
+            // Escaped byte parts keep groups contiguous, including embedded NULs and full-width u64 sequences.
+            let order = crate::format::key::encode(&[
+                crate::format::key::Part::Bytes(key),
+                crate::format::key::Part::Bytes(seq.to_be_bytes().to_vec()),
+            ]);
+            self.memberships.push(order, Vec::new())
+        };
         for (term, places) in &doc.terms {
-            postings.entry(term.clone()).or_default().insert(*seq);
-            emit(keys::text_positions(entity_type, name, term, *seq), encode_places(places))?;
+            membership(keys::text_term(self.entity_type, name, term))?;
+            emit(keys::text_positions(self.entity_type, name, term, seq), encode_places(places))?;
         }
         for word in &doc.words {
-            words.entry(word.clone()).or_default().insert(*seq);
+            membership(keys::text_word(self.entity_type, name, word))?;
         }
-        stats.documents += 1;
-        for (total, l) in stats.lengths.iter_mut().zip(&doc.lengths) {
-            *total += u64::from(*l);
+        self.stats.documents += 1;
+        for (total, length) in self.stats.lengths.iter_mut().zip(&doc.lengths) {
+            *total += u64::from(*length);
         }
-        emit(keys::text_document(entity_type, name, *seq), encode_document(id, &doc))?;
+        emit(keys::text_document(self.entity_type, name, seq), encode_document(id, &doc))
     }
-    for (term, bitmap) in &postings {
-        emit(keys::text_term(entity_type, name, term), encode_postings(bitmap))?;
+
+    pub(super) fn finish(self, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>) -> Result<()> {
+        use crate::format::key::{Part, decode};
+        let mut sorted = self.memberships.finish()?;
+        let mut previous: Option<Vec<u8>> = None;
+        let mut bitmap = RoaringTreemap::new();
+        while let Some((key, _)) = sorted.next()? {
+            let mut parts = decode(&key)?.into_iter();
+            let (Some(Part::Bytes(key)), Some(Part::Bytes(seq))) = (parts.next(), parts.next()) else {
+                return Err(Error::new(ErrorCode::Corrupted, "A sorted text membership doesn't read"));
+            };
+            let seq = u64::from_be_bytes(
+                seq.as_slice()
+                    .try_into()
+                    .map_err(|_| Error::new(ErrorCode::Corrupted, "A sorted text sequence doesn't read"))?,
+            );
+            if previous.as_ref().is_some_and(|previous| *previous != key) {
+                emit(previous.take().expect("a previous posting exists"), encode_postings(&bitmap))?;
+                bitmap = RoaringTreemap::new();
+            }
+            previous = Some(key);
+            bitmap.insert(seq);
+        }
+        if let Some(key) = previous {
+            emit(key, encode_postings(&bitmap))?;
+        }
+        if self.stats.documents > 0 {
+            emit(keys::text_stats(self.entity_type, &self.index.name), encode_stats(&self.stats))?;
+        }
+        Ok(())
     }
-    for (word, bitmap) in &words {
-        emit(keys::text_word(entity_type, name, word), encode_postings(bitmap))?;
-    }
-    if stats.documents > 0 {
-        emit(keys::text_stats(entity_type, name), encode_stats(&stats))?;
-    }
-    Ok(())
 }
 
 /// Deletes every key of a text index of a type

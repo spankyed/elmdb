@@ -138,51 +138,80 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
 
 pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Result<()>) -> Result<()> {
     let corrupt = |what: &str| Error::new(ErrorCode::Corrupted, format!("{what} doesn't read"));
-    let mut made: Vec<(u64, String, bool)> = Vec::new();
-    for (key, bytes) in r.scan(&keys::all_entities())? {
-        let Some(Part::String(id)) = decode_key(&key)?.pop() else { return Err(corrupt("An entity's key")) };
-        let record = values::decode(&bytes)?;
+    // Order identifiers rather than complete rows. Primary keys do not follow creation order, and derived type
+    // ranges cannot establish what a dump must retain. One snapshot supplies both inventory and later row reads.
+    let mut entities = derive::sorted::Scratch::new()?;
+    r.try_visit(&keys::all_entities(), |key, bytes| {
+        let Some(Part::String(id)) = decode_key(key)?.pop() else { return Err(corrupt("An entity's key")) };
+        let record = values::decode(bytes)?;
         let items = record.as_array().ok_or_else(|| corrupt(&format!("{id}'s record")))?;
         let seq = items.first().and_then(Value::as_u64).ok_or_else(|| corrupt(&format!("{id}'s record")))?;
         let trashed = items.get(1).and_then(Value::as_bool).ok_or_else(|| corrupt(&format!("{id}'s record")))?;
-        made.push((seq, id, trashed));
-    }
-    made.sort_unstable();
-    for (_, id, trashed) in made {
+        let mut order = seq.to_be_bytes().to_vec();
+        order.extend_from_slice(id.as_bytes());
+        entities.push(order, vec![u8::from(trashed)])
+    })?;
+    let mut entities = entities.finish()?;
+    while let Some((order, flag)) = entities.next()? {
+        let id = std::str::from_utf8(order.get(8..).ok_or_else(|| corrupt("A sorted entity id"))?)
+            .map_err(|_| corrupt("A sorted entity id"))?
+            .to_owned();
+        let trashed = match flag.as_slice() {
+            [0] => false,
+            [1] => true,
+            _ => return Err(corrupt("A sorted entity flag")),
+        };
         let mut fields = BTreeMap::new();
-        for (field, bytes) in entities::fields(r, &id)? {
-            fields.insert(field, values::decode(&bytes)?);
-        }
+        r.try_visit(&keys::values_of(&id), |key, bytes| {
+            let Some(Part::String(field)) = decode_key(key)?.pop() else {
+                return Err(corrupt("An entity's field key"));
+            };
+            fields.insert(field, values::decode(bytes)?);
+            Ok(())
+        })?;
         each(Load::Entity { id, fields, trashed })?;
     }
-    let mut filed: Vec<(u64, Load)> = Vec::new();
-    for (key, bytes) in r.scan(&keys::all_relations())? {
-        let Some(Part::String(id)) = decode_key(&key)?.pop() else { return Err(corrupt("A relation's key")) };
-        let stored: relations::Stored =
-            rmp_serde::from_slice(&bytes).map_err(|_| corrupt(&format!("relation {id}'s row")))?;
-        let relations::Stored { kind, source, target, info, seq } = stored;
-        filed.push((seq, Load::Relation { id, kind, source, target, info }));
+    drop(entities);
+    let mut relations = derive::sorted::Scratch::new()?;
+    r.try_visit(&keys::all_relations(), |key, bytes| {
+        if !matches!(decode_key(key)?.last(), Some(Part::String(_))) {
+            return Err(corrupt("A relation's key"));
+        }
+        let stored: relations::Stored = rmp_serde::from_slice(bytes).map_err(|_| corrupt("A relation's row"))?;
+        let mut order = stored.seq.to_be_bytes().to_vec();
+        order.extend_from_slice(key);
+        relations.push(order, Vec::new())
+    })?;
+    let mut relations = relations.finish()?;
+    while let Some((order, _)) = relations.next()? {
+        let key = order.get(8..).ok_or_else(|| corrupt("A sorted relation key"))?;
+        let Some(Part::String(id)) = decode_key(key)?.pop() else { return Err(corrupt("A relation's key")) };
+        let bytes = r.get(key)?.ok_or_else(|| corrupt("A sorted relation's row"))?;
+        let stored: relations::Stored = rmp_serde::from_slice(&bytes).map_err(|_| corrupt("A relation's row"))?;
+        each(Load::Relation {
+            id,
+            kind: stored.kind,
+            source: stored.source,
+            target: stored.target,
+            info: stored.info,
+        })?;
     }
-    filed.sort_by_key(|(seq, _)| *seq);
-    for (_, load) in filed {
-        each(load)?;
-    }
-    for (key, bytes) in r.scan(&Prefix::Vector.key().to_vec())? {
-        let mut parts = decode_key(&key)?;
+    drop(relations);
+    r.try_visit(&Prefix::Vector.key().to_vec(), |key, bytes| {
+        let mut parts = decode_key(key)?;
         let (Some(Part::Number(chunk)), Some(Part::String(id)), Some(Part::String(index))) =
             (parts.pop(), parts.pop(), parts.pop())
         else {
             return Err(corrupt("An embedding's key"));
         };
-        let super::vector::Stored { model, hash, vector } = super::vector::decode_vector(&bytes)?;
-        each(Load::Embedding { id, index, chunk: chunk as u32, model, hash, vector })?;
-    }
-    for (key, bytes) in r.scan(&Prefix::Sequence.key().to_vec())? {
-        let Some(Part::String(name)) = decode_key(&key)?.pop() else { return Err(corrupt("A sequence's key")) };
-        let next = values::decode(&bytes)?.as_u64().ok_or_else(|| corrupt(&format!("sequence {name}")))?;
-        each(Load::Sequence { name, next })?;
-    }
-    Ok(())
+        let super::vector::Stored { model, hash, vector } = super::vector::decode_vector(bytes)?;
+        each(Load::Embedding { id, index, chunk: chunk as u32, model, hash, vector })
+    })?;
+    r.try_visit(&Prefix::Sequence.key().to_vec(), |key, bytes| {
+        let Some(Part::String(name)) = decode_key(key)?.pop() else { return Err(corrupt("A sequence's key")) };
+        let next = values::decode(bytes)?.as_u64().ok_or_else(|| corrupt(&format!("sequence {name}")))?;
+        each(Load::Sequence { name, next })
+    })
 }
 
 fn stats_of(r: &impl Read) -> Result<Stats> {
@@ -355,5 +384,88 @@ impl Database {
     /// need data the checks would refuse
     pub fn bulk_load(&self, loads: &[Load]) -> Result<()> {
         self.admin_load(loads)
+    }
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+    use crate::schema::Schema;
+    use crate::store::Db;
+
+    struct Streaming<'a, R>(&'a R);
+    impl<R: Read> Read for Streaming<'_, R> {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.0.get(key)
+        }
+        fn visit(&self, prefix: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.0.visit(prefix, f)
+        }
+        fn visit_starting(&self, prefix: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.0.visit_starting(prefix, f)
+        }
+        fn schema(&self) -> &Schema {
+            self.0.schema()
+        }
+        fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
+            self.0.raw()
+        }
+        fn scan(&self, _: &[u8]) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+            Err(Error::new(ErrorCode::Io, "export must not collect a primary range"))
+        }
+    }
+
+    #[test]
+    fn export_streams_primary_ranges_preserves_order_and_stops_on_consumer_error() {
+        use crate::engine::tests::{open, write};
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        for i in (0..90).rev() {
+            write(
+                &db,
+                vec![json!({"op":"create","type":"Task","id":format!("Task-{i:03}"),
+                "fields":{"title":format!("row {i}"),"a":[i, {"nested":true}]}})],
+            )
+            .unwrap();
+        }
+        db.bulk_load(&[
+            Load::Relation {
+                id: "z".into(),
+                kind: "refs".into(),
+                source: "Task-089".into(),
+                target: "Task-000".into(),
+                info: None,
+            },
+            Load::Relation {
+                id: "a".into(),
+                kind: "refs".into(),
+                source: "Task-000".into(),
+                target: "Task-089".into(),
+                info: Some(Value::Binary(vec![7; 4096])),
+            },
+        ])
+        .unwrap();
+        derive::sorted::with_budget(128, || {
+            db.primary_snapshot(|_, r| {
+                let r = Streaming(r);
+                let mut entities = Vec::new();
+                let mut relations = Vec::new();
+                primary_loads_of(&r, |load| {
+                    match load {
+                        Load::Entity { id, .. } => entities.push(id),
+                        Load::Relation { id, .. } => relations.push(id),
+                        _ => {}
+                    }
+                    Ok(())
+                })?;
+                assert_eq!(entities, (0..90).rev().map(|i| format!("Task-{i:03}")).collect::<Vec<_>>());
+                assert_eq!(relations, ["z", "a"]);
+                let error = primary_loads_of(&r, |_| Err(Error::new(ErrorCode::Io, "consumer stopped"))).unwrap_err();
+                assert_eq!(error.message, "consumer stopped");
+                Ok(())
+            })
+        })
+        .unwrap();
     }
 }

@@ -3,7 +3,7 @@
 //! marker); writes keep every index whether built or not, so building one fills in what predates it.
 
 mod audit;
-mod sorted;
+pub(super) mod sorted;
 #[cfg(test)]
 use audit::{PrimaryGraph, audit_cycles};
 
@@ -37,34 +37,27 @@ struct Entity {
 /// Every entity the store holds, from `p/i`
 fn entities_of(r: &impl Read) -> Result<Vec<Entity>> {
     let mut out = Vec::new();
-    for (key, bytes) in r.scan(&keys::all_entities())? {
-        let id = match decode_key(&key)?.pop() {
-            Some(Part::String(id)) => id,
-            _ => return Err(Error::new(ErrorCode::Corrupted, "An entity's key doesn't read")),
-        };
-        let record = values::decode(&bytes)?;
-        let items =
-            record.as_array().ok_or_else(|| Error::new(ErrorCode::Corrupted, format!("{id}'s record doesn't read")))?;
-        let seq = items.first().and_then(Value::as_u64).unwrap_or(0);
-        let trashed = items.get(1).and_then(Value::as_bool).unwrap_or(false);
-        out.push(Entity { id, seq, trashed });
-    }
-    Ok(out)
-}
-
-/// The entries one index of a type should hold, from its entities' fields
-fn index_entries(
-    r: &impl Read,
-    entity_type: &str,
-    index: &ValueIndex,
-    of: &[&Entity],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    let mut out = Vec::new();
-    index_entries_into(r, entity_type, index, of, |key, value| {
-        out.push((key, value));
+    visit_entities(r, |entity| {
+        out.push(entity);
         Ok(())
     })?;
     Ok(out)
+}
+
+fn visit_entities(r: &impl Read, mut each: impl FnMut(Entity) -> Result<()>) -> Result<()> {
+    r.try_visit(&keys::all_entities(), |key, bytes| {
+        let Some(Part::String(id)) = decode_key(key)?.pop() else {
+            return Err(Error::new(ErrorCode::Corrupted, "An entity's key doesn't read"));
+        };
+        let record = values::decode(bytes)?;
+        let items =
+            record.as_array().ok_or_else(|| Error::new(ErrorCode::Corrupted, format!("{id}'s record doesn't read")))?;
+        each(Entity {
+            id,
+            seq: items.first().and_then(Value::as_u64).unwrap_or(0),
+            trashed: items.get(1).and_then(Value::as_bool).unwrap_or(false),
+        })
+    })
 }
 
 fn index_entries_into(
@@ -86,14 +79,6 @@ fn index_entries_into(
 
 /// Refuses what would keep a build of a value index from finishing: an entry whose key LMDB can't store
 /// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`)
-fn buildable(entity_type: &str, index: &ValueIndex, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    let mut holders = BTreeMap::new();
-    for (key, id) in entries {
-        buildable_entry(entity_type, index, key, id, &mut holders)?;
-    }
-    Ok(())
-}
-
 fn buildable_entry(
     entity_type: &str,
     index: &ValueIndex,
@@ -370,33 +355,87 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     format!("rebuild: {entity_type} has no index \"{name}\""),
                 ));
             }
-            t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
-            text::clear(t, entity_type, name)?;
-            t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
-            let all = entities_of(t)?;
-            let of: Vec<&Entity> = all.iter().filter(|e| ids::type_of(&e.id) == entity_type).collect();
-            let found = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name);
-            if let Some(found) = found {
-                let entries = index_entries(t, entity_type, &found, &of)?;
-                buildable(entity_type, &found, &entries)?;
-                for (key, value) in entries {
+            // Stage from primary records before mutating derived data. The write transaction makes the entire
+            // replacement atomic, including a late uniqueness, scratch or graph failure.
+            let mut scratch = sorted::Scratch::new()?;
+            if let Some(found) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+                visit_entities(t, |e| {
+                    if ids::type_of(&e.id) != entity_type {
+                        return Ok(());
+                    }
+                    index_entries_into(t, entity_type, &found, &[&e], |key, value| {
+                        entities::key_fits(&key, &e.id, entity_type, name)?;
+                        if found.unique {
+                            // Include the holder in the sort key: distinct entities with the same stored sequence
+                            // must not be collapsed by last-insert-wins before uniqueness is checked.
+                            let mut order = decode_key(&key)?;
+                            order.pop();
+                            order.push(Part::String(e.id.clone()));
+                            scratch.push(crate::format::key::encode(&order), key)
+                        } else {
+                            scratch.push(key, value)
+                        }
+                    })
+                })?;
+                let mut entries = scratch.finish()?;
+                t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
+                text::clear(t, entity_type, name)?;
+                let mut holder: Option<(Vec<u8>, String)> = None;
+                while let Some((order, value)) = entries.next()? {
+                    if found.unique {
+                        let mut parts = decode_key(&order)?;
+                        let Some(Part::String(id)) = parts.pop() else {
+                            return Err(Error::new(ErrorCode::Corrupted, "A sorted index holder doesn't read"));
+                        };
+                        let group = crate::format::key::encode(&parts);
+                        if let Some((previous, other)) = &holder
+                            && *previous == group
+                            && *other != id
+                        {
+                            return Err(unbuildable(entity_type, name, other, &id));
+                        }
+                        t.put(&value, &values::encode(&id.as_str().into()))?;
+                        holder = Some((group, id));
+                    } else {
+                        t.put(&order, &value)?;
+                    }
+                }
+            } else if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+                let mut text = text::Entries::new(entity_type, &found)?;
+                visit_entities(t, |e| {
+                    if ids::type_of(&e.id) == entity_type {
+                        text.entity(t, e.seq, &e.id, |key, value| scratch.push(key, value))?;
+                    }
+                    Ok(())
+                })?;
+                text.finish(|key, value| scratch.push(key, value))?;
+                let mut entries = scratch.finish()?;
+                t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
+                text::clear(t, entity_type, name)?;
+                while let Some((key, value)) = entries.next()? {
                     t.put(&key, &value)?;
                 }
-            }
-            if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
-                let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
-                for (key, value) in text::entries(t, entity_type, &found, &places)? {
-                    t.put(&key, &value)?;
-                }
-            }
-            if let Some(found) = vector::vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+            } else if let Some(found) =
+                vector::vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name)
+            {
+                visit_entities(t, |e| {
+                    if ids::type_of(&e.id) == entity_type {
+                        scratch.push(e.id.into_bytes(), Vec::new())?;
+                    }
+                    Ok(())
+                })?;
+                let mut entities = scratch.finish()?;
+                t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
+                text::clear(t, entity_type, name)?;
                 vector::clear(t, entity_type, name)?;
-                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
-                for e in &of {
-                    vector::refile_at(t, entity_type, &found, &e.id)?;
+                while let Some((id, _)) = entities.next()? {
+                    let id = std::str::from_utf8(&id)
+                        .map_err(|_| Error::new(ErrorCode::Corrupted, "A sorted vector entity id doesn't read"))?;
+                    vector::refile_at(t, entity_type, &found, id)?;
                 }
                 vector::flush(t)?;
             }
+            t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
         }
         None => {
             for prefix in COMPARED {

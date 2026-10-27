@@ -67,6 +67,16 @@ pub trait Read {
     /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Fallible streaming visit: stop at the first consumer error without collecting the range.
+    fn try_visit(&self, prefix: &[u8], mut each: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
+        let mut result = Ok(());
+        self.visit(prefix, |key, value| {
+            result = each(key, value);
+            result.is_ok()
+        })?;
+        result
+    }
+
     fn schema(&self) -> &Schema;
     /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);
