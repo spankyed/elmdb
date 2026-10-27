@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). Phase 3 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phase 3 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -66,9 +66,18 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   - a write nobody asked for that fails is reported (`fc2586112`);
   - the Brain surface no longer floods the brain: its state is one event, `BRAIN_STATE` (`ade7d000d`). Before it, a
     window asked for the run tree about 500 times a second while the brain ran, which would have swamped any reading.
-- **Branches (G7):** apack's `session/elmdb-next` at `master`'s tip (`052e8b3ca`), in
-  `~/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-next`, built and linked; elmdb's `session/elmdb-next` in its
-  own checkout. Neither holds Phase 3 work yet; apack's PR opens with its first checkpoint.
+- **Remediation landed** (2026-10-27): the review's R01–R08 and H01–H04 (`docs/reviews/elmdb-review-2026-10.md`;
+  goal archived at `docs/archive/goals/goal-elmdb-remediation.md`), elmdb #1 and #2 into `main` (`9359949`), apack
+  #283 and #284 into `master` (`5838145675`), which pins elmdb `c345182`.
+- **Branches (G7):** apack's `session/elmdb-next` at `master`'s tip (`5838145675`), in
+  `~/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-next`, linked to elmdb's checkout with the binding built
+  at the pin; elmdb's `session/elmdb-next` cut again from `main` (`9359949`), in its own checkout. Neither holds Phase 3
+  work yet; apack's PR opens with its first checkpoint.
+- **Starting state** (2026-10-27): in apack's worktree, the specs `packages/apack-ears/src/database.ts` reaches pass but
+  three repo checks, each needing what the worktree's first chain run writes (the chain's stamp store, and
+  `packages/apack-ui/.temp/api-types` from `api:check`). G8's copy at elmdb `9359949`: `check()` finds no derived
+  differences and the 17 known duplicate short codes.
+- **Next action:** Phase 3's call counter in `createConnection`, with its spec.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
