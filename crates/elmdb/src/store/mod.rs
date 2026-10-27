@@ -716,7 +716,8 @@ impl Store {
         std::fs::metadata(self.path.join("data.mdb")).map(|m| m.len()).unwrap_or(0)
     }
 
-    /// The bytes under a meta key
+    /// The bytes under a meta key, for store assertions
+    #[cfg(test)]
     pub fn meta(&self, name: &str) -> Result<Option<Vec<u8>>> {
         self.read(|txn, db| Ok(db.get(txn, &meta_key(name))?.map(<[u8]>::to_vec)))
     }

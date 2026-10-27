@@ -103,6 +103,9 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   db.untrack(1);
   assert.throws(() => db.write(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
   assert.throws(() => db.begin(), { code: 'SCHEMA_CHANGED' });
+  for (const field of ['a', 'b']) {
+    assert.throws(() => db.setSchema(schema(field)), { code: 'SCHEMA_CHANGED' });
+  }
   db.close();
   const reopened = Database.open(dir, { syncs: false });
   try { assert.deepEqual(packr.unpack(reopened.readSync(packr.pack(reads)))[0].ids, ['Task-0']); }

@@ -374,3 +374,16 @@ There are no benchmark conclusions in these counts.
 The patch is historical evidence, not a proposed production patch. Accepted fixes need regression assertions that fail
 on the baseline and pass on the corrected behavior, plus the area's required suites. Revalidate all source references
 and findings against the implementation agent's final commit before scheduling overlapping work.
+
+## Post-acceptance PR review — 2026-10-27
+
+A fresh review of PR #1 and adoption PR #283 found three additional edge cases: a stale schema setter could overwrite
+or silently adopt another process's declaration (P1); Windows temporary-directory environment changes could split
+process claims (P1); Unix claims followed symlinks or accepted a foreign-owned replaceable inode (P2). Corrections
+validate the setter's cached fingerprint in the declaration snapshot, use a PID-named Windows kernel event and refuse
+symlink/foreign-owned Unix claim files. Independent failing regressions and fresh acceptance are recorded in the
+[post-acceptance evidence](../evidence/elmdb-remediation.md#post-acceptance-pr-review--2026-10-27).
+
+The recovery resource contract also now identifies 8 MiB as a spill threshold, with vector spare capacity and the
+largest row as additional overhead. The NaN audit suspicion was dismissed for supported normal writes, which reject
+nonfinite values under the format contract. App production handling needs no additional change beyond the engine pin.

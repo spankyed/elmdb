@@ -1187,3 +1187,60 @@ Outcome is written and the [completed goal](../archive/goals/goal-elmdb-remediat
 repaired. Closure changes documentation only; engine source and app pin remain the exact validated pair. Source
 checkouts and live data remain untouched; branches stay unmerged, and no release/tag/publication was performed.
 No expensive local execution remains active. The paused next goal was not resumed.
+
+## Post-acceptance PR review — 2026-10-27
+
+Reviewed elmdb PR #1 at 6b4e795 and apack PR #283 at 20de66e19f against their base branches, including the changed
+store lifecycle, reader growth, commit finalization, schema transactions, tracking/watch delivery, primary audit,
+external sorting, dump staging, backup publication and EARS administrative notifications. Historical acceptance above
+remains evidence for those earlier commits; the following corrections require a fresh pinned pair and CI.
+
+### Confirmed findings and corrections
+
+- **P1 — stale schema setter:** `apply_schema` previously read the latest persisted declaration without validating
+  the caller's cached declaration. A handle opened under A could overwrite externally committed B, or silently adopt
+  B through a nominally unchanged setter. The setter now validates its cached fingerprint and reads the declaration
+  in the same read transaction. The existing writer validation still detects changes after that snapshot. Ordinary
+  open deliberately has no prior cached fingerprint. Independent Rust tests assert refusal, unchanged sequence,
+  cached declaration and watch count, then reopen/check the external declaration. The Node crossing covers both
+  requested declarations as well.
+- **P1 — mutable Windows claim namespace:** native temporary-directory selection observes process TMP/TEMP changes;
+  a second physical binary could therefore claim a different file. Windows now atomically creates a session-local
+  PID-named kernel event, retaining its non-inheritable handle and existing module pin for the process lifetime.
+  The Node regression changes TMPDIR/TMP/TEMP/SystemTemp after closing the first database, checks second-image
+  refusal and confirms the first image can reopen. The Windows platform job supplies the actual Windows result.
+- **P2 — Unix claim inode substitution:** opening a predictable claim followed symlinks and accepted another user's
+  file. Its owner could replace that inode while the accepted binary held its lock. Opening now uses O_NOFOLLOW
+  and requires a regular file owned by the effective user; no claim file is unlinked by the binding.
+- **Documentation:** the sorter's 8 MiB figure is a spill threshold accounting for payload capacities and per-row
+  metadata. Vector spare capacity and the largest row are additional overhead; it is not a strict total RSS limit.
+
+The NaN uniqueness probe was rejected as a supported-input finding: normal writes enforce the format's finite-number
+contract. Rust bulk loading intentionally bypasses write checks for repair/spec fixtures, so that probe did not justify
+changing normal uniqueness semantics. The invalid test was removed; no NaN production change was made.
+
+### Regression firing evidence
+
+All source mutations were confined to `/private/tmp/elmdb-pr-review-baseline`, never the production worktree.
+
+- Pre-fix Rust schema setters: both independently fail (exit 101); overwrite returns a successful migration and
+  adoption returns an empty success. `/private/tmp/elmdb-pr-review-schema-baseline.log`.
+- Existing binding with added stale setter assertions: fails with missing expected SCHEMA_CHANGED (exit 1).
+  `/private/tmp/elmdb-pr-review-node-schema-before.log`.
+- Disposable Unix build using mutable temporary-directory selection: new Node regression fails with `opened`
+  instead of ALREADY_LOADED (exit 1). `/private/tmp/elmdb-pr-review-env-before.log`. This establishes the test's
+  namespace sensitivity on the host; it is not claimed as a Windows execution result.
+- Disposable copy without O_NOFOLLOW: symlink refusal test fails (exit 101).
+  `/private/tmp/elmdb-pr-review-symlink-before.log`.
+
+Fresh local and remote acceptance is recorded below after completion. No source checkout, live database, merge,
+release or publication is involved; the next goal remains paused.
+
+### Fresh local engine acceptance
+
+All required gates pass on the corrected source: formatting, warning-denying workspace clippy, workspace tests
+(256 engine tests passed, two manual measurements ignored; CLI one, binding Rust three, xtask two), generated
+protocol, one-LMDB dependency check, release binding build, TypeScript checks and all 36 Node tests. Generated
+loader/declarations are unchanged. Upstream main remains 3afdf37 and app master 5574f84, both ancestral. The first
+lint pass identified the metadata helper as production-unused after moving schema reads into their transaction;
+that helper is now test-only and the complete gate sequence then passed.

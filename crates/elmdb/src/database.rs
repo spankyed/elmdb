@@ -127,7 +127,7 @@ impl Database {
                 map_size_bytes: options.map_size_bytes,
             },
         )?;
-        let AppliedSchema { schema, report, unbuilt, commit } = match apply_schema(&store, options.schema) {
+        let AppliedSchema { schema, report, unbuilt, commit } = match apply_schema(&store, options.schema, None) {
             Ok(applied) => applied,
             Err(error) => {
                 let _ = store.close();
@@ -192,7 +192,7 @@ impl Database {
         if let Some(mut builder) = self.builder().take() {
             builder.stop();
         }
-        let applied = apply_schema(&store, Some(schema));
+        let applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
             *current = Arc::new(EngineSchema::new(applied.schema.clone()));
             *self.schema.write() = applied.schema.clone();
@@ -358,8 +358,16 @@ fn unchanged_schema(store: &Store, schema: Option<Schema>) -> Result<AppliedSche
 }
 
 /// Compares declarations and atomically installs the schema, index removals and empty-index markers.
-fn apply_schema(store: &Store, given: Option<Schema>) -> Result<AppliedSchema> {
-    let stored = match store.meta(meta::SCHEMA)? {
+fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSchema>) -> Result<AppliedSchema> {
+    // Validate the handle and read the declaration in one snapshot. Reading a fresh declaration first would let
+    // a stale setter silently adopt or overwrite another process's schema.
+    let bytes = store.read(|txn, db| {
+        if let Some(expected) = expected {
+            expected.validate(txn, db)?;
+        }
+        Ok(db.get(txn, &crate::store::meta_key(meta::SCHEMA))?.map(<[u8]>::to_vec))
+    })?;
+    let stored = match bytes {
         Some(bytes) => Some(Schema::from_canonical(&String::from_utf8_lossy(&bytes))?),
         None => None,
     };

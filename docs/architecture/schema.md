@@ -286,3 +286,6 @@ write transaction; another process cannot insert data between the decision and t
 validates its cached schema fingerprint inside each schema-dependent transaction and returns `SCHEMA_CHANGED` when
 the stored declaration differs. Close and reopen the handle to adopt it. An explicit `setSchema` evaluates its requested
 declaration against the current stored one; it does not silently adopt a conflicting concurrent change.
+
+A stale handle also refuses `setSchema`, including a request identical to the newer stored declaration. Close and
+reopen before proposing schema changes; a setter cannot silently adopt or overwrite another process's declaration.

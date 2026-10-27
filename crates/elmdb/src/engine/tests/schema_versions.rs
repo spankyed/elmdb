@@ -211,3 +211,39 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
         "the earlier builder did not mix old index entries into the new declaration"
     );
 }
+
+#[test]
+fn a_stale_handle_cannot_overwrite_another_process_schema() {
+    stale_setter_refuses("a");
+}
+
+#[test]
+fn a_stale_handle_cannot_adopt_another_process_schema() {
+    stale_setter_refuses("b");
+}
+
+fn stale_setter_refuses(field: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+        .unwrap();
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let into = seen.clone();
+    db.watch(
+        query(),
+        Box::new(move |_| {
+            into.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    )
+    .unwrap();
+    change_in_child(dir.path());
+    let sequence = db.sequence().unwrap();
+    assert_eq!(db.set_schema(schema(field)).unwrap_err().code, ErrorCode::SchemaChanged, "requested {field}");
+    assert_eq!(db.schema(), Some(schema("a")));
+    assert_eq!(db.sequence().unwrap(), sequence);
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 1);
+    db.close().unwrap();
+    let reopened = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert_eq!(reopened.schema(), Some(schema("b")));
+    assert!(reopened.check().unwrap().is_clean());
+}

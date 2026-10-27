@@ -29,11 +29,13 @@ Several processes may open one database: one writes at a time, LMDB's lock seria
 reads while the app writes (apack's `apack db`). Read-only access still requires writable reader registration in
 LMDB's lock file. A permission failure is refused; it never silently disables locking.
 
-The Node binding takes a nonblocking exclusive file lock before its first database open. One binary owns the process
+The Node binding acquires an exclusive OS process claim before its first database open. One binary owns the process
 claim until process exit, including after its databases close or its first worker ends. Another physical binding copy
-is refused with `ALREADY_LOADED`; a claim-file I/O failure is refused with `IO`. Independent processes have independent
-claims. Claim files are named by real user ID and PID in `/tmp` on Unix, and by PID in the native process temporary directory on Windows. They are not
-removed: a stale unlocked file is reusable, while unlinking a live claim would break exclusion.
+is refused with `ALREADY_LOADED`; a process-claim I/O failure is refused with `IO`. Independent processes have independent
+claims. On Unix, claim files are named by real user ID and PID in `/tmp`; they must be regular files owned by the
+effective user and cannot be symlinks. They are never removed: a stale unlocked file is reusable, while unlinking a
+live claim would break exclusion. Windows uses a session-local named kernel event keyed by PID, with a non-inheritable
+handle retained until process exit. Neither identity depends on mutable temporary-directory settings.
 
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
@@ -251,9 +253,10 @@ unit is open.
 
 ### Recovery resources
 
-`check()` and full `rebuild()` spill derived entries to owned scratch files: an 8 MiB capacity-accounted row
-buffer plus the largest row. A merge keeps one head from each of at most 16 input runs plus pending/current rows
-and I/O buffers, so merge memory also depends on the largest row. Sorting costs O(D log D) comparisons for D
+`check()` and full `rebuild()` spill derived entries to owned scratch files: an 8 MiB spill threshold accounting for
+payload capacities and per-row metadata, plus vector spare capacity and the largest row. A merge keeps one head
+from each of at most 16 input runs plus pending/current rows and I/O buffers, so merge memory also depends on the
+largest row. Sorting costs O(D log D) comparisons for D
 emitted entries and uses temporary disk proportional to their encoded bytes. Rebuild deletes batches of at most
 1,000 keys without retaining stored values. Replacement streams primary ranges from one source snapshot instead
 of collecting source data. These bound those intermediate collections, not the complete operation: entity/graph

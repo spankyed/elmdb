@@ -150,3 +150,22 @@ if (process.platform !== 'win32') {
     assert.deepEqual(JSON.parse(printed), { code: 'IO', created: false });
   });
 }
+
+
+test('changing temporary-directory settings cannot create another process claim', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-env-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const copy = join(dir, 'copy.node');
+  copyFileSync(binary, copy);
+  const printed = run(`
+    const first = require(${JSON.stringify(binary)});
+    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
+    for (const key of ['TMPDIR', 'TMP', 'TEMP', 'SystemTemp']) process.env[key] = ${JSON.stringify(dir)};
+    let code;
+    try { require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false }).close(); code = 'opened'; }
+    catch (error) { code = error.code; }
+    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
+    console.log(code);
+  `);
+  assert.equal(printed, 'ALREADY_LOADED');
+});
