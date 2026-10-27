@@ -389,3 +389,33 @@ failing regressions and fresh acceptance are recorded in the
 The recovery resource contract also now identifies 8 MiB as a spill threshold, with vector spare capacity and the
 largest row as additional overhead. The NaN audit suspicion was dismissed for supported normal writes, which reject
 nonfinite values under the format contract. App production handling needs no additional change beyond the engine pin.
+
+## Independent review reconciliation — 2026-10-27
+
+The independent review used 6b4e795 / 20de66e19f. Its remaining correctness holes were rechecked against the later
+PR heads, reproduced and corrected: LMDB's implicit EROFS lock omission; listener-capture destruction outside the
+callback guard; panicking watch reads; temporary cleanup of a live Unix claim; no-op schema marker finalization;
+secondary errors masking a failed schema commit; and writer/unit reservation ordering. The app preserves both
+NOT_DURABLE and a failed observer/schema refresh, keeping the committed-outcome code. CLI reader-permission
+comments now name writable lock.mdb registration explicitly.
+
+Full recovery now streams value/vector entries rather than retaining a complete type's entries, including the second
+value-index validation pass and the invalid-index fallback. This does not bound inventories, per-entity expansion,
+uniqueness holders, text/vector aggregation, report output or dump export. The existing replacement figures used empty
+destinations and cannot establish populated-cutover limits. The runner now has an explicit populated mode; the engine
+reference narrows the old figures and documents scratch tmpfs use, crash leftovers and private Unix backup modes.
+
+Windows publication clears tempfile's temporary attribute. Unix dump publication uses exclusive rename on the shipped
+Linux/macOS targets; Windows already used no-replace MoveFileExW, so the hard-link restriction was Unix-specific.
+Actual exFAT/SMB behavior remains filesystem-dependent. Unix claim names include Linux PID-namespace identity,
+failed claim attempts are retryable, and claims live outside temporary cleanup. Zero-length claim-file retention is
+explicit: automatic deletion is deferred until it can avoid live/opening-claim races. Scratch cleanup after hard exit
+and whole-export/inventory streaming remain documented follow-ups, not completed resource guarantees.
+
+The read-only child test and bounded callback children now require proof that the selected child actually executed.
+The Node pooled-read loop remains scheduling stress, supplemented by deterministic Rust schema barriers and the
+independent child-process binding regression; it is not advertised as a standalone deterministic proof. Touched tokens
+are still unavailable on an error-only NOT_DURABLE return: callers invalidate all, as apack already does. A richer
+committed-error payload is a future API decision, not an undocumented promise of precise error-path invalidation.
+
+New focused regressions and their firing evidence are recorded in the [reconciliation evidence](../evidence/elmdb-remediation.md#independent-review-reconciliation--2026-10-27).

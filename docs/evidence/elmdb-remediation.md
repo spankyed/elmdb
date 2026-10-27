@@ -1284,3 +1284,86 @@ runs are required for this comparator change; the earlier 6566b85 results do not
 The complete required local engine gate sequence passes again after the comparator correction: formatting,
 warning-denying workspace lint, 257 engine tests (two manual measurements ignored), CLI/binding/xtask suites,
 generated protocol, one-LMDB, rebuilt release binding, TypeScript and all 36 Node tests. No generated API changes.
+
+## Independent review reconciliation — 2026-10-27
+
+Inputs: the external review examined 6b4e795 / 20de66e19f; this pass started at engine a8d618f / app 8897dc4296.
+Only the isolated remediation worktrees were edited. No live app data or source checkout was used for execution.
+The independent review's remaining holes were confirmed against the later heads rather than dismissed as stale.
+
+| Finding | Disposition |
+|---|---|
+| R02 implicit EROFS lock omission | Fixed: start a read transaction and require nonzero LMDB lock-table reader registration before opening database contents. A missing lock table always reports zero, even when LMDB omitted it without NO_LOCK. Host NO_LOCK simulation passes; Linux CI additionally runs a real read-only bind mount and a failing omission mutation in private mount namespaces |
+| R01 temporary cleanup | Fixed: Unix claims use owner-controlled `.elmdb/process-claims` under the OS account home, not temporary storage or HOME/TMP environment values |
+| R01 shared containers / transient errors | Linux claim identity includes the PID-namespace inode; only successful claims are retained, so a corrected transient failure can be retried |
+| R01 retained files | Explicit limitation/follow-up: zero-length files remain and unlocked names are reusable after PID reuse. Do not unlink live/opening claims. Automatic deletion is deferred; manual cleanup requires all elmdb processes to have exited |
+| R06 last-reference destruction | Fixed: callback scope covers delivery and listener-capture destruction, so Database::drop cannot wait on a store held by its own committing unit |
+| R05 read panic | Fixed: query execution, callback and capture destruction are unwinding boundaries; faulty watches and their read sets are removed, other watches continue, and committed sync outcomes remain authoritative. Initial read failure gets new WATCH_PANICKED; CALLBACK_PANICKED retains its listener meaning |
+| Full index retention | Full check/rebuild stream value/vector entries, including rebuild's second buildability pass and invalid-index fallback. Single-index collections, inventories, unique-holder maps, per-entity expansion, text/vector aggregation and reports remain workload-dependent; no whole-process 8 MiB bound is claimed |
+| Populated replacement | Old 22.73/47.69 s figures are explicitly empty-destination observations. New replace-populated mode prepares a compacted full incumbent and measures replacement with it present; one reference result is below |
+| Dump export memory | Confirmed limitation, documented follow-up: sorted entity identifiers, relation loads and scanned vector rows remain workload-dependent; Rust primary_loads also collects output. Bounded load is not bounded export |
+| Scratch tmpfs / hard-exit leftovers | Documented: scratch on tmpfs consumes RAM; normal/error cleanup does not cover SIGKILL/abort/power loss. Use an owned per-operation scratch parent and remove only after its process exits; no quota/automatic age cleanup is claimed |
+| Windows temporary attribute | Fixed: clear FILE_ATTRIBUTE_TEMPORARY before durable publication, preserving unrelated attributes. Windows CI checks actual published metadata and shows the assertion failing on a disposable mutation |
+| Hard-link publication | Unix-specific finding: Windows already used MoveFileExW. Shipped Linux/macOS now use native exclusive rename instead of hard links. Uncertified SMB/exFAT configurations may still reject requested rename/sync semantics; no universal filesystem guarantee is claimed |
+| Private backup mode | Documented Unix mode 0600 and cross-account restore ownership/permission responsibility |
+| Unchanged-schema marker sync | Fixed: marker repair returns its committed outcome to administrative finalization before NOT_DURABLE is reported |
+| Secondary schema errors | Fixed: preserve the original failed operation's code and append recovery failure context. Recovery inventories pending work without another synchronous marker commit |
+| Missing touched list on NOT_DURABLE | Existing API limitation, explicitly documented: no result payload is returned on failure; invalidate all tracked tokens. Native watches are already finalized. A richer committed-error payload remains a future API decision |
+| Vacuous child tests | Fixed: read-only child and bounded callback tests require proof that the selected child actually executed; zero-selected-test success cannot pass |
+| Timing-dependent pooled read loop | Retained as scheduling stress, explicitly not a standalone deterministic proof; deterministic Rust snapshot/schema barriers and child-process Node stale-handle assertions are the correctness gates |
+| Older writer/unit race | Fixed: native writer acquisition shares the unit reservation mutex, rechecking after the deliberate race window; set_schema refuses an open unit before taking its schema write guard |
+| App permission comments | Fixed in destructive.ts and runs.ts: data.mdb can be read-only only while lock.mdb permits writable reader registration |
+| App refresh masking durability | Fixed: AggregateError retains original and refresh errors plus original cause, while code stays NOT_DURABLE so callers cannot mistake committed state for a refused mutation |
+
+### Reproductions and demonstrated firing cases
+
+- The last-reference bounded child hangs on the original delivery code (ten-second regression deadline, exit 101),
+  then passes for both self-unwatch and listener panic after extending the guard. Logs:
+  `/private/tmp/elmdb-second-review-drop-before.log`, `-drop-after.log`.
+- The existing binding fails both new claim regressions: clearing its owned temporary claim admits a second binary,
+  and fixing a transient claim-file error does not allow a retry. Log: `/private/tmp/elmdb-second-review-claim-before.log`.
+  Both pass against the rebuilt binding with stable state and success-only caching.
+- App refresh masking fails its new assertion before correction and passes afterward:
+  `/private/tmp/elmdb-second-review-app-notify-before.log`, `-app-notify-after.log`.
+- A disposable source copy independently fires all seven selected regressions: missing reader table, uncontained watch
+  read panic, eager decoding before first index emission, missed no-op schema finalization, secondary schema error
+  replacing original IO, writer/unit ordering, and a selected child that never executes. Summary:
+  `/private/tmp/elmdb-second-review-mutations.log`; individual logs use `-mutant-<test-name>.log`.
+  The recovery error mutation yields actual SCHEMA_CHANGED instead of the original IO. No production worktree was mutated.
+- CI scripts require positive execution markers and actual failing runtime assertions, rather than merely a nonzero
+  compile error or successful zero-test selection. Real EROFS and Windows attribute mutation executions are pending
+  the supported-platform run at this checkpoint; no host result is presented as those platform results.
+
+### Local validation and populated replacement observation
+
+All required local engine gates pass: formatting, warning-denying workspace clippy, 264 engine tests (two manual
+measurements ignored on this macOS host), CLI one, binding Rust three, xtask two, generated protocol, single-LMDB,
+release binding build, TypeScript and 38 Node tests. Linux's privileged mount regression is ignored in the ordinary
+suite and explicitly executed by its CI step. Generated ErrorCode.ts adds WATCH_PANICKED; loader/declarations do not change.
+Final app checks pass against this binding: 200 EARS/model/watch tests, eight backup tests, full repository typecheck.
+Logs: `/private/tmp/elmdb-second-review-ears.log`, `-backup.log`, `-app-types.log`.
+
+One populated replacement was observed on 2026-10-27 on the same 32 GiB macOS arm64 host, serially, in a fresh Node
+process, with uncontrolled filesystem cache. The owned 100k-row reference source contains 1,024-byte bodies,
+199,997 relations, a unique slug value index, a nonunique state index and title/body text indexing. The destination initially contained a
+compacted copy of all those records; this is not a fragmented-incumbent or arbitrary-schema guarantee. The command
+`node scripts/measure-recovery.mjs replace-populated /private/tmp/elmdb-recovery-20261026-reference --observe`
+measured 15,687.079 ms total including incumbent-copy preparation, 1,060,048 KiB peak process RSS, and 320,865,636
+sampled scratch bytes. Root logical bytes increased from 4,213,081,663 to 5,140,407,807; the final data file is
+927,318,016 bytes. Scratch/disk sampling uses 100 ms metadata observations and is a lower bound. This is not a
+controlled speed comparison with the earlier empty-target timings or a universal populated-cutover allowance.
+
+Independent verification checks 100,000 live entities, 199,997 relations, exact last-row primary equality with source,
+1,024 body bytes, expected title/slug and an indexed lookup. The first ad hoc assertion mistakenly inspected the
+protocol envelope instead of its row; it was corrected and rerun successfully. Logs:
+`/private/tmp/elmdb-second-review-replace-populated.log`, `-populated-verification.log`. The owned target is
+`/private/tmp/elmdb-recovery-20261026-reference/replace-oxjN5n`; no source data was replaced or modified.
+
+The new source and app pin require a fresh platform matrix and final strict chain; earlier green CI remains evidence
+for earlier commits, not acceptance of these corrections. Terminal results are recorded in the updated PR descriptions
+and immutable CI run links after completion. No merge, release, live-data migration or next-goal execution is included.
+
+Measured rebuilt binding SHA-256: `a14e782d38aa9ca5ed7101760580aaa42314e8b29a904d03915a535c04db76ee`.
+
+Reconciled implementation checkpoint: `381b069f43b93b6178cc66a887f97f773a4b9762` (claims `e1eb300`, storage
+`33a17bd`, lifecycle/schema `ef91662`, recovery `381b069`). The following documentation checkpoint changes prose only.

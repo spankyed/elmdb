@@ -27,15 +27,23 @@ and `runs` (its flow run history), which reset and back up independently.
 
 Several processes may open one database: one writes at a time, LMDB's lock serializing them, and a read-only open
 reads while the app writes (apack's `apack db`). Read-only access still requires writable reader registration in
-LMDB's lock file. A permission failure is refused; it never silently disables locking.
+LMDB's lock file. A permission failure or LMDB's implicit unregistered EROFS fallback is refused. After opening,
+elmdb starts a reader and verifies that a lock-table reader slot exists before accessing database contents.
 
 The Node binding acquires an exclusive OS process claim before its first database open. One binary owns the process
 claim until process exit, including after its databases close or its first worker ends. Another physical binding copy
 is refused with `ALREADY_LOADED`; a process-claim I/O failure is refused with `IO`. Independent processes have independent
-claims. On Unix, claim files are named by real user ID and PID in `/tmp`; they must be regular files owned by the
-effective user and cannot be symlinks. They are never removed: a stale unlocked file is reusable, while unlinking a
-live claim would break exclusion. Windows uses a session-local named kernel event keyed by PID, with a non-inheritable
-handle retained until process exit. Neither identity depends on mutable temporary-directory settings.
+claims. On Unix, coordination lives under the operating-system account's home at `.elmdb/process-claims`, in
+owner-controlled directories, outside temporary-directory age cleanup. Claims include effective UID and PID, plus
+Linux's PID-namespace inode, so containers sharing state do not collide merely because their namespace-local PIDs
+match. The account home comes from the account database, not mutable HOME/TMP settings. It must permit creation of
+private coordination state. Claim files must be regular, owned files and cannot be symlinks. They are never unlinked
+while live; unlocked files are reusable after PID reuse. Small zero-length claim files remain after exit. Do not
+age-delete this directory while elmdb processes are running; remove abandoned coordination files only after all
+such processes have exited. Automatic stale-file reclamation is not implemented because unlinking a claim during
+an open/lock race would defeat exclusion. Failed claims are retryable; only a successful handle is retained.
+Windows uses a session-local PID-named kernel event with a non-inheritable handle retained until process exit.
+Neither identity depends on mutable temporary-directory settings.
 
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
@@ -150,6 +158,8 @@ and its change set delivered. Admin and schema mutations use the same finalizati
 notifying watches, with committed data and in-memory schema already installed. Empty-index markers are settled inside
 the schema/reset/replace transaction, not by a second commit. A caller must not retry the mutation as though it had been
 refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
+The failed call does not return its touched-token list: callers managing tracked tokens must conservatively invalidate
+all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
 `close()` syncs what is owed, and reports a sync that failed.
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
@@ -191,6 +201,9 @@ in either order. `db.sequence` is the last commit's.
   after the commit, outside its transaction, on the thread that committed. An unwinding listener panic removes that
   watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
   its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
+  A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does
+  not strand other watches. An initial read panic returns `WATCH_PANICKED`, distinct from a listener panic.
+  The callback guard also covers destruction of listener captures, including their last database reference.
   This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
 
@@ -212,7 +225,9 @@ unit is open.
   as a database of its own. A private temporary file is synced and atomically published; the destination is reserved
   against this process's opens and other publishers. The caller must coordinate exclusive destination ownership
   across other processes: a backup artifact is not an actively used database. Failure before publication preserves
-  the old backup. Unix syncs affected directories; Windows requests a write-through replacement. If directory sync
+  the old backup. Unix backup data files are private to the creating user (mode 0600); arrange ownership/permissions
+  explicitly before restoring under another account. Unix syncs affected directories; Windows clears the temporary
+  file attribute before requesting a write-through replacement. If directory sync
   fails after publication, `IO` reports that the complete new backup is visible and retrying is safe. Filesystem and
   device durability still depend on the platform honoring its sync operations.
 - `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
@@ -258,38 +273,59 @@ payload capacities and per-row metadata, plus vector spare capacity and the larg
 from each of at most 16 input runs plus pending/current rows and I/O buffers, so merge memory also depends on the
 largest row. Sorting costs O(D log D) comparisons for D
 emitted entries and uses temporary disk proportional to their encoded bytes. Rebuild deletes batches of at most
-1,000 keys without retaining stored values. Replacement streams primary ranges from one source snapshot instead
+1,000 keys without retaining stored values. Full recovery streams value/vector entries directly to the spill
+consumer, including the value-index marker-validation pass; single-index builds retain their existing collections.
+Per-entity field decoding and compound-index expansion are additional workload-dependent work, not part of the
+8 MiB sorter threshold. Replacement streams primary ranges from one source snapshot instead
 of collecting source data. These bound those intermediate collections, not the complete operation: entity/graph
-inventory, uniqueness auditing, text/vector aggregation, output reports and LMDB's dirty/resident pages remain
+inventory, unique-index validation/auditing, text/vector aggregation, output reports and LMDB's dirty/resident pages remain
 workload-dependent. Compound value indexes can expand with the product of list cardinalities. Single-index rebuilds
 also retain index-specific work; the measurements below concern full rebuilds.
 
-The validated operating envelope is the explicit synthetic shapes in the
+The recorded operating envelope is the explicit synthetic shapes in the
 [remediation evidence](../evidence/elmdb-remediation.md), measured on 2026-10-26 on a 32 GiB macOS host with local
 storage, fresh processes and uncontrolled filesystem cache. It is not a row-count guarantee for arbitrary schemas
-or a latency SLA. The reference shape has 100,000 entities with 1,024-byte bodies, 199,997 relations, unique slug
-and state value indexes, and one title/body text index. Current full rebuild/replacement measured 14.04/22.73 s
+or a latency SLA. The reference shape has 100,000 entities with 1,024-byte bodies, 199,997 relations, a unique slug
+value index, a nonunique state value index, and one title/body text index. Earlier full rebuild/empty-destination replacement measured 14.04/22.73 s
 and 879,200/992,400 KiB peak RSS, meeting the preselected 2 GiB process / 30 s writer-occupancy upper-bound budget.
-At twice that population, measured rebuild/replacement used 1,876,128/1,856,864 KiB and 28.12/47.69 s: replacement
-exceeds the reference time budget, so schedule a longer maintenance window. A private staged load of that larger
+At twice that population, measured rebuild/empty-destination replacement used 1,876,128/1,856,864 KiB and 28.12/47.69 s: replacement
+exceeds the reference time budget, so schedule a longer maintenance window. Those replacement figures exclude
+clearing a populated incumbent and do not establish its time, memory or disk budget. A private staged load of that larger
 dump took 79.64 s and 1,932,001,280 bytes RSS. The recorded 2,000-vector (1,536 dimensions) and 2,000-row/64-KiB
 value profiles also pass recovery and independent restoration checks; they do not establish arbitrary vector capacity.
 
-For these measured shapes, reserve at least 2 GiB on the scratch filesystem and the current data-file size plus
-2 GiB of free destination space per active recovery operation; add space for a dump if retaining one. These are
-conservative planning allowances over measured macOS artifacts/scratch, not enforced quotas or universal bounds.
+For these measured shapes with an empty replacement destination, reserve at least 2 GiB on the scratch filesystem
+and the current data-file size plus 2 GiB of free destination space per active recovery operation; add space for a dump if retaining one. These are
+planning allowances over those measured macOS artifacts/scratch, not enforced quotas or universal bounds. They
+are not validated allowances for replacing a populated destination: its old pages and incoming contents coexist
+until commit, so measure its copy-on-write peak separately with `replace-populated`.
 Add both allowances when the filesystems share a volume; check them separately when temporary storage is elsewhere.
 Measure Windows disk allocation separately; a mapping's reserved capacity does not establish physical file length.
 Use `scripts/measure-recovery.mjs` on an owned representative
 copy before using materially larger values, more relations, higher-dimensional/more numerous vectors, different
 vocabulary, compound/list indexes or an unmeasured schema. Keep one recovery operation active while measuring.
+The `replace` runner creates an empty destination; `replace-populated` first prepares an incumbent copy and then
+replaces it atomically. The latter's total elapsed/RSS/disk figures include incumbent preparation, so elapsed time
+is a conservative writer-occupancy upper bound rather than an isolated transaction timing.
 The runner refuses to adopt an existing workload directory and can sample scratch with `--observe`; sampled peaks
-are lower bounds. `TMPDIR`/the platform temporary directory controls scratch placement.
+are lower bounds. `TMPDIR`/the platform temporary directory controls scratch placement. On a tmpfs/RAM disk,
+scratch consumes memory as well as the process's RSS; choose a disk-backed location for large recovery work.
+Normal return/error drops remove scratch. SIGKILL, abort or power loss can leave `elmdb-check-*` directories.
+Use a private per-operation scratch parent and remove it only after the owning process has exited; no automatic
+age-based cleanup or scratch quota is provided.
+
+Dump export remains workload-dependent: it inventories entity identifiers, sorts complete relation loads by sequence,
+and currently scans vector primary rows into a collection. The Rust `primary_loads` convenience also collects its
+output. A bounded dump loader does not make dump export bounded. Streaming/spilling these remaining export and
+inventory phases is follow-up work; do not infer an 8 MiB or whole-process memory bound from the sorter threshold.
 
 Check and backup take read snapshots rather than the LMDB writer, but long snapshots pin pages and can delay map
 growth. Rebuild/replacement hold the destination writer for their atomic transaction; their entire measured operation
 time is a conservative occupancy upper bound. Dump loading writes only a private staging database until no-clobber
-publication. A scratch or pre-publication failure aborts/removes owned work and preserves the earlier database or
+publication. Linux/macOS use a native exclusive rename rather than requiring hard links; Windows uses no-replace
+MoveFileExW. A filesystem must support the requested atomic no-clobber publication and synchronization semantics;
+unsupported operations return an error, and arbitrary network/exFAT configurations are not certified by the host tests.
+A scratch or pre-publication failure aborts/removes owned work and preserves the earlier database or
 backup. Retrying after an explicit post-publication sync error must respect whether a complete result is already
 visible (`format.md`, Dumps). Filesystem/device sync behavior remains a platform dependency.
 
