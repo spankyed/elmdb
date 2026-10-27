@@ -77,8 +77,24 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
   30.256 seconds, with 659,907,632 bytes sampled peak scratch and complete cleanup. This fits the selected 2 GiB
   investigation budget for this shape, not a universal bound. CLI baseline dump/load at 100,000 rows took
   2.10/77.46 seconds; load retained all decoded loads and peaked at 2,062,188,544 bytes RSS.
-- No execution session remains running. Next: bounded load/staging publication and remaining recovery measurements
-  (larger rebuild/replace, large values/vector shape), cross-process schema pairing, then converged source checks,
+- Local bounded loader uses private staging and batches, validates the footer/count/trailing bytes, closes/rebuilds,
+  then publishes without clobbering a destination. Existing dump/order/embedding tests and two new ownership/
+  late-failure/retry tests pass, as does clippy. Broad acceptance remains pending.
+  Reference load is terminal success: 36.06 s / 1,370,095,616 bytes RSS, versus baseline 77.46 s /
+  2,062,188,544 bytes. Six dump tests and clippy pass; overwrite-publication mutation fails as intended.
+  Unwind cleanup and explicit post-publication sync-failure state are tested. Abrupt process death may leave
+  an unpublished private staging directory. Both larger rebuild/replace measurement chains are terminal. Larger rebuild/replace exceeded 2 GiB, prompting bounded deletion, spilled rebuild and
+  direct source-primary copying. Measurements now peak at 1,876,128 / 1,856,864 KiB; elapsed upper bounds
+  are 28.118 / 47.693 s. Larger replacement exceeds the reference 30 s criterion; preserve that limitation.
+  Scratch-failure rollback/retry test passes and its swallowing-error mutation fails. Required combined-source
+  gates passed in session 74611 (246 engine tests, two measurements ignored; all required checks and 34 Node
+  tests). Loader/recovery source is committed as 97e2675 / bce836a; vector runner as 9c18fdc. The vector
+  and large-value profiles passed all five operations and separate restored-copy count/slug/vector checks.
+  Prior matrix 40429674942 is terminal success at e15b027; newer recovery platform checks remain required.
+  One final CLI build/dump/load measurement chain is active in session 88967 for the larger, vector and
+  large-value workloads. Keep source frozen and only this expensive owner until terminal; inspect its logs.
+  Next: complete bounded load/publication verification and remaining recovery measurements
+  (final reference measurements and large values/vector shape), cross-process schema pairing, then converged source checks,
   app pin/strict CI, current reference contracts, finding dispositions and closure. Do not close acceptance early.
   Preserved CLI baseline executable and exact source archive, mutation logs and measurement conditions are in
   [implementation evidence](../evidence/elmdb-remediation.md). Keep one expensive local owner at a time.

@@ -687,3 +687,139 @@ typecheck and all 34 Node tests. The binding was rebuilt immediately before the 
 run with unchanged production source. Logs use the checkpoint prefix above. Reviewed source checkpoints:
 backup publication `c32a87a`, local snapshot pairing `7a4df3c`; the next audit checkpoint follows them.
 No final integrated or Phase 5 cross-platform closure is claimed by these host checks.
+
+
+## Phase 5 bounded dump loading — 2026-10-26, local work
+
+The previous checkpoint is pushed through `e15b027`; CI run 40429674942 is active on that exact head.
+The next loader change is local and not covered by that run. It applies at most 1,000 decoded loads or
+8 MiB of encoded frame lengths per batch (plus the largest frame), into an owned `.elmdb-load-*`
+directory inside the destination. It validates the footer/count and rejects trailing bytes, rebuilds,
+closes, then publishes the complete data file without clobbering an existing destination. Unix uses
+an atomic hard link followed by file/directory sync; Windows uses MoveFileExW without REPLACE_EXISTING,
+with WRITE_THROUGH. Post-publication sync errors explicitly leave a visible complete database.
+Same-process opens and publishers are excluded by a held canonical destination reservation. Other-process
+destination ownership still belongs to the caller; a race creating data.mdb is refused without deleting it.
+
+The existing three dump/order/embedding regressions pass. Two additional cases pass: 1,100 rows spanning
+batches retain a byte-identical roundtrip, preserve unrelated files, and refuse a foreign publication;
+late bad count/truncation/trailing bytes remove all private staging and permit retry. Workspace clippy
+passes. Logs: `/private/tmp/elmdb-remediation-phase5-staged-load-{tests,cases,clippy}.log`.
+Cancellation, mutation proof and broader final checks remain outstanding. The reference CLI build and
+one load measurement are active in session 28079; do not restart or run competing expensive work.
+Logs: `-phase5-staged-load-build.log`, `-recovery-load-staged.log`, `-recovery-load-staged-time.log`.
+
+
+The staged reference load is terminal success: 36.06 s elapsed, 1,370,095,616 bytes maximum RSS,
+100,000 entities, 600,000 fields, 199,997 relations and one sequence. Compared with the preserved
+baseline's 77.46 s / 2,062,188,544 bytes RSS, both elapsed time and peak memory decreased on this
+single uncontrolled-cache run. The new destination occupies 835,920 KiB according to du -sk;
+that is allocated filesystem space, not the runner's logical-byte metric. The writer is private to
+staging throughout load/rebuild; no existing destination is held open or modified.
+
+Publication mutation is demonstrated in a disposable archive/target clone at
+`/private/tmp/elmdb-remediation-load-mutation`: replacing Unix hard_link with overwrite-capable rename
+makes the race regression fail (exit 101, unexpectedly successful load), as intended. The worktree was
+not mutated. Log: `/private/tmp/elmdb-remediation-phase5-load-publication-mutation.log`.
+All six dump tests now pass, including unwind cleanup before publication and an injected post-publication
+sync failure leaving a complete, independently checked 1,100-row database. An unwinding interruption
+cleans private staging; abrupt process termination may leave an unpublished private directory, never a
+partially published database. Workspace clippy passes. Logs: `-phase5-staged-load-final-{cases,clippy}.log`.
+
+One larger rebuild/replace measurement chain is active in session 88559, using the previously built
+checkpoint binding (e15b027-equivalent production source). The staged loader edits do not change either
+operation. Logs: `/private/tmp/elmdb-remediation-recovery-large-{rebuild,replace}.log`. Only this chain
+owns expensive local execution. The dump-loader checkpoint is not committed and still needs all required
+gates before commit. CI 40429674942 currently has Linux checks/glibc and Windows green; remaining jobs
+are still active, so do not call the matrix complete.
+
+
+## Phase 5 rebuild and replacement resource repair — local, 2026-10-26
+
+At 200,000 entities / 399,997 relations, the checkpoint binding measured rebuild at 28.145 s /
+2,656,272 KiB RSS, and replacement at 42.680 s / 2,301,536 KiB RSS. Both exceed the 2 GiB
+investigation memory budget; larger replacement also exceeds the reference workload's 30 s writer
+upper-bound criterion. Logs: `/private/tmp/elmdb-remediation-recovery-large-{rebuild,replace}.log`.
+
+Rebuild now deletes batches of at most 1,000 keys without copying stored values or revisiting deleted
+rows, preserving normal transaction undo/tracking through del. Full derivation uses the owned external
+sorter and streams entries into the same atomic write. Replacement retains one source snapshot and copies
+only primary prefix ranges directly into the destination transaction; it no longer retains a complete
+primary-data vector or traverses source derived rows. Map-growth retries use that same immutable snapshot.
+The destination still changes in one atomic unit, preserving its schema and format/metadata semantics.
+
+All 28 derived-data tests and eight maintenance tests passed after the production changes, and clippy
+passed (`phase5-bounded-rebuild-tests.log`, `-stream-replace-tests.log`, `-stream-recovery-clippy.log`).
+Rebuilt-binding measurements then produced:
+
+| 200,000-row operation | Elapsed / writer upper bound (s) | RSS (KiB) | Sampled scratch peak (bytes) |
+|---|---:|---:|---:|
+| rebuild | 28.118 / 28.118 | 1876128 | 661001966 |
+| replace | 47.693 / 47.693 | 1856864 | 662408434 |
+
+Logs: `-recovery-large-rebuild-spill.log`, `-recovery-large-replace-stream.log`. Source data.mdb grew
+from 1,666,416,640 to 2,164,047,872 bytes during the repeated rebuild; the new replacement data file
+added 956,456,896 logical bytes. These are sequential uncontrolled-cache measurements, not paired
+latency statistics; file history differs. Peak sampled workload logical sizes were 3,176,962,585 and
+3,970,016,079 bytes respectively, including earlier retained synthetic destinations. Scratch cleaned up.
+Memory meets the chosen 2 GiB budget for this shape, but larger replacement latency is not hidden:
+47.693 s is above the reference 30 s criterion. Final workload/operating bounds and larger-value/vector
+profiles remain required; these results alone do not close R08.
+
+A focused failure regression injects scratch-creation IO after rebuild has deleted derived keys, and
+after replacement has cleared/copied primary data. Both operations return IO, preserve primary data,
+sequence, query answers and clean derived state; replacement retry succeeds. The regression passes.
+A disposable mutation swallowing the first scratch failure instead returns success and fails the test
+(exit 101). Logs: `/private/tmp/elmdb-remediation-phase5-scratch-rollback{,-mutation}.log`.
+Required combined-source gates are active once in session 74611; prefix
+`/private/tmp/elmdb-remediation-phase5-load-checkpoint-`. Do not start competing expensive work.
+
+
+## Phase 5 additional profiles and checkpoint gates — 2026-10-26
+
+Combined-source required gates are terminal success in session 74611: formatting, workspace clippy,
+workspace tests (246 engine tests passed, two measurements ignored), generated protocol/single-LMDB checks,
+rebuilt binding/typecheck and all 34 Node tests. The two recovery source checkpoints are `97e2675`
+(private bounded loader) and `bce836a` (bounded deletion/rebuild, streamed replacement). The exercised
+vector workload extension is `9c18fdc`; node --check and the 20-row seed/check smoke run pass.
+The prior checkpoint matrix [40429674942](https://github.com/spankyed/elmdb/actions/runs/40429674942)
+is terminal success across all eight jobs at e15b027. The newer recovery source still needs platform CI.
+
+Additional production-shaped synthetic profiles retain the same slug/state/text indexes and two backward
+relations per entity. Both have 2,000 entities and 3,997 relations. The vector profile uses 1,024-byte bodies
+and 2,000 deterministic 1,536-dimensional finite embeddings, model synthetic-recovery; this tests storage
+and recovery, not semantic quality or an external embedding service. The large-value profile has 65,536-byte
+bodies and no vector index. Values repeat the runner's stated natural-language phrase; vocabulary diversity
+and graph shape are limited, so these are explicit shapes, not arbitrary-data capacity claims.
+
+| Profile | Operation | Elapsed (s) | RSS (KiB) | Sampled scratch peak (bytes) |
+|---|---|---:|---:|---:|
+| vector | seed | 1.517 | 197872 | n/a |
+| vector | check | 0.242 | 102192 | 0 |
+| vector | rebuild | 0.844 | 156224 | 5747364 |
+| vector | replace | 1.104 | 183280 | 9686933 |
+| vector | backup | 0.035 | 119072 | 0 |
+| large-values | seed | 18.765 | 413792 | n/a |
+| large-values | check | 8.615 | 299408 | 98975636 |
+| large-values | rebuild | 8.571 | 359968 | 80121459 |
+| large-values | replace | 8.735 | 476048 | 50587386 |
+| large-values | backup | 0.218 | 278368 | 0 |
+
+Each operation used a fresh process, uncontrolled filesystem cache and the built current recovery source.
+Seed syncs are disabled; maintenance uses defaults. Rebuild/replace elapsed time is a writer-occupancy
+upper bound. Logical sampled peak across the retained vector workload was 252,036,238 bytes; across
+large values it was 751,731,636 bytes, including earlier artifacts. Scratch cleaned up after every operation.
+Logs: `/private/tmp/elmdb-remediation-recovery-{vector,large-values}-{seed,check,rebuild,replace,backup}.log`.
+
+Separate read-only validation opens all four produced backup/replacement artifacts: check is clean,
+independent expected primary counts are 2,000 entities/3,997 relations, and an exact slug lookup returns
+Note-1999. Both vector artifacts have zero pending embeddings and a working nearest-vector query.
+Log: `/private/tmp/elmdb-remediation-recovery-profile-restoration.log`; session 61811 is terminal success.
+No benchmark time/RSS result includes that separate validation process.
+
+One final current-source CLI build/dump/load chain is active in session 88967: 200,000-row, vector and
+large-value profiles. Logs use `/private/tmp/elmdb-remediation-phase5-final-recovery-cli-build.log` and
+`-recovery-{large,vector,large-values}-final-{dump,load}{,-time}.log`. Retain the handle to terminal state;
+do not edit production source or start competing expensive work while this measurement chain runs.
+Final restored-artifact validation and operating-envelope reference documentation remain required after it.
+Cross-process schema pairing, final upstream/app integration, strict CI and finding dispositions are still open.
