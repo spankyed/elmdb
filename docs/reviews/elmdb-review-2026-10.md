@@ -310,26 +310,29 @@ to their fix commits and acceptance evidence; green unrelated tests do not close
 ## Remediation dispositions — 2026-10-26
 
 This addition preserves the assessment above. Implementation is on the isolated `session/elmdb-remediation` branches;
-[the remediation goal](../goals/goal-elmdb-remediation.md) owns final acceptance and
+[the completed remediation goal](../archive/goals/goal-elmdb-remediation.md) owns final acceptance and
 [implementation evidence](../evidence/elmdb-remediation.md) records source checkpoints, exact inputs, measurements,
 fault injection and firing mutations. Local engine gates pass (254 tests, two measurements ignored; 35 Node tests;
-workspace lint, generated protocol, single-LMDB and rebuilt binding checks). Final combined-source platform CI and
-apack strict-chain acceptance remain pending. The table records implemented dispositions, not goal closure.
+workspace lint, generated protocol, single-LMDB and rebuilt binding checks). Final engine
+[platform CI](https://github.com/spankyed/elmdb/actions/runs/40443984290) passes all eight jobs at 9aea4c1.
+Final [apack strict-chain CI](https://github.com/spankyed/apack/actions/runs/40444016830) passes all six strict jobs
+at 20de66e19f, pinning exact engine source 9aea4c1. Final acceptance is recorded on 2026-10-27 in the archived goal;
+the table below records the accepted finding dispositions.
 
-| ID | Implemented disposition | Source and acceptance evidence |
+| ID | Disposition | Source and acceptance evidence |
 |---|---|---|
-| R01 | Fixed: atomic process claim without environment mutation; accepted Windows image stays loaded | `elmdb-node/src/process.rs`; worker, duplicate-image/race and independent-process cases; previous eight-job matrix passes |
-| R02 | Fixed: ordinary read-only opens register readers or refuse; Windows view bounds follow physical file length | `store/mod.rs`; permission/concurrent-reader and mapping-policy regressions; explicit read-only grow refuses; apack CLI fixtures retain writable reader registration. Final Windows-positive matrix remains required |
-| R03 | Fixed: committed state/schema and observer finalization precede NOT_DURABLE | `engine::finish_commit`, schema application and apack committed-error handling; all mutation entry points, fault injection and firing proofs. Reset's atomic markers remain in its mutation; optional physical recycling preserves one logical sequence/notification and required sync |
-| R04 | Fixed: primary constraint auditing is independent of whether a derived index can represent a value | `engine/derive/audit.rs`; field inventory, nested values, uniqueness, cycles, cardinality/endpoints/self-links and rebuild-invariant reports; firing mutations |
-| R05 | Fixed: initial/later panicking Rust listeners are removed without stranding other watches | `engine/watch.rs`; panic, later-write and independent-listener cases |
-| R06 | Fixed: same-database callback close refuses before waiting; teardown tolerates destroyed TLS | `Database::close_as`, callback scope; bounded subprocess and thread-exit regressions |
-| R07 | Fixed: build chunks seek directly from primary sequence cursors | `engine/derive.rs::build_chunk`; exact cursor-visit growth, interruption/resume and write/trash/delete transitions |
-| R08 | Fixed for the measured operating envelope: bounded dump staging, spilled derivation/rebuild, streamed replacement and owned publication | `dump.rs`, `derive/sorted.rs`, `maintenance.rs`, `store/backup.rs`; 100k/200k rows, vectors and large values, restoration, SIGKILL/retry and failure cleanup. Reference 100k rebuild/replace meet 2 GiB RSS / 30 s; 200k replace takes 47.693 s. These are stated shapes, not universal limits |
-| H01 | Confirmed and repaired: schema and snapshot must agree locally and across processes | Shared schema guards plus persisted fingerprint validation in the transaction; SCHEMA_CHANGED close/reopen contract; deterministic migration/inventory/builder child interleavings and pooled/sync/tracked Node cases |
-| H02 | Confirmed and repaired within the explicit publication contract | Owned temporary/reservation lifetime, atomic publication and Unix directory/Windows write-through handling; concurrent/failure/restoration cases. Callers exclusively own a backup destination against other processes; no universal power-cut claim |
-| H03 | Confirmed and repaired with bounded optimistic registration | First query attempts run outside the tracking mutex; validation/registration preserves notification order, with bounded serialized fallback. Alternating token/watch/locked measurements and deterministic firing cases; synchronous callback latency remains caller-owned |
-| H04 | Resolved by independent verification, not by trusting shared derivation | Independent query/model and primary fixtures; shared count mutation leaves check clean but fails the independent count assertion. Shared check/rebuild remains deliberate and is not a standalone correctness oracle |
+| R01 | Fixed: atomic process claim without environment mutation; accepted Windows image stays loaded | `2414390` / `6b839bd`, `elmdb-node/src/process.rs`; worker, duplicate-image/race and independent-process cases; final eight-job matrix passes |
+| R02 | Fixed: ordinary read-only opens register readers or refuse; Windows view bounds follow physical file length | `2414390` / `9aea4c1`, `store/mod.rs`; permission/concurrent-reader and mapping-policy regressions; explicit read-only grow refuses; apack CLI fixtures retain writable reader registration. Final engine matrix passes all eight jobs, Windows Rust/Node included; app strict chain also passes |
+| R03 | Fixed: committed state/schema and observer finalization precede NOT_DURABLE | `af141ad` / `24be744` (apack `5edd51adf7`), `engine::finish_commit`, schema application and apack committed-error handling; all mutation entry points, fault injection and firing proofs. Reset's atomic markers remain in its mutation; optional physical recycling preserves one logical sequence/notification and required sync |
+| R04 | Fixed: primary constraint auditing is independent of whether a derived index can represent a value | `42423db`, `engine/derive/audit.rs`; field inventory, nested values, uniqueness, cycles, cardinality/endpoints/self-links and rebuild-invariant reports; firing mutations |
+| R05 | Fixed: initial/later panicking Rust listeners are removed without stranding other watches | `5146508`, `engine/watch.rs`; panic, later-write and independent-listener cases |
+| R06 | Fixed: same-database callback close refuses before waiting; teardown tolerates destroyed TLS | `5146508` / `27c76ae`, `Database::close_as`, callback scope; bounded subprocess and thread-exit regressions |
+| R07 | Fixed: build chunks seek directly from primary sequence cursors | `42423db`, `engine/derive.rs::build_chunk`; exact cursor-visit growth, interruption/resume and write/trash/delete transitions |
+| R08 | Fixed for the measured operating envelope: bounded dump staging, spilled derivation/rebuild, streamed replacement and owned publication | `97e2675` / `bce836a` / `c32a87a` / `614170c`, `dump.rs`, `derive/sorted.rs`, `maintenance.rs`, `store/backup.rs`; 100k/200k rows, vectors and large values, restoration, SIGKILL/retry and failure cleanup. Reference 100k rebuild/replace meet 2 GiB RSS / 30 s; 200k replace takes 47.693 s. These are stated shapes, not universal limits |
+| H01 | Confirmed and repaired: schema and snapshot must agree locally and across processes | `7a4df3c` / `744ebf8`, shared schema guards plus persisted fingerprint validation in the transaction; SCHEMA_CHANGED close/reopen contract; deterministic migration/inventory/builder child interleavings and pooled/sync/tracked Node cases |
+| H02 | Confirmed and repaired within the explicit publication contract | `c32a87a`, owned temporary/reservation lifetime, atomic publication and Unix directory/Windows write-through handling; concurrent/failure/restoration cases. Callers exclusively own a backup destination against other processes; no universal power-cut claim |
+| H03 | Confirmed and repaired with bounded optimistic registration | `5146508`, first query attempts run outside the tracking mutex; validation/registration preserves notification order, with bounded serialized fallback. Alternating token/watch/locked measurements and deterministic firing cases; synchronous callback latency remains caller-owned |
+| H04 | Resolved by independent verification, not by trusting shared derivation | `42423db`, independent query/model and primary fixtures; shared count mutation leaves check clean but fails the independent count assertion. Shared check/rebuild remains deliberate and is not a standalone correctness oracle |
 
 The principal-engineering direction remains to keep the architecture and consolidate around these contracts. Preserve
 the independent models and fault-injection cases as features evolve. Enforce production-shaped measurements before

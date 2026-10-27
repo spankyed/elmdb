@@ -131,6 +131,9 @@ it must not merge out. The user reviews and separately authorizes landing. Only 
 goal-elmdb-next, whose branches incorporate upstream and whose acceptance owns its future features' compatibility.
 Remediation completion does not depend on those future features or on its branches being landed.
 
-The goal owns current execution and acceptance:
-[goal-elmdb-remediation.md](../goals/goal-elmdb-remediation.md). The original assessment remains
+The goal records implementation and acceptance:
+[completed remediation goal](../archive/goals/goal-elmdb-remediation.md). The original assessment remains
 [elmdb-review-2026-10.md](../reviews/elmdb-review-2026-10.md).
+
+Implementation and final acceptance completed on 2026-10-27; the archived goal records the exact validated pair,
+terminal CI results and Outcome. These preparation observations remain the dated starting point.

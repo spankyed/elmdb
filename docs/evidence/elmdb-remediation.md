@@ -1158,3 +1158,32 @@ EARS/model/watch 199 and backup eight tests pass in 84433 with no fatal/panic/TL
 mapping policy and rejects explicit read-only growth, with no protocol/export change. The existing shipped writable
 Mac benchmark remains applicable to its unchanged writable path. Next checkpoint must be validated on Windows and
 pinned into a fresh final app strict dispatch; the failed/superseded runs are not acceptance.
+
+## Corrected source platform acceptance — 2026-10-26
+
+Mapping repair is committed/pushed as `9aea4c18093dc0ec49e848079d0a46ccd3d3a02a`; app pin checkpoint is
+`20de66e19ff6ff6607b7a753b94c0f6175612348`. Final engine matrix
+[40443984290](https://github.com/spankyed/elmdb/actions/runs/40443984290) is terminal SUCCESS: all eight jobs
+pass, including Windows Rust/Node, both macOS architectures, x64/arm GNU Linux, x64/arm musl and Linux checks.
+The original stale-handle fault is therefore followed by a real positive Windows result, not inferred from host policy
+tests. Exact receipt: `/private/tmp/elmdb-remediation-final-platform-results.json`.
+App strict [40444016830](https://github.com/spankyed/apack/actions/runs/40444016830) runs on the exact 20de66e19f /
+9aea4c1 pair and is still pending; its producer checks completed and outputs are being packaged for the shards.
+This is not yet final integrated acceptance or goal closure. No source changes are planned while acceptance runs.
+
+## Final integrated acceptance — 2026-10-27
+
+App strict [40444016830](https://github.com/spankyed/apack/actions/runs/40444016830) is terminal SUCCESS on
+`20de66e19ff6ff6607b7a753b94c0f6175612348`, pinning engine `9aea4c18093dc0ec49e848079d0a46ccd3d3a02a`.
+All six strict jobs pass: producers, integration-1, integration-2, native-1, native-2 and app-and-rest. This includes
+the integration shard whose earlier permission assumptions failed. Other optional workflow selections are skipped by
+the strict dispatch configuration. The exact receipt is `/private/tmp/elmdb-remediation-final-strict-results.json`.
+Together with terminal eight-job engine matrix 40443984290, this proves final combined-source acceptance.
+
+Both upstream inputs were freshly fetched at closure and remain unchanged/ancestral: engine main 3afdf37, app
+master 5574f84. No merge/rebase was needed. App worktree is clean. Review dispositions now link every finding to
+its implementation and evidence. Reference docs describe the implemented contracts and measured resource limits.
+Outcome is written and the [completed goal](../archive/goals/goal-elmdb-remediation.md) is archived with backlinks
+repaired. Closure changes documentation only; engine source and app pin remain the exact validated pair. Source
+checkouts and live data remain untouched; branches stay unmerged, and no release/tag/publication was performed.
+No expensive local execution remains active. The paused next goal was not resumed.

@@ -1,7 +1,7 @@
 # Research plan: lessons from lmdb-js
 
 Status: planned, 2026-10-26. The initial survey was read-only. This document schedules research and design decisions,
-not production implementation, and does not expand the active remediation goal.
+not production implementation, and does not reopen completed remediation.
 
 ## Purpose and relationship to other work
 
@@ -9,11 +9,11 @@ Identify mechanisms in lmdb-js that could improve elmdb's performance, resource 
 preserving its contracts: Rust owns behavior, a plan/batch crosses once, results own their bytes, index maintenance is
 transactional, and refusals occur at the operation that caused them.
 
-This is a research plan, not a replacement for [goal-elmdb-remediation.md](../goals/goal-elmdb-remediation.md) or
-[goal-elmdb-next.md](../goals/goal-elmdb-next.md). Remediation continues independently; goal-elmdb-next stays paused.
-Neither goal waits for this research. After evidence exists, propose a specific implementation in its owning goal or
-roadmap; adding a required deliverable to a goal needs user authorization. A demonstrated correctness issue should be
-reported promptly with its reproduction and existing requirement, without silently adding a performance project.
+This research plan is separate from the [completed remediation](../archive/goals/goal-elmdb-remediation.md) and
+[goal-elmdb-next.md](../goals/goal-elmdb-next.md), which stays paused pending the user's review/landing/resumption
+decision. Their acceptance does not depend on this research. After evidence exists, propose a specific implementation
+in its owning goal or roadmap; adding a required deliverable to a goal needs user authorization. A demonstrated
+correctness issue should be reported promptly with its reproduction and existing requirement, without silently adding a performance project.
 
 The [engineering review](../reviews/elmdb-review-2026-10.md), [JavaScript boundary](javascript-boundary.md),
 [text-index scaling](text-index-at-scale.md), and [testing strategy](../architecture/testing.md) are related owners.

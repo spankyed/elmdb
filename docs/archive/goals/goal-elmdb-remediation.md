@@ -1,8 +1,10 @@
 # Goal: elmdb safety, consistent commits, and trustworthy recovery
 
-Status: active, 2026-10-26. Implementation, commits and pushes to the two remediation branches are authorized.
-Those branches may be rebased onto upstream main/master or receive merges from upstream main/master. Merging the
-remediation branches into any other branch, including main/master, is prohibited; releases remain unauthorized.
+Status: complete, 2026-10-27. Implemented and validated on the two remediation branches, committed and pushed for
+review in elmdb #1 and apack #283. The branches remain unmerged; releases remain unauthorized. goal-elmdb-next stays
+paused until the user separately authorizes landing and resumption.
+
+**Original execution prompt (historical):**
 
 ```text
 # Goal: elmdb safety, consistent commits, and trustworthy recovery
@@ -25,7 +27,7 @@ No finding is closed by an unrelated passing test or by moving its requirement t
 
 ## Scope
 
-Resolve R01–R08 from the [engineering review](../reviews/elmdb-review-2026-10.md), investigate H01–H04 to a recorded
+Resolve R01–R08 from the [engineering review](../../reviews/elmdb-review-2026-10.md), investigate H01–H04 to a recorded
 conclusion, and preserve the behavior already implemented on upstream main/master when integrating. Future
 planner, field-type, compression and search changes belong to goal-elmdb-next.md after remediation is landed.
 The review remains the dated assessment; this goal owns implementation order and acceptance.
@@ -40,62 +42,22 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 
 ## Current handoff
 
-- Use only the two `session/elmdb-remediation` worktrees: elmdb
-  `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation`; apack
-  `/Users/spankyed/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-remediation`.
-  Set ELMDB_DIR to isolated elmdb for app commands. Source checkouts, dependencies and build outputs remain isolated;
-  the 11 GB target seed was APFS-cloned, never linked. No app or live database was opened.
-- Commit/push/PR/required CI are authorized on these branches. No outward merges, tags, publication or releases.
-  Draft PRs: [elmdb #1](https://github.com/spankyed/elmdb/pull/1), [apack #283](https://github.com/spankyed/apack/pull/283).
-  Keep goal-elmdb-next paused before Phase 3; neither future features nor landing remediation is a closure prerequisite.
-- All R01–R08 repairs and H01–H04 conclusions are implemented locally. Source checkpoints and firing proofs are in
-  [implementation evidence](../evidence/elmdb-remediation.md). Latest engine checkpoint:
-  `24be744dc9a573d6609b97de53dfa6d1d3836b8f` (reset page recycling), after `744ebf8` (cross-process schema consistency).
-  Both are pushed, followed by reference/evidence/review checkpoint `5169f728962b955d77b823faa2d7faf17a35682a`.
-  App pin is exactly 5169f72.
-- Required final host engine gates pass on 24be744: workspace fmt/clippy/tests, generated protocol/single-LMDB,
-  rebuilt binding/types and 35 Node tests; engine 253 passed, two measurement tests ignored. Logs
-  `/private/tmp/elmdb-remediation-phase6-reset-final-*`, terminal 65838. New reset sequence/notification, failure fallback,
-  snapshot and page-reuse tests pass; omission/fallback/sequence mutations all fire. Prior supported matrix
-  [40431420372](https://github.com/spankyed/elmdb/actions/runs/40431420372) passed all eight jobs on recovery 1e8245b;
-  final combined-source matrix including H01/reset remains required. Windows VM access failed earlier; no auth,
-  resource, network or security settings changed. Windows process lifetime is covered by prior passing platform CI.
-- The Phase 6 write regression is repaired, not deferred. R03's atomic reset removed a physical generation that
-  allowed LMDB to recycle the reset's freed pages; repeated load doubled the file and left expensive free-page state.
-  Optional checkpoint before required sync preserves logical sequence/notifications and normal durability fallback.
-  Actual complete shipped EARS benchmark (24 cases, terminal 93318) gives medians hydrate 1238.394 ms, hub 772.706 ms,
-  creates 102.744 ms, short codes 59.086 ms, within upstream's reference range. Full samples/log:
-  `/private/tmp/elmdb-remediation-phase6-reset-ears-bench.{json,log}`. Counterfactuals/build-cache exclusion are recorded;
-  do not remove schema checks or add a speculative cache. Measured Mac shape, syncs on, otherwise uncontrolled host.
-- R08 reference 100k one-KiB rows/199,997 relations rebuild/replace meet 2 GiB RSS / 30 s (14.041/22.730 s,
-  879,200/992,400 KiB). At 200k rows replacement takes 47.693 s; private load 79.64 s / 1,932,001,280 bytes RSS.
-  Vector/large-value, golden restoration and actual SIGKILL/retry proofs pass. Staging ownership, directory sync,
-  cross-process destination ownership and coordinated abandoned-stage cleanup are documented. Shape and filesystem
-  limits are explicit; no universal memory/latency/power-cut promise. Review dispositions are appended, with final gates pending.
-- Fresh upstream revalidation after the repair: elmdb main `3afdf3700db041d08bcec9f0c7e13d66275ebe1a`, apack master
-  `5574f84ceaee30392e3430b8a4981f0ba55dd9d9`; both ancestors/merge bases, zero incoming commits. No merge/rebase needed.
-  Tested features are landed v1/live queries; future planner/type/compression/search work stays with the paused next goal.
-- App source is committed/pushed as `9ae643be018c9492c5e78410cbb2ef27d069f20a`, pinning 5169f72, adding
-  SCHEMA_CHANGED refusal/no-notification coverage and documenting reopening.
-  Current rebuilt repair passes all 199 EARS/model/watch and eight backup tests (terminal 41968), no fatal/TLS/panic
-  diagnostics. Full root typecheck already passed on identical app source. Original strict 40419289605 failed old
-  permission fixtures; corrected 547279e4d6 passes all 71 CLI DB cases. New final strict chain is still required.
-- Final elmdb matrix [40442259745](https://github.com/spankyed/elmdb/actions/runs/40442259745) is terminal:
-  seven jobs pass, Windows Rust crashes with STATUS_ACCESS_VIOLATION during stale-handle probes. Diagnosed read-only
-  Windows view length versus writable-style logical capacity; working source now caps open/adoption/replacement-source
-  bounds to physical file length and refuses read-only grow. Writer/read-only probes are separately contained with
-  15-second writer / 30-second outer deadlines. Focused schema/policy tests pass; cap/grow mutations fire.
-- App strict [40442311920](https://github.com/spankyed/apack/actions/runs/40442311920) was deliberately cancelled
-  as superseded by the required new elmdb pin (producer passed; other shards building old input). It is not accepted
-  as green. Existing PR descriptions still link the first final runs and need final results after the correction.
-- Corrected-source host gate chain **91294** is terminal success: 254 engine tests/two ignored measurements,
-  workspace fmt/clippy/tests, generated/single-LMDB and rebuilt binding/types/35 Node tests. Logs
-  `/private/tmp/elmdb-remediation-phase6-map-final-*`. EARS/model/watch 199 and backup eight pass in terminal 84433
-  (`-phase6-map-{ears,backup}.log`), with no fatal/panic/TLS diagnostics. No live expensive local owner.
-  Windows-specific positive validation is still required; do not infer it from host tests.
-- Next: commit/push the reviewed mapping repair, pin it in apack, and run final platform and strict CI on those exact
-  inputs. Do not use CI as a debugging loop. Re-evaluate upstream if it advances. After green required gates, update
-  dispositions/acceptance, write Outcome, archive the goal and repair links. Remediation remains active and unmerged.
+Acceptance is complete. The isolated worktrees remain available for review:
+
+| Input | Validated revision / location |
+|---|---|
+| elmdb source | `9aea4c18093dc0ec49e848079d0a46ccd3d3a02a`; `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation` |
+| apack | `20de66e19ff6ff6607b7a753b94c0f6175612348`, pinning that exact elmdb revision; `/Users/spankyed/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-remediation` |
+| Current upstream | elmdb main `3afdf3700db041d08bcec9f0c7e13d66275ebe1a`; apack master `5574f84ceaee30392e3430b8a4981f0ba55dd9d9`; both ancestral, freshly revalidated at acceptance |
+| Engine CI | [40443984290](https://github.com/spankyed/elmdb/actions/runs/40443984290), all eight jobs passed |
+| App strict CI | [40444016830](https://github.com/spankyed/apack/actions/runs/40444016830), all six strict jobs passed |
+| Review | [elmdb #1](https://github.com/spankyed/elmdb/pull/1), [apack #283](https://github.com/spankyed/apack/pull/283) |
+
+The closure commit changes documentation only; apack retains the exact validated source pin. Source checkouts and
+live data were untouched. Dependencies and build outputs stayed isolated, with the original 11 GB target seed
+APFS-cloned rather than linked. No expensive local execution remains active. The tested feature set is landed v1/live
+queries; future planner, type, compression and search work remains with the paused next goal. Detailed dated work,
+failures, corrections, operating bounds and receipts are in [implementation evidence](../../evidence/elmdb-remediation.md).
 
 ## Decisions
 
@@ -205,16 +167,44 @@ A deferred required repair needs explicit user authorization; moving it to a fol
 
 ## Acceptance
 
-| Requirement | Implementation / source | Evidence | Remaining work |
+| Requirement | Implementation / source | Acceptance evidence | Remaining work |
 |---|---|---|---|
-| Isolated source, build caches and binding resolution | Done locally; isolated binding/EARS builds | Preparation and implementation evidence | Final combined-source baseline in Phase 6 |
-| R01/R02 opening and process safety | Implemented locally; checkpoint `2414390` | Implementation evidence; 33 Node tests, Rust regressions, firing cases | Supported-platform matrix and final integration |
-| R03 committed outcomes and AgentBuddy notifications | Implemented locally; `af141ad` / `5edd51adf7` | Implementation evidence; fault injection, mutation tests, 198 EARS / eight backup tests | Remote checks and final integration |
-| R05/R06 lifecycle and H03 contention | Implemented locally; Phase 3 checkpoint | Implementation evidence; bounded regressions, mutation tests, alternating measurements | Final checks, supported-platform matrix and integration |
-| R04 auditing and R07 bounded construction | Implemented locally; Phase 4 checkpoint | Primary fixtures, firing mutations, cursor counts and restart tests | Supported-platform checks and final integration |
-| R08 recovery envelope and H01/H02/H04 disposition | Implemented locally; 97e2675 / bce836a / 744ebf8 and reference contracts | Measured reference/larger/vector/large-value profiles, SIGKILL/retry/restoration, schema races and firing mutations | Final integrated gates and finding dispositions |
-| Current-upstream integration and required gates | Integrated locally; current upstream is ancestral | Final local engine/EARS/backup/type gates and complete shipped benchmark | Final combined platform matrix and apack strict CI; no future-feature dependency |
-| Current reference docs, review dispositions, Outcome and closure | Reference contracts/dispositions drafted | Implementation evidence and dated review addition | Final gates, accepted dispositions, Outcome and archival |
+| Isolated source, build caches and binding resolution | Completed in the two named worktrees; exact native provenance recorded | Preparation/implementation evidence; final source pin and strict receipt | None |
+| R01/R02 opening and process safety | `2414390`, `6b839bd`, `9aea4c1` | Ownership/permission/growth regressions and firing mutations; final eight-job matrix including Windows Rust/Node | None |
+| R03 committed outcomes and apack notifications | `af141ad`, `24be744`; app `5edd51adf7` / `9ae643be01` | Every mutation entry point, fault injection and firing proofs; 199 EARS/eight backup cases, final strict chain | None |
+| R05/R06 lifecycle and H03 contention | `5146508`, `27c76ae` | Bounded panic/close/TLS regressions, registration mutations, alternating contention measurements; final platform/strict gates | None |
+| R04 auditing and R07 bounded construction | `42423db` | Primary inventories, independent model/mutation evidence, cursor counts, interruption/resume/transitions; final platform/strict gates | None |
+| R08 recovery envelope and H01/H02/H04 disposition | `c32a87a`, `7a4df3c`, `97e2675`, `bce836a`, `744ebf8`, `9aea4c1`; current reference contracts | Reference/larger/vector/large-value measurements, golden restoration, SIGKILL/retry, publication faults and schema races; final platform/strict gates | None within the stated operating envelope; measured limits remain documented |
+| Current-upstream integration and required gates | Exact inputs above; upstream freshly revalidated as ancestral | Host fmt/clippy/workspace/generated/single-LMDB/binding gates, full shipped benchmark, eight-job engine matrix and six-job app strict chain | None; future features are outside this goal |
+| Current reference docs, review dispositions, Outcome and closure | Reference contracts reconciled; dated dispositions appended; Outcome below; goal archived and backlinks repaired | Documentation-only closure with source equivalence and link validation | None |
+
+## Outcome
+
+Completed 2026-10-27. R01–R08 are repaired within their specified contracts and measured operating envelope;
+H01–H04 have evidence-backed conclusions in the [review dispositions](../../reviews/elmdb-review-2026-10.md).
+The architecture is retained: Rust owns behavior and generated contracts, primary data reconstructs derived state,
+and writes preserve atomic data/index changes. Opening, committed-error, lifecycle, audit, chunking, snapshot and
+recovery guarantees now have focused regressions and demonstrated firing cases.
+
+The integrated inputs are elmdb `9aea4c1` and apack `20de66e19f`, with the exact full hashes above. All eight engine
+CI jobs and all six app strict-chain jobs pass. Host validation includes 254 engine tests/two ignored measurement
+cases, 35 Node tests, workspace lint/generated/dependency gates, 199 EARS/model/watch tests, eight backup tests,
+71 corrected CLI database cases and full root typecheck. The strict chain additionally validates the complete required
+producer/integration/native/app checks on disposable macOS runners.
+
+Final shipped EARS measurements complete all 24 cases on the recorded app-sized graph. Create/short-code medians
+are 102.744/59.086 ms; the reset-related write regression was diagnosed and repaired without weakening schema,
+logical sequence or observer guarantees. The final matrix also exposed and then verified the Windows read-only
+mapping repair. Earlier failed/superseded runs remain in the evidence; they are not counted as passing acceptance.
+
+The 100k-row reference rebuild/replacement meet the selected 2 GiB RSS / 30 s budget. Larger 200k-row replacement
+takes 47.693 s, requiring a longer maintenance window; vector/large-value profiles and restoration/interruption
+checks pass. These are explicit shapes, not universal bounds. Long snapshots, remaining graph/inventory state,
+compound-index expansion, scratch/destination disk planning and filesystem publication limits remain documented
+operating contracts. Use representative owned copies to measure a materially different workload.
+
+Both branches and PRs are ready for user review. No merge or release was performed. goal-elmdb-next remains paused;
+its future features and the separate lmdb-js research plan retain their own scope and acceptance.
 
 ## Constraints
 
