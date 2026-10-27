@@ -3,6 +3,7 @@
 //! marker); writes keep every index whether built or not, so building one fills in what predates it.
 
 mod audit;
+mod sorted;
 #[cfg(test)]
 use audit::{PrimaryGraph, audit_cycles};
 
@@ -107,36 +108,48 @@ pub fn is_built(r: &impl Read, entity_type: &str, index: &str) -> Result<bool> {
 /// and every relation's edges
 pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
     let mut out = BTreeMap::new();
+    derive_into(r, |key, value| {
+        out.insert(key, value);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>) -> Result<()> {
     let all = entities_of(r)?;
     let mut live: BTreeMap<&str, i64> = BTreeMap::new();
     let mut by_type: BTreeMap<&str, Vec<&Entity>> = BTreeMap::new();
     for e in &all {
         let t = ids::type_of(&e.id);
-        out.insert(keys::of_type(e.trashed, t, e.seq), values::encode(&e.id.as_str().into()));
+        emit(keys::of_type(e.trashed, t, e.seq), values::encode(&e.id.as_str().into()))?;
         if !e.trashed {
             *live.entry(t).or_default() += 1;
         }
         by_type.entry(t).or_default().push(e);
     }
     for (t, n) in live {
-        out.insert(keys::count(t), values::encode(&n.into()));
+        emit(keys::count(t), values::encode(&n.into()))?;
     }
     for (t, of) in &by_type {
         for index in value_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                out.extend(index_entries(r, t, &index, of)?);
+                for (key, value) in index_entries(r, t, &index, of)? {
+                    emit(key, value)?;
+                }
             }
         }
         let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
         for index in text::text_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                out.extend(text::entries(r, t, &index, &places)?);
+                text::entries_into(r, t, &index, &places, &mut emit)?;
             }
         }
         let ids: Vec<String> = of.iter().map(|e| e.id.clone()).collect();
         for index in vector::vector_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                out.extend(vector::entries(r, t, &index, &ids)?);
+                for (key, value) in vector::entries(r, t, &index, &ids)? {
+                    emit(key, value)?;
+                }
             }
         }
     }
@@ -148,11 +161,11 @@ pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
         let s: relations::Stored = rmp_serde::from_slice(&bytes)
             .map_err(|e| Error::new(ErrorCode::Corrupted, format!("Relation {relation}'s row doesn't read: {e}")))?;
         let edge = |far: &str| values::encode(&Value::Array(vec![relation.as_str().into(), far.into()]));
-        out.insert(keys::edge(true, &s.source, &s.kind, s.seq), edge(&s.target));
-        out.insert(keys::edge(false, &s.target, &s.kind, s.seq), edge(&s.source));
-        out.insert(keys::between(&s.source, &s.kind, &s.target, s.seq), values::encode(&relation.as_str().into()));
+        emit(keys::edge(true, &s.source, &s.kind, s.seq), edge(&s.target))?;
+        emit(keys::edge(false, &s.target, &s.kind, s.seq), edge(&s.source))?;
+        emit(keys::between(&s.source, &s.kind, &s.target, s.seq), values::encode(&relation.as_str().into()))?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
@@ -194,25 +207,16 @@ pub fn index_names(schema: &Schema, entity_type: &str) -> Vec<String> {
     names
 }
 
-/// What is stored under the compared prefixes, an unbuilt index's entries left out
-fn stored(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    for prefix in COMPARED {
-        for (key, value) in r.scan(&prefix.key().to_vec())? {
-            if PER_INDEX.contains(&prefix) {
-                let parts = decode_key(&key)?;
-                let built = match (parts.get(1), parts.get(2)) {
-                    (Some(Part::String(t)), Some(Part::String(i))) => is_built(r, t, i)?,
-                    _ => false,
-                };
-                if !built {
-                    continue;
-                }
-            }
-            out.insert(key, value);
-        }
+/// Whether a stored derived key participates in comparison; unbuilt index contents are intentionally ignored.
+fn compared(r: &impl Read, prefix: Prefix, key: &[u8]) -> Result<bool> {
+    if !PER_INDEX.contains(&prefix) {
+        return Ok(true);
     }
-    Ok(out)
+    let parts = decode_key(key)?;
+    match (parts.get(1), parts.get(2)) {
+        (Some(Part::String(t)), Some(Part::String(i))) => is_built(r, t, i),
+        _ => Ok(false),
+    }
 }
 
 /// One derived key that disagrees with primary data
@@ -270,19 +274,52 @@ fn key_text(key: &[u8]) -> String {
 
 /// Compares every derived key with what primary data derives, and every row with the schema's rules
 pub fn check(r: &impl Read) -> Result<CheckReport> {
-    let expected = derive(r)?;
-    let actual = stored(r)?;
-    let mut differences = Vec::new();
-    for (key, value) in &expected {
-        match actual.get(key) {
-            None => differences.push(Difference { key: key_text(key), kind: "missing".into() }),
-            Some(v) if v != value => differences.push(Difference { key: key_text(key), kind: "differs".into() }),
-            Some(_) => {}
+    let mut scratch = sorted::Scratch::new()?;
+    derive_into(r, |key, value| scratch.push(key, value))?;
+    let mut expected = scratch.finish()?;
+    let mut next = expected.next()?;
+    let mut changed = Vec::new();
+    let mut extra = Vec::new();
+    let mut prefixes = COMPARED;
+    prefixes.sort_by_key(|prefix| prefix.key().to_vec());
+    for prefix in prefixes {
+        let mut failed = None;
+        r.visit(&prefix.key().to_vec(), |key, value| {
+            let step = (|| -> Result<()> {
+                if !compared(r, prefix, key)? {
+                    return Ok(());
+                }
+                while next.as_ref().is_some_and(|(wanted, _)| wanted.as_slice() < key) {
+                    let (missing, _) = next.take().expect("next exists");
+                    changed.push(Difference { key: key_text(&missing), kind: "missing".into() });
+                    next = expected.next()?;
+                }
+                if next.as_ref().is_some_and(|(wanted, _)| wanted.as_slice() == key) {
+                    let (_, wanted) = next.take().expect("next exists");
+                    if wanted != value {
+                        changed.push(Difference { key: key_text(key), kind: "differs".into() });
+                    }
+                    next = expected.next()?;
+                } else {
+                    extra.push(Difference { key: key_text(key), kind: "extra".into() });
+                }
+                Ok(())
+            })();
+            if let Err(error) = step {
+                failed = Some(error);
+                return false;
+            }
+            true
+        })?;
+        if let Some(error) = failed {
+            return Err(error);
         }
     }
-    for key in actual.keys().filter(|k| !expected.contains_key(*k)) {
-        differences.push(Difference { key: key_text(key), kind: "extra".into() });
+    while let Some((key, _)) = next {
+        changed.push(Difference { key: key_text(&key), kind: "missing".into() });
+        next = expected.next()?;
     }
+    let differences = changed.into_iter().chain(extra).collect();
     let mut violations = audit::violations(r)?;
     for message in vector::check_items(r, r.schema())? {
         violations.push(Violation { subject: "vector graph".into(), message });

@@ -406,8 +406,22 @@ pub fn entries(
     index: &TextIndex,
     of: &[(u64, String)],
 ) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let name = index.name.as_str();
     let mut out = BTreeMap::new();
+    entries_into(r, entity_type, index, of, |key, value| {
+        out.insert(key, value);
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+pub fn entries_into(
+    r: &impl Read,
+    entity_type: &str,
+    index: &TextIndex,
+    of: &[(u64, String)],
+    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    let name = index.name.as_str();
     let mut postings: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
     let mut words: BTreeMap<String, RoaringTreemap> = BTreeMap::new();
     let mut stats = Stats { documents: 0, lengths: vec![0; index.fields.len()] };
@@ -418,7 +432,7 @@ pub fn entries(
         }
         for (term, places) in &doc.terms {
             postings.entry(term.clone()).or_default().insert(*seq);
-            out.insert(keys::text_positions(entity_type, name, term, *seq), encode_places(places));
+            emit(keys::text_positions(entity_type, name, term, *seq), encode_places(places))?;
         }
         for word in &doc.words {
             words.entry(word.clone()).or_default().insert(*seq);
@@ -427,18 +441,18 @@ pub fn entries(
         for (total, l) in stats.lengths.iter_mut().zip(&doc.lengths) {
             *total += u64::from(*l);
         }
-        out.insert(keys::text_document(entity_type, name, *seq), encode_document(id, &doc));
+        emit(keys::text_document(entity_type, name, *seq), encode_document(id, &doc))?;
     }
     for (term, bitmap) in &postings {
-        out.insert(keys::text_term(entity_type, name, term), encode_postings(bitmap));
+        emit(keys::text_term(entity_type, name, term), encode_postings(bitmap))?;
     }
     for (word, bitmap) in &words {
-        out.insert(keys::text_word(entity_type, name, word), encode_postings(bitmap));
+        emit(keys::text_word(entity_type, name, word), encode_postings(bitmap))?;
     }
     if stats.documents > 0 {
-        out.insert(keys::text_stats(entity_type, name), encode_stats(&stats));
+        emit(keys::text_stats(entity_type, name), encode_stats(&stats))?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Deletes every key of a text index of a type
