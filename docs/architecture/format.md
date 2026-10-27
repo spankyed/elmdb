@@ -78,9 +78,15 @@ and a load by the build after it. That is how our databases are converted once, 
 - The loads, in the order a load applies them: each entity in the order it was made, with every field it holds, the
   engine's own (`shortCode`, `trashedAt`, ...) among them; each relation in the order it was made, under its id; each
   embedding (`p/q`); each sequence (`p/s`), last, so a numbering goes on where it was.
-- A load opens the new database with the dump's schema, applies the loads unchecked in one unit and rebuilds everything
-  under `d/`, so what the data holds against the schema's rules is `check()`'s to report, as after any unchecked load.
-  A dump, or a load that fails, removes what it wrote.
+- A load applies unchecked batches in a private database in the destination directory, using at most 1,000 loads
+  or 8 MiB of encoded frames per batch plus the largest frame. Decoded values and rebuild state have separate
+  workload-dependent costs. It validates the footer/count and refuses trailing bytes, rebuilds derived data, then
+  closes and publishes the complete database without replacing any existing file. The destination is reserved
+  against this process's opens and publishers; coordinate its ownership across processes. Before publication,
+  failure removes only private staging files, leaving unrelated destination files intact and permitting retry.
+  A publication-sync error reports that the complete database is visible; never delete or overwrite it blindly.
+  Unix syncs affected directories; Windows requests write-through publication. A dump that fails removes its file.
+  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load.
 - A load of a dump, dumped again, is byte-identical to it.
 
 The dump version is the file's, not the stored format's: it moves only when `Load` does.

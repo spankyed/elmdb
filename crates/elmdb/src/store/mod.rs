@@ -7,6 +7,9 @@
 //! never waits on a growth that waits on the unit.
 
 mod backup;
+#[cfg(unix)]
+pub(crate) use backup::directories_to_sync as publication_directories;
+pub(crate) use backup::publish_new;
 pub mod sync;
 
 use std::collections::HashSet;
@@ -128,7 +131,18 @@ fn open_paths() -> &'static Mutex<HashSet<PathBuf>> {
 }
 
 /// Releases a path's registration unless the open that took it succeeded
-struct Registration(Option<PathBuf>);
+pub(crate) struct Registration(Option<PathBuf>);
+
+/// Reserve an existing canonical destination against opens and publishers in this process.
+pub(crate) fn reserve_destination(target: &Path) -> Result<Registration> {
+    if !open_paths().lock().expect("the open-paths lock is never poisoned").insert(target.to_owned()) {
+        return Err(Error::new(
+            ErrorCode::AlreadyOpen,
+            format!("The database at {} is open or being published; use another directory", target.display()),
+        ));
+    }
+    Ok(Registration(Some(target.to_owned())))
+}
 
 impl Drop for Registration {
     fn drop(&mut self) {

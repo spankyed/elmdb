@@ -19,6 +19,19 @@ use crate::schema::Schema;
 const MAGIC: &[u8; 8] = b"ELMDBDMP";
 const VERSION: u32 = 1;
 const END: u32 = u32::MAX;
+const LOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const LOAD_BATCH_ROWS: usize = 1000;
+
+#[cfg(test)]
+type PublishHook = Box<dyn FnOnce(&Path)>;
+#[cfg(test)]
+type SyncHook = Box<dyn FnOnce() -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static BEFORE_LOAD_PUBLISH: std::cell::RefCell<Option<PublishHook>> = const { std::cell::RefCell::new(None) };
+    static AFTER_LOAD_PUBLISH: std::cell::RefCell<Option<SyncHook>> = const { std::cell::RefCell::new(None) };
+}
 
 /// What a dump holds
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -113,31 +126,90 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
         Some(Schema::from_json(&json)?)
     };
     let mut report = DumpReport { schema: schema.is_some(), ..Default::default() };
+    // Staging stays on the destination volume. Only the completed data file is published, without replacement.
+    let target = std::path::absolute(target)?;
+    #[cfg(unix)]
+    let sync_dirs = crate::store::publication_directories(&target);
+    std::fs::create_dir_all(&target)?;
+    let target = target.canonicalize()?;
+    let _reservation = crate::store::reserve_destination(&target)?;
+    if target.join("data.mdb").exists() {
+        return Err(Error::new(
+            ErrorCode::IdInUse,
+            "The load destination already holds a database; choose a new directory",
+        ));
+    }
+    let stage = tempfile::Builder::new().prefix(".elmdb-load-").tempdir_in(&target)?;
+    let db = Database::open(stage.path(), OpenOptions { schema, ..Default::default() })?;
     let mut loads = Vec::new();
+    let mut batch_bytes = 0usize;
+    let mut seen = 0u64;
     loop {
         let n = read_len(&mut file)?;
         if n == END {
             break;
         }
         let bytes = read_bytes(&mut file, n)?;
-        let load: Load = rmp_serde::from_slice(&bytes)
-            .map_err(|e| invalid(format!("load {} doesn't decode: {e}", loads.len() + 1)))?;
+        let load: Load =
+            rmp_serde::from_slice(&bytes).map_err(|e| invalid(format!("load {} doesn't decode: {e}", seen + 1)))?;
         report.count(&load);
         loads.push(load);
+        seen += 1;
+        batch_bytes = batch_bytes.saturating_add(n as usize);
+        if batch_bytes >= LOAD_BATCH_BYTES || loads.len() >= LOAD_BATCH_ROWS {
+            db.bulk_load(&loads)?;
+            loads.clear();
+            batch_bytes = 0;
+        }
     }
     let mut count = [0u8; 8];
     file.read_exact(&mut count).map_err(|_| invalid("it ends before its load count"))?;
-    if u64::from_le_bytes(count) != loads.len() as u64 {
-        return Err(invalid(format!("it records {} loads and holds {}", u64::from_le_bytes(count), loads.len())));
+    if u64::from_le_bytes(count) != seen {
+        return Err(invalid(format!("it records {} loads and holds {seen}", u64::from_le_bytes(count))));
     }
-    // A failed load removes what it wrote, so it can be run again
-    let written = Written(Some(target.to_owned()));
-    let db = Database::open(target, OpenOptions { schema, ..Default::default() })?;
-    let loaded = db.bulk_load(&loads).and_then(|_| db.rebuild(None));
-    let closed = db.close();
-    loaded?;
-    closed?;
-    written.keep();
+    if file.read(&mut [0u8; 1])? != 0 {
+        return Err(invalid("it holds bytes after its load count"));
+    }
+    if !loads.is_empty() {
+        db.bulk_load(&loads)?;
+    }
+    drop(loads);
+    db.rebuild(None)?;
+    db.close()?;
+    #[cfg(test)]
+    BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| {
+        if let Some(hook) = hook.take() {
+            hook(&target);
+        }
+    });
+    // Publication is atomic and fails if any file already occupies the destination. The closed staging file is
+    // on the same volume; no failed operation ever removes a destination file owned by another invocation.
+    crate::store::publish_new(&stage.path().join("data.mdb"), &target.join("data.mdb")).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            Error::new(ErrorCode::IdInUse, "The load destination now holds a database; choose a new directory")
+        } else {
+            error.into()
+        }
+    })?;
+    let published = (|| -> Result<()> {
+        #[cfg(test)]
+        AFTER_LOAD_PUBLISH.with_borrow_mut(|hook| hook.take().map_or(Ok(()), |hook| hook()))?;
+        std::fs::OpenOptions::new().write(true).open(target.join("data.mdb"))?.sync_all()?;
+        #[cfg(unix)]
+        for dir in sync_dirs {
+            std::fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    published.map_err(|error| {
+        Error::new(
+            ErrorCode::Io,
+            format!(
+                "The complete loaded database at {} is visible, but publication syncing failed: {error}",
+                target.display()
+            ),
+        )
+    })?;
     Ok(report)
 }
 
@@ -187,5 +259,110 @@ impl Drop for Written {
                 let _ = std::fs::remove_file(target);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(root: &Path) -> std::path::PathBuf {
+        let db = Database::open(root.join("source"), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        let loads: Vec<_> = (0..1100)
+            .map(|i| Load::Entity {
+                id: format!("Note-{i}"),
+                fields: [("body".into(), rmpv::Value::from("x".repeat(9000)))].into(),
+                trashed: false,
+            })
+            .collect();
+        db.bulk_load(&loads).unwrap();
+        let path = root.join("primary.dump");
+        dump(&db, &path).unwrap();
+        db.close().unwrap();
+        path
+    }
+
+    #[test]
+    fn staged_load_preserves_foreign_files_and_refuses_a_publication_race() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path());
+        let target = root.path().join("destination");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("notes.txt"), b"unrelated").unwrap();
+        BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(|target| {
+                assert!(!target.join("data.mdb").exists(), "staged batches are never public");
+                assert!(matches!(
+                    Database::open(target, OpenOptions::default()),
+                    Err(Error { code: ErrorCode::AlreadyOpen, .. })
+                ));
+                std::fs::write(target.join("data.mdb"), b"foreign publisher").unwrap();
+            }))
+        });
+        assert_eq!(load(&path, &target).unwrap_err().code, ErrorCode::IdInUse);
+        assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), b"foreign publisher");
+        assert_eq!(std::fs::read(target.join("notes.txt")).unwrap(), b"unrelated");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 2, "private staging cleaned up");
+        std::fs::remove_file(target.join("data.mdb")).unwrap();
+        let report = load(&path, &target).unwrap();
+        assert_eq!(report.entities, 1100);
+        let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        let again = root.path().join("again.dump");
+        dump(&db, &again).unwrap();
+        assert_eq!(std::fs::read(again).unwrap(), std::fs::read(path).unwrap());
+        assert!(db.check().unwrap().is_clean());
+    }
+
+    #[test]
+    fn unwinding_before_publication_cleans_staging_and_postpublication_failure_keeps_the_database() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path());
+        let target = root.path().join("destination");
+        BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| *hook = Some(Box::new(|_| panic!("cancel import"))));
+        assert!(std::panic::catch_unwind(|| load(&path, &target)).is_err());
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
+        AFTER_LOAD_PUBLISH
+            .with_borrow_mut(|hook| *hook = Some(Box::new(|| Err(Error::new(ErrorCode::Io, "injected sync failure")))));
+        let error = load(&path, &target).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Io);
+        assert!(error.message.contains("complete loaded database") && error.message.contains("visible"));
+        let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        assert!(db.check().unwrap().is_clean());
+        let mut entities = 0;
+        db.primary_loads(|load| {
+            if matches!(load, Load::Entity { .. }) {
+                entities += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(entities, 1100);
+        assert_eq!(load(&path, &target).unwrap_err().code, ErrorCode::IdInUse);
+    }
+
+    #[test]
+    fn late_invalid_input_cleans_staged_batches_and_can_be_retried() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path());
+        let bytes = std::fs::read(&path).unwrap();
+        let target = root.path().join("destination");
+        let bad = root.path().join("bad.dump");
+        for kind in ["count", "truncated", "trailing"] {
+            let mut broken = bytes.clone();
+            match kind {
+                "count" => {
+                    let at = broken.len() - 8;
+                    broken[at..].copy_from_slice(&0u64.to_le_bytes());
+                }
+                "truncated" => {
+                    broken.truncate(broken.len() - 1);
+                }
+                _ => broken.push(0),
+            }
+            std::fs::write(&bad, broken).unwrap();
+            assert_eq!(load(&bad, &target).unwrap_err().code, ErrorCode::WrongFormat, "{kind}");
+            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "{kind}: staging cleaned up");
+        }
+        assert_eq!(load(&path, &target).unwrap().entities, 1100);
     }
 }

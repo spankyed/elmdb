@@ -83,7 +83,7 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
 /// Sync the destination and each newly created ancestor's parent, deepest first. Existing ancestors above the first
 /// existing directory have no new entry to persist. No temporary filename belongs to another invocation.
 #[cfg(unix)]
-pub(super) fn directories_to_sync(target: &Path) -> Vec<PathBuf> {
+pub(crate) fn directories_to_sync(target: &Path) -> Vec<PathBuf> {
     let mut dirs = vec![target.to_owned()];
     let mut current = target;
     while !current.exists() {
@@ -101,6 +101,11 @@ fn publish(source: &Path, target: &Path) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn publish(source: &Path, target: &Path) -> std::io::Result<()> {
+    move_file(source, target, true)
+}
+
+#[cfg(windows)]
+fn move_file(source: &Path, target: &Path, replace: bool) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -112,6 +117,20 @@ fn publish(source: &Path, target: &Path) -> std::io::Result<()> {
     const WRITE_THROUGH: u32 = 8;
     // SAFETY: both pointers refer to live, NUL-terminated UTF-16 path buffers. The temporary file is closed and in
     // the destination directory, so the replacement stays on one volume; no delayed-reboot or cross-volume flags.
-    let success = unsafe { MoveFileExW(source.as_ptr(), target.as_ptr(), REPLACE_EXISTING | WRITE_THROUGH) };
+    let success = unsafe {
+        MoveFileExW(source.as_ptr(), target.as_ptr(), (if replace { REPLACE_EXISTING } else { 0 }) | WRITE_THROUGH)
+    };
     if success == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
+}
+
+/// Install a complete private file without replacing any existing destination.
+pub(crate) fn publish_new(source: &Path, target: &Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        move_file(source, target, false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::hard_link(source, target)
+    }
 }
