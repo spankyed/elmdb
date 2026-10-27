@@ -1,6 +1,6 @@
 // Synthetic recovery workloads only. Run each operation in a fresh process; resourceUsage includes native RSS.
 // node scripts/measure-recovery.mjs seed /private/tmp/elmdb-recovery-run 10000 1024
-// node scripts/measure-recovery.mjs check|rebuild|replace|backup /private/tmp/elmdb-recovery-run
+// node scripts/measure-recovery.mjs check|rebuild|replace|replace-populated|backup /private/tmp/elmdb-recovery-run
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +11,8 @@ import { Packr } from 'msgpackr';
 const { Database } = createRequire(import.meta.url)('../crates/elmdb-node/index.js');
 const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
 const [mode, directory, rowsArg = '10000', bytesArg = '1024', profile = 'text'] = process.argv.slice(2);
-const modes = ['seed', 'check', 'rebuild', 'replace', 'backup'];
-if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|replace|backup <owned-workload-dir> [rows] [body-bytes] [text|vector]');
+const modes = ['seed', 'check', 'rebuild', 'replace', 'replace-populated', 'backup'];
+if (!modes.includes(mode) || !directory) throw new Error('Usage: measure-recovery.mjs seed|check|rebuild|replace|replace-populated|backup <owned-workload-dir> [rows] [body-bytes] [text|vector]');
 const root = resolve(directory);
 const source = join(root, 'source');
 const manifestPath = join(root, 'workload.json');
@@ -115,8 +115,12 @@ if (mode === 'seed') {
       fs.writeFileSync(manifestPath, JSON.stringify(workload, null, 2));
     }
   } finally { db.close(); }
-} else if (mode === 'replace') {
+} else if (mode === 'replace' || mode === 'replace-populated') {
   target = fs.mkdtempSync(join(root, 'replace-'));
+  if (mode === 'replace-populated') {
+    const incumbent = Database.open(source, { readOnly: true });
+    try { incumbent.backup(target); } finally { incumbent.close(); }
+  }
   const destination = Database.open(target, { schema: workload.schema });
   try { destination.replaceWith(source); } finally { destination.close(); }
 } else {
@@ -140,6 +144,7 @@ console.log(JSON.stringify({
   elapsedMs, maxRssKiB: process.resourceUsage().maxRSS,
   sourceFileBytes: fs.statSync(join(source, 'data.mdb')).size,
   logicalDiskBefore: beforeBytes, logicalDiskAfter: diskBytes(root),
-  writerOccupancyUpperBoundMs: ['replace', 'rebuild'].includes(mode) ? elapsedMs : mode === 'seed' ? null : 0,
-  conditions: 'fresh Node process; filesystem cache uncontrolled; seed syncs disabled, maintenance defaults; synthetic data',
+  writerOccupancyUpperBoundMs: ['replace', 'replace-populated', 'rebuild'].includes(mode) ? elapsedMs : mode === 'seed' ? null : 0,
+  destinationInitiallyPopulated: mode === 'replace-populated',
+  conditions: 'replace-populated includes incumbent backup preparation; fresh Node process; filesystem cache uncontrolled; seed syncs disabled, maintenance defaults; synthetic data',
 }));

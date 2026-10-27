@@ -60,38 +60,61 @@ fn index_entries(
     of: &[&Entity],
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
     let mut out = Vec::new();
+    index_entries_into(r, entity_type, index, of, |key, value| {
+        out.push((key, value));
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+fn index_entries_into(
+    r: &impl Read,
+    entity_type: &str,
+    index: &ValueIndex,
+    of: &[&Entity],
+    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+) -> Result<()> {
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
         for parts in entries_of(&fields) {
-            out.push((
-                keys::index_entry(entity_type, &index.name, &parts, e.seq),
-                values::encode(&e.id.as_str().into()),
-            ));
+            emit(keys::index_entry(entity_type, &index.name, &parts, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Refuses what would keep a build of a value index from finishing: an entry whose key LMDB can't store
 /// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`)
 fn buildable(entity_type: &str, index: &ValueIndex, entries: &[(Vec<u8>, Vec<u8>)]) -> Result<()> {
-    let mut holders: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+    let mut holders = BTreeMap::new();
     for (key, id) in entries {
-        let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
-        entities::key_fits(key, &id, entity_type, &index.name)?;
-        if !index.unique {
-            continue;
-        }
-        let mut parts = decode_key(key)?;
-        parts.drain(..3);
-        parts.pop();
-        match holders.get(&crate::format::key::encode(&parts)) {
-            Some(other) if *other != id => return Err(unbuildable(entity_type, &index.name, other, &id)),
-            Some(_) => {}
-            None => {
-                holders.insert(crate::format::key::encode(&parts), id);
-            }
+        buildable_entry(entity_type, index, key, id, &mut holders)?;
+    }
+    Ok(())
+}
+
+fn buildable_entry(
+    entity_type: &str,
+    index: &ValueIndex,
+    key: &[u8],
+    id: &[u8],
+    holders: &mut BTreeMap<Vec<u8>, String>,
+) -> Result<()> {
+    let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
+    entities::key_fits(key, &id, entity_type, &index.name)?;
+    if !index.unique {
+        return Ok(());
+    }
+    let mut parts = decode_key(key)?;
+    parts.drain(..3);
+    parts.pop();
+    let key = crate::format::key::encode(&parts);
+    match holders.get(&key) {
+        Some(other) if *other != id => return Err(unbuildable(entity_type, &index.name, other, &id)),
+        Some(_) => {}
+        None => {
+            holders.insert(key, id);
         }
     }
     Ok(())
@@ -138,9 +161,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     for (t, of) in &by_type {
         for index in value_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                for (key, value) in index_entries(r, t, &index, of)? {
-                    emit(key, value)?;
-                }
+                index_entries_into(r, t, &index, of, &mut emit)?;
             }
         }
         let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
@@ -152,9 +173,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
         let ids: Vec<String> = of.iter().map(|e| e.id.clone()).collect();
         for index in vector::vector_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                for (key, value) in vector::entries(r, t, &index, &ids)? {
-                    emit(key, value)?;
-                }
+                vector::entries_into(r, t, &index, &ids, &mut emit)?;
             }
         }
     }
@@ -398,12 +417,22 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         t.put(&marker, &values::encode(&true.into()))?;
                         continue;
                     };
-                    let entries = index_entries(t, ty, found, of)?;
-                    match buildable(ty, found, &entries) {
+                    let mut holders = BTreeMap::new();
+                    match index_entries_into(t, ty, found, of, |key, value| {
+                        buildable_entry(ty, found, &key, &value, &mut holders)
+                    }) {
                         Ok(()) => t.put(&marker, &values::encode(&true.into()))?,
                         Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
                             t.del(&marker)?;
-                            for (key, value) in entries.into_iter().filter(|(k, _)| k.len() <= values::MAX_KEY_BYTES) {
+                            let mut fallback = sorted::Scratch::new()?;
+                            index_entries_into(t, ty, found, of, |key, value| {
+                                if key.len() <= values::MAX_KEY_BYTES {
+                                    fallback.push(key, value)?;
+                                }
+                                Ok(())
+                            })?;
+                            let mut entries = fallback.finish()?;
+                            while let Some((key, value)) = entries.next()? {
                                 t.put(&key, &value)?;
                             }
                         }
@@ -517,6 +546,53 @@ pub fn build_chunk(
 #[cfg(test)]
 mod audit_tests {
     use super::*;
+
+    #[test]
+    fn recovery_emitters_stop_before_decoding_the_next_entity() {
+        use crate::engine::tests::{open, write};
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        let mut declared = db.schema().unwrap();
+        let mut json = serde_json::to_value(&declared).unwrap();
+        json["types"]["Task"]["indexes"]["meaning"] =
+            serde_json::json!({"kind":"vector","from":["title"],"dims":2,"model":"m"});
+        declared = Schema::from_json(&json).unwrap();
+        db.set_schema(declared).unwrap();
+        write(
+            &db,
+            vec![
+                serde_json::json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":1,"title":"first"}}),
+                serde_json::json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":2,"title":"second"}}),
+            ],
+        )
+        .unwrap();
+        db.store()
+            .unwrap()
+            .write(
+                |txn, main| {
+                    main.put(txn, &keys::value("Task-1", "a"), &[])?;
+                    main.put(txn, &keys::value("Task-1", "title"), &[])?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        db.snapshot(|r| {
+            let all = entities_of(r)?;
+            let of: Vec<_> = all.iter().collect();
+            let index = value_indexes(r.schema(), "Task").into_iter().find(|i| i.name == "a").unwrap();
+            let stopped = || Error::new(ErrorCode::Io, "stop after the first emitted entry");
+            let error = index_entries_into(r, "Task", &index, &of, |_, _| Err(stopped())).unwrap_err();
+            assert_eq!(error.message, stopped().message);
+            let vector = vector::vector_indexes(r.schema(), "Task").remove(0);
+            let error =
+                vector::entries_into(r, "Task", &vector, &["Task-0".into(), "Task-1".into()], |_, _| Err(stopped()))
+                    .unwrap_err();
+            assert_eq!(error.message, stopped().message);
+            Ok(())
+        })
+        .unwrap();
+    }
 
     #[test]
     fn chunk_cursors_visit_linear_rows_across_mixed_live_and_trash_ranges() {

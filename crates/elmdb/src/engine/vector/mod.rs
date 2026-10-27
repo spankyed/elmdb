@@ -577,21 +577,21 @@ pub fn rebuild_graphs(t: &mut Txn<'_, '_>) -> Result<()> {
 
 /// What a vector index should hold of a type's entities, chunks and pending markers, from their fields and stored
 /// embeddings, as `check()` compares
-pub fn entries(
+pub fn entries_into(
     r: &impl Read,
     entity_type: &str,
     index: &VectorIndex,
     ids: &[String],
-) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut out = BTreeMap::new();
+    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+) -> Result<()> {
     for id in ids {
         for (n, text) in chunks_of(index, &field_values(r, index, id)?).iter().enumerate() {
             let n = n as u32;
             let hash = hash_of(text);
-            out.insert(
+            emit(
                 keys::vector_chunk_key(Prefix::VectorChunk, entity_type, &index.name, id, n),
                 encode_chunk(&hash, text),
-            );
+            )?;
             let embedded = match r.get(&keys::vector(entity_type, &index.name, id, n))? {
                 Some(stored) => {
                     let stored = decode_vector(&stored)?;
@@ -600,14 +600,14 @@ pub fn entries(
                 None => false,
             };
             if !embedded {
-                out.insert(
+                emit(
                     keys::vector_chunk_key(Prefix::VectorPending, entity_type, &index.name, id, n),
                     values::encode(&Value::Nil),
-                );
+                )?;
             }
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// One chunk waiting for its embedding
