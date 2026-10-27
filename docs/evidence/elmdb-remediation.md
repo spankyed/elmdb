@@ -1233,8 +1233,8 @@ All source mutations were confined to `/private/tmp/elmdb-pr-review-baseline`, n
 - Disposable copy without O_NOFOLLOW: symlink refusal test fails (exit 101).
   `/private/tmp/elmdb-pr-review-symlink-before.log`.
 
-Fresh local and remote acceptance is recorded below after completion. No source checkout, live database, merge,
-release or publication is involved; the next goal remains paused.
+Fresh local acceptance is recorded below; the PR descriptions and linked CI runs record terminal remote results.
+No source checkout, live database, merge, release or publication is involved; the next goal remains paused.
 
 ### Fresh local engine acceptance
 
@@ -1244,3 +1244,18 @@ protocol, one-LMDB dependency check, release binding build, TypeScript checks an
 loader/declarations are unchanged. Upstream main remains 3afdf37 and app master 5574f84, both ancestral. The first
 lint pass identified the metadata helper as production-unused after moving schema reads into their transaction;
 that helper is now test-only and the complete gate sequence then passed.
+
+
+### Fresh integration and CI dispatch receipts
+
+Engine correction `6566b8544bb05d406a206110692dff076e95afbd` is pinned by app
+`cf08775b02006734a850b4fd132c064b8dda2415`. All 199 EARS/model/watch tests, eight host backup tests and the full app
+repository typecheck pass against the rebuilt release binding. Logs: `/private/tmp/elmdb-pr-review-ears-final.log`,
+`/private/tmp/elmdb-pr-review-backup-final.log`, `/private/tmp/elmdb-pr-review-app-types-final.log`.
+
+Fresh engine matrix: [40500102740](https://github.com/spankyed/elmdb/actions/runs/40500102740), exact engine 6566b85.
+Fresh app strict chain: [40500269286](https://github.com/spankyed/apack/actions/runs/40500269286), exact app cf08775b02
+and engine 6566b85, dispatched with `strict_chain=true`. At this documentation checkpoint Windows, arm macOS,
+both GNU Linux targets and Linux checks have passed; the full runs are still in progress. Terminal status is available
+at those immutable run links and in the updated PR descriptions. This checkpoint changes documentation only;
+the app pin remains the tested engine correction. Both isolated worktrees were clean after their source commits.
