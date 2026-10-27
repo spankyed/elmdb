@@ -56,3 +56,5 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linux; on dispatch and pull requests, the
 full matrix — macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding
 and running every suite, the model and crash harnesses included, on it.
+
+Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
