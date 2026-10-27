@@ -7,9 +7,9 @@ use super::{batch, open, schema, write};
 use crate::engine::plan::{ReadOp, Reads};
 use crate::{Database, ErrorCode, OpenOptions};
 
-struct FailedSync(std::path::PathBuf);
+pub(super) struct FailedSync(std::path::PathBuf);
 impl FailedSync {
-    fn arm(db: &Database) -> Self {
+    pub(super) fn arm(db: &Database) -> Self {
         let path = db.path().to_owned();
         crate::store::FAIL_SYNC_AT.lock().unwrap().push(path.clone());
         Self(path)
@@ -207,4 +207,34 @@ fn reset_checkpoint_respects_an_active_read_snapshot() {
     })
     .unwrap();
     assert!(db.snapshot(|s| super::entities::record(s, "Task-1")).unwrap().is_none());
+}
+
+#[test]
+fn unchanged_schema_marker_commits_finalize_before_failed_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Task", "a"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let reads: Reads = serde_json::from_value(json!({"reads":[{"read":"query","plan":{"start":{"from":"types","types":["Task"]},"terminal":{"answer":"ids"}}}]})).unwrap();
+    db.watch(reads, Box::new(|_| {})).unwrap();
+    let before = db.sequence().unwrap();
+    let _failure = FailedSync::arm(&db);
+    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    assert_eq!(db.set_schema(schema()).unwrap_err().code, ErrorCode::NotDurable);
+    assert_eq!(db.sequence().unwrap(), before + 1);
+    assert_eq!(
+        db.track_stats().0,
+        0,
+        "committed marker repair delivered the watch, whose injected read panic removes it"
+    );
+    assert!(!crate::engine::watch::PANIC_NEXT_READ.replace(false));
+    assert!(db.close().is_err());
 }

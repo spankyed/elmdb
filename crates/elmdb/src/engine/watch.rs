@@ -127,10 +127,17 @@ impl Tracks {
     }
 }
 
+#[cfg(test)]
+thread_local! { pub(crate) static PANIC_NEXT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
 /// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
 /// taken read nothing, so the whole store stands for what they read: any commit then names them, where an empty read
 /// set would leave whoever filed it on the failure for good
 pub(crate) fn run_tracked(store: &Store, schema: &EngineSchema, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
+    #[cfg(test)]
+    if PANIC_NEXT_READ.replace(false) {
+        panic!("injected watch read panic");
+    }
     let ran = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let snapshot = Snapshot { txn, db, schema };
@@ -156,11 +163,8 @@ pub(crate) fn watch(
         held.watches.insert(id, Watching { reads, last: None, listener: Some(listener), again: false });
         id
     };
-    if deliver(tracks, store, schema, &[id]).contains(&id) {
-        return Err(Error::new(
-            ErrorCode::CallbackPanicked,
-            "The initial watch listener panicked; the watch was removed",
-        ));
+    if let Some((_, code)) = deliver(tracks, store, schema, &[id]).into_iter().find(|(removed, _)| *removed == id) {
+        return Err(Error::new(code, "The initial watch execution panicked; the watch was removed"));
     }
     Ok(id)
 }
@@ -182,42 +186,53 @@ pub(crate) fn deliver(
     store: &Store,
     schema: &RwLock<Arc<EngineSchema>>,
     ids: &[u64],
-) -> Vec<u64> {
+) -> Vec<(u64, ErrorCode)> {
     let mut panicked = Vec::new();
     for &id in ids {
+        // The scope also covers listener destruction: its captures may own the last database reference while
+        // a committing unit still holds the store. Database::drop must not wait on that same stack frame.
+        let _scope = CallbackScope::enter(tracks);
         let mut listener = {
             let mut held = tracks.lock();
             let Some(watching) = held.watches.get_mut(&id) else { continue };
             match watching.listener.take() {
-                Some(listener) => listener,
+                Some(listener) => Some(listener),
                 None => {
                     watching.again = true;
                     continue;
                 }
             }
         };
-        while let Some((answer, changed)) = read_watch(tracks, store, schema, id) {
-            if changed {
-                let outcome = {
-                    let _scope = CallbackScope::enter(tracks);
-                    catch_unwind(AssertUnwindSafe(|| listener(&answer)))
+        let mut calling_listener = false;
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            while let Some((answer, changed)) = read_watch(tracks, store, schema, id) {
+                if changed {
+                    calling_listener = true;
+                    listener.as_mut().expect("listener remains local until restored")(&answer);
+                    calling_listener = false;
+                }
+                let mut held = tracks.lock();
+                let Some(watching) = held.watches.get_mut(&id) else {
+                    held.index.remove(&Owner::Watch(id));
+                    break;
                 };
-                if outcome.is_err() {
-                    unwatch(tracks, id);
-                    panicked.push(id);
+                if !watching.again {
+                    watching.listener = listener.take();
                     break;
                 }
             }
-            let mut held = tracks.lock();
-            // Ended while its listener ran: its read set went with it
-            let Some(watching) = held.watches.get_mut(&id) else {
-                held.index.remove(&Owner::Watch(id));
-                break;
-            };
-            if !watching.again {
-                watching.listener = Some(listener);
-                break;
-            }
+        }));
+        let dropped = catch_unwind(AssertUnwindSafe(|| drop(listener.take())));
+        if outcome.is_err() || dropped.is_err() {
+            unwatch(tracks, id);
+            panicked.push((
+                id,
+                if calling_listener || dropped.is_err() {
+                    ErrorCode::CallbackPanicked
+                } else {
+                    ErrorCode::WatchPanicked
+                },
+            ));
         }
     }
     panicked

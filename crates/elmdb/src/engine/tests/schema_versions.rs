@@ -247,3 +247,22 @@ fn stale_setter_refuses(field: &str) {
     assert_eq!(reopened.schema(), Some(schema("b")));
     assert!(reopened.check().unwrap().is_clean());
 }
+
+#[test]
+fn a_failed_schema_commit_keeps_its_error_when_recovery_sees_a_new_declaration() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+        .unwrap();
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    let path = dir.path().to_owned();
+    crate::database::BEFORE_SCHEMA_RECOVERY
+        .with_borrow_mut(|hook| *hook = Some(Box::new(move || change_in_child(&path))));
+    crate::store::FAIL_NEXT_COMMIT.set(true);
+    let error = db.set_schema(schema("b")).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("refreshing index state also failed"));
+    db.close().unwrap();
+    let reopened = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    assert_eq!(reopened.schema(), Some(schema("b")));
+    assert!(reopened.check().unwrap().is_clean());
+}

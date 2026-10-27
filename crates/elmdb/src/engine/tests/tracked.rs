@@ -265,15 +265,23 @@ fn bounded_watch_child(test: &str) -> bool {
     // A regression must fail within a deadline rather than hang the entire test runner.
     const CHILD: &str = "ELMDB_TEST_BOUNDED_WATCH_CHILD";
     if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new(test)) {
+        let marker = tempfile::tempdir().unwrap();
+        let entered = marker.path().join("entered");
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--nocapture"])
             .env(CHILD, test)
+            .env("ELMDB_TEST_BOUNDED_WATCH_MARKER", &entered)
             .spawn()
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if let Some(status) = child.try_wait().unwrap() {
                 assert!(status.success(), "callback close subprocess failed: {status}");
+                assert_eq!(
+                    std::fs::read_to_string(&entered).unwrap(),
+                    "entered",
+                    "the selected child test must actually run"
+                );
                 return true;
             }
             if std::time::Instant::now() >= deadline {
@@ -283,6 +291,9 @@ fn bounded_watch_child(test: &str) -> bool {
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+    }
+    if let Some(marker) = std::env::var_os("ELMDB_TEST_BOUNDED_WATCH_MARKER") {
+        std::fs::write(marker, "entered").unwrap();
     }
     false
 }
@@ -635,4 +646,114 @@ fn an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schem
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn dropping_a_listeners_last_database_reference_does_not_wait_on_its_unit() {
+    if bounded_watch_child(
+        "engine::tests::tracked::dropping_a_listeners_last_database_reference_does_not_wait_on_its_unit",
+    ) {
+        return;
+    }
+    for action in ["unwatch", "panic"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(open(&dir));
+        let weak = Arc::downgrade(&db);
+        let callback_db = db.clone();
+        let identity = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let into = identity.clone();
+        let mut initial = true;
+        let id = db
+            .watch(
+                reads(vec![tasks()], None),
+                Box::new(move |_| {
+                    if initial {
+                        initial = false;
+                        return;
+                    }
+                    if action == "panic" {
+                        panic!("listener panic with last database reference");
+                    }
+                    callback_db.unwatch(into.load(std::sync::atomic::Ordering::SeqCst));
+                }),
+            )
+            .unwrap();
+        identity.store(id, std::sync::atomic::Ordering::SeqCst);
+        let mut unit = db.begin().unwrap();
+        drop(db);
+        unit.write(&serde_json::from_value(json!({"ops":[{"op":"create","type":"Task","id":"Task-last"}]})).unwrap())
+            .unwrap();
+        unit.commit(false).unwrap();
+        assert!(weak.upgrade().is_none());
+    }
+}
+
+#[test]
+fn a_panicking_watch_read_is_removed_and_does_not_hide_failed_durability() {
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), crate::OpenOptions { schema: Some(super::schema()), ..Default::default() }).unwrap();
+    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    assert_eq!(
+        db.watch(reads(vec![tasks()], None), Box::new(|_| {})).unwrap_err().code,
+        crate::ErrorCode::WatchPanicked
+    );
+    assert_eq!(db.track_stats().0, 0);
+    db.watch(reads(vec![tasks()], None), Box::new(|_| {})).unwrap();
+    let heard = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let into = heard.clone();
+    db.watch(
+        reads(vec![tasks()], None),
+        Box::new(move |_| {
+            into.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }),
+    )
+    .unwrap();
+    let before = db.sequence().unwrap();
+    let _failure = super::commits::FailedSync::arm(&db);
+    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    let result = db.write(&batch(vec![json!({"op":"create","type":"Task","id":"Task-read-panic"})]), true);
+    assert_eq!(result.unwrap_err().code, crate::ErrorCode::NotDurable);
+    assert_eq!(db.sequence().unwrap(), before + 1);
+    assert_eq!(db.track_stats().0, 1);
+    assert_eq!(heard.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert!(db.close().is_err());
+}
+
+#[test]
+fn a_unit_opened_between_writer_checks_is_refused_without_holding_schema() {
+    if bounded_watch_child(
+        "engine::tests::tracked::a_unit_opened_between_writer_checks_is_refused_without_holding_schema",
+    ) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open(&dir));
+    let (ready, queued) = std::sync::mpsc::channel();
+    let (proceed, start) = std::sync::mpsc::channel();
+    let (finished, result) = std::sync::mpsc::channel();
+    let writer = db.clone();
+    let handle = std::thread::spawn(move || {
+        crate::store::BEFORE_WRITE_RESERVATION.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                ready.send(()).unwrap();
+                start.recv().unwrap();
+            }))
+        });
+        finished.send(writer.write(&batch(Vec::new()), false).map(|_| ())).unwrap();
+    });
+    queued.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    let unit = db.begin().unwrap();
+    proceed.send(()).unwrap();
+    assert_eq!(db.set_schema(super::schema()).unwrap_err().code, crate::ErrorCode::UnitOpen);
+    assert_eq!(
+        result
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a writer must refuse an open unit rather than wait on it")
+            .unwrap_err()
+            .code,
+        crate::ErrorCode::UnitOpen
+    );
+    drop(unit);
+    handle.join().unwrap();
 }

@@ -15,6 +15,7 @@ use crate::store::{Store, StoreOptions, put_meta};
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static BEFORE_SCHEMA_RECOVERY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static BEFORE_SCHEMA_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -181,8 +182,11 @@ impl Database {
     /// answering the changes and what was done about each. Refused while a unit is open (`UNIT_OPEN`), in a
     /// read-only database, and for a change opening refuses, which leaves the schema as it was
     pub fn set_schema(&self, schema: Schema) -> Result<Vec<SchemaChange>> {
-        let mut current = self.engine_schema.write();
         let store = self.store()?;
+        if store.unit_is_open() {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
+        }
+        let mut current = self.engine_schema.write();
         // Refused before the builder stops: a unit holding the write transaction would keep a build from finishing
         if store.unit_is_open() {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
@@ -192,14 +196,28 @@ impl Database {
         if let Some(mut builder) = self.builder().take() {
             builder.stop();
         }
-        let applied = apply_schema(&store, Some(schema), Some(&current));
+        let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
             *current = Arc::new(EngineSchema::new(applied.schema.clone()));
             *self.schema.write() = applied.schema.clone();
         }
-        let unbuilt = match &applied {
+        #[cfg(test)]
+        if applied.is_err() {
+            BEFORE_SCHEMA_RECOVERY.with_borrow_mut(|hook| {
+                if let Some(hook) = hook.take() {
+                    hook();
+                }
+            });
+        }
+        let unbuilt = match &mut applied {
             Ok(applied) => applied.unbuilt.clone(),
-            Err(_) => crate::engine::settle_indexes(&store, &current)?,
+            Err(original) => match crate::engine::remaining_indexes(&store, &current) {
+                Ok(unbuilt) => unbuilt,
+                Err(secondary) => {
+                    original.message.push_str(&format!("; refreshing index state also failed: {secondary}"));
+                    Vec::new()
+                }
+            },
         };
         if !unbuilt.is_empty() {
             let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&current));
@@ -353,8 +371,8 @@ struct AppliedSchema {
 }
 
 fn unchanged_schema(store: &Store, schema: Option<Schema>) -> Result<AppliedSchema> {
-    let unbuilt = crate::engine::settle_indexes(store, &EngineSchema::new(schema.clone()))?;
-    Ok(AppliedSchema { schema, report: OpenReport::default(), unbuilt, commit: None })
+    let (unbuilt, commit) = crate::engine::settle_indexes_committed(store, &EngineSchema::new(schema.clone()))?;
+    Ok(AppliedSchema { schema, report: OpenReport::default(), unbuilt, commit })
 }
 
 /// Compares declarations and atomically installs the schema, index removals and empty-index markers.

@@ -96,6 +96,8 @@ pub enum ErrorCode {
     NumbersExhausted,
     /// The initial watch listener panicked; its registration was removed
     CallbackPanicked,
+    /// The initial watch read panicked; its registration was removed
+    WatchPanicked,
     /// Closing a database from its own watch callback would wait on the callback's operation
     CallbackActive,
 }
@@ -147,6 +149,7 @@ impl ErrorCode {
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
             Self::CallbackPanicked => "CALLBACK_PANICKED",
+            Self::WatchPanicked => "WATCH_PANICKED",
             Self::CallbackActive => "CALLBACK_ACTIVE",
         }
     }
@@ -233,6 +236,7 @@ mod tests {
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
             ErrorCode::CallbackPanicked,
+            ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());

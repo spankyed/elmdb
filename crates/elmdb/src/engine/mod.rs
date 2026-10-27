@@ -266,23 +266,34 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     Ok(unbuilt)
 }
 
-/// Settles an existing schema at open; a read-only database only reports what still needs building.
-pub(crate) fn settle_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
+/// Read pending index work without committing marker repairs while a caller is reporting a refused mutation.
+pub(crate) fn remaining_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
+    store.read(|txn, db| {
+        schema.validate(txn, db)?;
+        let (empty, unbuilt) = unbuilt_indexes(&unit::Snapshot { txn, db, schema })?;
+        Ok(empty.into_iter().chain(unbuilt).collect())
+    })
+}
+
+/// Settle empty-type markers with their committed sync outcome kept separate from the pending work.
+pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> Result<(IndexList, Option<Commit>)> {
     let (empty, unbuilt) = store.read(|txn, db| {
         schema.validate(txn, db)?;
         unbuilt_indexes(&unit::Snapshot { txn, db, schema })
     })?;
     if !empty.is_empty() && !store.is_read_only() {
-        return store.write(
-            |txn, db| {
-                schema.validate(txn, db)?;
-                let mut state = UnitState::default();
-                settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })
-            },
-            true,
-        );
+        return store
+            .write_committed(
+                |txn, db| {
+                    schema.validate(txn, db)?;
+                    let mut state = UnitState::default();
+                    settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })
+                },
+                true,
+            )
+            .map(|(unbuilt, commit)| (unbuilt, Some(commit)));
     }
-    Ok(unbuilt)
+    Ok((unbuilt, None))
 }
 
 pub(crate) use builder::Builder;

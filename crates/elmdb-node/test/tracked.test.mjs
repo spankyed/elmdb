@@ -45,6 +45,8 @@ test('reads tracked under a token cross the binding, and a commit names the toke
   assert.deepEqual(write([{ op: 'create', type: 'Task', id: 'Task-3' }]).changes.touched, []);
 });
 
+// Scheduling stress supplements the deterministic Rust schema/snapshot barrier tests and child-process crossing
+// below; this loop is not claimed as an independent deterministic firing proof.
 test('pooled reads keep query results coherent while an index changes fields', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-schema-pool-'));
   const schema = (field) => ({
