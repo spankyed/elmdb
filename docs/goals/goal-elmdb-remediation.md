@@ -40,62 +40,48 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 
 ## Current handoff
 
-- elmdb: `session/elmdb-remediation`, `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation`,
-  based on `4ea9e79f5ea9e0a32793b1a5a84c9d98b3403266`. The review's implementation baseline is `f7bc8a5`; subsequent
-  source-checkout commits through `4ea9e79` changed documentation only.
-- AgentBuddy: `session/elmdb-remediation`,
+- All edits/builds remain in isolated `session/elmdb-remediation` worktrees:
+  elmdb `/Users/spankyed/Develop/Projects/apack/elmdb-worktrees.noindex/elmdb-remediation`, based on
+  `4ea9e79f5ea9e0a32793b1a5a84c9d98b3403266`; monorepo
   `/Users/spankyed/Develop/Projects/apack/monorepo-worktrees.noindex/elmdb-remediation`, based on
-  `7ac1d99fb24649a7ce3e708035bae07cde45ee78` from `master`.
-- The 11 GB elmdb `target/` was copied with `cp -cR` (APFS copy-on-write), not linked. Sample outputs have distinct
-  inodes and equal sizes. elmdb's tooling dependencies and binding output were copied independently; the isolated binding rebuild passed during preparation. AgentBuddy has its own `npm ci --offline` installation, and its `vendor/elmdb` and npm
-  resolution point into this isolated elmdb worktree. Build outputs are seeds until source/build agreement is verified.
-- The isolated binding build, `npm run typecheck`, and all 29 binding tests passed; generated declarations/loader
-  are unchanged. No full AgentBuddy app build or app validation is claimed.
-- Phase 0 baseline: isolated EARS package build and 14 watch tests passed; the prepared binding/type checks were
-  already green. Phase 1 implements R01/R02: process claims use nonblocking file locks, and read-only opens retain
-  reader registration. Final binding build/typecheck and all 33 Node tests passed; the full Rust workspace, generated/dependency checks,
-  formatting, and clippy passed. Full Rust/generated/dependency final checks and the platform matrix are recorded in
-  [implementation evidence](../evidence/elmdb-remediation.md). Cross-platform closure is pending, not waived.
-- Regressions were shown failing against the old behavior in disposable copies. No shared checkout was mutated.
-- Sequencing (user decision, 2026-10-26): goal-elmdb-next is paused before Phase 3. This goal runs independently
-  against current upstream, completes its own checks, and leaves committed/pushed remediation branches for user
-  review. Landing requires separate user authorization. goal-elmdb-next resumes only when the user resumes it after
-  remediation has landed in both repositories and its branches incorporate those upstream commits.
-- Local Phase 1 checkpoints: elmdb `2414390`; monorepo `a68ee6999b` (pin and persistence guidance).
-  All 189 EARS tests passed against the final Phase 1 binding. Its initial push was rejected by automatic approval review before execution. The user subsequently explicitly
-  approved both branch pushes, PR creation and required CI on 2026-10-26; the earlier block is resolved.
-- Phase 2 local checkpoints: elmdb `af141adb2c7745fceca7fb5af410159fdc9fa30b`; monorepo `5edd51adf7`.
-  Shared commit finalization preserves committed schema and notifies observers before reporting failed sync. EARS
-  refreshes declaration caches and notifies committed admin changes before rethrowing. Full local checks and firing
-  mutations are recorded in implementation evidence. Next deliverable: Phase 5 recovery bounds, snapshot pairing and backup publication.
-  Phase 3 implements panic cleanup, callback-close refusal and bounded optimistic token/watch registration.
-  Deterministic and mutation regressions pass. Alternating 20,000-row measurements reproduced 167–322 ms prior
-  tracking-lock waits; current nonconflicting waits were zero and paced token/watch waits about 21 ms, with
-  write maxima 22–25 ms. H03 is resolved locally with bounded fallback and documented synchronous watch cost.
-  Final local Rust checks pass (221 engine tests; two measurements ignored), as do binding/type checks and 33 Node tests. Windows test quoting is fixed
-  locally; fresh platform verification and final integration remain pending. Checkpoint `5146508` is pushed;
-  monorepo validation exposed callback-TLS teardown panics hidden by passing Vitest totals. A `try_with` correction
-  and bounded TLS-destruction regression pass all required Rust/binding checks and 198 EARS tests without fatal
-  diagnostics. Correction `27c76ae` and monorepo checkpoint `547279e4d6` are committed/pushed. CLI typecheck,
-  all three permission cases and the full 71-test database integration suite pass; query and dry-run fixtures now
-  preserve reader registration. No local check session remains running. Phase 4 recursive reference auditing has a passing focused
-  regression and demonstrated pre-fix failure. Primary relation auditing now covers cycles, duplicate pairs,
-  self-links, endpoints and required/typed info; the independent unchecked fixture passes before/after rebuild,
-  20,000-node graph test passes. Primary-value uniqueness now covers unindexed values and exact compound/list
-  rules; its independent before/after-rebuild fixture passes and fails on old code. Cursor-based chunks have bounded
-  candidates and measured linear visits; mutation and resume/reopen tests pass. Combined required checks completed
-  in session 53202; the rebuilt binding/typecheck and all 33 Node tests pass. Auditing is now a separate derive/audit.rs module;
-  all field types, presence/null rules and cardinalities have passing unchecked fixtures. Historical short-code
-  prefixes and removed roles remain valid after admin/schema changes; primary short-code uniqueness is audited.
-  H04 is resolved locally by a shared-derivation mutation that keeps check clean but fails independent query counts.
-  Local staged review is complete; checkpoint commits/pushes and platform/integration verification remain pending.
-  Latest Windows CI exposed accepted-DLL reload rejection after worker exit (R01); a local Windows module-pin
-  correction has host-only checks, no Windows proof yet. Prescribed VM SSH timed out and Azure read-only lookup
-  hit an authentication security-defaults block; no resource/network changes were made. These source/docs changes
-  are local and separate from the built TLS pin. See implementation evidence.
-  Revalidate upstream inputs before integrating them under D11.
-- No app has been launched and no live database accessed. Do not reuse an explicit data-directory override from another
-  checkout. Full AgentBuddy app/pack build and integrated acceptance are not claimed by dependency installation.
+  master `7ac1d99fb24649a7ce3e708035bae07cde45ee78`. Set ELMDB_DIR to isolated elmdb for app commands.
+  The 11 GB target seed was APFS-cloned, never linked; dependencies/build outputs are isolated. Source checkouts
+  remain untouched. No app launched or live database accessed.
+- User authorized implementation, commits, pushes, draft PRs and required CI on these branches. No merges outward,
+  tags or releases. PRs: [elmdb #1](https://github.com/spankyed/elmdb/pull/1) and
+  [apack #283](https://github.com/spankyed/apack/pull/283). Earlier push rejection was resolved by explicit approval.
+  goal-elmdb-next stays paused before Phase 3; do not wait for its future work. Revalidate upstream under D11
+  before final integration.
+- Phases 1–4 are committed/pushed: R01/R02 `2414390`, R03 `af141ad`, lifecycle/tracking `5146508`,
+  TLS teardown `27c76ae`, audit/bounded construction `42423db`, Windows module lifetime `6b839bd`.
+  Platform run [40424293465](https://github.com/spankyed/elmdb/actions/runs/40424293465) is terminal success
+  across all eight jobs at 6b839bd, including Windows. These results do not verify later Phase 5 code.
+- Monorepo is clean at `7c59b97310f754f909abc6ce49466c4b47858db6`, pinning 6b839bd. Committed-error caller
+  handling and CLI permission fixtures are committed. Latest app checks passed 198 EARS tests, eight backup tests
+  and EARS types with no fatal/TLS diagnostics. All 71 CLI database tests passed after fixture correction.
+  Original strict chain 40419289605 failed integration-2's old permission assumptions; other executed jobs passed.
+  A final green strict chain remains required. VM SSH timed out and Azure lookup hit an authentication block;
+  no network/resource/authentication changes were made. Windows behavior is now verified by CI instead.
+- Phase 5 local checkpoint source: backup publication `c32a87a`, local schema/snapshot pairing `7a4df3c`,
+  audit scratch sorting/text streaming `614170c`. Required host checks passed together in session 43978:
+  formatting, workspace clippy/tests (242 engine tests, two measurements ignored), generated/single-LMDB checks,
+  rebuilt binding/typecheck and all 34 Node tests. Disposable mutations prove backup ownership, read-gap,
+  watch schema refresh and duplicate sort winner regressions fire. H01 cross-process schema semantics remain
+  unresolved; local guards alone do not protect against another process changing declarations.
+- H02 now uses owned private files, held same-process destination reservation, atomic publication and Unix directory
+  sync/Windows write-through. Seven focused tests pass. Other-process destination ownership is explicitly the
+  caller's obligation; no power-cut guarantee is inferred from sync calls. Phase 5 platform validation is pending.
+- R08 remains open. Owned synthetic measurements are in implementation evidence and `scripts/measure-recovery.mjs`.
+  At 100,000 one-KiB entities/199,997 relations, baseline rebuild/replace upper bounds were ~11/~21 seconds.
+  At 200,000 entities, baseline check peaked at 3,438,112 KiB RSS; current check is clean at 1,600,848 KiB /
+  30.256 seconds, with 659,907,632 bytes sampled peak scratch and complete cleanup. This fits the selected 2 GiB
+  investigation budget for this shape, not a universal bound. CLI baseline dump/load at 100,000 rows took
+  2.10/77.46 seconds; load retained all decoded loads and peaked at 2,062,188,544 bytes RSS.
+- No execution session remains running. Next: bounded load/staging publication and remaining recovery measurements
+  (larger rebuild/replace, large values/vector shape), cross-process schema pairing, then converged source checks,
+  app pin/strict CI, current reference contracts, finding dispositions and closure. Do not close acceptance early.
+  Preserved CLI baseline executable and exact source archive, mutation logs and measurement conditions are in
+  [implementation evidence](../evidence/elmdb-remediation.md). Keep one expensive local owner at a time.
 
 ## Decisions
 

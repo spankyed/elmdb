@@ -504,3 +504,186 @@ by the final build; afterward only stale comments and prose wrapping were cleane
 implementation/evidence; supported-platform checks and final integration remain outstanding. Phase 5 now owns
 recovery resource measurement, schema/snapshot pairing and backup publication. The audit/builder and Windows
 module-lifetime changes are separate logical checkpoints; the latter still requires real Windows verification.
+
+
+## Phase 4 pushed checkpoints — 2026-10-26
+
+Audit/builder checkpoint `42423dbd121c80d7eaa4cdfe52b509e52195e2c3` and separate Windows module-lifetime
+checkpoint `6b839bd5e0309450570c256568cfb49064725f32` were reviewed, committed and pushed. The platform matrix
+on their combined source is https://github.com/spankyed/elmdb/actions/runs/40424293465; Windows is not yet verified.
+Monorepo validation against the rebuilt binding passed 198 EARS tests, eight host backup tests and EARS typecheck.
+The passing logs were explicitly checked for fatal/panic/TLS teardown diagnostics; none appeared. Logs:
+`/private/tmp/elmdb-remediation-phase4-ears.log`, `-backup.log`, `-ears-types.log`. Session 13615 is terminal.
+
+The original strict chain (40419289605, Phase 2 source) is terminal: producers, integration-1, native-1, native-2 and
+app-and-rest passed; integration-2 failed on the diagnosed CLI permission assumptions. Those fixtures are corrected
+in `547279e4d6` and all 71 affected database tests passed locally. This is not a green final strict chain. No broad
+retry was dispatched; final strict acceptance belongs on converged integrated commits after Phase 5.
+
+Monorepo pin checkpoint `7c59b97310f754f909abc6ce49466c4b47858db6` was committed/pushed after that validation.
+
+
+## Phase 5 schema/snapshot work in progress — 2026-10-26
+
+H01 is confirmed locally. Ordinary reads previously cloned the schema before acquiring an LMDB snapshot; tracked
+read retries and watch reruns could retain that clone across schema changes. Schema storage is now shared through
+Arc<RwLock<Arc<Schema>>>. Ordinary reads/check/index status hold a schema read guard across snapshot execution;
+watch reads acquire the live schema before tracking locks and release it before invoking listeners. A Unit retains
+its write schema and a separate live schema source for post-commit observer delivery. This preserves lock ordering
+and permits callback schema changes without continuing subsequent watch queries under the old declaration.
+
+Primary export now captures declared schema, engine schema and the LMDB snapshot under the schema guard, then
+releases that guard before export callbacks. Its immutable snapshot/schema remain paired while callbacks can
+change live schema. Dump writes its header and primary loads through this same pair rather than reading schema
+and data in separate calls. These changes protect changes through this Database's shared schema source; cross-process
+schema mutation behavior still needs an explicit contract/review before closing H01.
+
+Bounded deterministic tests pass: paused threaded read between schema acquisition and snapshot; watch callbacks
+remove/restore a type during initial, batch and Unit delivery; and export callbacks change live schema while the
+captured snapshot retains its old declaration. All 14 tracked tests pass (one explicit measurement ignored).
+Logs: `/private/tmp/elmdb-remediation-phase5-pairing-final.log`, `-watch-schema.log`. Disposable mutations replacing
+the read guard with a clone, and freezing the watch delivery schema, each fail their regression (exit 101):
+`phase5-read-schema-mutation.log`, `phase5-watch-schema-mutation.log`. These are actual failures, not timeout
+assumptions.
+
+The actual dump/load regression passed and focused clippy passed (`phase5-pairing-dump.log`,
+`phase5-pairing-clippy-final.log`). An earlier `dump::tests` filter selected zero tests, so it supplies no export
+evidence; it was replaced with the actual `a_dump_and_a_load` filter. The corrected regression is included in the
+preserved log. No H01 closure, new binding build, async-binding verification or full Phase 5 check is claimed yet.
+
+The committed Phase 4 Windows module pin now passes the Windows job in run 40424293465, including the worker
+lifetime reproducer. At the latest observation Linux checks, Linux glibc both architectures and arm64 musl also
+passed; Linux x64 musl was active and both macOS jobs queued. Continue observing that same run to terminal state.
+Backup publication (H02) and measured recovery bounds (R08) still require implementation/evidence; no resource
+envelope has been claimed from these schema tests.
+
+
+## Phase 5 backup publication and resource measurement — work in progress
+
+Backup publication now reserves the canonical destination in the same process registry as Store::open for the
+entire operation, creates a private tempfile in that directory, copies through its owned descriptor, syncs and closes
+it, then replaces data.mdb. RAII removes only that invocation's temporary path on failure; the fixed
+data.mdb.partial name is untouched. Unix syncs the destination plus parents of newly created directories; Windows
+uses [MoveFileExW REPLACE_EXISTING + WRITE_THROUGH](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-movefileexw).
+No cross-volume copy flag is used. tempfile is now a runtime dependency rather than only a test dependency.
+
+Pre-publication failures retain the earlier complete backup. If post-publication directory syncing fails, IO
+explicitly reports that the complete copy is visible and a retry is safe. Seven focused backup tests pass, including
+private-file ownership with an unrelated legacy partial sentinel, failure cleanup/retry, bounded publisher/open
+concurrency handshakes, nested-directory creation and post-publication sync failure. Clippy passes after factoring
+the test-hook type. Logs: `/private/tmp/elmdb-remediation-phase5-backup-cases.log`, `-backup-clippy.log`. The old
+copy implementation fails the ownership/failure regression in the disposable copy (`phase5-backup-mutation.log`,
+exit 101). Destination ownership across other processes and filesystem-specific power-loss guarantees need an
+explicit contract before H02 closure; no simulated power-cut proof is claimed.
+
+`scripts/measure-recovery.mjs` creates only owned synthetic workload directories and refuses to adopt existing
+ones. Separate process commands measure seed/check/rebuild/replace/backup, RSS including native allocations,
+elapsed time and logical disk usage. Replace/rebuild elapsed time is explicitly a conservative writer-occupancy
+upper bound, not an instrumented lock-held duration. The 1,000-row/1,024-byte smoke seed and check passed, using
+the last built Phase 4 binding (`6b839bd` source), not unbuilt Phase 5 code. Logs:
+`/private/tmp/elmdb-remediation-recovery-seed-smoke.log`, `-check-smoke.log`.
+
+Initial R08 evaluation workload chosen before optimization: 100,000 entities with 1,024-byte message bodies, two
+relations per entity (apart from the first two), unique slug and state value indexes plus a title/body text index.
+Evaluate against 2 GiB peak process RSS, 30 s writer-occupancy upper bound for replace/rebuild, and logical disk
+headroom measured per operation. These are investigation criteria, not a final advertised support limit. Small,
+reference and larger scales will be recorded before a final envelope is chosen; dump/load require their own CLI
+measurements. Seed syncs are disabled; maintenance uses default durability. Filesystem cache and machine load
+are recorded, not called idle or controlled by assumption. No live database or app profile is involved.
+
+
+Reference baseline completed on the built Phase 4 binding (6b839bd), fresh Node processes, local macOS filesystem
+cache uncontrolled. Synthetic 100,000 entities / 1,024-byte bodies / 199,997 relations, value and text indexes:
+
+| Operation | Elapsed / writer upper bound (s) | Peak RSS (KiB) | Notes |
+|---|---:|---:|---|
+| seed | 27.260 / n/a | 223808 | Syncs off; source file 566,820,864 bytes |
+| check | 11.411 / 0 | 1622608 | No differences or violations |
+| rebuild | 11.059 / 11.059 | 1349296 | Source grew to 813,334,528 bytes |
+| replace | 20.783 / 20.783 | 1163648 | New private destination; total logical footprint 1,224,336,207 bytes |
+| backup | 0.870 / 0 | 582432 | Total logical footprint 1,763,795,791 bytes |
+
+Logs have prefix `/private/tmp/elmdb-remediation-recovery-reference-` and suffixes `seed.log`, `check.log`,
+`rebuild.log`, `replace-final.log`, `backup.log`. The first replacement harness incorrectly kept the source open
+with different LMDB options and was refused with ALREADY_OPEN before replacing. The harness now leaves the source
+closed, matching the API contract; its failed empty destination is retained and included in later logical totals.
+No engine change was made to accommodate the harness. This baseline fits the initial reference criteria but is
+not the complete envelope: larger/large-value and dump/load measurements are still outstanding, and Phase 5
+safety changes have not yet been rebuilt into the binding.
+
+
+The next scale is running once in session 60851: seed then check, 200,000 entities, same 1,024-byte/text/value/
+relation shape. Logs: `/private/tmp/elmdb-remediation-recovery-large-seed.log`, `-large-check.log`. Host RAM was
+read as 34,359,738,368 bytes before starting; only this synthetic resource run owns expensive local execution.
+Retain the handle until terminal and inspect results before deciding on larger-scale changes. The runner and
+all Phase 5 source changes remain uncommitted. H02 has seven passing local cases and clippy; filesystem-specific
+platform acceptance and H01's remaining cross-process/async contract review are still pending.
+
+
+## Phase 5 recovery investigation continuation — 2026-10-26
+
+The earlier 200,000-row run completed: 399,997 relations, 1,024-byte bodies and the same indexes.
+Seed took 64.615 s with 331,520 KiB peak RSS and a 1,152,843,776-byte source file. Baseline check took
+23.473 s and 3,438,112 KiB peak RSS, exceeding the preselected 2 GiB investigation budget. Logs:
+`/private/tmp/elmdb-remediation-recovery-large-seed.log`, `-large-check.log`.
+
+First, check streamed stored rows against an expected map, removing the second complete actual-data map.
+The 200,000-row check then took 24.974 s and 2,429,296 KiB RSS, still over budget (`-large-check-stream.log`).
+The current implementation instead spills expected derived rows through an 8 MiB capacity-accounted buffer
+plus the largest record, with global ordinals preserving last-insertion-wins semantics, fan-in 16 merging,
+owned temporary directories and bounded open files. It streams the stored side and preserves report ordering.
+This bounds sorting storage, not the complete audit: primary graph/constraint state and report output remain
+workload-dependent. Scratch I/O failure returns an error rather than a partial successful report.
+
+Four sorter tests cover multilevel merges, duplicates, empty/oversized rows, cleanup on failure and truncated
+frames. The original duplicate mutation passed because its first and last values coincided; that fixture was
+corrected to encode global emission order. Correct code passes and the first-wins mutation now fails. Logs:
+`/private/tmp/elmdb-remediation-phase5-sort-winner.log`, `-sort-mutation.log`. Earlier broad checks passed:
+242 engine tests (two measurements ignored), workspace CLI/binding/xtask tests, formatting, clippy,
+generated/dependency checks and rebuilt binding/typecheck/34 Node tests. The strengthened fixture passes
+separately. These are local checkpoint checks, not final integrated acceptance.
+
+The first external-sort measurement took 28.913 s and 2,093,600 KiB RSS at 200,000 rows. It sampled
+679,439,987 bytes of peak scratch and 1,832,317,410 bytes peak workload logical disk; sampling every
+100 ms is a lower bound and logical sizes differ from allocated filesystem space. Scratch cleaned up.
+This was only 3,552 KiB under budget, insufficient margin for a support claim. Log:
+`/private/tmp/elmdb-remediation-recovery-large-check-spill.log`. Text derivation now emits document and
+position rows directly rather than retaining a complete per-index map; necessary term/word aggregation
+remains. All 17 text tests, 28 derived tests and clippy pass. The rebuilt-binding measurement is running
+once in session 70929; inspect `-phase5-text-stream-binding.log` and `-recovery-large-check-text-stream.log`
+before starting another expensive operation.
+
+The CLI baseline completed in the former session 39547 (that handle no longer exists). At 100,000 rows,
+dump took 2.10 s with 371,228,672 bytes maximum RSS; load took 77.46 s with 2,062,188,544 bytes maximum
+RSS. macOS `/usr/bin/time -l` reports these memory values in bytes, unlike Node's KiB resourceUsage.
+Logs: `/private/tmp/elmdb-remediation-recovery-{dump,load}-baseline{,-time}.log`.
+The preserved executable is `/private/tmp/elmdb-remediation-pre-bounded-load`. Its explicit source archive
+is `/private/tmp/elmdb-remediation-pre-load-source.tar.gz`, SHA-256
+`4164a0bc32a114aa716d848b2788e4f0dff22f968ae3910fef1a30f5ebe46da6`.
+Load still retains all decoded loads and rebuild still collects all derived rows. These results do not
+close R08 or establish a final supported envelope. Bounded load/publication, cross-process schema pairing,
+large-value/vector profiles and final combined-source validation remain outstanding.
+
+Platform run [40424293465](https://github.com/spankyed/elmdb/actions/runs/40424293465), at `6b839bd`,
+is terminal success: all eight jobs, including Windows, passed. This verifies the committed Windows
+module-pin correction; it does not verify the uncommitted Phase 5 changes. Monorepo final strict CI is
+still required. The isolated monorepo remains clean at `7c59b97310`.
+
+
+The text-streaming measurement is terminal success: 200,000 rows, check clean, elapsed 30.256 s,
+1,600,848 KiB peak RSS, sampled scratch peak 659,907,632 bytes and workload logical peak
+1,812,760,575 bytes. The source remained 1,152,843,776 bytes; scratch cleaned up. Log:
+`/private/tmp/elmdb-remediation-recovery-large-check-text-stream.log`. This gives approximately
+473 MiB RSS margin below the selected 2 GiB budget for this shape. Relative to the baseline,
+check uses less RSS but more elapsed time and temporary disk. Check is read-only: its 30.256 s
+is not writer occupancy. This is one uncontrolled-cache run, not a percentile or a universal
+bound. Required checkpoint gates are running once in session 43978, logs with prefix
+`/private/tmp/elmdb-remediation-phase5-checkpoint-`.
+
+
+Checkpoint gates completed successfully in session 43978: formatting, workspace clippy, workspace tests
+(242 engine tests passed, two measurements ignored), generated protocol and single-LMDB checks, binding
+typecheck and all 34 Node tests. The binding was rebuilt immediately before the measured text-streaming
+run with unchanged production source. Logs use the checkpoint prefix above. Reviewed source checkpoints:
+backup publication `c32a87a`, local snapshot pairing `7a4df3c`; the next audit checkpoint follows them.
+No final integrated or Phase 5 cross-platform closure is claimed by these host checks.
