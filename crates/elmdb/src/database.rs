@@ -58,7 +58,7 @@ pub struct Database {
     /// The schema the engine holds writes to: the database's, or one declaring nothing. A write holds it read-locked
     /// from before its transaction until it commits, and `set_schema` write-locked, so no write commits under a
     /// schema that changed while it ran
-    engine_schema: RwLock<Arc<Schema>>,
+    engine_schema: Arc<RwLock<Arc<Schema>>>,
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
     builder: Mutex<Option<crate::engine::Builder>>,
@@ -114,7 +114,7 @@ impl Database {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
             store: Mutex::new(Some(store)),
-            engine_schema: RwLock::new(engine_schema),
+            engine_schema: Arc::new(RwLock::new(engine_schema)),
             schema: RwLock::new(schema),
             report,
             builder: Mutex::new(builder),
@@ -186,8 +186,14 @@ impl Database {
         self.builder.lock().expect("the builder slot's lock is never poisoned")
     }
 
+    #[cfg(test)]
     pub(crate) fn engine_schema(&self) -> Arc<Schema> {
         Arc::clone(&self.engine_schema.read())
+    }
+
+    /// Shared schema source for watches delivered after a unit ends, including later callback-driven changes.
+    pub(crate) fn observing_schema(&self) -> Arc<RwLock<Arc<Schema>>> {
+        Arc::clone(&self.engine_schema)
     }
 
     /// The engine's schema, held read-locked for a write's length (`engine_schema`)

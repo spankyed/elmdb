@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
@@ -141,7 +141,13 @@ pub fn run_tracked(store: &Store, schema: &Schema, reads: &Reads) -> (Result<Vec
 }
 
 /// Registers a watch of `reads` and delivers its first answer
-pub fn watch(tracks: &SharedTracks, store: &Store, schema: &Schema, reads: Reads, listener: Listener) -> Result<u64> {
+pub fn watch(
+    tracks: &SharedTracks,
+    store: &Store,
+    schema: &RwLock<Arc<Schema>>,
+    reads: Reads,
+    listener: Listener,
+) -> Result<u64> {
     let id = {
         let mut held = tracks.lock();
         let id = held.next;
@@ -170,7 +176,7 @@ pub fn unwatch(tracks: &SharedTracks, id: u64) {
 /// runs outside it, so it may read, write or end a watch itself. A watch a commit names while
 /// its listener runs is run again once the listener returns. A read that fails is handed to the listener as such.
 /// An unwinding listener is removed and its id returned; other listeners still run
-pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64]) -> Vec<u64> {
+pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &RwLock<Arc<Schema>>, ids: &[u64]) -> Vec<u64> {
     let mut panicked = Vec::new();
     for &id in ids {
         let mut listener = {
@@ -213,8 +219,15 @@ pub fn deliver(tracks: &SharedTracks, store: &Store, schema: &Schema, ids: &[u64
 
 /// Uses the same bounded sequence validation as token reads, preserving any notification delivered while the
 /// query runs. Removal during execution cancels delivery and registration.
-fn read_watch(tracks: &SharedTracks, store: &Store, schema: &Schema, id: u64) -> Option<(Result<Vec<u8>>, bool)> {
-    read_watch_with(tracks, store, id, |reads| run_tracked(store, schema, reads))
+fn read_watch(
+    tracks: &SharedTracks,
+    store: &Store,
+    schema: &RwLock<Arc<Schema>>,
+    id: u64,
+) -> Option<(Result<Vec<u8>>, bool)> {
+    // Acquire schema before tracking: writes take the same order. Drop this guard before any listener runs.
+    let held = schema.read();
+    read_watch_with(tracks, store, id, |reads| run_tracked(store, &held, reads))
 }
 
 fn read_watch_with(

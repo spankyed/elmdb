@@ -513,3 +513,126 @@ fn measure_tracking_contention() {
         }
     }
 }
+
+#[test]
+fn watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_delivery() {
+    if bounded_watch_child(
+        "engine::tests::tracked::watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_delivery",
+    ) {
+        return;
+    }
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let schema = |task: bool| {
+        crate::schema::Schema::from_json(&json!({
+            "$schema":crate::schema::SCHEMA_LANGUAGE,
+            "types":if task {json!({"Task":{"fields":{}}})} else {json!({})}
+        }))
+        .unwrap()
+    };
+    for trigger in ["initial", "batch", "unit"] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(
+            Database::open(
+                dir.path(),
+                crate::OpenOptions { schema: Some(schema(true)), syncs: false, ..Default::default() },
+            )
+            .unwrap(),
+        );
+        let weak = Arc::downgrade(&db);
+        let armed = Arc::new(AtomicBool::new(trigger == "initial"));
+        let callback_armed = armed.clone();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let into = heard.clone();
+        let mut phase = 0;
+        let id = db
+            .watch(
+                reads(vec![tasks()], None),
+                Box::new(move |answer| {
+                    into.lock().unwrap().push(answer.as_ref().err().map(|e| e.code));
+                    if !callback_armed.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let db = weak.upgrade().unwrap();
+                    match phase {
+                        0 => {
+                            phase = 1;
+                            db.set_schema(schema(false)).unwrap();
+                        }
+                        1 => {
+                            phase = 2;
+                            db.set_schema(schema(true)).unwrap();
+                        }
+                        _ => {}
+                    }
+                }),
+            )
+            .unwrap();
+        armed.store(true, Ordering::SeqCst);
+        if trigger == "batch" {
+            write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-wake"})]).unwrap();
+        } else if trigger == "unit" {
+            let mut unit = db.begin().unwrap();
+            unit.write(&batch(vec![json!({"op":"create", "type":"Task", "id":"Task-wake"})])).unwrap();
+            unit.commit(false).unwrap();
+        }
+        let heard = heard.lock().unwrap();
+        assert_eq!(
+            &heard[heard.len().saturating_sub(3)..],
+            &[None, Some(crate::error::ErrorCode::UnknownType), None],
+            "{trigger}: {heard:?}"
+        );
+        db.unwatch(id);
+        db.close().unwrap();
+    }
+}
+
+#[test]
+fn a_threaded_read_holds_its_schema_before_taking_the_snapshot() {
+    if bounded_watch_child("engine::tests::tracked::a_threaded_read_holds_its_schema_before_taking_the_snapshot") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open(&dir));
+    let entered = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let reader = db.clone();
+    let paused = entered.clone();
+    let resumed = resume.clone();
+    let thread = std::thread::spawn(move || {
+        crate::engine::BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
+            *hook = Some(Box::new(move || {
+                paused.wait();
+                resumed.wait();
+            }))
+        });
+        reader.read(&reads(vec![tasks()], None)).unwrap()
+    });
+    entered.wait();
+    let schema_was_free = db.observing_schema().try_write().is_some();
+    resume.wait();
+    let bytes = thread.join().unwrap();
+    assert!(!schema_was_free, "a schema change must not cross the schema/snapshot acquisition gap");
+    let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    assert_eq!(answer[0]["ids"], json!([]));
+}
+
+#[test]
+fn an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schema() {
+    if bounded_watch_child(
+        "engine::tests::tracked::an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schema",
+    ) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    db.primary_snapshot(|declared, snapshot| {
+        assert!(declared.unwrap().types.contains_key("Task"));
+        db.set_schema(crate::schema::Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE})).unwrap())?;
+        let bytes = crate::engine::reads::run(snapshot, &reads(vec![tasks()], None).reads)?;
+        let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+        assert_eq!(answer[0]["ids"], json!([]));
+        assert_eq!(db.read(&reads(vec![tasks()], None)).unwrap_err().code, crate::error::ErrorCode::UnknownType);
+        Ok(())
+    })
+    .unwrap();
+}

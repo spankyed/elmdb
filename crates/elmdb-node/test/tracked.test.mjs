@@ -42,3 +42,31 @@ test('reads tracked under a token cross the binding, and a commit names the toke
   assert.deepEqual(db.trackStats(), { owners: 0, keys: 0, ranges: 0 });
   assert.deepEqual(write([{ op: 'create', type: 'Task', id: 'Task-3' }]).changes.touched, []);
 });
+
+test('pooled reads keep query results coherent while an index changes fields', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-schema-pool-'));
+  const schema = (field) => ({
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Task: { fields: { a: { type: 'string' }, b: { type: 'string' } },
+      indexes: { lookup: { kind: 'value', fields: [field] } } } },
+  });
+  const db = Database.open(dir, { syncs: false, schema: schema('a') });
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  db.write(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
+    op: 'create', type: 'Task', id: `Task-${i}`,
+    fields: { a: i === 0 ? 'match' : 'other', b: i === 1 ? 'match' : 'other' },
+  })) }));
+  const query = { read: 'query', plan: { start: { from: 'types', types: ['Task'] },
+    steps: [{ step: 'where', field: 'a', value: 'match' }], terminal: { answer: 'ids' } } };
+  for (let round = 0; round < 8; ++round) {
+    const pending = Array.from({ length: 8 }, (_, i) => db.read(packr.pack({
+      reads: [query], ...(i % 2 ? { track: round } : {}),
+    })));
+    db.setSchema(schema(round % 2 ? 'a' : 'b'));
+    db.waitForIndexBuilds();
+    for (const bytes of await Promise.all(pending)) {
+      assert.deepEqual(packr.unpack(bytes)[0].ids, ['Task-0']);
+    }
+    db.untrack(round);
+  }
+});

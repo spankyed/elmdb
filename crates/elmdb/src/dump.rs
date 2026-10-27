@@ -66,15 +66,17 @@ pub fn dump(db: &Database, target: &Path) -> Result<DumpReport> {
     let mut report = DumpReport::default();
     out.write_all(MAGIC)?;
     out.write_all(&VERSION.to_le_bytes())?;
-    let schema = db.schema().map(|s| s.canonical()).unwrap_or_default();
-    report.schema = !schema.is_empty();
-    write_framed(&mut out, schema.as_bytes())?;
     let mut count = 0u64;
-    db.primary_loads(|load| {
-        report.count(&load);
-        count += 1;
-        let bytes = rmp_serde::to_vec_named(&load).expect("a load serializes");
-        write_framed(&mut out, &bytes)
+    db.primary_snapshot(|schema, snapshot| {
+        let schema = schema.map(|s| s.canonical()).unwrap_or_default();
+        report.schema = !schema.is_empty();
+        write_framed(&mut out, schema.as_bytes())?;
+        crate::engine::maintenance::primary_loads_of(snapshot, |load| {
+            report.count(&load);
+            count += 1;
+            let bytes = rmp_serde::to_vec_named(&load).expect("a load serializes");
+            write_framed(&mut out, &bytes)
+        })
     })?;
     out.write_all(&END.to_le_bytes())?;
     out.write_all(&count.to_le_bytes())?;

@@ -30,8 +30,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 use heed::RwTxn;
-use parking_lot::RawRwLockRecursive;
 use parking_lot::lock_api::ArcRwLockReadGuard;
+use parking_lot::{RawRwLockRecursive, RwLock};
 
 use crate::database::Database;
 use crate::error::{Error, ErrorCode, Result};
@@ -42,12 +42,17 @@ use changes::ChangeSet;
 pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
+#[cfg(test)]
+thread_local! {
+    static BEFORE_READ_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Finalizes every user-visible commit before reporting its sync outcome. `None` invalidates every owner for
 /// operations whose writes were not logged key by key.
 fn finish_commit(
     tracks: &watch::SharedTracks,
     store: &Store,
-    schema: &Schema,
+    schema: &RwLock<Arc<Schema>>,
     mut changes: ChangeSet,
     written: Option<&std::collections::HashSet<Vec<u8>>>,
     commit: Commit,
@@ -300,7 +305,7 @@ impl Database {
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
     pub fn check(&self) -> Result<derive::CheckReport> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.writing_schema();
         store.read(|txn, db| derive::check(&unit::Snapshot { txn, db, schema: &schema }))
     }
 
@@ -356,7 +361,7 @@ impl Database {
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
-        finish_commit(&self.tracks, store, &self.engine_schema(), ChangeSet::default(), None, commit).map(|_| ())
+        finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
@@ -377,7 +382,7 @@ impl Database {
     /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.writing_schema();
         let failures = self.builder().as_ref().map(|b| b.failures()).unwrap_or_default();
         store.read(|txn, db| {
             let s = unit::Snapshot { txn, db, schema: &schema };
@@ -400,7 +405,13 @@ impl Database {
     /// Answers reads from one snapshot of the last commit, as one msgpack envelope (`docs/architecture/engine.md`, Reads)
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.writing_schema();
+        #[cfg(test)]
+        BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
+            if let Some(pause) = hook.take() {
+                pause();
+            }
+        });
         let Some(token) = reads.track else {
             return store.read(|txn, db| reads::run(&unit::Snapshot { txn, db, schema: &schema }, &reads.reads));
         };
@@ -429,7 +440,7 @@ impl Database {
     /// `CALLBACK_PANICKED`, while later panics do not change the committed operation's outcome
     pub fn watch(&self, reads: plan::Reads, listener: watch::Listener) -> Result<u64> {
         let store = self.store()?;
-        watch::watch(&self.tracks, &store, &self.engine_schema(), reads, listener)
+        watch::watch(&self.tracks, &store, &self.observing_schema(), reads, listener)
     }
 
     /// Ends a watch
@@ -460,7 +471,7 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.engine_schema(), changes, written.as_ref(), commit)?;
+        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
         Ok((results, changes))
     }
 
@@ -468,7 +479,7 @@ impl Database {
     #[cfg(test)]
     pub(crate) fn snapshot<T>(&self, f: impl FnOnce(&unit::Snapshot<'_, '_>) -> Result<T>) -> Result<T> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.writing_schema();
         store.read(|txn, db| f(&unit::Snapshot { txn, db, schema: &schema }))
     }
 
@@ -489,6 +500,7 @@ impl Database {
             txn: Some(txn),
             state: UnitState::new(logging),
             tracks: Arc::clone(&self.tracks),
+            schemas: self.observing_schema(),
             poisoned: None,
             gate: Some(gate),
             schema,
@@ -509,6 +521,7 @@ pub struct Unit {
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
     schema: Arc<Schema>,
+    schemas: Arc<RwLock<Arc<Schema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
     _thread: PhantomData<*const ()>,
@@ -615,7 +628,7 @@ impl Unit {
         finish_commit(
             &self.tracks,
             &self.store,
-            &self.schema,
+            &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },

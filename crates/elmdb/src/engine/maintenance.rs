@@ -136,7 +136,7 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
     Ok(())
 }
 
-fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Result<()>) -> Result<()> {
+pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Result<()>) -> Result<()> {
     let corrupt = |what: &str| Error::new(ErrorCode::Corrupted, format!("{what} doesn't read"));
     let mut made: Vec<(u64, String, bool)> = Vec::new();
     for (key, bytes) in r.scan(&keys::all_entities())? {
@@ -316,7 +316,7 @@ impl Database {
     /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes
     pub fn stats(&self) -> Result<Stats> {
         let store = self.store()?;
-        let schema = self.engine_schema();
+        let schema = self.writing_schema();
         let mut stats = store.read(|txn, db| stats_of(&super::unit::Snapshot { txn, db, schema: &schema }))?;
         stats.file_bytes = store.file_size();
         stats.map_bytes = store.map_size() as u64;
@@ -327,9 +327,23 @@ impl Database {
     /// were made, each with every field it holds, then its relations in theirs, its embeddings, and its sequences last,
     /// so a load takes each in the place it had (`docs/architecture/format.md`, Dumps)
     pub fn primary_loads(&self, each: impl FnMut(Load) -> Result<()>) -> Result<()> {
+        self.primary_snapshot(|_, snapshot| primary_loads_of(snapshot, each))
+    }
+
+    /// Captures declarations and primary data from one schema/snapshot pair. Release the schema guard after the
+    /// LMDB snapshot starts, before export callbacks: their snapshot and captured schema stay valid independently.
+    pub(crate) fn primary_snapshot<T>(
+        &self,
+        f: impl FnOnce(Option<&crate::schema::Schema>, &super::unit::Snapshot<'_, '_>) -> Result<T>,
+    ) -> Result<T> {
         let store = self.store()?;
-        let schema = self.engine_schema();
-        store.read(|txn, db| primary_loads_of(&super::unit::Snapshot { txn, db, schema: &schema }, each))
+        let held = self.writing_schema();
+        let schema = std::sync::Arc::clone(&held);
+        let declared = self.schema();
+        store.read(|txn, db| {
+            drop(held);
+            f(declared.as_ref(), &super::unit::Snapshot { txn, db, schema: &schema })
+        })
     }
 
     /// Applies loads in one durable unit without a write's checks, as an import or a dump's load does, and for specs that
