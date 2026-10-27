@@ -78,10 +78,18 @@ pub const MAP_STEP: usize = 64 << 20;
 const MAX_GROWTHS: usize = 16;
 
 /// The map's size for a data file of `file_bytes`: twice the file, so a database can double before its first growth,
-/// and a step at least. On Windows LMDB sizes the file to the map, so this is also what an open costs on disk there
+/// and a step at least. This is writable mapping capacity, independent of the file's current physical length.
 pub fn initial_map_size(file_bytes: u64) -> usize {
     let wanted = (file_bytes as usize).saturating_mul(2).max(MAP_STEP);
     wanted.div_ceil(MAP_STEP) * MAP_STEP
+}
+
+// Windows read-only sections map only the current file, not a writer's reserved capacity. The logical bound
+// must not exceed that view: transaction renewal then reports MAP_RESIZED before accessing newly appended pages.
+#[cfg(any(windows, test))]
+pub(crate) fn read_only_map_size(file_bytes: u64, requested: Option<usize>) -> usize {
+    let physical = usize::try_from(file_bytes).unwrap_or(usize::MAX);
+    requested.unwrap_or(physical).min(physical)
 }
 
 /// A transaction that committed, with its sync outcome kept apart until in-memory state and observers are finalized.
@@ -188,7 +196,11 @@ impl Store {
         let file_bytes = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
         let open = |flags: EnvFlags| {
             let mut builder = EnvOpenOptions::new().read_txn_without_tls();
-            builder.max_dbs(8).map_size(options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes)));
+            let map_size = options.map_size_bytes.unwrap_or_else(|| initial_map_size(file_bytes));
+            #[cfg(windows)]
+            let map_size =
+                if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
+            builder.max_dbs(8).map_size(map_size);
             // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
             // flushed by group commit's syncs, and a read-only environment is never written
             unsafe {
@@ -610,6 +622,7 @@ impl Store {
 
     /// Doubles the map, holding every transaction of this process off while it does
     pub fn grow(&self) -> Result<()> {
+        self.check_writable()?;
         let _gate = self.gate.write();
         self.drop_idle();
         let size = self.env.info().map_size;
@@ -624,8 +637,17 @@ impl Store {
     fn adopt_map_size(&self) -> Result<()> {
         let _gate = self.gate.write();
         self.drop_idle();
-        // SAFETY: as in `grow`; a size of 0 adopts the size the file's meta records
-        unsafe { self.env.resize(0) }?;
+        #[cfg(windows)]
+        let size = if self.read_only {
+            read_only_map_size(std::fs::metadata(self.path.join("data.mdb"))?.len(), None)
+        } else {
+            0
+        };
+        #[cfg(not(windows))]
+        let size = 0;
+        // SAFETY: as in `grow`; a size of 0 adopts the recorded capacity. Windows read-only mappings instead use
+        // physical file length, so the next external extension is detected before any page outside that view is read.
+        unsafe { self.env.resize(size) }?;
         Ok(())
     }
 

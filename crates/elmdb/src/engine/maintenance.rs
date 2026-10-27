@@ -267,6 +267,8 @@ impl Database {
         }
         let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options.max_dbs(8);
+        #[cfg(windows)]
+        options.map_size(crate::store::read_only_map_size(std::fs::metadata(source.join("data.mdb"))?.len(), None));
         // SAFETY: the source is another directory than this database's, opened read-only for this call alone
         unsafe { options.flags(EnvFlags::READ_ONLY) };
         let env = unsafe { options.open(source) }?;

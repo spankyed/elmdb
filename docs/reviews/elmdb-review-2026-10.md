@@ -312,14 +312,14 @@ to their fix commits and acceptance evidence; green unrelated tests do not close
 This addition preserves the assessment above. Implementation is on the isolated `session/elmdb-remediation` branches;
 [the remediation goal](../goals/goal-elmdb-remediation.md) owns final acceptance and
 [implementation evidence](../evidence/elmdb-remediation.md) records source checkpoints, exact inputs, measurements,
-fault injection and firing mutations. Local engine gates pass (253 tests, two measurements ignored; 35 Node tests;
+fault injection and firing mutations. Local engine gates pass (254 tests, two measurements ignored; 35 Node tests;
 workspace lint, generated protocol, single-LMDB and rebuilt binding checks). Final combined-source platform CI and
 apack strict-chain acceptance remain pending. The table records implemented dispositions, not goal closure.
 
 | ID | Implemented disposition | Source and acceptance evidence |
 |---|---|---|
 | R01 | Fixed: atomic process claim without environment mutation; accepted Windows image stays loaded | `elmdb-node/src/process.rs`; worker, duplicate-image/race and independent-process cases; previous eight-job matrix passes |
-| R02 | Fixed: ordinary read-only opens register readers or refuse with an actionable error | `store/mod.rs`; permission/concurrent-reader regressions; apack CLI fixtures corrected to require writable lock registration |
+| R02 | Fixed: ordinary read-only opens register readers or refuse; Windows view bounds follow physical file length | `store/mod.rs`; permission/concurrent-reader and mapping-policy regressions; explicit read-only grow refuses; apack CLI fixtures retain writable reader registration. Final Windows-positive matrix remains required |
 | R03 | Fixed: committed state/schema and observer finalization precede NOT_DURABLE | `engine::finish_commit`, schema application and apack committed-error handling; all mutation entry points, fault injection and firing proofs. Reset's atomic markers remain in its mutation; optional physical recycling preserves one logical sequence/notification and required sync |
 | R04 | Fixed: primary constraint auditing is independent of whether a derived index can represent a value | `engine/derive/audit.rs`; field inventory, nested values, uniqueness, cycles, cardinality/endpoints/self-links and rebuild-invariant reports; firing mutations |
 | R05 | Fixed: initial/later panicking Rust listeners are removed without stranding other watches | `engine/watch.rs`; panic, later-write and independent-listener cases |

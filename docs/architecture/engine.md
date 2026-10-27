@@ -13,8 +13,10 @@ matter; `durable()` then resolves at once.
 
 The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
-engine can run it again without the caller. On Windows LMDB sizes the file to the map, which is why it starts no
-larger.
+engine can run it again without the caller. Mapping capacity and physical file length are separate. On Windows,
+a read-only view covers the current physical file: its configured bound is capped to that length at open and when
+adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
+the writable capacity. Writable mappings retain the normal capacity policy.
 
 An open refuses files that aren't an elmdb database (`NOT_A_DATABASE`, which names lmdb-js for files lmdb-js
 wrote) and a database in another format (`WRONG_FORMAT`), and a new database is stamped with its format, and
@@ -274,7 +276,8 @@ For these measured shapes, reserve at least 2 GiB on the scratch filesystem and 
 2 GiB of free destination space per active recovery operation; add space for a dump if retaining one. These are
 conservative planning allowances over measured macOS artifacts/scratch, not enforced quotas or universal bounds.
 Add both allowances when the filesystems share a volume; check them separately when temporary storage is elsewhere.
-Windows file allocation follows map size (Opening), so measure its disk requirement separately. Use `scripts/measure-recovery.mjs` on an owned representative
+Measure Windows disk allocation separately; a mapping's reserved capacity does not establish physical file length.
+Use `scripts/measure-recovery.mjs` on an owned representative
 copy before using materially larger values, more relations, higher-dimensional/more numerous vectors, different
 vocabulary, compound/list indexes or an unmeasured schema. Keep one recovery operation active while measuring.
 The runner refuses to adopt an existing workload directory and can sample scratch with `--observe`; sampled peaks

@@ -1118,3 +1118,43 @@ Reset repair is committed as `24be744dc9a573d6609b97de53dfa6d1d3836b8f`; H01 is 
 expensive execution remains live. Both source checkouts remain untouched. Reference recovery bounds/sequence scope,
 format staging cleanup and dated review dispositions are reconciled locally; supported-platform and apack strict CI
 still decide final combined acceptance. Upstream hashes were freshly fetched and remain ancestral without merges.
+
+## Final platform diagnosis — Windows read-only mapping, 2026-10-26
+
+Source/evidence checkpoint 5169f72 and app 9ae643be01 were committed/pushed; PR descriptions were reconciled.
+Final elmdb matrix [40442259745](https://github.com/spankyed/elmdb/actions/runs/40442259745) is terminal:
+seven jobs pass (both macOS, both GNU Linux, both musl targets and Linux checks), Windows Rust exits with
+0xc0000005 / STATUS_ACCESS_VIOLATION during the new stale-handle cases. The reset regressions and the first
+schema child cases passed before that crash; Node tests on that job were not reached. Exact log retained at
+`/private/tmp/elmdb-remediation-final-windows-ci.log`, fetched via the completed job API while siblings ran.
+
+Pinned LMDB's Windows read-only NtMapViewOfSection maps current file length, while elmdb configured writable-style
+capacity (normally at least 64 MiB). After another process appends pages, that larger logical bound can suppress
+MAP_RESIZED even though the read-only view cannot cover them. The correction caps read-only mapping bounds at
+physical file length for ordinary open, external-growth adoption and replacement-source open; writable capacity
+policy is retained. Explicit grow on a read-only handle now refuses READ_ONLY. This is a safety repair, not disabling
+reader registration or granting data-file write permissions. The earlier general claim that Windows physical file
+allocation follows reserved map capacity was inaccurate for the pinned incremental-growth implementation; code and
+reference wording are corrected.
+
+Stale writable/read-only handle operations now run in separate bounded probe processes, reporting their mode if a
+native fault occurs. Writer children retain 15-second deadlines; outer probes have 30 seconds to allow their own
+child to be reaped. All four schema tests and the mapping-policy test pass locally. Removing the cap in a disposable
+copy makes the policy test fail (64 MiB versus 128 KiB); allowing read-only grow makes its refusal test fail.
+Logs `-phase6-windows-map-{schema,policy,mutation}.log`, `-phase6-read-only-grow-mutation.log`; sessions
+67083/6622/97143 are terminal. Required converged host gates 91294 run serially under `-phase6-map-final-*`.
+Windows-specific positive validation remains the final supported matrix; no success is inferred from host tests.
+
+App strict run [40442311920](https://github.com/spankyed/apack/actions/runs/40442311920) was deliberately cancelled
+as superseded when its elmdb pin required this safety correction. Its producer job passed; remaining shards were
+building the old pin. Cancellation is due to changed input, not expired observation, and is not passing acceptance.
+A final strict dispatch on the replacement pin is still required. The approved VM was previously inaccessible; no
+authentication, security, networking or runner configuration was changed. No CI redispatch was used for diagnosis.
+
+Corrected-source required host gate chain 91294 is terminal success: 254 engine tests (two measurements ignored),
+all workspace fmt/clippy/tests, generated/single-LMDB checks, rebuilt binding/types and 35 Node tests. Current app
+EARS/model/watch 199 and backup eight tests pass in 84433 with no fatal/panic/TLS diagnostics; logs
+`-phase6-map-{ears,backup}.log`. Root app typecheck remains on identical app source; this repair changes Windows
+mapping policy and rejects explicit read-only growth, with no protocol/export change. The existing shipped writable
+Mac benchmark remains applicable to its unchanged writable path. Next checkpoint must be validated on Windows and
+pinned into a fresh final app strict dispatch; the failed/superseded runs are not acceptance.

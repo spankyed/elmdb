@@ -51,7 +51,8 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 - All R01–R08 repairs and H01–H04 conclusions are implemented locally. Source checkpoints and firing proofs are in
   [implementation evidence](../evidence/elmdb-remediation.md). Latest engine checkpoint:
   `24be744dc9a573d6609b97de53dfa6d1d3836b8f` (reset page recycling), after `744ebf8` (cross-process schema consistency).
-  These two commits are not yet pushed. Remaining elmdb changes are owned reference/evidence/review/goal prose.
+  Both are pushed, followed by reference/evidence/review checkpoint `5169f728962b955d77b823faa2d7faf17a35682a`.
+  App pin is exactly 5169f72.
 - Required final host engine gates pass on 24be744: workspace fmt/clippy/tests, generated protocol/single-LMDB,
   rebuilt binding/types and 35 Node tests; engine 253 passed, two measurement tests ignored. Logs
   `/private/tmp/elmdb-remediation-phase6-reset-final-*`, terminal 65838. New reset sequence/notification, failure fallback,
@@ -74,15 +75,27 @@ performance rewrite. New unrelated defects are recorded with evidence, not silen
 - Fresh upstream revalidation after the repair: elmdb main `3afdf3700db041d08bcec9f0c7e13d66275ebe1a`, apack master
   `5574f84ceaee30392e3430b8a4981f0ba55dd9d9`; both ancestors/merge bases, zero incoming commits. No merge/rebase needed.
   Tested features are landed v1/live queries; future planner/type/compression/search work stays with the paused next goal.
-- App HEAD remains `7c59b97310`; owned edits currently pin 744ebf8, add SCHEMA_CHANGED refusal/no-notification coverage,
-  and document reopening. Update the pin to the final committed elmdb checkpoint before committing/pushing app changes.
+- App source is committed/pushed as `9ae643be018c9492c5e78410cbb2ef27d069f20a`, pinning 5169f72, adding
+  SCHEMA_CHANGED refusal/no-notification coverage and documenting reopening.
   Current rebuilt repair passes all 199 EARS/model/watch and eight backup tests (terminal 41968), no fatal/TLS/panic
   diagnostics. Full root typecheck already passed on identical app source. Original strict 40419289605 failed old
   permission fixtures; corrected 547279e4d6 passes all 71 CLI DB cases. New final strict chain is still required.
-- No live expensive owner: all handles are terminal. Next: review/commit owned prose, pin/commit app, push both branches,
-  update PRs, obtain final elmdb matrix and apack `strict_chain=true` results. Respect one expensive local owner and the
-  app's Linux/native boundary; CI is final acceptance, not a debug loop. Re-evaluate upstream if it advances.
-  Then update dispositions/acceptance, write Outcome, archive the goal and repair links. Goal remains active until done.
+- Final elmdb matrix [40442259745](https://github.com/spankyed/elmdb/actions/runs/40442259745) is terminal:
+  seven jobs pass, Windows Rust crashes with STATUS_ACCESS_VIOLATION during stale-handle probes. Diagnosed read-only
+  Windows view length versus writable-style logical capacity; working source now caps open/adoption/replacement-source
+  bounds to physical file length and refuses read-only grow. Writer/read-only probes are separately contained with
+  15-second writer / 30-second outer deadlines. Focused schema/policy tests pass; cap/grow mutations fire.
+- App strict [40442311920](https://github.com/spankyed/apack/actions/runs/40442311920) was deliberately cancelled
+  as superseded by the required new elmdb pin (producer passed; other shards building old input). It is not accepted
+  as green. Existing PR descriptions still link the first final runs and need final results after the correction.
+- Corrected-source host gate chain **91294** is terminal success: 254 engine tests/two ignored measurements,
+  workspace fmt/clippy/tests, generated/single-LMDB and rebuilt binding/types/35 Node tests. Logs
+  `/private/tmp/elmdb-remediation-phase6-map-final-*`. EARS/model/watch 199 and backup eight pass in terminal 84433
+  (`-phase6-map-{ears,backup}.log`), with no fatal/panic/TLS diagnostics. No live expensive local owner.
+  Windows-specific positive validation is still required; do not infer it from host tests.
+- Next: commit/push the reviewed mapping repair, pin it in apack, and run final platform and strict CI on those exact
+  inputs. Do not use CI as a debugging loop. Re-evaluate upstream if it advances. After green required gates, update
+  dispositions/acceptance, write Outcome, archive the goal and repair links. Remediation remains active and unmerged.
 
 ## Decisions
 

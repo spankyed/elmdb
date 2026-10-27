@@ -28,28 +28,36 @@ fn change_in_child(path: &Path) {
     run_child(path, "schema");
 }
 
-fn run_child(path: &Path, mode: &str) {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+fn test_command() -> Command {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args([
             "--exact",
             "engine::tests::schema_versions::cross_process_schema_changes_refuse_stale_reads_and_mutations",
             "--nocapture",
         ])
-        .env("ELMDB_SCHEMA_CHILD", path)
-        .env("ELMDB_SCHEMA_CHILD_MODE", mode)
-        .stdin(Stdio::null())
-        .spawn()
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(15);
+        .stdin(Stdio::null());
+    command
+}
+
+fn run_child(path: &Path, mode: &str) {
+    let mut command = test_command();
+    command.env("ELMDB_SCHEMA_CHILD", path).env("ELMDB_SCHEMA_CHILD_MODE", mode);
+    run_process(command, mode, Duration::from_secs(15));
+}
+
+fn run_process(mut command: Command, description: &str, timeout: Duration) {
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
-            assert!(status.success());
+            assert!(status.success(), "{description} exited {status}");
             return;
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
             child.wait().unwrap();
-            panic!("schema child timed out");
+            panic!("{description} timed out");
         }
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -69,60 +77,67 @@ fn cross_process_schema_changes_refuse_stale_reads_and_mutations() {
         db.close().unwrap();
         return;
     }
-    for read_only in [false, true] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut db =
-            Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
-                .unwrap();
-        write(
-            &db,
-            vec![
-                json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}}),
-                json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":"other","b":"match"}}),
-            ],
-        )
-        .unwrap();
-        if read_only {
-            db.close().unwrap();
-            db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    if let Ok(mode) = std::env::var("ELMDB_SCHEMA_PROBE") {
+        stale_handle_probe(mode == "read-only");
+    } else {
+        for mode in ["writable", "read-only"] {
+            let mut command = test_command();
+            command.env("ELMDB_SCHEMA_PROBE", mode);
+            run_process(command, mode, Duration::from_secs(30));
         }
-        change_in_child(dir.path());
-        assert_eq!(db.read(&query()).unwrap_err().code, ErrorCode::SchemaChanged);
-        let mut tracked = query();
-        tracked.track = Some(1);
-        assert_eq!(db.read(&tracked).unwrap_err().code, ErrorCode::SchemaChanged);
-        db.untrack(1);
-        assert_eq!(db.check().unwrap_err().code, ErrorCode::SchemaChanged);
-        assert_eq!(db.stats().unwrap_err().code, ErrorCode::SchemaChanged);
-        assert_eq!(db.index_status().unwrap_err().code, ErrorCode::SchemaChanged);
-        assert_eq!(
-            db.primary_loads(|_| panic!("stale export must not run")).unwrap_err().code,
-            ErrorCode::SchemaChanged
-        );
-        let dump = dir.path().join("stale.dump");
-        assert_eq!(crate::dump::dump(&db, &dump).unwrap_err().code, ErrorCode::SchemaChanged);
-        assert!(!dump.exists());
-        let heard = std::sync::Arc::new(std::sync::Mutex::new(None));
-        let into = heard.clone();
-        let watch = db
-            .watch(query(), Box::new(move |answer| *into.lock().unwrap() = answer.as_ref().err().map(|e| e.code)))
-            .unwrap();
-        assert_eq!(*heard.lock().unwrap(), Some(ErrorCode::SchemaChanged));
-        db.unwatch(watch);
-        if !read_only {
-            assert_eq!(db.write(&batch(vec![]), false).unwrap_err().code, ErrorCode::SchemaChanged);
-            assert_eq!(db.bulk_load(&[]).unwrap_err().code, ErrorCode::SchemaChanged);
-            assert_eq!(db.reset().unwrap_err().code, ErrorCode::SchemaChanged);
-            assert_eq!(db.rebuild(None).unwrap_err().code, ErrorCode::SchemaChanged);
-            assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged);
-            assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged, "failed begin releases unit state");
-        }
-        db.close().unwrap();
-        let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
-        let answer: serde_json::Value = rmp_serde::from_slice(&db.read(&query()).unwrap()).unwrap();
-        assert_eq!(answer[0]["ids"], json!(["Task-0"]));
-        assert!(db.check().unwrap().is_clean());
     }
+}
+
+fn stale_handle_probe(read_only: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() })
+            .unwrap();
+    write(
+        &db,
+        vec![
+            json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}}),
+            json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":"other","b":"match"}}),
+        ],
+    )
+    .unwrap();
+    if read_only {
+        db.close().unwrap();
+        db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    }
+    change_in_child(dir.path());
+    assert_eq!(db.read(&query()).unwrap_err().code, ErrorCode::SchemaChanged);
+    let mut tracked = query();
+    tracked.track = Some(1);
+    assert_eq!(db.read(&tracked).unwrap_err().code, ErrorCode::SchemaChanged);
+    db.untrack(1);
+    assert_eq!(db.check().unwrap_err().code, ErrorCode::SchemaChanged);
+    assert_eq!(db.stats().unwrap_err().code, ErrorCode::SchemaChanged);
+    assert_eq!(db.index_status().unwrap_err().code, ErrorCode::SchemaChanged);
+    assert_eq!(db.primary_loads(|_| panic!("stale export must not run")).unwrap_err().code, ErrorCode::SchemaChanged);
+    let dump = dir.path().join("stale.dump");
+    assert_eq!(crate::dump::dump(&db, &dump).unwrap_err().code, ErrorCode::SchemaChanged);
+    assert!(!dump.exists());
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let into = heard.clone();
+    let watch = db
+        .watch(query(), Box::new(move |answer| *into.lock().unwrap() = answer.as_ref().err().map(|e| e.code)))
+        .unwrap();
+    assert_eq!(*heard.lock().unwrap(), Some(ErrorCode::SchemaChanged));
+    db.unwatch(watch);
+    if !read_only {
+        assert_eq!(db.write(&batch(vec![]), false).unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.bulk_load(&[]).unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.reset().unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.rebuild(None).unwrap_err().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged);
+        assert_eq!(db.begin().err().unwrap().code, ErrorCode::SchemaChanged, "failed begin releases unit state");
+    }
+    db.close().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    let answer: serde_json::Value = rmp_serde::from_slice(&db.read(&query()).unwrap()).unwrap();
+    assert_eq!(answer[0]["ids"], json!(["Task-0"]));
+    assert!(db.check().unwrap().is_clean());
 }
 
 #[test]

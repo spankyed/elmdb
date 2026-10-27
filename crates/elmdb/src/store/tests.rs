@@ -44,6 +44,30 @@ fn a_read_only_store_refuses_a_write_and_reads_what_is_there() {
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     let error = put(&store, "b", b"2").unwrap_err();
     assert_eq!(error.code, ErrorCode::ReadOnly);
+    assert_eq!(store.grow().unwrap_err().code, ErrorCode::ReadOnly);
+}
+
+#[test]
+fn a_windows_read_only_map_never_claims_unmapped_file_capacity() {
+    assert_eq!(read_only_map_size(32 * 4096, None), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096, Some(MAP_STEP)), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096, Some(16 * 4096)), 16 * 4096);
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_read_only_open_and_adoption_follow_the_physical_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    store.close().unwrap();
+    let store =
+        Store::open(dir.path(), StoreOptions { read_only: true, map_size_bytes: Some(MAP_STEP * 2), ..quiet() })
+            .unwrap();
+    assert!(store.map_size() as u64 <= store.file_size());
+    store.adopt_map_size().unwrap();
+    assert!(store.map_size() as u64 <= store.file_size());
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
 }
 
 #[cfg(unix)]
