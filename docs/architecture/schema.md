@@ -284,12 +284,13 @@ builds the schema from the registered packs' (`toElmdbSchema`, apack's `packages
 name two packs declare and naming both:
 
 - **types, short code prefixes and indexes** from each `apack.json` entity entry. Its `indexes: ["pinned"]` is the
-  manifest's shorthand for a value index per field, beside its `search` (a text index) and `embed` (a vector index);
+  manifest's shorthand for a value index per field, beside its `search` (a text index), `embed` (a vector index) and
+  `substrings` (a trigram index);
 - **fields** from the TypeScript shape (`rowRulesOf`, apack's `packages/apack-sdk/src/build/module-exports.ts`):
   `string`, `number` and `boolean` as themselves, a union of string literals as `enum`, an id tagged with its types
   (`EARS.EntityId<'X'>`) as `ref` to those the schema declares, `T[]` of one of these as `list`, and anything else — an
   object, a record, `unknown`, a date, a mixed union — as `any`; `?` as `optional` and `| null` as `nullable`, every
-  field nullable for a pack that doesn't check nulls. A field a text or vector index reads is held to text or `any`;
+  field nullable for a pack that doesn't check nulls. A field a text, vector or trigram index reads is held to text or `any`;
 - **relation kinds and roles** from `data.relations` and `data.roles`, every kind many-to-many.
 
 `additionalFields` is `allow` for every apack type: a field written without being in the shape — an untyped write, an
