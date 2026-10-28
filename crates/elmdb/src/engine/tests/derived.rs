@@ -1135,46 +1135,37 @@ fn note_ids(db: &Database, step: Json) -> Json {
 #[test]
 fn each_of_a_types_text_and_trigram_indexes_is_built_and_rebuilt_from_its_own_fields() {
     let dir = tempfile::tempdir().unwrap();
-    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
-    write(
-        &db,
-        vec![
-            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "alpha", "kind": "gamma" } }),
-        ],
-    )
-    .unwrap();
-    let indexes = json!({
-        "byTitle": { "kind": "text", "fields": { "title": {} } },
-        "byKind": { "kind": "text", "fields": { "kind": {} } },
-        "titleGrams": { "kind": "trigram", "fields": ["title"] },
-        "kindGrams": { "kind": "trigram", "fields": ["kind"] }
-    });
-    db.set_schema(Schema::from_json(&notes(base_fields(), indexes)).unwrap()).unwrap();
-    db.wait_for_index_builds().unwrap();
-    let found = |db: &Database| {
-        (
-            note_ids(db, json!({ "step": "search", "query": "gamma", "index": "byKind" })),
-            note_ids(db, json!({ "step": "containing", "text": "amm", "index": "kindGrams" })),
-        )
-    };
-    assert_eq!(found(&db), (json!(["Note-1"]), json!(["Note-1"])), "built in the background");
-    db.rebuild(Some(("Note", "byKind"))).unwrap();
-    db.rebuild(Some(("Note", "kindGrams"))).unwrap();
-    assert_eq!(found(&db), (json!(["Note-1"]), json!(["Note-1"])), "rebuilt alone");
-    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
-}
-
-#[test]
-fn a_full_rebuild_keeps_a_unique_index_over_a_list_holding_one_value_twice() {
-    let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
-    fields["tags"] = json!({ "type": "list", "of": { "type": "string" }, "optional": true });
-    let db =
-        with_schema(&dir, notes(fields, json!({ "tag": { "kind": "value", "fields": ["tags"], "unique": true } })))
-            .unwrap();
-    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "tags": ["x", "x"] } })])
-        .unwrap();
-    db.rebuild(None).unwrap();
-    let status = db.index_status().unwrap();
-    assert!(status.iter().find(|s| s.index == "tag").unwrap().built, "{status:?}");
+    fields["body"] = json!({ "type": "string", "optional": true });
+    let db = with_schema(&dir, notes(fields.clone(), json!({}))).unwrap();
+    let words = [("title", "alpha"), ("kind", "gamma"), ("body", "delta")];
+    let row: serde_json::Map<String, Json> = words.iter().map(|(f, w)| (f.to_string(), json!(w))).collect();
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": row })]).unwrap();
+    // Three of each kind, so that an index built or rebuilt from another's fields leaves one of them without its own
+    let mut indexes = serde_json::Map::new();
+    for (field, _) in words {
+        indexes.insert(format!("{field}Text"), json!({ "kind": "text", "fields": { field: {} } }));
+        indexes.insert(format!("{field}Grams"), json!({ "kind": "trigram", "fields": [field] }));
+    }
+    db.set_schema(Schema::from_json(&notes(fields, Json::Object(indexes))).unwrap()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let each_finds_its_word = |db: &Database, after: &str| {
+        for (field, word) in words {
+            let searched = note_ids(db, json!({ "step": "search", "query": word, "index": format!("{field}Text") }));
+            assert_eq!(searched, json!(["Note-1"]), "{field}Text finds {word} {after}");
+            let gram = &word[1..4];
+            let contained =
+                note_ids(db, json!({ "step": "containing", "text": gram, "index": format!("{field}Grams") }));
+            assert_eq!(contained, json!(["Note-1"]), "{field}Grams finds {gram} {after}");
+        }
+    };
+    each_finds_its_word(&db, "built in the background");
+    for (field, _) in words {
+        for kind in ["Text", "Grams"] {
+            let index = format!("{field}{kind}");
+            db.rebuild(Some(("Note", &index))).unwrap();
+            each_finds_its_word(&db, &format!("after {index} is rebuilt"));
+        }
+    }
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }

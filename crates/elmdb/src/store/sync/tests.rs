@@ -348,14 +348,12 @@ fn stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_
     commit.on_commit();
     drop(commit.durable());
     started.recv_timeout(Duration::from_millis(200)).expect("a sync started");
+    let shared = Arc::clone(&commit.shared);
     let stopping = std::thread::spawn(move || commit.stop_at_exit(Duration::from_secs(5)));
     std::thread::sleep(Duration::from_millis(50));
     finish.send(Ok(())).unwrap();
     stopping.join().unwrap();
-    assert!(
-        matches!(started.recv_timeout(Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
-        "the syncer is dropped once the sync that held it ends"
-    );
+    assert!(shared.syncer.lock().unwrap().is_none(), "the stop waited for the sync and dropped the syncer");
 }
 
 #[test]
