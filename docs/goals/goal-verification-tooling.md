@@ -52,8 +52,18 @@ move, since no behaviour of the binding changes.
 - **Phase 3 built** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
   write-through. Left: the eight-target matrix, dispatched as run 40674565378.
 - **Phase 1 under way** (`9a978be`): `trigram.rs` done (3 missed: `block_of`'s two, excluded as layout; `resolve`'s
-  name match, killed by a stronger spec). Pass 1 over the other five modules runs into `target/mutants-pass1`; at about
-  a minute a mutant under load, it is most of a day.
+  name match, killed by a stronger spec). Pass 1 over `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and
+  `schema/diff.rs` (874 mutants) into `target/mutants-pass1`: 133 tested by 2026-10-28 12:00, 9 missed, 2 timeouts.
+  Of `entities.rs`' first five survivors, three are excluded as equivalent in `.cargo/mutants.toml`, and two are given
+  specs, uncommitted: `place_for`'s trigram match (shown killed) and `check_unique`'s `&&` (the spec reordered so the
+  walked value comes before the indexed one; its re-test not yet run).
+- **Disk:** each cargo-mutants copy of the tree takes 1.3 to 2.9 GB under the system temporary directory, most of it
+  debug info; with -j 5 the run held about 15 GB at 29 GiB free. Before resuming: a `mutants` cargo profile without
+  debug info (`profile = "mutants"` in `.cargo/mutants.toml`) and -j 3.
+- **To resume pass 1:** `cargo mutants -j 3 -o target/mutants-pass1 --iterate --file crates/elmdb/src/engine/reads.rs
+  --file crates/elmdb/src/engine/text/search.rs --file crates/elmdb/src/engine/entities.rs --file
+  crates/elmdb/src/engine/values.rs --file crates/elmdb/src/schema/diff.rs -- -- --skip model::the_engine`.
+  `--iterate` skips what earlier runs caught; the `-- -- --skip` keeps it the fast suite, which pass 2 then drops.
 - **Evidence:** `docs/evidence/verification-tooling.md`, with Phase 1's baseline still to record.
 - **Next action:** triage pass 1's survivors over the five modules, then pass 2 (`--iterate`) over the files with
   survivors.

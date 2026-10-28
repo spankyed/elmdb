@@ -74,4 +74,6 @@ for both publications, write-through being a flag on the move that nothing aroun
 backup's replacing publish on Unix stays `std::fs::rename`, which is all tempfile's `persist` does. The dump and backup
 specs pass.
 
-PENDING: the eight-target CI matrix (run 40674565378).
+elmdb's eight-target CI matrix (run 40674565378, a dispatch on `9a978be`, which holds Phases 2 and 3) passed:
+macOS arm64 and x64, Linux x64 and arm64 on glibc and musl, and Windows x64, each building the binding and running
+every suite, the Windows backup mutation script among them.

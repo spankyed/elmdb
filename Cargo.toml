@@ -54,6 +54,12 @@ unsafe_op_in_unsafe_fn = "deny"
 dbg_macro = "deny"
 todo = "deny"
 
+# What cargo-mutants builds each mutant with (`.cargo/mutants.toml`): the test profile without debug info, which is most
+# of what each of its copies of the tree takes on disk
+[profile.mutants]
+inherits = "test"
+debug = 0
+
 [profile.release]
 lto = true
 codegen-units = 1

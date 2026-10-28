@@ -15,10 +15,18 @@ test_package = ["elmdb"]
 timeout_multiplier = 3.0
 # Inside target/, which is gitignored and which cargo-mutants doesn't copy
 output = "target"
+# Without debug info (`Cargo.toml`, profile.mutants): each job's copy is a fraction of a debug build's
+profile = "mutants"
 
 # Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
 exclude_re = [
     # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
     # function of the place answers the same, and only the file's size and a write's cost tell them apart
     "trigram.rs:.*replace block_of -> u64 with",
+    # unique_keys' arms for one field absent and one field held each give what its general arm gives those inputs
+    "entities.rs:.*delete match arm \\[None\\] in unique_keys",
+    "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
+    # check_unique's index read skips the entity's own entry; a unique index holds one entity a value, so stopping
+    # at the first entry or the one after it finds the same holder
+    "entities.rs:.*replace == with != in check_unique",
 ]
