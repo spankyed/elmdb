@@ -275,3 +275,36 @@ fn among_a_set_a_type_with_several_trigram_indexes_and_none_named_is_refused() {
     assert_eq!(found("grams"), json!(["Message-1"]));
     assert_eq!(found("tagGrams"), json!(["Message-tags"]));
 }
+
+#[test]
+fn containing_reads_every_type_started_from_and_among_a_set_skips_a_type_without_the_index() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = json!({ "text": { "type": "string", "optional": true } });
+    let schema = Schema::from_json(&json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": {
+            "Message": { "fields": text, "indexes": { "grams": { "kind": "trigram", "fields": ["text"] } } },
+            "Note": { "fields": text, "indexes": { "grams": { "kind": "trigram", "fields": ["text"] } } },
+            "Plain": { "fields": text }
+        }
+    }))
+    .unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    let ops = ["Message", "Note", "Plain"]
+        .iter()
+        .map(|t| json!({ "op": "create", "type": t, "id": format!("{t}-1"), "fields": { "text": "xaby" } }))
+        .collect();
+    write(&db, ops).unwrap();
+    let found = |start: Json| {
+        let op: ReadOp = serde_json::from_value(json!({ "read": "query", "plan": {
+            "start": start, "steps": [{ "step": "containing", "text": "ab" }], "terminal": { "answer": "ids" }
+        } }))
+        .unwrap();
+        let bytes = db.read(&Reads { reads: vec![op], track: None }).unwrap();
+        serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["ids"].clone()
+    };
+    // "ab" is shorter than a trigram, so each type is walked
+    assert_eq!(found(json!({ "from": "types", "types": ["Message", "Note"] })), json!(["Message-1", "Note-1"]));
+    assert_eq!(found(json!({ "from": "ids", "ids": ["Plain-1", "Message-1"] })), json!(["Message-1"]));
+}

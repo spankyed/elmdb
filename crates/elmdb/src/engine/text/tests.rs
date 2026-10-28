@@ -306,6 +306,11 @@ fn a_search_combines_with_the_steps_around_it() {
     assert_eq!(plan(second, json!([{ "step": "search", "query": "database" }])), json!(["Message-2"]));
     // A page and the next, by a cursor
     let all = json!({ "from": "types", "types": ["Message"] });
+    // After a step, among what it kept, each entity once
+    let within = json!([{ "step": "within", "ids": ["Message-2"] }, { "step": "search", "query": "database" }]);
+    assert_eq!(plan(all.clone(), within), json!(["Message-2"]));
+    let pair = json!({ "from": "ids", "ids": ["Message-1", "Message-2"] });
+    assert_eq!(plan(pair, json!([{ "step": "search", "query": "database" }])), json!(["Message-2", "Message-1"]));
     let first = json!([{ "step": "search", "query": "database lmdb", "options": { "any": true } }, { "step": "limit", "n": 1 }]);
     assert_eq!(plan(all.clone(), first), json!(["Message-1"]));
     let next = json!([{ "step": "search", "query": "database lmdb", "options": { "any": true } }, { "step": "after", "id": "Message-1" }]);
@@ -461,6 +466,33 @@ fn labels_match_a_quick_opens_characters_in_order_across_types() {
     };
     assert_eq!(found("live"), ["Thread-1"]);
     assert_eq!(found("withTrashed").len(), 2);
+    // Equal matches in creation order, across types
+    write(
+        &db,
+        vec![create("Thread", "Thread-2", json!({ "title": "rc" })), create("Doc", "Doc-3", json!({ "title": "rc" }))],
+    );
+    assert_eq!(found("live")[..2], ["Thread-2", "Doc-3"]);
+}
+
+#[test]
+fn hits_of_a_search_say_whether_their_rows_may_hold_proto() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Doc", "Doc-1", json!({ "title": "proto", "body": { "__proto__": "x" } }))]);
+    let plain = |fields: Json| {
+        read(
+            &db,
+            json!({ "read": "query", "plan": {
+            "start": { "from": "types", "types": ["Doc"] },
+            "steps": [{ "step": "search", "query": "proto", "index": "text" }],
+            "terminal": { "answer": "hits", "fields": fields }
+        } }),
+        )
+        .unwrap()["plainObjects"]
+            .clone()
+    };
+    assert_eq!(plain(json!(["title"])), true);
+    assert_eq!(plain(json!(["body"])), false);
 }
 
 #[test]

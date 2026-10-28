@@ -48,4 +48,20 @@ exclude_re = [
     "search.rs:427:.*replace > with >= in search",
     # walk_type merges the trash into the live range by place, and no two entities share a place
     "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
+    # nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the graph held
+    # more, so any first ask finds the same k
+    "reads.rs:901:.*replace \\+ with \\* in Query<'_, R>::nearest",
+    # orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same order, and
+    # EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are its cost
+    "reads.rs:614:.*replace > with < in Query<'_, R>::stage",
+    "reads.rs:615:.*replace - with / in Query<'_, R>::stage",
+    "reads.rs:1101:.*replace >= with < in Query<'_, R>::first_ordered",
+    "reads.rs:1103:.*replace == with != in Query<'_, R>::first_ordered",
+    # A stage's answer flows only to the stages after it and the terminal, none of which reads it: an id refused is
+    # what stops a walk
+    "reads.rs:636:.*delete ! in Query<'_, R>::stage",
+    # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
+    # reaches these guards' other side
+    "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
+    "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
 ]
