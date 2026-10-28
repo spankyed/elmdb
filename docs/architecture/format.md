@@ -48,8 +48,14 @@ A value is msgpack bytes, written by the caller and stored as given:
 - the engine decodes a value only where it must: to index it, to check a required field, to filter by it, to extract
   text.
 
-Values above a size are compressed with zstd, marked by a tag byte no msgpack value starts with, later with
-dictionaries trained per type for small values such as messages.
+A field's value of `COMPRESS_FROM` bytes of msgpack or more (`crates/elmdb/src/engine/values.rs`) is stored compressed
+when that is smaller: the byte `0xc1`, which no msgpack value starts with and which a write's value therefore never
+does (a write holding it is no msgpack, and refused), followed by a zstd frame (level 3) of the value's msgpack. Every
+other value is its msgpack as given. A read decompresses where it reads a field — a row, a field, a filter, an index's
+or a text index's derivation, `check()`, a dump — so nothing past the store sees the stored form, and a dump holds the
+value. Keys are never compressed, their bytes being their order; relation info and other primary records are stored
+as they are. Per-type dictionaries for small values, such as short messages, are a later design
+(`docs/roadmap.md`).
 
 ## Versions
 

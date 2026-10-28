@@ -250,12 +250,12 @@ fn write_relation(id: &str, s: &relations::Stored, w: &mut W<'_>) {
     }
 }
 
-/// A field's stored bytes; `entityType` is read from the id of an entity that exists
+/// A field's msgpack, decompressed where it is stored compressed; `entityType` is read from the id of an entity that exists
 fn get(r: &impl Read, id: &str, name: &str) -> Result<Option<Vec<u8>>> {
     if name == field::ENTITY_TYPE {
         return Ok(entities::record(r, id)?.map(|_| values::encode(&ids::type_of(id).into())));
     }
-    r.get(&keys::value(id, name))
+    r.get(&keys::value(id, name))?.map(|bytes| Ok(values::unstored(&bytes)?.into_owned())).transpose()
 }
 
 fn get_value(r: &impl Read, id: &str, name: &str) -> Result<Option<Value>> {

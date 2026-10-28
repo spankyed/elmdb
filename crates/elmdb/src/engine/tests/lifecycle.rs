@@ -30,8 +30,16 @@ fn within_ten_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static)
 }
 
 /// A 4 MiB row in a field no index reads, so the write costs its bytes and nothing else
+/// A task holding 4 MiB of text that doesn't compress, so it outgrows a 1 MiB map however its value is stored
 fn large_task(id: &str) -> serde_json::Value {
-    json!({ "op": "create", "type": "Task", "id": id, "fields": { "c": "x".repeat(4 << 20) } })
+    let mut state = 0x9e37_79b9_u32;
+    let text: String = (0..4 << 20)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            char::from(b'!' + (state >> 24) as u8 % 90)
+        })
+        .collect();
+    json!({ "op": "create", "type": "Task", "id": id, "fields": { "c": text } })
 }
 
 #[test]

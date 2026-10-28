@@ -166,7 +166,7 @@ pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Resu
             let Some(Part::String(field)) = decode_key(key)?.pop() else {
                 return Err(corrupt("An entity's field key"));
             };
-            fields.insert(field, values::decode(bytes)?);
+            fields.insert(field, values::decode_stored(bytes)?);
             Ok(())
         })?;
         each(Load::Entity { id, fields, trashed })?;

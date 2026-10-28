@@ -30,6 +30,7 @@ tempfile.workspace = true
 # Text indexes (`docs/architecture/search.md`): tokenizing and normalizing, the posting lists, fuzzy terms, and stemming
 charabia.workspace = true
 roaring.workspace = true
+zstd.workspace = true
 levenshtein_automata.workspace = true
 rust-stemmers.workspace = true
 # Vector indexes: hannoy's HNSW graphs in the same environment, built with a seeded generator

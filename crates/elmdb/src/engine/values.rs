@@ -21,6 +21,49 @@ pub fn encode(value: &Value) -> Vec<u8> {
     out
 }
 
+/// The byte a compressed field value starts with as it is stored: one no msgpack value starts with, so a stored value
+/// is its msgpack, or this byte and a zstd frame of its msgpack (`docs/architecture/format.md`, Values)
+pub const COMPRESSED: u8 = 0xc1;
+
+/// The msgpack length from which a field's value is stored compressed, when compressing makes it smaller: set by the
+/// sizes and reads measured on production-shaped data (`docs/evidence/next-phase-8.md`)
+pub const COMPRESS_FROM: usize = 256;
+
+/// zstd's level: within a few percent of its smallest output on apack's text, and its fastest to encode and decode
+const ZSTD_LEVEL: i32 = 3;
+
+/// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller
+pub fn stored(value: &Value) -> Vec<u8> {
+    let plain = encode(value);
+    if plain.len() < COMPRESS_FROM {
+        return plain;
+    }
+    match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
+        Ok(frame) if frame.len() + 1 < plain.len() => {
+            let mut out = Vec::with_capacity(frame.len() + 1);
+            out.push(COMPRESSED);
+            out.extend_from_slice(&frame);
+            out
+        }
+        _ => plain,
+    }
+}
+
+/// A stored field value's msgpack: the bytes as they are, or decompressed
+pub fn unstored(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
+    match bytes.split_first() {
+        Some((&COMPRESSED, frame)) => zstd::stream::decode_all(frame)
+            .map(std::borrow::Cow::Owned)
+            .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A stored value doesn't decompress: {e}"))),
+        _ => Ok(std::borrow::Cow::Borrowed(bytes)),
+    }
+}
+
+/// A stored field value, decoded
+pub fn decode_stored(bytes: &[u8]) -> Result<Value> {
+    decode(&unstored(bytes)?)
+}
+
 /// A stored value, decoded; stored values were checked as they were written
 pub fn decode(bytes: &[u8]) -> Result<Value> {
     rmpv::decode::read_value_with_max_depth(&mut &bytes[..], MAX_DEPTH)

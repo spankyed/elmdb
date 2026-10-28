@@ -170,7 +170,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
         })?;
         t.put(&keys::entity(new), &record)?;
         t.del(&keys::entity(old))?;
-        for (name, bytes) in entities::fields(t, old)? {
+        for (name, bytes) in entities::fields_stored(t, old)? {
             t.put(&keys::value(new, &name), &bytes)?;
             t.del(&keys::value(old, &name))?;
         }
@@ -227,7 +227,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
                 v => rewrite(v),
             };
             if next != value {
-                t.put(&keys::value(&id, &name), &values::encode(&next))?;
+                t.put(&keys::value(&id, &name), &values::stored(&next))?;
             }
         }
     }

@@ -111,11 +111,19 @@ fn set_trashed(t: &mut Txn<'_, '_>, id: &str, trashed: bool) -> Result<()> {
 }
 
 pub fn get(t: &impl Read, id: &str, field: &str) -> Result<Option<Value>> {
-    t.get(&keys::value(id, field))?.map(|b| values::decode(&b)).transpose()
+    t.get(&keys::value(id, field))?.map(|b| values::decode_stored(&b)).transpose()
 }
 
-/// The entity's fields, in key order, as stored bytes
+/// The entity's fields, in key order, each as its msgpack, decompressed where it is stored compressed
 pub fn fields(t: &impl Read, id: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    fields_stored(t, id)?
+        .into_iter()
+        .map(|(field, bytes)| Ok((field, values::unstored(&bytes)?.into_owned())))
+        .collect()
+}
+
+/// The entity's fields, in key order, as their stored bytes: what a copy of them or an undo of their removal keeps
+pub fn fields_stored(t: &impl Read, id: &str) -> Result<Vec<(String, Vec<u8>)>> {
     let prefix = keys::values_of(id);
     t.scan(&prefix)?
         .into_iter()
@@ -149,10 +157,10 @@ fn place_for(t: &Txn<'_, '_>, id: &str, field: &str) -> Result<Option<u64>> {
 pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> Result<()> {
     let key = keys::value(id, field);
     let stored = t.get(&key)?;
-    let before = stored.as_deref().map(values::decode).transpose()?;
+    let before = stored.as_deref().map(values::decode_stored).transpose()?;
     let seq = place_for(t, id, field)?;
     reindex(t, id, field, before.as_ref(), Some(value), seq)?;
-    t.put_over(&key, &values::encode(value), stored.as_deref())?;
+    t.put_over(&key, &values::stored(value), stored.as_deref())?;
     super::text::refile(t, id, field, seq, Some(value))?;
     super::vector::refile(t, id, field, seq, Some(value))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
@@ -166,7 +174,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
 pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     let key = keys::value(id, field);
     let Some(stored) = t.get(&key)? else { return Ok(()) };
-    let before = values::decode(&stored)?;
+    let before = values::decode_stored(&stored)?;
     let seq = place_for(t, id, field)?;
     reindex(t, id, field, Some(&before), None, seq)?;
     t.del_over(&key, Some(&stored))?;
@@ -185,8 +193,8 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     super::text::remove(t, id)?;
     super::vector::remove(t, id)?;
     let seq = record(t, id)?.map(|r| r.seq);
-    for (field, bytes) in fields(t, id)? {
-        let before = values::decode(&bytes)?;
+    for (field, bytes) in fields_stored(t, id)? {
+        let before = values::decode_stored(&bytes)?;
         reindex(t, id, &field, Some(&before), None, seq)?;
         t.del_over(&keys::value(id, &field), Some(&bytes))?;
     }
