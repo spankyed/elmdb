@@ -55,8 +55,11 @@ over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.r
 24 excluded as answering what the code answers, and one finding left, EXPLAIN's stage times, which no count shows; the
 triage also found a step limit whose plan needs more than a debug test thread's 2 MB stack. The three mutation scripts
 make changes cargo-mutants doesn't (an expression swapped for another, a Windows attribute, heap and timing regressions)
-and stay, each saying why in its header. Left: the baseline over `store/`,
-`engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`, and CI over `--in-diff`.
+and stay, each saying why in its header. The baseline over `store/`, `engine/watch.rs`, `engine/derive.rs` with
+`derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
+killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
+would need terabytes of map for) and 17 in Windows and Linux publication code, read on those platforms; `process.rs` runs
+against elmdb-node's suite, its Linux claim in a Linux container. Left: CI over `--in-diff`.
 
 ## 2. Named failpoints
 

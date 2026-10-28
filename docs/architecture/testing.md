@@ -58,7 +58,16 @@ cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -
 git diff main... > target/branch.diff && cargo mutants -j 3 --in-diff target/branch.diff
 # What the exclusions leave out of a file
 diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
+# The binding's process claim, against elmdb-node's suite rather than the engine's
+cargo mutants -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
+# Some mutants of a file again, after the specs that should kill them: a regex over their names
+cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
 ```
+
+Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
+the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants installed in it, against a copy of the
+tree), and the Windows ones are run by the Windows CI target and `scripts/check-windows-backup-mutation.py`
+(`docs/evidence/mutation-baseline.md`).
 
 Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
 test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
