@@ -142,12 +142,16 @@ fn order_by_then_limit_answers_what_sorting_everything_would() {
 
 /// EXPLAIN's answer, as `{ stage, index?, visited, kept }` per stage, without the times
 fn explained(db: &Database, plan: Json) -> (Json, Json, Vec<Json>) {
+    let began = std::time::Instant::now();
     let answer = read(db, json!({ "read": "query", "explain": true, "plan": plan.clone() }));
+    let wall = began.elapsed().as_secs_f64() * 1000.0;
     let plain = read(db, json!({ "read": "query", "plan": plan }));
     assert_eq!(answer["kind"], "explained");
     assert!(answer["ms"].as_f64().unwrap() >= 0.0);
+    assert!(answer["ms"].as_f64().unwrap() <= wall, "milliseconds: {} in a read of {wall}", answer["ms"]);
     let stages = answer["stages"].as_array().unwrap();
     let total: f64 = stages.iter().map(|s| s["ms"].as_f64().unwrap()).sum();
+    assert!(total > 0.0, "the stages' time is charged to them");
     assert!(
         total <= answer["ms"].as_f64().unwrap() + 0.5,
         "stage times are each stage's own: {total} of {}",
@@ -273,4 +277,39 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         ]
     );
     assert!(open > 0);
+}
+
+#[test]
+fn explain_names_each_index_a_stage_read_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Schema::from_json(&json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": {
+            "Task": { "fields": { "status": { "type": "string" } }, "indexes": { "status": { "kind": "value", "fields": ["status"] } } },
+            "Bug": { "fields": { "status": { "type": "string" } }, "indexes": { "status": { "kind": "value", "fields": ["status"] } } },
+            "Note": { "fields": { "status": { "type": "string" } }, "indexes": { "state": { "kind": "value", "fields": ["status"] } } },
+            "Ticket": { "shortCode": { "prefix": "TKT" }, "fields": {} }
+        }
+    }))
+    .unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    let ops = ["Task", "Bug", "Note"]
+        .iter()
+        .map(|t| json!({ "op": "create", "type": t, "id": format!("{t}-1"), "fields": { "status": "open" } }))
+        .collect();
+    super::write(&db, ops).unwrap();
+    let index_of = |types: Json| {
+        let plan = json!({ "start": { "from": "types", "types": types },
+            "steps": [{ "step": "where", "field": "status", "value": "open" }], "terminal": { "answer": "ids" } });
+        explained(&db, plan).2[1]["index"].clone()
+    };
+    assert_eq!(index_of(json!(["Task", "Bug"])), "status");
+    assert_eq!(index_of(json!(["Task", "Note"])), "status, state");
+    super::write(&db, vec![json!({ "op": "create", "type": "Ticket", "fields": {} })]).unwrap();
+    let plan = json!({ "start": { "from": "types", "types": ["Ticket"] },
+        "steps": [{ "step": "where", "field": "shortCode", "value": "TKT-1" }], "terminal": { "answer": "ids" } });
+    let (answer, _, stages) = explained(&db, plan);
+    assert_eq!(answer["ids"].as_array().unwrap().len(), 1);
+    assert_eq!(stages[1]["index"], "shortCode");
 }

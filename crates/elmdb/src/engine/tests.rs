@@ -832,6 +832,12 @@ fn a_unique_index_refuses_a_value_it_cant_hold_that_another_entity_holds() {
     assert!(e.message.contains("Task-1"), "{}", e.message);
     let e = refused(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "a": { "k": 1 } } })]);
     assert_eq!(e.code, ErrorCode::Unique, "{}", e.message);
+    // A list holding one value only a walk could find and nobody holds, then one the index finds another entity
+    // holding: the index's holder is the refusal, whatever the walk finds
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-3", "fields": { "a": "held" } })]).unwrap();
+    let e = refused(&db, vec![json!({ "op": "create", "type": "Task", "fields": { "a": ["z".repeat(300), "held"] } })]);
+    assert_eq!(e.code, ErrorCode::Unique, "{}", e.message);
+    assert!(e.message.contains("Task-3"), "{}", e.message);
     // Another such value, and the holder writing its own again, are allowed
     write(
         &db,

@@ -656,11 +656,9 @@ fn a_threaded_read_holds_its_schema_before_taking_the_snapshot() {
     let paused = entered.clone();
     let resumed = resume.clone();
     let thread = std::thread::spawn(move || {
-        crate::engine::BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(move || {
-                paused.wait();
-                resumed.wait();
-            }))
+        crate::failpoints::run_once_here(crate::failpoints::points::READ_SNAPSHOT, move || {
+            paused.wait();
+            resumed.wait();
         });
         reader.read(&reads(vec![tasks()], None)).unwrap()
     });
@@ -739,7 +737,7 @@ fn a_panicking_watch_read_is_removed_and_does_not_hide_failed_durability() {
     let dir = tempfile::tempdir().unwrap();
     let db =
         Database::open(dir.path(), crate::OpenOptions { schema: Some(super::schema()), ..Default::default() }).unwrap();
-    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    crate::failpoints::run_once_here(crate::failpoints::points::WATCH_READ, || panic!("injected watch read panic"));
     assert_eq!(
         db.watch(reads(vec![tasks()], None), Box::new(|_| {})).unwrap_err().code,
         crate::ErrorCode::WatchPanicked
@@ -757,7 +755,7 @@ fn a_panicking_watch_read_is_removed_and_does_not_hide_failed_durability() {
     .unwrap();
     let before = db.sequence().unwrap();
     let _failure = super::commits::FailedSync::arm(&db);
-    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    crate::failpoints::run_once_here(crate::failpoints::points::WATCH_READ, || panic!("injected watch read panic"));
     let result = db.write(&batch(vec![json!({"op":"create","type":"Task","id":"Task-read-panic"})]), true);
     assert_eq!(result.unwrap_err().code, crate::ErrorCode::NotDurable);
     assert_eq!(db.sequence().unwrap(), before + 1);
@@ -780,11 +778,9 @@ fn a_unit_opened_between_writer_checks_is_refused_without_holding_schema() {
     let (finished, result) = std::sync::mpsc::channel();
     let writer = db.clone();
     let handle = std::thread::spawn(move || {
-        crate::store::BEFORE_WRITE_RESERVATION.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(move || {
-                ready.send(()).unwrap();
-                start.recv().unwrap();
-            }))
+        crate::failpoints::run_once_here(crate::failpoints::points::WRITE_RESERVATION, move || {
+            ready.send(()).unwrap();
+            start.recv().unwrap();
         });
         finished.send(writer.write(&batch(Vec::new()), false).map(|_| ())).unwrap();
     });

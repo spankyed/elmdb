@@ -471,7 +471,7 @@ fn single_vector_rebuild_spills_identifiers_and_preserves_embeddings_and_neighbo
     super::super::derive::sorted::with_budget(1, || db.rebuild(Some(("Doc", "meaning")))).unwrap();
     assert_eq!(ids(&db, docs(), json!([{ "step":"near","vector":[1.0,0.0,0.0],"k":3 }])), expected);
     assert!(db.check().unwrap().is_clean());
-    super::super::derive::fail_next_scratch();
+    crate::failpoints::fail_once_here(crate::failpoints::points::SCRATCH);
     assert_eq!(db.rebuild(Some(("Doc", "meaning"))).unwrap_err().code, ErrorCode::Io);
     assert!(db.check().unwrap().is_clean());
 }
@@ -512,4 +512,123 @@ fn vector_flush_drains_multiple_journal_batches_and_index_groups() {
         "commit must drain every journal batch and index group"
     );
     assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_near_hit_scores_its_nearness_and_a_hybrid_one_its_fused_ranks() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    embed_pending(&db, topic);
+    let hits = |step: Json| -> Vec<(String, f64)> {
+        let answer = read(
+            &db,
+            json!({ "read": "query", "plan": { "start": docs(), "steps": [step], "terminal": { "answer": "hits" } } }),
+        )
+        .unwrap();
+        answer["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| (h["id"].as_str().unwrap().into(), h["score"].as_f64().unwrap()))
+            .collect()
+    };
+    // `1 / (1 + distance)`: 1 at no distance, falling below it with distance
+    let near = hits(json!({ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 3 }));
+    assert_eq!(near[0], ("Doc-cats".into(), 1.0));
+    // Nothing to highlight, a vector search matching no terms
+    let highlighted = read(
+        &db,
+        json!({ "read": "query", "plan": { "start": docs(), "steps": [{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }],
+            "terminal": { "answer": "hits", "highlights": true } } }),
+    )
+    .unwrap();
+    assert_eq!(highlighted["hits"][0]["highlights"], json!({}));
+    assert!(near[1..].iter().all(|(_, s)| *s > 0.0 && *s < 1.0), "{near:?}");
+    // First in both lists: 1 / 61, twice
+    let fused = hits(json!({ "step": "hybrid", "query": "cats", "vector": [1.0, 0.0, 0.0], "k": 1 }));
+    assert_eq!(fused.len(), 1);
+    assert_eq!(fused[0].0, "Doc-cats");
+    assert!((fused[0].1 - 2.0 / 61.0).abs() < 1e-12, "{fused:?}");
+}
+
+#[test]
+fn among_a_set_a_type_without_the_index_holds_no_match_and_one_named_or_started_from_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    write(&db, vec![json!({ "op": "create", "type": "Folder", "id": "Folder-1", "fields": {} })]).unwrap();
+    embed_pending(&db, topic);
+    let mixed = json!({ "from": "ids", "ids": ["Folder-1", "Doc-cars"] });
+    let hits = |start: Json, step: Json| {
+        read(
+            &db,
+            json!({ "read": "query", "plan": { "start": start, "steps": [step], "terminal": { "answer": "hits" } } }),
+        )
+    };
+    let near = json!({ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 2 });
+    assert_eq!(hits(mixed.clone(), near.clone()).unwrap()["hits"][0]["id"], "Doc-cars");
+    // After a step, among what it kept, each entity once
+    let within = read(
+        &db,
+        json!({ "read": "query", "plan": { "start": docs(), "steps": [{ "step": "within", "ids": ["Doc-cars"] }, near], "terminal": { "answer": "ids" } } }),
+    )
+    .unwrap();
+    assert_eq!(within["ids"], json!(["Doc-cars"]));
+    let pair = json!({ "from": "ids", "ids": ["Doc-cats", "Doc-cars"] });
+    assert_eq!(
+        hits(pair, json!({ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 5 })).unwrap()["hits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let hybrid = json!({ "step": "hybrid", "query": "car", "vector": [1.0, 0.0, 0.0], "k": 2 });
+    let found = hits(mixed.clone(), hybrid.clone()).unwrap();
+    assert_eq!(found["hits"].as_array().unwrap().len(), 1);
+    assert_eq!(found["hits"][0]["terms"], json!(["car"]), "the text search ran among the set's docs");
+    let folders = json!({ "from": "types", "types": ["Folder"] });
+    assert_eq!(hits(folders.clone(), near.clone()).unwrap_err().code, ErrorCode::UnknownIndex);
+    assert_eq!(hits(folders, hybrid.clone()).unwrap_err().code, ErrorCode::UnknownIndex);
+    let mut named = near;
+    named["index"] = json!("meaning");
+    assert_eq!(hits(mixed.clone(), named).unwrap_err().code, ErrorCode::UnknownIndex);
+    let mut named = hybrid;
+    named["textIndex"] = json!("text");
+    assert_eq!(hits(mixed, named).unwrap_err().code, ErrorCode::UnknownIndex);
+}
+
+#[test]
+fn hybrid_fuses_the_vector_ranking_four_times_k_deep() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Eighty-six docs nearer the vector than `Doc-e0`, `Doc-e1` 47th of them; only the two hold the word, `Doc-e0` the
+    // better match
+    let mut ops: Vec<Json> = (0..86)
+        .map(|i| json!({ "op": "create", "type": "Doc", "id": format!("Doc-f{i}"), "fields": { "body": format!("f{i}") } }))
+        .collect();
+    ops.push(json!({ "op": "create", "type": "Doc", "id": "Doc-e0", "fields": { "body": "zebra e0" } }));
+    ops.push(json!({ "op": "create", "type": "Doc", "id": "Doc-e1", "fields": { "body": "zebra with stripes e1" } }));
+    write(&db, ops).unwrap();
+    embed_pending(&db, |text| {
+        let angle = match text {
+            t if t.contains("e0") => 1.5,
+            t if t.contains("e1") => 0.465,
+            t => t.trim_start_matches('f').parse::<f32>().unwrap() * 0.01,
+        };
+        [angle.cos(), angle.sin(), 0.0]
+    });
+    let first = |k: u32| {
+        let step = json!({ "step": "hybrid", "query": "zebra", "vector": [1.0, 0.0, 0.0], "k": k });
+        read(
+            &db,
+            json!({ "read": "query", "plan": { "start": docs(), "steps": [step], "terminal": { "answer": "ids" } } }),
+        )
+        .unwrap()["ids"][0]
+            .clone()
+    };
+    // At k 20 the vector list is 80 deep, so `Doc-e1`'s place in it adds to its score and lifts it over `Doc-e0`
+    assert_eq!(first(20), "Doc-e1");
+    // At k 5 it is 40 deep, without `Doc-e1`
+    assert_eq!(first(5), "Doc-e0");
 }

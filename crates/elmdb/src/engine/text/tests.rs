@@ -150,6 +150,18 @@ fn the_last_word_matches_as_a_prefix_and_a_long_word_one_edit_away() {
     write(&db, vec![create("Message", "Message-5", json!({ "text": "databases" }))]);
     let hits = search(&db, "Message", "databases", json!({}));
     assert_eq!(hits[0], "Message-5");
+    // A term one edit away outranks one two away
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Message", "Message-6", json!({ "text": "databaxes" })),
+            create("Message", "Message-7", json!({ "text": "databasez" })),
+        ],
+    );
+    let hits = search(&db, "Message", "databasex", json!({ "prefix": false }));
+    assert_eq!(hits, json!(["Message-7", "Message-6"]));
 }
 
 #[test]
@@ -233,6 +245,8 @@ fn a_stemmed_index_matches_a_prefix_as_typed_and_suggests_words_not_stems() {
         assert_eq!(typed(q), json!(["Doc-1"]), "{q}");
     }
     assert_eq!(typed("runx"), json!([]));
+    // Only the last word is a prefix
+    assert_eq!(typed("runni nightly"), json!([]));
     let answer =
         read(&db, json!({ "read": "suggest", "type": "Doc", "index": "stemmed", "term": "Datab", "limit": 3 }))
             .unwrap();
@@ -288,8 +302,15 @@ fn a_search_combines_with_the_steps_around_it() {
     let thread = json!({ "from": "ids", "ids": ["Thread-1"] });
     let inside = json!([{ "step": "out", "kinds": ["in"] }, { "step": "search", "query": "lmdb" }]);
     assert_eq!(plan(thread, inside), json!(["Message-1"]));
+    let second = json!({ "from": "ids", "ids": ["Message-2"] });
+    assert_eq!(plan(second, json!([{ "step": "search", "query": "database" }])), json!(["Message-2"]));
     // A page and the next, by a cursor
     let all = json!({ "from": "types", "types": ["Message"] });
+    // After a step, among what it kept, each entity once
+    let within = json!([{ "step": "within", "ids": ["Message-2"] }, { "step": "search", "query": "database" }]);
+    assert_eq!(plan(all.clone(), within), json!(["Message-2"]));
+    let pair = json!({ "from": "ids", "ids": ["Message-1", "Message-2"] });
+    assert_eq!(plan(pair, json!([{ "step": "search", "query": "database" }])), json!(["Message-2", "Message-1"]));
     let first = json!([{ "step": "search", "query": "database lmdb", "options": { "any": true } }, { "step": "limit", "n": 1 }]);
     assert_eq!(plan(all.clone(), first), json!(["Message-1"]));
     let next = json!([{ "step": "search", "query": "database lmdb", "options": { "any": true } }, { "step": "after", "id": "Message-1" }]);
@@ -410,6 +431,15 @@ fn suggestions_complete_a_word_most_held_first_and_correct_one_nearest_first() {
     assert_eq!(answer["corrections"], json!(["store", "stork"]));
     let answer = read(&db, json!({ "read": "suggest", "type": "Message", "term": "storaeg" })).unwrap();
     assert_eq!(answer["corrections"], json!(["storage", "store", "stored"]));
+    // A word held is no correction of itself
+    let answer = read(&db, json!({ "read": "suggest", "type": "Message", "term": "store" })).unwrap();
+    assert_eq!(answer["corrections"], json!(["stored", "stork"]));
+    // Two letters take no edit
+    write(&db, vec![create("Message", "Message-3", json!({ "text": "go" }))]);
+    let answer = read(&db, json!({ "read": "suggest", "type": "Message", "term": "gx" })).unwrap();
+    assert_eq!(answer["corrections"], json!([]));
+    let answer = read(&db, json!({ "read": "suggest", "type": "Message", "term": "gox" })).unwrap();
+    assert_eq!(answer["corrections"], json!(["go"]));
 }
 
 #[test]
@@ -436,6 +466,33 @@ fn labels_match_a_quick_opens_characters_in_order_across_types() {
     };
     assert_eq!(found("live"), ["Thread-1"]);
     assert_eq!(found("withTrashed").len(), 2);
+    // Equal matches in creation order, across types
+    write(
+        &db,
+        vec![create("Thread", "Thread-2", json!({ "title": "rc" })), create("Doc", "Doc-3", json!({ "title": "rc" }))],
+    );
+    assert_eq!(found("live")[..2], ["Thread-2", "Doc-3"]);
+}
+
+#[test]
+fn hits_of_a_search_say_whether_their_rows_may_hold_proto() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Doc", "Doc-1", json!({ "title": "proto", "body": { "__proto__": "x" } }))]);
+    let plain = |fields: Json| {
+        read(
+            &db,
+            json!({ "read": "query", "plan": {
+            "start": { "from": "types", "types": ["Doc"] },
+            "steps": [{ "step": "search", "query": "proto", "index": "text" }],
+            "terminal": { "answer": "hits", "fields": fields }
+        } }),
+        )
+        .unwrap()["plainObjects"]
+            .clone()
+    };
+    assert_eq!(plain(json!(["title"])), true);
+    assert_eq!(plain(json!(["body"])), false);
 }
 
 #[test]
@@ -517,4 +574,118 @@ fn a_highlight_names_its_element_by_its_place_in_the_list() {
     )
     .unwrap();
     assert_eq!(answer["hits"][0]["highlights"]["body"], json!([[1, 0, 5]]), "{answer}");
+}
+
+#[test]
+fn a_query_parses_into_its_clauses_as_typed() {
+    use super::search::{RawClause, parse};
+    let clause =
+        |text: &str| RawClause { text: text.into(), quoted: false, negated: false, field: None, or_previous: false };
+    assert_eq!(
+        parse("a -b - title:c \"d e\" -\"f\" g OR h"),
+        vec![
+            clause("a"),
+            RawClause { negated: true, ..clause("b") },
+            clause("-"),
+            RawClause { field: Some("title".into()), ..clause("c") },
+            RawClause { quoted: true, ..clause("d e") },
+            RawClause { negated: true, quoted: true, ..clause("f") },
+            clause("g"),
+            RawClause { or_previous: true, ..clause("h") },
+        ]
+    );
+    // A colon followed by a space names no field
+    assert_eq!(parse("title: c"), vec![clause("title:"), clause("c")]);
+}
+
+/// Each hit's id and score, most relevant first
+fn scores(db: &Database, t: &str, query: &str, options: Json) -> Vec<(String, f64)> {
+    let index = if t == "Doc" { json!("text") } else { Json::Null };
+    let answer = read(
+        db,
+        json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": [t] },
+        "steps": [{ "step": "search", "query": query, "index": index, "options": options }],
+        "terminal": { "answer": "hits" }
+    } }),
+    )
+    .unwrap();
+    let hits = answer["hits"].as_array().unwrap();
+    hits.iter().map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap())).collect()
+}
+
+/// Okapi BM25 of a term `frequency` times in a document of `length` among `n` of `average` length, `df` holding it,
+/// with k1 1.2 and b 0.75; a field's weight multiplies its terms and its length
+fn bm25(frequency: f64, df: f64, n: f64, length: f64, average: f64) -> f64 {
+    let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
+    idf * frequency * 2.2 / (frequency + 1.2 * (0.25 + 0.75 * length / average))
+}
+
+fn assert_scores(got: Vec<(String, f64)>, want: &[(&str, f64)]) {
+    assert_eq!(got.len(), want.len(), "{got:?}");
+    for ((id, score), (want_id, want_score)) in got.iter().zip(want) {
+        assert_eq!(id, want_id, "{got:?}");
+        assert!((score - want_score).abs() < 1e-9, "{id}: {score}, not {want_score}");
+    }
+}
+
+#[test]
+fn a_score_is_bm25_over_the_weighted_fields_searched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Doc", "Doc-a", json!({ "title": "alpha", "body": "alpha beta" })),
+            create("Doc", "Doc-b", json!({ "title": "beta", "body": "gamma delta epsilon" })),
+        ],
+    );
+    // Weighted lengths: Doc-a 3 + 2, Doc-b 3 + 3, an average of 5.5
+    let exact = json!({ "fuzzy": false, "prefix": false });
+    let alpha = bm25(4.0, 1.0, 2.0, 5.0, 5.5);
+    assert_scores(scores(&db, "Doc", "alpha", exact.clone()), &[("Doc-a", alpha)]);
+    assert_scores(
+        scores(&db, "Doc", "beta", exact.clone()),
+        &[("Doc-b", bm25(3.0, 2.0, 2.0, 6.0, 5.5)), ("Doc-a", bm25(1.0, 2.0, 2.0, 5.0, 5.5))],
+    );
+    // Searching the body alone, the body's lengths: 2 and 3
+    let body = json!({ "fuzzy": false, "prefix": false, "fields": ["body"] });
+    assert_scores(scores(&db, "Doc", "alpha", body), &[("Doc-a", bm25(1.0, 1.0, 2.0, 2.0, 2.5))]);
+    // A clause that doesn't match adds nothing, though its terms are held: "beta alpha" isn't a phrase of Doc-a's
+    let mut any = exact.clone();
+    any["any"] = json!(true);
+    assert_scores(scores(&db, "Doc", "\"beta alpha\" alpha", any), &[("Doc-a", alpha)]);
+}
+
+#[test]
+fn recency_multiplies_a_score_by_a_half_for_each_half_life() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Message", "Message-1", json!({ "text": "deploy", "at": 80_000 }))]);
+    let [(_, plain)] = scores(&db, "Message", "deploy", json!({}))[..] else { panic!() };
+    let aged = |half_life: f64| {
+        let recency = json!({ "recency": { "field": "at", "halfLife": half_life, "now": 100_000 } });
+        scores(&db, "Message", "deploy", recency)[0].1
+    };
+    assert!((aged(10_000.0) - plain / 4.0).abs() < 1e-12);
+    assert!((aged(40_000.0) - plain / 2.0_f64.sqrt()).abs() < 1e-12);
+    assert_eq!(aged(0.0), plain, "a half-life of 0 ages nothing");
+}
+
+#[test]
+fn a_highlight_joins_the_terms_it_runs_across() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Message", "Message-1", json!({ "text": "openDatabaseStore fails" }))]);
+    let answer = read(
+        &db,
+        json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Message"] },
+        "steps": [{ "step": "search", "query": "database store fails", "options": { "any": true } }],
+        "terminal": { "answer": "hits", "highlights": true }
+    } }),
+    )
+    .unwrap();
+    // "Database" and "Store" touch, and mark as one
+    assert_eq!(answer["hits"][0]["highlights"]["text"], json!([[0, 4, 17], [0, 18, 23]]));
 }

@@ -512,3 +512,204 @@ fn a_query_asked_for_its_visits_answers_how_many_entities_its_walk_reached() {
     .unwrap();
     assert_eq!(plain[0], json!({ "kind": "count", "n": 4 }), "without visits, the answer itself");
 }
+
+#[test]
+fn with_role_after_another_filter_keeps_what_that_filter_kept() {
+    let f = fixture();
+    super::write(&f.db, vec![json!({ "op": "grant", "id": B, "role": "focus" })]).unwrap();
+    assert_eq!(ids(&f.db, types(&["Task"]), json!([{ "step": "withRole", "role": "focus" }])), json!([A, B]));
+    let open_focused =
+        json!([{ "step": "where", "field": "status", "value": "open" }, { "step": "withRole", "role": "focus" }]);
+    assert_eq!(ids(&f.db, types(&["Task"]), open_focused), json!([A]));
+}
+
+#[test]
+fn find_relations_by_both_ends_or_neither() {
+    let f = fixture();
+    let found = |op: Json| -> Vec<(Json, Json, Json)> {
+        reads(&f.db, vec![op]).unwrap()[0]["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["kind"].clone(), r["source"].clone(), r["target"].clone()))
+            .collect()
+    };
+    assert_eq!(
+        found(json!({ "read": "findRelations", "source": P, "target": B })),
+        [(json!("contains"), json!(P), json!(B))]
+    );
+    assert_eq!(found(json!({ "read": "findRelations", "kind": "owns" })), [(json!("owns"), json!(P), json!(C))]);
+    assert_eq!(found(json!({ "read": "findRelations" })).len(), 3);
+}
+
+#[test]
+fn a_row_read_says_whether_its_map_may_hold_proto() {
+    let f = fixture();
+    let row = |id: &str| reads(&f.db, vec![json!({ "read": "row", "id": id })]).unwrap()[0].take();
+    assert_eq!(row(A)["plainObjects"], true);
+    super::write(
+        &f.db,
+        vec![json!({ "op": "create", "type": "Person", "id": "Person-p", "fields": { "__proto__": { "x": 1 } } })],
+    )
+    .unwrap();
+    assert_eq!(row("Person-p")["plainObjects"], false);
+}
+
+#[test]
+fn the_filters_before_a_driving_index_keep_their_part() {
+    let f = fixture();
+    super::write(&f.db, vec![json!({ "op": "grant", "id": B, "role": "focus" })]).unwrap();
+    let open = json!({ "step": "where", "field": "status", "value": "open" });
+    let within = json!({ "step": "within", "ids": [A, B] });
+    assert_eq!(ids(&f.db, types(&["Task"]), json!([within, open])), json!([A]));
+    let focused = json!({ "step": "withRole", "role": "focus" });
+    assert_eq!(ids(&f.db, types(&["Task"]), json!([focused, open])), json!([A]));
+    let unknown = json!({ "step": "withRole", "role": "nope" });
+    let refused = reads(
+        &f.db,
+        vec![json!({ "read": "query", "plan": { "start": types(&["Task"]), "steps": [unknown, open], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRole);
+    // withRole drives when the filter before it has no index
+    let rank = json!({ "step": "where", "field": "rank", "value": 2 });
+    let explained = reads(
+        &f.db,
+        vec![json!({ "read": "query", "explain": true, "plan": { "start": types(&["Task"]), "steps": [rank, focused], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap();
+    assert_eq!(explained[0]["answer"]["ids"], json!([A]));
+    assert_eq!(explained[0]["stages"][2]["index"], "role");
+}
+
+#[test]
+fn with_role_before_a_driving_index_is_checked_per_match_while_the_role_index_is_unbuilt() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![json!({ "op": "grant", "id": A, "role": "focus" }), json!({ "op": "grant", "id": B, "role": "focus" })],
+    )
+    .unwrap();
+    f.db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Task", "role"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let open = json!({ "step": "where", "field": "status", "value": "open" });
+    let focused = json!({ "step": "withRole", "role": "focus" });
+    let explained = reads(
+        &f.db,
+        vec![json!({ "read": "query", "explain": true, "plan": { "start": types(&["Task"]), "steps": [focused, open], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap();
+    assert_eq!(explained[0]["answer"]["ids"], json!([A]));
+    assert_eq!(explained[0]["stages"][2]["index"], "status", "the where drives");
+    let unknown = json!({ "step": "withRole", "role": "nope" });
+    let refused = reads(
+        &f.db,
+        vec![json!({ "read": "query", "plan": { "start": types(&["Task"]), "steps": [unknown, open], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRole);
+}
+
+#[test]
+fn a_where_after_a_types_start_reads_every_type_indexed_or_not() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![json!({ "op": "create", "type": "Person", "id": "Person-x", "fields": { "status": "open" } })],
+    )
+    .unwrap();
+    let open = json!([{ "step": "where", "field": "status", "value": "open" }]);
+    assert_eq!(ids(&f.db, types(&["Person", "Task"]), open.clone()), json!(["Person-x", A, C, D]));
+    assert_eq!(ids(&f.db, types(&["Task", "Person"]), open), json!([A, C, D, "Person-x"]));
+}
+
+#[test]
+fn a_deep_walk_and_a_link_filter_stop_at_the_trash() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![
+            json!({ "op": "link", "source": A, "kind": "parent_of", "target": B }),
+            json!({ "op": "link", "source": B, "kind": "parent_of", "target": D }),
+        ],
+    )
+    .unwrap();
+    let descendants = json!([{ "step": "descendants", "kinds": ["parent_of"] }]);
+    assert_eq!(ids(&f.db, of_ids(&[A]), descendants.clone()), json!([B, D]));
+    let linked = json!([{ "step": "linkedTo", "kind": "contains" }]);
+    assert_eq!(ids(&f.db, types(&["Project"]), linked.clone()), json!([P]));
+    super::write(&f.db, vec![json!({ "op": "trash", "id": B })]).unwrap();
+    assert_eq!(ids(&f.db, of_ids(&[A]), descendants), json!([]), "past a trashed entity nothing is reached");
+    super::write(&f.db, vec![json!({ "op": "trash", "id": A })]).unwrap();
+    assert_eq!(ids(&f.db, types(&["Project"]), linked), json!([]), "every end it contains is in the trash");
+}
+
+#[test]
+fn where_null_matches_an_entity_lacking_the_field_though_the_field_is_indexed() {
+    let f = fixture();
+    super::write(&f.db, vec![json!({ "op": "create", "type": "Task", "id": "Task-e", "fields": { "title": "none" } })])
+        .unwrap();
+    let null = json!([{ "step": "where", "field": "status", "value": null }]);
+    assert_eq!(ids(&f.db, types(&["Task"]), null), json!(["Task-e"]));
+}
+
+#[test]
+fn every_answer_holding_rows_or_values_says_whether_a_map_may_hold_proto() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![json!({ "op": "create", "type": "Person", "id": "Person-p", "fields": { "tag": { "__proto__": 1 } } })],
+    )
+    .unwrap();
+    let answer = |start: Json, terminal: Json| query(&f.db, json!({ "start": start, "terminal": terminal }));
+    assert_eq!(answer(of_ids(&[A]), json!({ "answer": "firstRow" }))["plainObjects"], true);
+    assert_eq!(answer(of_ids(&["Person-p"]), json!({ "answer": "firstRow" }))["plainObjects"], false);
+    let grouped = json!({ "answer": "groupBy", "field": "tag" });
+    assert_eq!(answer(types(&["Task"]), grouped.clone())["plainObjects"], true);
+    assert_eq!(answer(types(&["Person"]), grouped)["plainObjects"], false);
+}
+
+#[test]
+fn edges_leave_out_a_far_end_in_the_trash() {
+    let f = fixture();
+    super::write(&f.db, vec![json!({ "op": "trash", "id": B })]).unwrap();
+    let edges = query(
+        &f.db,
+        json!({ "start": of_ids(&[P]), "terminal": { "answer": "edges", "kinds": ["contains"], "outward": true, "types": ["Task"] } }),
+    );
+    let targets: Vec<&Json> = edges["relations"].as_array().unwrap().iter().map(|r| &r["target"]).collect();
+    assert_eq!(targets, [&json!(A)]);
+}
+
+#[test]
+fn order_by_puts_false_before_true_and_distinct_keeps_each_list() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![
+            json!({ "op": "create", "type": "Person", "id": "Person-yes", "fields": { "tag": true } }),
+            json!({ "op": "create", "type": "Person", "id": "Person-no", "fields": { "tag": false } }),
+            json!({ "op": "create", "type": "Person", "id": "Person-l1", "fields": { "tag": [1] } }),
+            json!({ "op": "create", "type": "Person", "id": "Person-l2", "fields": { "tag": [1] } }),
+        ],
+    )
+    .unwrap();
+    let ordered = ids(&f.db, of_ids(&["Person-yes", "Person-no"]), json!([{ "step": "orderBy", "field": "tag" }]));
+    assert_eq!(ordered, json!(["Person-no", "Person-yes"]));
+    // A list is an object of its own each read, as JavaScript's Set holds it: equal lists are two values
+    let lists = of_ids(&["Person-l1", "Person-l2"]);
+    assert_eq!(
+        ids(&f.db, lists.clone(), json!([{ "step": "distinct", "field": "tag" }])),
+        json!(["Person-l1", "Person-l2"])
+    );
+    let groups = query(&f.db, json!({ "start": lists, "terminal": { "answer": "groupBy", "field": "tag" } }));
+    assert_eq!(groups["groups"].as_array().unwrap().len(), 2);
+}

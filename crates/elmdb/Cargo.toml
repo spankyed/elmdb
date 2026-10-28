@@ -27,6 +27,8 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tempfile.workspace = true
+# Named failpoints, which only the tests' builds enable (`src/failpoints.rs`)
+fail.workspace = true
 # Text indexes (`docs/architecture/search.md`): tokenizing and normalizing, the posting lists, fuzzy terms, and stemming
 charabia.workspace = true
 roaring.workspace = true
@@ -52,6 +54,7 @@ heed = { workspace = true, features = ["posix-sem"] }
 libc.workspace = true
 
 [dev-dependencies]
+fail = { workspace = true, features = ["failpoints"] }
 proptest.workspace = true
 criterion.workspace = true
 dhat.workspace = true

@@ -30,6 +30,49 @@ compares them with the model after the acknowledged steps, or one more. The fail
 checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it waited on
 failed.
 
+## Failpoints
+
+A fault a test injects — a commit refused as on a full disk, a failed sync, a pause before a read takes its snapshot,
+a panic in a watch's read — is a named `fail` failpoint (`crates/elmdb/src/failpoints.rs`, the names in its `points`).
+`fail`'s registry is the process's and the suite's tests run in parallel, so a site's condition asks `failpoints`
+whether the point is armed for it: once on the thread that armed it (`fail_once_here`, `run_once_here`), once for the
+database at a path (`fail_once_at`), or for a path until a guard drops (`fail_while_at`), for a fault that fires on
+another thread, a sync or a commit. A test arms a point only through these, never `fail::cfg`, which would arm it for
+every test running at the time; `failpoints`'s own spec shows a point armed on one thread doesn't fire on another.
+
+Only elmdb's tests enable `fail`'s `failpoints` feature (a dev-dependency feature, which resolver 2 keeps out of every
+other build), and without it a site is nothing: a release binding holds no point's name and no `fail` symbol
+(`docs/evidence/verification-tooling.md`).
+
+## Mutation testing
+
+cargo-mutants (`.cargo/mutants.toml`) mutates the engine's source — operators, conditions, a function's body — and runs
+the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate:
+
+```sh
+# Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
+cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+# Pass 2, only those pass 1 missed, against the whole suite
+cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
+# A branch's own changes
+git diff main... > target/branch.diff && cargo mutants -j 3 --in-diff target/branch.diff
+# What the exclusions leave out of a file
+diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
+```
+
+Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
+test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
+caught from the output directory's `previously_caught.txt`, so a pass is resumed, and narrowed, by running it again into
+the same directory.
+
+A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
+exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
+an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. A line
+that moves shows the excluded mutant as missed, and can hide a mutant of the same kind in the same function that moves
+onto that line; the `--list --no-config` diff above shows what each exclusion hides, and is the check after an edit. The hand-made mutation scripts that remain
+(`scripts/check-process-publication-mutations.py`, `check-windows-backup-mutation.py`,
+`check-maintenance-verification.py`) make platform-specific or heap and timing changes that cargo-mutants doesn't.
+
 ## Derived data
 
 `check()` runs after every model-harness case, so an index that drifts from its primary data fails the case that

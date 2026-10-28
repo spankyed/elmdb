@@ -1,0 +1,68 @@
+# cargo-mutants: what it mutates and how it tests each mutant. A run is scoped by `--file` or `--in-diff`, never the
+# whole crate (`docs/architecture/testing.md`, Mutation testing, has the commands and the two passes).
+
+# The tests themselves, and code no spec of the engine's covers by design
+exclude_globs = [
+    "crates/elmdb/src/**/tests/**",
+    "crates/elmdb/src/**/tests.rs",
+    "crates/elmdb/benches/**",
+    "crates/elmdb/examples/**",
+    "xtask/**",
+]
+# A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
+test_package = ["elmdb"]
+# Under the machine's other load a suite can run several times its baseline
+timeout_multiplier = 3.0
+# Inside target/, which is gitignored and which cargo-mutants doesn't copy
+output = "target"
+# Without debug info (`Cargo.toml`, profile.mutants): each job's copy is a fraction of a debug build's
+profile = "mutants"
+
+# Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
+exclude_re = [
+    # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
+    # function of the place answers the same, and only the file's size and a write's cost tell them apart
+    "trigram.rs:.*replace block_of -> u64 with",
+    # unique_keys' arms for one field absent and one field held each give what its general arm gives those inputs
+    "entities.rs:.*delete match arm \\[None\\] in unique_keys",
+    "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
+    # check_unique's index read skips the entity's own entry; a unique index holds one entity a value, so stopping
+    # at the first entry or the one after it finds the same holder
+    "entities.rs:351:.*replace == with != in check_unique",
+    # stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
+    # within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
+    # being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here, which
+    # the `--list --no-config` diff (`docs/architecture/testing.md`, Mutation testing) shows
+    "values.rs:42:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
+    # parse's field name needs an alphabetic first character, which an empty name (name_end == at) doesn't have
+    "search.rs:66:.*replace > with >= in parse",
+    # within's guard: the DFA is built for the distance within asks, and reports Exact only up to its own maximum
+    "search.rs:.*replace match guard d <= distance with true in within",
+    # A word given no edits walks an exact DFA, whose only match, at distance 0, the loop skips
+    "search.rs:310:.*replace > with >= in expand",
+    "search.rs:592:.*replace > with >= in suggest",
+    # The exact term was merged at weight 1 first, and merge keeps a term's highest weight
+    "search.rs:313:.*replace > with >= in expand",
+    # A clause of several words is checked by holds, which needs every word at consecutive places, so the union of the
+    # words' postings keeps what their intersection keeps; and holds answers true for one word in any field
+    "search.rs:422:.*replace &= with \\|= in search",
+    "search.rs:427:.*replace > with >= in search",
+    # walk_type merges the trash into the live range by place, and no two entities share a place
+    "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
+    # nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the graph held
+    # more, so any first ask finds the same k
+    "reads.rs:901:.*replace \\+ with \\* in Query<'_, R>::nearest",
+    # orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same order, and
+    # EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are its cost
+    "reads.rs:614:.*replace > with < in Query<'_, R>::stage",
+    "reads.rs:615:.*replace - with / in Query<'_, R>::stage",
+    "reads.rs:1101:.*replace >= with < in Query<'_, R>::first_ordered",
+    "reads.rs:1103:.*replace == with != in Query<'_, R>::first_ordered",
+    # A stage's answer flows only to the stages after it and the terminal, none of which reads it: an id refused is
+    # what stops a walk
+    "reads.rs:636:.*delete ! in Query<'_, R>::stage",
+    # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
+    # reaches these guards' other side
+    "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
+    "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
+]

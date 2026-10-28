@@ -1,4 +1,9 @@
-"""Prove Linux kernel-claim exclusion and unsupported-rename fallback assertions fire on disposable regressions."""
+"""Prove Linux kernel-claim exclusion and unsupported-rename fallback assertions fire on disposable regressions.
+
+Not cargo-mutants: both mutations are Linux-only code, run on Linux CI, and each swaps one expression for another (an
+unbound claim, the fallback's link for its error) where cargo-mutants replaces a function's whole answer; the claim's is
+in elmdb-node, which `.cargo/mutants.toml` doesn't test.
+"""
 import io
 import os
 from pathlib import Path

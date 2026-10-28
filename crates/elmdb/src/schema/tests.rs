@@ -336,6 +336,15 @@ mod changes {
         diff(&stored, &given, &Held::default()).into_iter().map(|c| (c.path, c.change, c.effect)).collect()
     }
 
+    fn changes_between(
+        before: impl FnOnce(&mut Value),
+        after: impl FnOnce(&mut Value),
+    ) -> Vec<(String, Change, Effect)> {
+        let stored = parse(&edited(before)).unwrap();
+        let given = parse(&edited(after)).unwrap();
+        diff(&stored, &given, &Held::default()).into_iter().map(|c| (c.path, c.change, c.effect)).collect()
+    }
+
     fn one(path: &str, change: Change, effect: Effect) -> Vec<(String, Change, Effect)> {
         vec![(path.to_owned(), change, effect)]
     }
@@ -445,6 +454,21 @@ mod changes {
         assert_eq!(
             changes(|j| j["relations"]["contains"]["cardinality"] = json!("many-to-many")),
             one("relations.contains", Change::Changed, Effect::Applied)
+        );
+        assert_eq!(
+            changes_between(
+                |j| j["relations"]["contains"]["cardinality"] = json!("one-to-one"),
+                |j| j["relations"]["contains"]["cardinality"] = json!("one-to-many"),
+            ),
+            one("relations.contains", Change::Changed, Effect::Applied)
+        );
+        assert_eq!(
+            changes(|j| j["types"]["Thread"]["fields"]["topic"] = json!({ "type": "integer" })),
+            one("types.Thread.fields.topic", Change::Changed, Effect::Enforced)
+        );
+        assert_eq!(
+            changes(|j| j["types"]["Thread"]["fields"]["topic"]["optional"] = json!(true)),
+            one("types.Thread.fields.topic", Change::Changed, Effect::Applied)
         );
         assert_eq!(
             changes(|j| j["relations"]["contains"]["acyclic"] = json!(true)),

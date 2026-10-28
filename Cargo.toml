@@ -31,6 +31,7 @@ thiserror = "2.0.21"
 ts-rs = "12.0.1"
 schemars = "1.2.3"
 tempfile = "3.27.0"
+fail = "0.5.1"
 regex = "1.13.1"
 regex-syntax = "0.8.11"
 zstd = "0.14.3"
@@ -52,6 +53,12 @@ unsafe_op_in_unsafe_fn = "deny"
 [workspace.lints.clippy]
 dbg_macro = "deny"
 todo = "deny"
+
+# What cargo-mutants builds each mutant with (`.cargo/mutants.toml`): the test profile without debug info, which is most
+# of what each of its copies of the tree takes on disk
+[profile.mutants]
+inherits = "test"
+debug = 0
 
 [profile.release]
 lto = true

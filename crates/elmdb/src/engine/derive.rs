@@ -22,11 +22,6 @@ use super::keys;
 use super::unit::{Read, Txn};
 use super::{ids, relations, text, trigram, values, vector};
 
-#[cfg(test)]
-pub(crate) fn fail_next_scratch() {
-    sorted::FAIL_NEXT_NEW.set(true);
-}
-
 /// One entity as primary data holds it
 struct Entity {
     id: String,

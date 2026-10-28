@@ -160,21 +160,6 @@ impl Drop for Registration {
     }
 }
 
-/// A test's stand-in for a disk that fills while a new environment is stamped: stamping the environment at this path fails
-#[cfg(test)]
-pub(crate) static FAIL_STAMP_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-/// A test's stand-in for a disk that fills: the next commit of the environment at this path fails, once
-#[cfg(test)]
-pub(crate) static FAIL_COMMIT_AT: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-#[cfg(test)]
-thread_local! {
-    pub(crate) static BEFORE_WRITE_RESERVATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static FAIL_NEXT_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(crate) static FAIL_RESET_CHECKPOINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
@@ -256,11 +241,7 @@ impl Store {
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer {
-                    env: env.clone(),
-                    #[cfg(test)]
-                    path: canonical.clone(),
-                }),
+                Box::new(EnvSyncer { env: env.clone(), path: canonical.clone() }),
                 Box::new(SystemClock),
             )
         });
@@ -328,10 +309,8 @@ impl Store {
         let db = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
                 let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
-                #[cfg(test)]
-                if FAIL_STAMP_AT.lock().unwrap().as_deref() == Some(path) {
-                    return Err(Error::new(ErrorCode::Io, "No space left on device"));
-                }
+                // A test's stand-in for a disk that fills while a new environment is stamped
+                failure_point!(STAMP at path, Error::new(ErrorCode::Io, "No space left on device"));
                 put_meta(wtxn, db, meta::KIND, format::KIND.as_bytes())?;
                 put_meta(wtxn, db, meta::FORMAT, &format::FORMAT_VERSION.to_be_bytes())?;
                 Ok(CommitOrAbort::<_, ()>::Commit(db))
@@ -466,12 +445,7 @@ impl Store {
         }
         let mut growths = 0;
         loop {
-            #[cfg(test)]
-            let _ = BEFORE_WRITE_RESERVATION.try_with(|hook| {
-                if let Some(hook) = hook.borrow_mut().take() {
-                    hook();
-                }
-            });
+            run_point!(WRITE_RESERVATION);
             // Serialize claiming the native writer with begin's unit reservation. Otherwise a unit can slip
             // between the earlier check and write_txn, leaving a caller waiting while it holds a schema guard.
             let open = self.unit.lock().expect("the unit's lock is never poisoned");
@@ -517,20 +491,17 @@ impl Store {
     }
 
     /// Commits a write transaction with the next sequence, answering it; a test may refuse it as a full disk would
-    /// (`FAIL_COMMIT_AT`). The sequence is read in the transaction, which holds the environment's one write lock, so
+    /// (the `COMMIT` failpoint). The sequence is read in the transaction, which holds the environment's one write lock, so
     /// it is the last any process committed
     pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
         let stored = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
         let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
         let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
-        #[cfg(test)]
-        if FAIL_NEXT_COMMIT.with(|flag| flag.replace(false))
-            || FAIL_COMMIT_AT.lock().unwrap().take_if(|p| *p == self.path).is_some()
-        {
-            drop(txn);
-            return Err(Error::new(ErrorCode::Io, "No space left on device"));
-        }
+        // A test's stand-in for a full disk, armed on its thread or for this environment's path; the transaction
+        // aborts as it drops
+        failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
+        failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
         txn.commit()?;
         self.sequence.fetch_max(next, Ordering::AcqRel);
         Ok(next)
@@ -580,10 +551,7 @@ impl Store {
             .ok_or_else(|| Error::new(ErrorCode::Corrupted, "Reset has no committed sequence"))?
             .to_vec();
         self.db.put(&mut txn, &key, &value)?;
-        #[cfg(test)]
-        if FAIL_RESET_CHECKPOINT.with(|flag| flag.replace(false)) {
-            return Err(Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
-        }
+        failure_point!(RESET_CHECKPOINT, Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
         txn.commit()?;
         Ok(())
     }
@@ -767,21 +735,16 @@ impl Drop for Store {
     }
 }
 
-#[cfg(test)]
-pub(crate) static FAIL_SYNC_AT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-
 struct EnvSyncer {
     env: Env<WithoutTls>,
-    #[cfg(test)]
+    /// What a test arms the `SYNC` failpoint for
+    #[cfg_attr(not(test), allow(dead_code))]
     path: PathBuf,
 }
 
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
-        #[cfg(test)]
-        if FAIL_SYNC_AT.lock().unwrap().contains(&self.path) {
-            return Err(Error::new(ErrorCode::Io, "Injected sync failure"));
-        }
+        failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
         self.env.force_sync().map_err(Into::into)
     }
 }

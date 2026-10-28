@@ -1,4 +1,8 @@
-"""Show the Windows published-attribute regression firing in a disposable source copy."""
+"""Show the Windows published-attribute regression firing in a disposable source copy.
+
+Not cargo-mutants: the code it mutates is `cfg(windows)`, built and tested only on the Windows CI target, where
+cargo-mutants isn't installed and a run over the crate would cost hours of a two-core runner.
+"""
 import io
 import os
 from pathlib import Path

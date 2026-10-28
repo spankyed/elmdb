@@ -17,11 +17,13 @@ fn schema() -> Schema {
             "fields": {
                 "note": { "type": "string", "optional": true },
                 "status": { "type": "string", "optional": true },
-                "body": { "type": "string", "optional": true }
+                "body": { "type": "string", "optional": true },
+                "title": { "type": "string", "optional": true }
             },
             "indexes": {
                 "status": { "kind": "value", "fields": ["status"] },
-                "text": { "kind": "text", "fields": { "body": {} } }
+                "text": { "kind": "text", "fields": { "body": {} } },
+                "titles": { "kind": "trigram", "fields": ["title"] }
             }
         } }
     }))
@@ -61,7 +63,8 @@ fn reads_of(field: &str, value: &str) -> u64 {
 
 #[test]
 fn a_field_write_reads_what_it_replaces_and_what_its_indexes_need_and_nothing_twice() {
-    // A field no index covers: what it held, for the write and the undo log both
+    // A field no index covers, though the type's trigram index covers another: what it held, for the write and the
+    // undo log both
     assert_eq!(reads_of("note", "changed"), 1);
     // A value index's: that, the entity's place, and the undo log's reads of the index entry it removes and the one it adds
     assert_eq!(reads_of("status", "done"), 4);

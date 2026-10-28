@@ -1,5 +1,7 @@
 //! elmdb: an embedded graph database written in Rust on LMDB. The design is in the repository's `docs/`.
 
+#[macro_use]
+mod failpoints;
 mod database;
 pub mod dump;
 pub mod engine;

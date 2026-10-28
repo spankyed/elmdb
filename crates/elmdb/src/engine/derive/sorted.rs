@@ -14,7 +14,6 @@ const FAN_IN: usize = 16;
 #[cfg(test)]
 thread_local! {
     pub(in crate::engine) static TEST_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
-    pub(in crate::engine) static FAIL_NEXT_NEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 #[derive(PartialEq, Eq)]
@@ -59,10 +58,7 @@ pub(in crate::engine) struct Scratch {
 
 impl Scratch {
     pub(in crate::engine) fn new() -> Result<Self> {
-        #[cfg(test)]
-        if FAIL_NEXT_NEW.replace(false) {
-            return Err(std::io::Error::other("injected scratch creation failure").into());
-        }
+        failure_point!(SCRATCH, std::io::Error::other("injected scratch creation failure").into());
         Ok(Self {
             directory: tempfile::Builder::new().prefix("elmdb-check-").tempdir()?,
             runs: Vec::new(),
