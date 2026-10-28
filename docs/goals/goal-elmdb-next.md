@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phase 5 built, its integration rerun outstanding (Current handoff). Phase 6 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phase 5 the same day (`next-phase-5.md`). Phase 6 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -83,13 +83,13 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Validation:** apack's `npm run chain -- --no-native` passed over Phases 3 and 4 at `d4db390d0f` (run
   `2026-10-27T23-57-59Z-32736`, 1,047 s). Not yet run: `test:native`, and G6's strict chain and macOS compiler cases at
   the end.
-- **Phase 5 built** (2026-10-27): field types from apack's shapes (apack `914316d725`; the plan archived with its
+- **Phase 5 done** (2026-10-27): field types from apack's shapes (apack `914316d725`; the plan archived with its
   Outcome, `docs/archive/plans/field-types-from-shapes.md`); the audit and the writers fixed in
   `docs/evidence/next-phase-5.md`. Its chain (`npm run chain -- --no-native`, run `2026-10-28T01-06-34Z-79939`) passed
   every step but `test:integration`, which was terminated (exit 143) with no case failing, while the machine ran another
   project's tests at a load average of 32 to 53 on ten cores with 8 GiB of disk free; `test:integration` passed over the
-  same Phase 5 code in the run before (`2026-10-28T00-49-17Z-38419`), before the one-line threads repository fix.
-  **Next diagnostic:** `npm run test:integration` alone, on a machine below load 10 with 20 GiB free.
+  same Phase 5 code in the run before (`2026-10-28T00-49-17Z-38419`), before the one-line threads repository fix, and
+  passed alone at `914316d725` (`npm run test:integration`: 60 files, 788 cases), so every step has passed over it.
 - **Disk:** the data volume runs near full. `apack-authoring-*` work dirs of checkouts that no longer exist are never
   swept, the sweep in apack's `tests/scripts/lib/authoring.sh` failing silently on the read-only compiler store inside
   each; 30 of them (about 15 GB) were removed on 2026-10-27 with the user's agreement. Not this goal's to fix.
@@ -275,7 +275,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
 | A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
 | The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | the strict chain, with G6's at the end |
-| Field types from apack's shapes (P5) | built | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | `test:integration` rerun on a quiet machine (Current handoff); the strict chain, with G6's at the end |
+| Field types from apack's shapes (P5) | done | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | the strict chain, with G6's at the end |
 | Text postings in blocks, gated (P6) | missing | | all |
 | Fewer reads per field write (P7) | missing | | all |
 | Value compression (P8) | missing | | all |
