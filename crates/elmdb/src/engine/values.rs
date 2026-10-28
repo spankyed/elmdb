@@ -337,6 +337,42 @@ mod tests {
             check_field("Note", "f", &FieldDef { nullable: true, ..field(ValueType::String) }, &Value::Nil).is_ok()
         );
         assert!(ok(ValueType::Any, Value::Nil).is_ok());
+        let got = |t: ValueType, v: Value| ok(t, v).unwrap_err().message;
+        assert!(got(ValueType::String, 1.into()).contains("it got a number"));
+        assert!(got(ValueType::String, Value::Ext(TIMESTAMP_EXTENSION, vec![0; 4])).contains("it got a timestamp"));
+        assert!(got(ValueType::String, Value::Ext(5, vec![0])).contains("it got an extension"));
+        assert!(got(list, "x".into()).contains("it got a string"));
+    }
+
+    #[test]
+    fn reads_each_timestamp_encoding_as_milliseconds() {
+        let secs: u32 = 1_700_000_000;
+        assert_eq!(timestamp_ms(&secs.to_be_bytes()), 1_700_000_000_000.0);
+        let packed = (500_000_000_u64 << 34) | u64::from(secs);
+        assert_eq!(timestamp_ms(&packed.to_be_bytes()), 1_700_000_000_500.0);
+        let wide = [250_000_000_u32.to_be_bytes().as_slice(), (-2_i64).to_be_bytes().as_slice()].concat();
+        assert_eq!(timestamp_ms(&wide), -1_750.0);
+        let ts = Value::Ext(TIMESTAMP_EXTENSION, secs.to_be_bytes().to_vec());
+        assert_eq!(as_time(&ts), Some(1_700_000_000_000.0));
+        assert_eq!(as_time(&Value::Ext(5, secs.to_be_bytes().to_vec())), None, "another extension holds no time");
+        assert_eq!(as_time(&Value::from(12)), Some(12.0));
+        assert_eq!(as_number(&Value::F32(1.5)), Some(1.5));
+    }
+
+    #[test]
+    fn refuses_a_value_outside_the_value_spec() {
+        assert!(check_spec(&Value::Map(vec![("k".into(), 1.into())])).is_ok());
+        assert!(check_spec(&Value::Map(vec![(1.into(), 1.into())])).is_err(), "a map key is a string");
+    }
+
+    #[test]
+    fn compresses_from_the_threshold_on() {
+        // A string's msgpack is two bytes longer than it, for these lengths
+        let below = Value::from("a".repeat(COMPRESS_FROM - 3));
+        assert_eq!(stored(&below), encode(&below));
+        let at = Value::from("a".repeat(COMPRESS_FROM - 2));
+        assert_eq!(encode(&at).len(), COMPRESS_FROM);
+        assert_eq!(stored(&at)[0], COMPRESSED);
     }
 
     #[test]
