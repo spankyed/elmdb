@@ -34,6 +34,20 @@ over `reads.rs` (61: 56 caught; of the 5 missed, the step limit's then caught by
 excluded as unreached and the finding left), and a fresh run of `entities.rs` (88: 82
 caught, 6 unviable, none missed). `trigram.rs`' was its own rerun (`9a978be`).
 
+**The end state**, a fresh reading of the four modules whose caught and unviable the first reading kept together, on
+`636fe17`'s source with the configuration's exclusions, against the fast suite (760 mutants in 2 h at `-j 3`):
+
+| Module | Caught | Unviable | Missed | Timeout |
+|---|---|---|---|---|
+| `engine/reads.rs` | 326 | 24 | 6 | 0 |
+| `engine/text/search.rs` | 212 | 8 | 0 | 5 |
+| `engine/values.rs` | 101 | 12 | 0 | 0 |
+| `schema/diff.rs` | 64 | 2 | 0 | 0 |
+
+`reads.rs`' six missed are the stage-time finding below and five in `walk_type`, which the model harness kills: run
+against the whole suite, all five are caught (4 minutes). The five timeouts are `parse`'s and `within`'s counters
+turned into loops that never end. `entities.rs`' and `trigram.rs`' end states are their reruns above.
+
 **What the survivors showed untested**, each now a spec: a query's clauses as parsed; BM25's score over weighted fields,
 a fields option and a clause that doesn't match; recency's factor; a one-edit term over a two-edit one; a prefix only for
 the last word; search, `near` and `containing` among a set, past its first place and each entity once; highlights joined
