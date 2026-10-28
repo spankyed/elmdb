@@ -51,22 +51,21 @@ move, since no behaviour of the binding changes.
   workspace runs at a load of 205 to 250.
 - **Phase 3 done** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
   write-through; the eight-target matrix passed (run 40674565378).
-- **Phase 1 under way** (`9a978be`): `trigram.rs` done (3 missed: `block_of`'s two, excluded as layout; `resolve`'s
-  name match, killed by a stronger spec). Pass 1 over `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and
-  `schema/diff.rs` (874 mutants) into `target/mutants-pass1`: 133 tested by 2026-10-28 12:00, 9 missed, 2 timeouts.
-  Of `entities.rs`' first five survivors, three are excluded as equivalent in `.cargo/mutants.toml`, and two are given
-  specs, uncommitted: `place_for`'s trigram match (shown killed) and `check_unique`'s `&&` (the spec reordered so the
-  walked value comes before the indexed one; its re-test not yet run).
-- **Disk:** each cargo-mutants copy of the tree takes 1.3 to 2.9 GB under the system temporary directory, most of it
-  debug info; with -j 5 the run held about 15 GB at 29 GiB free. Before resuming: a `mutants` cargo profile without
-  debug info (`profile = "mutants"` in `.cargo/mutants.toml`) and -j 3.
-- **To resume pass 1:** `cargo mutants -j 3 -o target/mutants-pass1 --iterate --file crates/elmdb/src/engine/reads.rs
-  --file crates/elmdb/src/engine/text/search.rs --file crates/elmdb/src/engine/entities.rs --file
-  crates/elmdb/src/engine/values.rs --file crates/elmdb/src/schema/diff.rs -- -- --skip model::the_engine`.
-  `--iterate` skips what earlier runs caught; the `-- -- --skip` keeps it the fast suite, which pass 2 then drops.
+- **Phase 1 under way.** `trigram.rs` done (`9a978be`). Pass 1 (the fast suite) over `reads.rs`, `text/search.rs`,
+  `entities.rs`, `values.rs` and `schema/diff.rs` finished: 667 mutants, 465 caught, 161 missed, 36 unviable,
+  5 timeouts; results kept in `target/mutants-pass1/mutants.out`, whose `previously_caught.txt` `--iterate` reads.
+  `entities.rs` done (`c8c00ee`). `values.rs`, `text/search.rs` and `schema/diff.rs`' survivors have specs or
+  exclusions (`26650b0`), being confirmed by a fast-suite `--iterate` over those three. `reads.rs`: of its 75
+  survivors, a full-suite pass reached 12 before it was stopped (it ran from a tree without the new specs): 5 caught,
+  7 missed, of which `answer`'s, `find_relations`' three and `stage`'s `withRole` now have specs,
+  `walk_type`'s `<=` is excluded, and `pull`'s `upto + 1` moves only which stage a time is charged to — a finding, no
+  count showing it.
+- **Disk:** each cargo-mutants copy takes about 1.3 GB on the `mutants` profile; -j 3.
+- **To continue:** after the confirmation, the full suite over `reads.rs`' survivors:
+  `cargo mutants -j 3 -o target/mutants-pass1 --iterate --file crates/elmdb/src/engine/reads.rs`; then the same
+  over the other three files for what the fast suite left; then `--in-diff` once against `main`.
 - **Evidence:** `docs/evidence/verification-tooling.md`, with Phase 1's baseline still to record.
-- **Next action:** triage pass 1's survivors over the five modules, then pass 2 (`--iterate`) over the files with
-  survivors.
+- **Next action:** triage what the full suite leaves in `reads.rs`, record the baseline, then `--in-diff`.
 
 ## Decisions
 

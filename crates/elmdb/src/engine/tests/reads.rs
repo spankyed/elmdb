@@ -512,3 +512,45 @@ fn a_query_asked_for_its_visits_answers_how_many_entities_its_walk_reached() {
     .unwrap();
     assert_eq!(plain[0], json!({ "kind": "count", "n": 4 }), "without visits, the answer itself");
 }
+
+#[test]
+fn with_role_after_another_filter_keeps_what_that_filter_kept() {
+    let f = fixture();
+    super::write(&f.db, vec![json!({ "op": "grant", "id": B, "role": "focus" })]).unwrap();
+    assert_eq!(ids(&f.db, types(&["Task"]), json!([{ "step": "withRole", "role": "focus" }])), json!([A, B]));
+    let open_focused =
+        json!([{ "step": "where", "field": "status", "value": "open" }, { "step": "withRole", "role": "focus" }]);
+    assert_eq!(ids(&f.db, types(&["Task"]), open_focused), json!([A]));
+}
+
+#[test]
+fn find_relations_by_both_ends_or_neither() {
+    let f = fixture();
+    let found = |op: Json| -> Vec<(Json, Json, Json)> {
+        reads(&f.db, vec![op]).unwrap()[0]["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["kind"].clone(), r["source"].clone(), r["target"].clone()))
+            .collect()
+    };
+    assert_eq!(
+        found(json!({ "read": "findRelations", "source": P, "target": B })),
+        [(json!("contains"), json!(P), json!(B))]
+    );
+    assert_eq!(found(json!({ "read": "findRelations", "kind": "owns" })), [(json!("owns"), json!(P), json!(C))]);
+    assert_eq!(found(json!({ "read": "findRelations" })).len(), 3);
+}
+
+#[test]
+fn a_row_read_says_whether_its_map_may_hold_proto() {
+    let f = fixture();
+    let row = |id: &str| reads(&f.db, vec![json!({ "read": "row", "id": id })]).unwrap()[0].take();
+    assert_eq!(row(A)["plainObjects"], true);
+    super::write(
+        &f.db,
+        vec![json!({ "op": "create", "type": "Person", "id": "Person-p", "fields": { "__proto__": { "x": 1 } } })],
+    )
+    .unwrap();
+    assert_eq!(row("Person-p")["plainObjects"], false);
+}

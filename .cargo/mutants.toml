@@ -46,4 +46,6 @@ exclude_re = [
     # words' postings keeps what their intersection keeps; and holds answers true for one word in any field
     "search.rs:422:.*replace &= with \\|= in search",
     "search.rs:427:.*replace > with >= in search",
+    # walk_type merges the trash into the live range by place, and no two entities share a place
+    "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
 ]
