@@ -381,6 +381,8 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     start() {
       tally = createCallTally();
       stopped = undefined;
+      // A unit begun before this count started isn't the count's, as one begun before counting at all isn't
+      counted = undefined;
     },
     report: () => tally?.report(true) ?? stopped ?? createCallTally().report(false),
     stop() {

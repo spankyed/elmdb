@@ -223,4 +223,72 @@ describe('the watch scheduler', () => {
     expect(report.totals.watchRuns.calls).toBe(counted.runs);
     expect(w.last()).toEqual(rows());
   });
+
+  it("doesn't settle while a flush still holds a watch it hasn't run", async () => {
+    let asked: Promise<void> | undefined;
+    let asking = false;
+    // The first watch's run fills most of the slice, so the second is left to a later flush; the first's observer
+    // asks for settling between them
+    watches.watch(() => { time.spend(6); return rows(); }, () => { if (asking) asked ??= watches.settled(); }, { label: 'asks' });
+    const second = watching(5, 'second');
+    await drain();
+    asking = true;
+    time.advance(1000);
+    commit();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(asked, 'the first watch ran and asked').toBeDefined();
+    expect(second.last(), 'the second is still to run').toHaveLength(0);
+    let settled = false;
+    void asked!.then(() => { settled = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled, 'settled before the second watch heard the commit').toBe(false);
+    await drain();
+    expect(settled).toBe(true);
+    expect(second.last()).toEqual(rows());
+  });
+
+  it("keeps the flush's other watches when a warning throws", async () => {
+    watches = createWatches(connection, { clock: time.clock, warn: () => { throw new Error('the warning sink failed'); } });
+    const costly = watching(20, 'costly');
+    const after = watching(0.1, 'after');
+    await drain();
+    const errors: unknown[] = [];
+    const onError = (error: unknown) => { errors.push(error); };
+    process.on('uncaughtException', onError);
+    try {
+      for (let i = 0; i < 6; i++) {
+        time.advance(1000);
+        commit();
+        await drain();
+      }
+    } finally {
+      process.off('uncaughtException', onError);
+    }
+    expect(errors).toHaveLength(1);
+    expect(costly.last()).toEqual(rows());
+    expect(after.last(), 'the watch after the one that warned still heard every commit').toEqual(rows());
+  });
+
+  it('runs a watch once for a commit an earlier run in its flush made', async () => {
+    // The first watch's read writes when told to; the second, still to run in that flush, reads the write
+    let write = false;
+    watches.watch(() => {
+      if (write) {
+        write = false;
+        commit();
+      }
+      return rows();
+    }, () => {}, { label: 'writes' });
+    const reader = watching(0.1, 'reads');
+    await drain();
+    time.advance(1000);
+    const before = reader.runs();
+    write = true;
+    commit();
+    await drain();
+    expect(reader.last()).toEqual(rows());
+    expect(reader.runs() - before).toBe(1);
+  });
 });

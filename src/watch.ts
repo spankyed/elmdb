@@ -226,18 +226,20 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
           continue;
         }
         ranOne = true;
+        // A commit an earlier run in this flush made is one this run reads: it needn't run again for it
+        if (dirty.delete(watch)) connection.tally()?.watchSkipped(watch.label);
         try {
           run(watch);
+          charge(watch);
         } catch (error) {
-          // An observer's own throw: reported, without stopping the other watches' deliveries
+          // An observer's (or a warning's) own throw: reported, without stopping the other watches' deliveries
           queueMicrotask(() => { throw error; });
         }
-        charge(watch);
       }
     } finally {
       flushing = false;
-      // Those left over run first next time, then those this flush's commits marked
-      dirty = new Set([...left, ...dirty]);
+      // Those left over run first next time, then those this flush's commits marked; one stopped meanwhile doesn't
+      dirty = new Set([...left.filter((watch) => !watch.stopped), ...dirty]);
     }
     if (dirty.size > 0) plan(false);
     settleWaiting();
@@ -289,7 +291,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       };
     },
     settled() {
-      if (!queued && !timer && dirty.size === 0) return Promise.resolve();
+      // A flush under way still holds watches it hasn't run, which it settles when it ends
+      if (!flushing && !queued && !timer && dirty.size === 0) return Promise.resolve();
       return new Promise((resolve) => { waiting.push(resolve); });
     },
     stats: () => {

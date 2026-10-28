@@ -69,8 +69,12 @@ export interface CallCounting {
 const SITE_FRAMES = 3;
 /** How deep a stack is read for them, past the engine's own frames */
 const STACK_DEPTH = 40;
-/** The engine's own source or build directory: frames inside it are the engine's, never a site */
-const ENGINE_DIR = filePath(new URL('.', import.meta.url).href);
+/**
+ * The engine's frames, never a site: its package's own source or build, by path. A bundle that inlines the engine
+ * (the development app's API) names those paths only through its source maps, which is why that bundle has them; the
+ * directory this module loaded from isn't used, being the bundle's, which holds every host frame too
+ */
+const ENGINE_FRAME = /\/(?:apack-ears|@apackdev\/ears)\/(?:src|dist)\//;
 
 function filePath(location: string): string {
   return location.startsWith('file://') ? decodeURIComponent(new URL(location).pathname) : location;
@@ -101,7 +105,7 @@ export function callSite(): string {
   Error.stackTraceLimit = STACK_DEPTH;
   const stack = new Error().stack ?? '';
   Error.stackTraceLimit = limit;
-  const outside = framesOf(stack).filter((frame) => !frame.startsWith(ENGINE_DIR) && !frame.startsWith('node:'));
+  const outside = framesOf(stack).filter((frame) => !ENGINE_FRAME.test(frame) && !frame.startsWith('node:'));
   return outside.length ? outside.slice(0, SITE_FRAMES).map(shortened).join(' < ') : 'unknown';
 }
 
