@@ -53,7 +53,9 @@ Not hooks, and left: `sorted.rs`'s `TEST_BUDGET`, a size override, and `watch.rs
   (`nm`).
 - `cargo xtask check-one-lmdb` and `check-generated` pass with the new dependency.
 
-PENDING: three workspace runs at default parallelism.
+`cargo test --workspace` three times in a row at the default parallelism, on `c8c00ee`, beside cargo-mutants' three
+jobs at a load average of 205 to 250: the engine's 294 cases passed each time, in 151, 164 and 169 s, and every other
+suite with them. A failpoint left armed for another test would have failed an unrelated case.
 
 ## Phase 3: tempfile publication
 

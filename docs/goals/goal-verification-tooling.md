@@ -46,11 +46,11 @@ move, since no behaviour of the binding changes.
   `EINVAL`, where `exclusive_rename_or_link` also falls back on `EOPNOTSUPP` and macOS today has no fallback; on Windows
   it clears every attribute (`FILE_ATTRIBUTE_NORMAL`) and moves without `MOVEFILE_WRITE_THROUGH`, which both of elmdb's
   publications pass.
-- **Phase 2 built** (`2c9b64e`): fifteen hooks as failpoints through `crates/elmdb/src/failpoints.rs` (one,
-  `FAIL_SYNC_AT`, wasn't in Phases' list); V2's spec and mutation, V3's `cargo tree` and symbol check done. Left: three
-  workspace runs at default parallelism.
-- **Phase 3 built** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
-  write-through. Left: the eight-target matrix, dispatched as run 40674565378.
+- **Phase 2 done** (`2c9b64e`): fifteen hooks as failpoints through `crates/elmdb/src/failpoints.rs` (one,
+  `FAIL_SYNC_AT`, wasn't in Phases' list); V2's spec and mutation, V3's `cargo tree` and symbol check, and three
+  workspace runs at a load of 205 to 250.
+- **Phase 3 done** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
+  write-through; the eight-target matrix passed (run 40674565378).
 - **Phase 1 under way** (`9a978be`): `trigram.rs` done (3 missed: `block_of`'s two, excluded as layout; `resolve`'s
   name match, killed by a stronger spec). Pass 1 over `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and
   `schema/diff.rs` (874 mutants) into `target/mutants-pass1`: 133 tested by 2026-10-28 12:00, 9 missed, 2 timeouts.
