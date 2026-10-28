@@ -55,7 +55,7 @@ phase's evidence is `docs/evidence/next-phase-3.md` to `next-phase-10.md`; the f
   Phase 8 and fixed (`a1b6603e5a`).
 
 **Left, each the user's or a later goal's:**
-- Merging elmdb's PR #3 (fast-forward, G7) before apack's PR #285.
+- Merged 2026-10-28: elmdb's PR #3 fast-forwarded onto `main` (`0646348`, hashes kept), then apack's #285 (`98386b36a1`).
 - A message sent before the threads surface has its chat start goes out with `mode: ''` and no flow answers it; the fix
   is the user's call (Current handoff).
 - The designs' triggers (`docs/roadmap.md`, Designed, each waiting for its trigger).
@@ -150,8 +150,8 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   the phantom-contract spec refusing the field-type reader's read of the id brand `__entity`; the spec names that brand
   as its one exception (`ab78fc3df1`). A first run failed for a full disk (ENOSPC), freed by removing elmdb's debug
   build cache.
-- **Next action:** none; the goal is closed. Merging elmdb's PR #3 (fast-forward, hashes kept) and then apack's #285
-  is the user's.
+- **Next action:** none; the goal is closed, and both PRs are merged: elmdb's #3 fast-forwarded (`0646348`), then
+  apack's #285 (`98386b36a1`).
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).

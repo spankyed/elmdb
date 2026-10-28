@@ -1,6 +1,6 @@
 # Goal: mutation testing, named failpoints and tempfile publication
 
-Status: planned, 2026-10-28. Stages 1, 2 and 9 of `docs/roadmap/verification-tooling.md`, in one pass. Not started.
+Status: in progress, 2026-10-28. Stages 1, 2 and 9 of `docs/roadmap/verification-tooling.md`, in one pass.
 
 ```text
 # Goal: mutation testing, named failpoints and tempfile publication
@@ -39,7 +39,13 @@ move, since no behaviour of the binding changes.
 
 ## Current handoff
 
-- **State:** not started. Branch: none yet.
+- **State:** started 2026-10-28 on `session/verification-tooling`, from `main` at `0646348`, after elmdb-next merged
+  (apack `master` at `98386b36a1`, whose chain passed with it linked). cargo-mutants 27.1.0 is installed.
+- **Phase 3's reading of `tempfile` 3.27.0** (`src/file/imp/{unix,windows}.rs`), before Phase 3 starts: on Linux and
+  macOS `persist_noclobber` renames with `RENAME_NOREPLACE` and falls back to a hard link and an unlink on `ENOSYS` or
+  `EINVAL`, where `exclusive_rename_or_link` also falls back on `EOPNOTSUPP` and macOS today has no fallback; on Windows
+  it clears every attribute (`FILE_ATTRIBUTE_NORMAL`) and moves without `MOVEFILE_WRITE_THROUGH`, which both of elmdb's
+  publications pass.
 - **Next action:** Phase 1.
 
 ## Decisions
