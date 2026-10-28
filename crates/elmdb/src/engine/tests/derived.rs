@@ -1122,3 +1122,59 @@ fn a_removed_type_takes_its_indexes_data_with_it_and_keeps_its_rows() {
         .unwrap();
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
+
+/// The ids a plan over Notes with one step answers
+fn note_ids(db: &Database, step: Json) -> Json {
+    let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Note"] }, "steps": [step], "terminal": { "answer": "ids" } } }] }))
+    .unwrap();
+    let bytes = db.read(&reads).unwrap();
+    serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["ids"].clone()
+}
+
+#[test]
+fn each_of_a_types_text_and_trigram_indexes_is_built_and_rebuilt_from_its_own_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "alpha", "kind": "gamma" } }),
+        ],
+    )
+    .unwrap();
+    let indexes = json!({
+        "byTitle": { "kind": "text", "fields": { "title": {} } },
+        "byKind": { "kind": "text", "fields": { "kind": {} } },
+        "titleGrams": { "kind": "trigram", "fields": ["title"] },
+        "kindGrams": { "kind": "trigram", "fields": ["kind"] }
+    });
+    db.set_schema(Schema::from_json(&notes(base_fields(), indexes)).unwrap()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let found = |db: &Database| {
+        (
+            note_ids(db, json!({ "step": "search", "query": "gamma", "index": "byKind" })),
+            note_ids(db, json!({ "step": "containing", "text": "amm", "index": "kindGrams" })),
+        )
+    };
+    assert_eq!(found(&db), (json!(["Note-1"]), json!(["Note-1"])), "built in the background");
+    db.rebuild(Some(("Note", "byKind"))).unwrap();
+    db.rebuild(Some(("Note", "kindGrams"))).unwrap();
+    assert_eq!(found(&db), (json!(["Note-1"]), json!(["Note-1"])), "rebuilt alone");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+#[test]
+fn a_full_rebuild_keeps_a_unique_index_over_a_list_holding_one_value_twice() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["tags"] = json!({ "type": "list", "of": { "type": "string" }, "optional": true });
+    let db =
+        with_schema(&dir, notes(fields, json!({ "tag": { "kind": "value", "fields": ["tags"], "unique": true } })))
+            .unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "tags": ["x", "x"] } })])
+        .unwrap();
+    db.rebuild(None).unwrap();
+    let status = db.index_status().unwrap();
+    assert!(status.iter().find(|s| s.index == "tag").unwrap().built, "{status:?}");
+}

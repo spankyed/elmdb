@@ -686,7 +686,10 @@ impl Store {
     /// Syncs on the calling thread what group commit owes, without its worker
     pub fn sync_owed(&self) -> Result<()> {
         match self.commit {
-            Some(_) => self.env.force_sync().map_err(Into::into),
+            Some(_) => {
+                failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
+                self.env.force_sync().map_err(Into::into)
+            }
             None => Ok(()),
         }
     }

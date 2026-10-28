@@ -409,3 +409,57 @@ fn unique_rebuild_does_not_merge_distinct_holders_with_a_corrupt_shared_sequence
         .unwrap();
     assert_eq!(db.rebuild(Some(("Task", "slug"))).unwrap_err().code, crate::ErrorCode::Unique);
 }
+
+#[test]
+fn a_report_is_clean_only_without_differences_and_violations() {
+    use crate::engine::derive::{CheckReport, Difference, Violation};
+    assert!(CheckReport::default().is_clean());
+    let differences = vec![Difference { key: "k".into(), kind: "missing".into() }];
+    assert!(!CheckReport { differences, violations: Vec::new() }.is_clean());
+    let violations = vec![Violation { subject: "Task-1".into(), message: "m".into() }];
+    assert!(!CheckReport { differences: Vec::new(), violations }.is_clean());
+}
+
+#[test]
+fn check_names_a_relation_outside_its_endpoints_a_second_target_and_every_holder_of_a_unique_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let entity = |id: &str, fields: &[(&str, rmpv::Value)]| Load::Entity {
+        id: id.into(),
+        fields: fields.iter().map(|(k, v)| (k.to_string(), v.clone())).collect::<BTreeMap<_, _>>(),
+        trashed: false,
+    };
+    let relation = |id: &str, source: &str, target: &str| Load::Relation {
+        id: id.into(),
+        kind: "pins".into(),
+        source: source.into(),
+        target: target.into(),
+        info: None,
+    };
+    db.bulk_load(&[
+        entity("Task-1", &[("slug", "same".into())]),
+        entity("Task-2", &[("slug", "same".into())]),
+        entity("Task-3", &[("slug", "same".into())]),
+        entity("Note-1", &[]),
+        entity("Note-2", &[]),
+        relation("Relation-1", "Note-1", "Task-1"),
+        relation("Relation-2", "Note-1", "Task-2"),
+        relation("Relation-3", "Note-2", "Note-1"),
+    ])
+    .unwrap();
+    let report = db.check().unwrap();
+    let said: Vec<(&str, &str)> = report.violations.iter().map(|v| (v.subject.as_str(), v.message.as_str())).collect();
+    // A relation is named by its key, an entity by its id
+    let about = |subject: &str| {
+        said.iter()
+            .filter(|(s, _)| *s == subject || s.ends_with(&format!(" {subject}")))
+            .map(|(_, m)| *m)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(about("Relation-3"), ["pins doesn't join a Note to a Note"], "{said:?}");
+    assert!(about("Relation-1").is_empty(), "a Note pinning a Task is within the endpoints: {said:?}");
+    assert_eq!(about("Note-1"), ["has 2 pins targets, and a pins source has one"], "{said:?}");
+    let unique: Vec<_> = said.iter().filter(|(_, m)| m.contains("which is unique")).collect();
+    assert_eq!(unique.len(), 1, "one violation names every holder: {said:?}");
+    assert_eq!(unique[0].0, "Task-1, Task-2, Task-3");
+}

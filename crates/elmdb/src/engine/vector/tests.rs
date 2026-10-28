@@ -632,3 +632,30 @@ fn hybrid_fuses_the_vector_ranking_four_times_k_deep() {
     // At k 5 it is 40 deep, without `Doc-e1`
     assert_eq!(first(5), "Doc-e0");
 }
+
+#[test]
+fn each_of_two_vector_indexes_declared_over_existing_data_queues_its_own_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    let options =
+        |indexes: Json| OpenOptions { schema: Some(schema_with(indexes)), syncs: false, ..Default::default() };
+    let db = Database::open(dir.path(), options(json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "title": "a title", "body": "a body" } }),
+        ],
+    )
+    .unwrap();
+    db.set_schema(schema_with(json!({
+        "ofTitle": { "kind": "vector", "from": ["title"], "dims": DIMS, "model": "m1" },
+        "ofBody": { "kind": "vector", "from": ["body"], "dims": DIMS, "model": "m1" }
+    })))
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    for (index, text) in [("ofTitle", "a title"), ("ofBody", "a body")] {
+        let waiting = read(&db, json!({ "read": "pendingEmbeddings", "type": "Doc", "index": index })).unwrap();
+        let texts: Vec<&str> =
+            waiting["chunks"].as_array().unwrap().iter().map(|c| c["text"].as_str().unwrap()).collect();
+        assert_eq!(texts, [text], "{index}: {waiting}");
+    }
+}

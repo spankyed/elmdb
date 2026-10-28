@@ -331,6 +331,43 @@ fn stopping_at_exit_waits_on_no_worker() {
     finish.send(Ok(())).unwrap();
 }
 
+#[test]
+fn stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_free() {
+    // Idle: both locks are free at once
+    let Harness { commit, started, finish: _finish, .. } = Harness::new();
+    let shared = Arc::clone(&commit.shared);
+    commit.stop_at_exit(Duration::from_millis(20));
+    assert!(shared.lock().closing, "the worker is told to stop");
+    assert!(
+        matches!(started.recv_timeout(Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+        "the syncer is dropped"
+    );
+
+    // Mid-sync: the syncer's lock comes free within the wait
+    let Harness { commit, started, finish, .. } = Harness::new();
+    commit.on_commit();
+    drop(commit.durable());
+    started.recv_timeout(Duration::from_millis(200)).expect("a sync started");
+    let stopping = std::thread::spawn(move || commit.stop_at_exit(Duration::from_secs(5)));
+    std::thread::sleep(Duration::from_millis(50));
+    finish.send(Ok(())).unwrap();
+    stopping.join().unwrap();
+    assert!(
+        matches!(started.recv_timeout(Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+        "the syncer is dropped once the sync that held it ends"
+    );
+}
+
+#[test]
+fn dropping_group_commit_syncs_what_it_owes() {
+    let Harness { commit, started, finish, .. } = Harness::new();
+    commit.on_commit();
+    let dropping = std::thread::spawn(move || drop(commit));
+    assert!(started.recv_timeout(Duration::from_secs(5)).is_ok(), "the drop syncs the owed commit");
+    finish.send(Ok(())).unwrap();
+    dropping.join().unwrap();
+}
+
 /// The failed-sync harness (`docs/architecture/testing.md`): random commits, waits, syncs finished or failed, and time, checked against
 /// what a wait promises rather than against a copy of the implementation. A wait that resolved had a sync covering its
 /// commits finish successfully, and no sync failed before it settled; a wait that rejected had a sync fail before it

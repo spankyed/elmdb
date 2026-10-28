@@ -65,4 +65,16 @@ exclude_re = [
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
     "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
+    # check_stamp's newer-format arm: the format equal to this elmdb's is the arm above it
+    "store/mod.rs:.*replace > with >= in check_stamp",
+    # The worker's owed check: a sync is due only after a commit since the last sync began, so whenever one is due the
+    # commits outnumber the synced
+    "sync.rs:330:.*replace > with >= in run",
+    # A manual clock's worker would wait a millisecond at a time rather than to be woken: the same syncs, polled
+    "sync.rs:343:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
+    # A build error other than a refusal recurs in the fallback's walk of the same rows, which returns it
+    "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
+    # The spill budget sets when rows go to disk, which no answer shows; the release heap test
+    # (tests/maintenance_heap.rs) holds what it bounds
+    "sorted.rs:11:.*replace \\* with",
 ]
