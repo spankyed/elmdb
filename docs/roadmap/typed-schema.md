@@ -1,6 +1,6 @@
 # Field types from apack's shapes
 
-Status: decided, 2026-10-25; planned in apack (`docs/plans/field-types-from-shapes.md`).
+Status: decided, 2026-10-25; built in apack, 2026-10-27 (`docs/archive/plans/field-types-from-shapes.md`, Outcome).
 
 ## Where it starts
 

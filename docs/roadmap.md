@@ -64,7 +64,7 @@ From a review of the engine on 2026-10-25 (the reasons in `roadmap/`):
 3. **Posting lists in blocks**, if a message write's time is measured to grow with the corpus
    (`roadmap/text-index-at-scale.md`).
 4. **Field types from apack's shapes** (`roadmap/typed-schema.md`; planned in apack's
-   `docs/plans/field-types-from-shapes.md`).
+   `docs/archive/plans/field-types-from-shapes.md`).
 
 Bitmaps, reads without a decode, units that span an `await` and the change log follow, each when a measurement or a
 feature calls for it.

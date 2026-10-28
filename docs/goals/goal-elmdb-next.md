@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`). Phase 5 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phase 5 built, its integration rerun outstanding (Current handoff). Phase 6 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -9,7 +9,7 @@ Implement elmdb/docs/goals/goal-elmdb-next.md. Read Scope, Current handoff, Deci
 Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished by its own
 document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
 elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 5 is
-apack/monorepo/docs/plans/field-types-from-shapes.md. Phases 1 and 2 are done; Phases 3 to 10 run on
+apack/monorepo/docs/archive/plans/field-types-from-shapes.md. Phases 1 and 2 are done; Phases 3 to 10 run on
 G7's branches, apack's in its main checkout under one PR and elmdb's in its own checkout.
 
 Work in two repositories, both under ~/Develop/Projects:
@@ -83,13 +83,17 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Validation:** apack's `npm run chain -- --no-native` passed over Phases 3 and 4 at `d4db390d0f` (run
   `2026-10-27T23-57-59Z-32736`, 1,047 s). Not yet run: `test:native`, and G6's strict chain and macOS compiler cases at
   the end.
-- **Next action:** Phase 5, field types from apack's shapes (apack's `docs/plans/field-types-from-shapes.md`). Two things
-  found reading for it: a shape names `EARS.EntityId` through the pack's `#generated/ears`, which codegen writes after
-  reading the shapes and which is gitignored, so the reader must be handed the `ears.ts` codegen is about to write or a
-  clean checkout's first build types every id `any`; and an elmdb `ref` names only declared types, so a target no
-  registered pack declares is narrowed out where the schema is built. elmdb's `schema.md` (apack's schema) says objects
-  map to `object` and `additionalFields` is `refuse`, where the plan says `any` and `allow`: the plan is built, and
-  `schema.md` corrected to it.
+- **Phase 5 built** (2026-10-27): field types from apack's shapes (apack `914316d725`; the plan archived with its
+  Outcome, `docs/archive/plans/field-types-from-shapes.md`); the audit and the writers fixed in
+  `docs/evidence/next-phase-5.md`. Its chain (`npm run chain -- --no-native`, run `2026-10-28T01-06-34Z-79939`) passed
+  every step but `test:integration`, which was terminated (exit 143) with no case failing, while the machine ran another
+  project's tests at a load average of 32 to 53 on ten cores with 8 GiB of disk free; `test:integration` passed over the
+  same Phase 5 code in the run before (`2026-10-28T00-49-17Z-38419`), before the one-line threads repository fix.
+  **Next diagnostic:** `npm run test:integration` alone, on a machine below load 10 with 20 GiB free.
+- **Disk:** the data volume runs near full. `apack-authoring-*` work dirs of checkouts that no longer exist are never
+  swept, the sweep in apack's `tests/scripts/lib/authoring.sh` failing silently on the read-only compiler store inside
+  each; 30 of them (about 15 GB) were removed on 2026-10-27 with the user's agreement. Not this goal's to fix.
+- **Next action:** Phase 6, text postings in blocks (gated): apack's bench gains the text cases its reading names.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -199,7 +203,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 ### Phase 5: field types from apack's shapes
 
-- **Deliverable:** apack's `docs/plans/field-types-from-shapes.md`, its four steps.
+- **Deliverable:** apack's `docs/archive/plans/field-types-from-shapes.md`, its four steps.
 - **Dependencies:** Phase 2.
 - **Done when:** the plan's steps are done, the audit's findings and their fixes are recorded, and apack's
   `npm run chain -- --no-native` passes.
@@ -271,7 +275,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
 | A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
 | The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | the strict chain, with G6's at the end |
-| Field types from apack's shapes (P5) | missing | | all |
+| Field types from apack's shapes (P5) | built | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | `test:integration` rerun on a quiet machine (Current handoff); the strict chain, with G6's at the end |
 | Text postings in blocks, gated (P6) | missing | | all |
 | Fewer reads per field write (P7) | missing | | all |
 | Value compression (P8) | missing | | all |

@@ -265,19 +265,22 @@ elmdb's Rust schema types are the definition. From them the build generates:
 
 ## apack's schema
 
-apack doesn't write this document. Codegen writes a fragment per pack from its manifest and shapes, and the host merges
-the registered packs' fragments, refusing a name two packs declare and naming both, as it does today:
+apack doesn't write this document. Codegen reads each pack's manifest and shapes into its registration, and the host
+builds the schema from the registered packs' (`toElmdbSchema`, apack's `packages/apack-ears/src/schema.ts`), refusing a
+name two packs declare and naming both:
 
-- **types, short code prefixes and indexes** from each `apack.json` entity entry. Its `indexes: ["pinned"]` stays the
-  manifest's shorthand for a value index per field, and gains the text and vector forms;
-- **fields** from the TypeScript shape: `string`, `number` and `boolean` as themselves, a union of string literals as
-  `enum`, `T[]` as `list`, a branded `EARS.EntityId<'X'>` as `ref` to `X`, an interface or record as `object`, any
-  other union as `any`; `?` as `optional` and `| null` as `nullable`;
-- **relation kinds and roles** from `data.relations` and `data.roles`, which gain the relation options;
-- **`declaredBy`** as the pack's id.
+- **types, short code prefixes and indexes** from each `apack.json` entity entry. Its `indexes: ["pinned"]` is the
+  manifest's shorthand for a value index per field, beside its `search` (a text index) and `embed` (a vector index);
+- **fields** from the TypeScript shape (`rowRulesOf`, apack's `packages/apack-sdk/src/build/module-exports.ts`):
+  `string`, `number` and `boolean` as themselves, a union of string literals as `enum`, an id tagged with its types
+  (`EARS.EntityId<'X'>`) as `ref` to those the schema declares, `T[]` of one of these as `list`, and anything else — an
+  object, a record, `unknown`, a date, a mixed union — as `any`; `?` as `optional` and `| null` as `nullable`, every
+  field nullable for a pack that doesn't check nulls. A field a text or vector index reads is held to text or `any`;
+- **relation kinds and roles** from `data.relations` and `data.roles`, every kind many-to-many.
 
-`additionalFields` is `refuse` for every apack type, since every field a pack writes is in its shape.
-
+`additionalFields` is `allow` for every apack type: a field written without being in the shape — an untyped write, an
+entity with no shape — is taken, as an untyped twin's write must be. The SDK's own entity types carry the row rules the
+SDK writes by hand, with no field types (apack's `docs/archive/plans/field-types-from-shapes.md`, Outcome).
 
 ## Concurrent processes
 
