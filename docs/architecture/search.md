@@ -1,8 +1,8 @@
 # Search
 
 Text and vector indexes, and search as plan steps. Status: text search and fuzzy labels are built
-(`crates/elmdb/src/engine/text/`), and vector and hybrid search (`crates/elmdb/src/engine/vector/`); substring and
-regex are designed, not built.
+(`crates/elmdb/src/engine/text/`), vector and hybrid search (`crates/elmdb/src/engine/vector/`), and substring and
+regex search (`crates/elmdb/src/engine/trigram.rs`).
 
 ## Why in the engine
 
@@ -104,6 +104,28 @@ snapshot as a search when it needs to say that search is incomplete.
   `findLabels` is the quick-open: a query's characters in order in each type's label field, scored for word starts,
   runs and position, best first.
 
+## Substrings and patterns as built
+
+- **Keys** (`format.md`, Keys): per type and index, each run of three characters an entity's text holds, case folded
+  (each character lowercased on its own), with the places of the entities holding it as a roaring bitmap, one key per
+  block of 2^16 places (`d/g trigram block`). A place only grows, so a new entity changes its trigrams' last blocks. A
+  write refiles what the changed field's text gained and lost, in the same unit; an index declared over existing data
+  is built in the background as a value index is, and `check()` and `rebuild()` cover it. On G8's data a key per
+  trigram and entity tripled the file, and blocks add an eighth (`docs/evidence/next-phase-9.md`).
+- **Fields**: as a text index's. Each string, and each element of a list, is apart, so no run spans two.
+- **`containing`** a text, exactly or with `caseInsensitive`; **`matching`** a pattern in Rust's `regex` syntax (G11 of
+  `goal-elmdb-next.md`), which has no look-around or backreferences: a pattern using them, or one that doesn't parse,
+  is refused (`PATTERN_INVALID`) with the parser's reason.
+- **Narrowing**: what every match holds is read off the text, or off the pattern's syntax — its literals, all of a
+  sequence's parts, one of an alternation's branches, a repetition's body when it repeats at least once — and the
+  places of the entities holding each run of it are intersected, or for an alternation joined. Each candidate is then
+  checked against its text, so a search answers exactly what checking every entity would; what can't narrow (a text
+  under three characters, a class, a branch that narrows by nothing, an index not yet built) reads every entity of the
+  type and checks each.
+- **As a plan step**: after a type start it reads the candidates in place order, which is the order a walk of the type
+  answers; after other steps it filters what they reached, in their order, in which a type with no trigram index holds
+  no match. It doesn't rank: a search box that wants both orders a `search` and a `containing` together.
+
 ## Vector search as built
 
 - **Keys** (`format.md`, Keys): an embedding is primary data (`p/q`: its model, its chunk's hash, its f32 values); each
@@ -123,4 +145,4 @@ snapshot as a search when it needs to say that search is incomplete.
 1. Ranked full text over messages, notes and documents, with filters and highlights, replacing apack #148.
 2. Fuzzy labels for a quick-open across entities.
 3. Vector and hybrid search, replacing apack's dormant library index.
-4. Substring and regex, if text search leaves a gap.
+4. Substring and regex, for what words don't find: error text, ids, hashes and code (`docs/evidence/next-phase-9.md`).

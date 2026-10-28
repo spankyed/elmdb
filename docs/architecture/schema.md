@@ -60,6 +60,7 @@ What a database holds and the rules it keeps, declared as data. Built: `crates/e
       "indexes": {
         "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"] },
         "text":         { "kind": "text", "fields": { "text": { "weight": 1 } } },
+        "grams":        { "kind": "trigram", "fields": ["text"] },
         "meaning":      { "kind": "vector", "from": ["text"], "chunk": "paragraph",
                           "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
       }
@@ -178,7 +179,7 @@ An entity's edges keep the order they were linked in.
 
 Indexes are declared on the type, named, and separate from the fields, since one index can cover several fields and one
 field several indexes. A plan never names a value index: the engine picks one from the plan's filters and order. A
-search step names its text or vector index only when the type has more than one.
+search step names its text, trigram or vector index only when the type has more than one.
 
 **Value**: equality, ranges and order.
 
@@ -206,6 +207,19 @@ search step names its text or vector index only when the type has more than one.
   when it is a string or a list of strings, and no text otherwise.
 - `analyzer`: `standard` (charabia's tokenizing, identifiers split on case and punctuation, case and accents folded) or
   `exact` (whole values, case folded). Stemming is `standard`'s option `{ "analyzer": "standard", "stem": "en" }`.
+
+**Trigram**: substrings and patterns, as they are written (`search.md`, Substrings and patterns).
+
+```json
+"grams": { "kind": "trigram", "fields": ["text"] }
+```
+
+- `fields`: `string` fields, lists of strings, or `any` fields, read as a text index reads them; each string, and each
+  element of a list, is matched on its own.
+- It has no options. It holds every run of three characters, case folded, and a `containing` or `matching` step reads
+  the entities holding the runs a match must, then checks each: what it answers is what checking every entity would.
+- A text index finds words, ranked; a trigram index finds what is written, `ETIMEDOUT`, `a1b6603e5a` or `fn need_of(`,
+  unranked, in the order of the set it filters. Declare both on a field that wants both.
 
 **Vector**: nearest neighbours (`search.md`).
 

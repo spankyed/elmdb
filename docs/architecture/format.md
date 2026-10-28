@@ -27,6 +27,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |
 | `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
 | `d/fw` type index word | a stemming text index's word as written: the places of the entities holding it | derived |
+| `d/g` type index trigram block | a trigram index: the places of the entities holding the three characters, case folded, in one block of 2^16 places, as a roaring bitmap | derived |
 | `d/qc`, `d/qp` type index id chunk | a vector index's chunk: its hash and text; and that it waits for an embedding | derived |
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
 | `d/qj` type index item | a unit's graph changes, applied as it commits | derived |

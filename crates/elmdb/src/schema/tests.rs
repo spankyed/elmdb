@@ -254,8 +254,20 @@ fn checks_what_each_index_covers() {
             "types.Message.indexes.x.model: names no model (declared by default-setup)",
         ),
         (
+            json!({ "kind": "trigram", "fields": [] }),
+            "types.Message.indexes.x.fields: names no field (declared by default-setup)",
+        ),
+        (
+            json!({ "kind": "trigram", "fields": ["nope"] }),
+            "types.Message.indexes.x.fields[0]: no such field on Message (declared by default-setup)",
+        ),
+        (
+            json!({ "kind": "trigram", "fields": ["sender"] }),
+            "types.Message.indexes.x.fields[0]: a trigram index reads string and any fields, and \"sender\" is a enum field (declared by default-setup)",
+        ),
+        (
             json!({ "kind": "graph" }),
-            "types.Message.indexes.x.kind: \"graph\" isn't an index kind (value, text, vector)",
+            "types.Message.indexes.x.kind: \"graph\" isn't an index kind (value, text, trigram, vector)",
         ),
     ];
     for (index, expected) in cases {

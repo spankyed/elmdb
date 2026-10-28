@@ -18,6 +18,7 @@ use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
 use super::plan::{Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
 use super::text::{self, search::Hit};
+use super::trigram::{self, Matcher};
 use super::unit::Read;
 use super::{ids, relations, values};
 
@@ -636,6 +637,16 @@ impl<R: Read> Query<'_, R> {
                 })
             }
             Step::Search { query, index, options } => self.search(before, query, index.as_deref(), options, visit),
+            Step::Containing { text, index, case_insensitive } => self.containing(
+                before,
+                &Matcher::substring(text, *case_insensitive),
+                index.as_deref(),
+                "containing",
+                visit,
+            ),
+            Step::Matching { pattern, index } => {
+                self.containing(before, &Matcher::pattern(pattern)?, index.as_deref(), "matching", visit)
+            }
             Step::Near { vector, index, k } => {
                 let found = self.nearest(before, vector, index.as_deref(), *k as usize, None)?;
                 self.record_and_visit(found, visit)
@@ -752,6 +763,64 @@ impl<R: Read> Query<'_, R> {
             }
         }
         each(ids, visit)
+    }
+
+    /// The entities whose text in a trigram index matches, in the order they came. A type start's whole types are
+    /// read from the index's candidates, each checked, in place order as a walk of the type visits them; an index not
+    /// yet built narrows by nothing, so the type is walked. The set before the step is checked entity by entity, and
+    /// one of a type with no trigram index matches nothing, unless the step names an index, which every type must have
+    fn containing(
+        &self,
+        before: usize,
+        matcher: &Matcher,
+        index: Option<&str>,
+        via: &str,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
+        if before == 0
+            && let Some(types) = self.start_types()
+        {
+            let need = matcher.need();
+            for entity_type in types {
+                let found = trigram::resolve(self.r.schema(), entity_type, index, via)?;
+                let narrowed = match super::derive::is_built(self.r, entity_type, &found.name)? {
+                    true => trigram::candidates(self.r, entity_type, &found.name, &need)?,
+                    false => None,
+                };
+                let mut keep = |id: &str| -> Result<bool> {
+                    if matcher.matches(self.r, &found, id)? { visit(id) } else { Ok(true) }
+                };
+                let Some(places) = narrowed else {
+                    if !self.walk_type(entity_type, &mut keep)? {
+                        return Ok(false);
+                    }
+                    continue;
+                };
+                let ranges: &[bool] = match self.plan.scope {
+                    Scope::Live => &[false],
+                    Scope::Trashed => &[true],
+                    Scope::WithTrashed => &[false, true],
+                };
+                for seq in places {
+                    for &trashed in ranges {
+                        let Some(held) = self.r.get(&keys::of_type(trashed, entity_type, seq))? else { continue };
+                        self.count_visit();
+                        if !keep(values::decode(&held)?.as_str().unwrap_or_default())? {
+                            return Ok(false);
+                        }
+                    }
+                }
+            }
+            return Ok(true);
+        }
+        self.pull(before, &mut |id| {
+            let found = match trigram::resolve(self.r.schema(), ids::type_of(id), index, via) {
+                Ok(found) => found,
+                Err(e) if index.is_none() && e.code == ErrorCode::UnknownIndex => return Ok(true),
+                Err(e) => return Err(e),
+            };
+            if matcher.matches(self.r, &found, id)? { visit(id) } else { Ok(true) }
+        })
     }
 
     /// The types a step searches, and the entities it searches among: a type start's whole types, or the set before
@@ -1276,6 +1345,8 @@ fn step_name(step: &Step) -> &'static str {
         Step::Like { .. } => "like",
         Step::Hybrid { .. } => "hybrid",
         Step::Search { .. } => "search",
+        Step::Containing { .. } => "containing",
+        Step::Matching { .. } => "matching",
     }
 }
 

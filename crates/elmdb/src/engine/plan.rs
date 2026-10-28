@@ -295,6 +295,25 @@ pub enum Step {
         #[cfg_attr(feature = "codegen", ts(as = "Option<SearchOptions>", optional))]
         options: SearchOptions,
     },
+    /// The entities whose text, in a field of a type's trigram index, holds `text`: exactly, or ignoring case. The
+    /// set keeps its order; `index` names the index on a type with more than one
+    Containing {
+        text: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        index: Option<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        case_insensitive: bool,
+    },
+    /// The entities whose text, in a field of a type's trigram index, matches `pattern`, in Rust's `regex` syntax,
+    /// which has no look-around or backreferences. The set keeps its order
+    Matching {
+        pattern: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        index: Option<String>,
+    },
 }
 
 /// How a search matches and ranks

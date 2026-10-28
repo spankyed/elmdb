@@ -585,6 +585,8 @@ dependencies = [
  "parking_lot 0.13.0",
  "proptest",
  "rand 0.10.3",
+ "regex",
+ "regex-syntax",
  "rmp",
  "rmp-serde",
  "rmpv",

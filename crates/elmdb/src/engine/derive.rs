@@ -20,7 +20,7 @@ use crate::schema::Schema;
 use super::entities::{self, ValueIndex, entries_of, value_indexes};
 use super::keys;
 use super::unit::{Read, Txn};
-use super::{ids, relations, text, values, vector};
+use super::{ids, relations, text, trigram, values, vector};
 
 #[cfg(test)]
 pub(crate) fn fail_next_scratch() {
@@ -155,6 +155,11 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
                 text::entries_into(r, t, &index, &places, &mut emit)?;
             }
         }
+        for index in trigram::trigram_indexes(r.schema(), t) {
+            if is_built(r, t, &index.name)? {
+                trigram::entries_into(r, t, &index, &places, &mut emit)?;
+            }
+        }
         let ids: Vec<String> = of.iter().map(|e| e.id.clone()).collect();
         for index in vector::vector_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
@@ -179,7 +184,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 14] = [
+const COMPARED: [Prefix; 15] = [
     Prefix::Live,
     Prefix::Trashed,
     Prefix::Count,
@@ -192,18 +197,20 @@ const COMPARED: [Prefix; 14] = [
     Prefix::TextDocument,
     Prefix::TextStats,
     Prefix::TextWord,
+    Prefix::Trigram,
     Prefix::VectorChunk,
     Prefix::VectorPending,
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 8] = [
+const PER_INDEX: [Prefix; 9] = [
     Prefix::Index,
     Prefix::TextTerm,
     Prefix::TextPositions,
     Prefix::TextDocument,
     Prefix::TextStats,
     Prefix::TextWord,
+    Prefix::Trigram,
     Prefix::VectorChunk,
     Prefix::VectorPending,
 ];
@@ -213,6 +220,7 @@ pub fn index_names(schema: &Schema, entity_type: &str) -> Vec<String> {
     let mut names: Vec<String> = value_indexes(schema, entity_type).into_iter().map(|i| i.name).collect();
     names.extend(text::text_indexes(schema, entity_type).into_iter().map(|i| i.name));
     names.extend(vector::vector_indexes(schema, entity_type).into_iter().map(|i| i.name));
+    names.extend(trigram::trigram_indexes(schema, entity_type).into_iter().map(|i| i.name));
     names
 }
 
@@ -416,6 +424,22 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     t.put(&key, &value)?;
                 }
             } else if let Some(found) =
+                trigram::trigram_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name)
+            {
+                let mut grams = trigram::Entries::new(entity_type, &found)?;
+                visit_entities(t, |e| {
+                    if ids::type_of(&e.id) == entity_type {
+                        grams.entity(t, e.seq, &e.id)?;
+                    }
+                    Ok(())
+                })?;
+                grams.finish(|key, value| scratch.push(key, value))?;
+                let mut entries = scratch.finish()?;
+                trigram::clear(t, entity_type, name)?;
+                while let Some((key, value)) = entries.next()? {
+                    t.put(&key, &value)?;
+                }
+            } else if let Some(found) =
                 vector::vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name)
             {
                 visit_entities(t, |e| {
@@ -537,6 +561,17 @@ pub fn build_chunk(
                 last = *seq;
             }
             vector::flush(t)?;
+            if done {
+                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+                return Ok(None);
+            }
+            return Ok(Some(last));
+        }
+        if let Some(index) = trigram::trigram_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+            for (seq, id) in chunk.iter().take(limit) {
+                trigram::refile_at(t, entity_type, &index, id, *seq)?;
+                last = *seq;
+            }
             if done {
                 t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
                 return Ok(None);

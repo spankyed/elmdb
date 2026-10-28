@@ -579,6 +579,26 @@
           ]
         },
         {
+          "description": "Substrings and regular expressions over text fields: each field's text filed by its trigrams, which narrow a search\nto the entities that can match before each is checked",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "trigram"
+            },
+            "fields": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "kind",
+            "fields"
+          ]
+        },
+        {
           "description": "Nearest neighbours of embeddings computed from text fields",
           "type": "object",
           "properties": {

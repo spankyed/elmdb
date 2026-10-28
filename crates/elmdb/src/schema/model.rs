@@ -249,6 +249,9 @@ pub enum IndexDef {
         #[cfg_attr(feature = "codegen", ts(optional = nullable))]
         stem: Option<String>,
     },
+    /// Substrings and regular expressions over text fields: each field's text filed by its trigrams, which narrow a search
+    /// to the entities that can match before each is checked
+    Trigram { fields: Vec<String> },
     /// Nearest neighbours of embeddings computed from text fields
     Vector {
         from: Vec<String>,
@@ -272,6 +275,7 @@ impl IndexDef {
             Self::Value { .. } => "value",
             Self::Text { .. } => "text",
             Self::Vector { .. } => "vector",
+            Self::Trigram { .. } => "trigram",
         }
     }
 }

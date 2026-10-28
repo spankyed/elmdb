@@ -240,6 +240,26 @@ impl Validator<'_> {
                     }
                 }
             }
+            IndexDef::Trigram { fields } => {
+                if fields.is_empty() {
+                    self.problem(format!("{at}.fields"), "names no field".into(), who);
+                }
+                for (i, field) in fields.iter().enumerate() {
+                    let field_at = format!("{at}.fields[{i}]");
+                    match field_of(field) {
+                        None => self.problem(field_at, format!("no such field on {type_name}"), who),
+                        Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
+                            field_at,
+                            format!(
+                                "a trigram index reads string and any fields, and \"{field}\" is a {} field",
+                                value.name()
+                            ),
+                            who,
+                        ),
+                        Some(_) => {}
+                    }
+                }
+            }
             IndexDef::Vector { from, model, metric, precision, .. } => {
                 // hannoy's graphs measure cosine or euclidean distance, over f32 vectors
                 if *metric == Metric::Dot {

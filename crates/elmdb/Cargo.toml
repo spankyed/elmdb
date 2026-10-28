@@ -30,6 +30,8 @@ tempfile.workspace = true
 # Text indexes (`docs/architecture/search.md`): tokenizing and normalizing, the posting lists, fuzzy terms, and stemming
 charabia.workspace = true
 roaring.workspace = true
+regex.workspace = true
+regex-syntax.workspace = true
 zstd.workspace = true
 levenshtein_automata.workspace = true
 rust-stemmers.workspace = true

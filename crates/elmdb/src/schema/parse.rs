@@ -400,6 +400,10 @@ impl Reader {
                 let stem = self.optional_string(&mut object, "stem");
                 Some(IndexDef::Text { fields: fields?, analyzer: analyzer?, stem: stem? })
             }
+            "trigram" => {
+                let fields = self.required_strings(&mut object, "fields");
+                Some(IndexDef::Trigram { fields: fields? })
+            }
             "vector" => {
                 let from = self.required_strings(&mut object, "from");
                 let chunk = self.choice(
@@ -432,7 +436,10 @@ impl Reader {
                 })
             }
             other => {
-                self.problem(object.at("kind"), format!("\"{other}\" isn't an index kind (value, text, vector)"));
+                self.problem(
+                    object.at("kind"),
+                    format!("\"{other}\" isn't an index kind (value, text, trigram, vector)"),
+                );
                 None
             }
         };

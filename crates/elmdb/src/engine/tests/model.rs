@@ -726,6 +726,45 @@ fn sorted_far_ends(mut derived: BTreeMap<String, Json>) -> BTreeMap<String, Json
 /// The words a search of Note's text index (its fields `a` and `b`) asks for: strings the workload writes
 const SEARCHED: [&str; 4] = ["a", "ab", "abc", "c"];
 
+/// The substring and pattern searches of Note's trigram index (its fields `a` and `b`): `containing` with a text and
+/// whether it ignores case, or `matching` with a pattern. Short texts narrow by nothing, which walks the type
+const GREPS: [(&str, &str, bool); 9] = [
+    ("containing", "abc", false),
+    ("containing", "ab", false),
+    ("containing", "BCA", true),
+    ("containing", "BCA", false),
+    ("containing", "5555", false),
+    ("matching", "a.c", false),
+    ("matching", "^(ab|ca)c", false),
+    ("matching", "c{3}|bab", false),
+    ("matching", "[0-9]{4}", false),
+];
+
+fn grep_step(n: usize) -> Json {
+    match GREPS[n] {
+        ("containing", text, case_insensitive) => {
+            json!({ "step": "containing", "text": text, "caseInsensitive": case_insensitive })
+        }
+        (_, pattern, _) => json!({ "step": "matching", "pattern": pattern }),
+    }
+}
+
+/// Whether a scan of the fields finds what grep `n` asks: a string, or a list's strings
+fn grepped(fields: &BTreeMap<String, Json>, n: usize) -> bool {
+    let (kind, text, case_insensitive) = GREPS[n];
+    let pattern = regex::Regex::new(text).unwrap();
+    let found = |s: &str| match (kind, case_insensitive) {
+        ("containing", false) => s.contains(text),
+        ("containing", true) => s.to_lowercase().contains(&text.to_lowercase()),
+        _ => pattern.is_match(s),
+    };
+    ["a", "b"].iter().any(|f| match fields.get(*f) {
+        Some(Json::String(s)) => found(s),
+        Some(Json::Array(items)) => items.iter().filter_map(Json::as_str).any(found),
+        _ => false,
+    })
+}
+
 /// What a `where` asks for: every number the workload writes, alone or in a list, and two of its long strings
 fn probes() -> Vec<Json> {
     let mut out: Vec<Json> = (0..10).map(Json::from).collect();
@@ -764,6 +803,18 @@ fn derived_reads() -> Vec<(String, Json)> {
             }
         }
         if t == "Note" {
+            for n in 0..GREPS.len() {
+                out.push((format!("{t} grep {n}"), ids(start.clone(), json!([grep_step(n)]), "live")));
+                out.push((
+                    format!("{t} grep {n} with trashed"),
+                    ids(start.clone(), json!([grep_step(n)]), "withTrashed"),
+                ));
+                // Among a set of both types: Task has no trigram index, so none of its entities matches
+                out.push((
+                    format!("{t} grep {n} among"),
+                    ids(json!({ "from": "ids", "ids": IDS }), json!([grep_step(n)]), "live"),
+                ));
+            }
             for word in SEARCHED {
                 let steps = json!([{ "step": "search", "query": word, "options": { "fuzzy": false } }]);
                 out.push((format!("{t} search {word}"), ids(start.clone(), steps, "live")));
@@ -867,6 +918,29 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                         .collect();
                     found.sort();
                     json!(found)
+                }
+                ["grep", n, rest @ ..] => {
+                    let n: usize = n.parse().unwrap();
+                    match rest {
+                        [] => json!(
+                            of_type()
+                                .filter(|(_, e)| !e.trashed && grepped(&e.fields, n))
+                                .map(|(id, _)| id)
+                                .collect::<Vec<_>>()
+                        ),
+                        ["with", "trashed"] => {
+                            json!(
+                                of_type().filter(|(_, e)| grepped(&e.fields, n)).map(|(id, _)| id).collect::<Vec<_>>()
+                            )
+                        }
+                        ["among"] => json!(
+                            IDS.iter()
+                                .filter(|id| crate::engine::ids::type_of(id) == t)
+                                .filter(|id| m.entities.get(**id).is_some_and(|e| !e.trashed && grepped(&e.fields, n)))
+                                .collect::<Vec<_>>()
+                        ),
+                        other => unreachable!("{other:?}"),
+                    }
                 }
                 ["role", role] => json!(
                     of_type()

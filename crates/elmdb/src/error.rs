@@ -66,6 +66,8 @@ pub enum ErrorCode {
     RequiredField,
     /// A value its field's declared type doesn't take
     FieldType,
+    /// A regular expression that doesn't parse, or uses what Rust's `regex` doesn't hold (look-around, backreferences)
+    PatternInvalid,
     /// A short code that isn't the type's `<prefix>-<n>`, or one an entity can't take
     InvalidShortCode,
     /// A short code another entity holds
@@ -135,6 +137,7 @@ impl ErrorCode {
             Self::NotAList => "NOT_A_LIST",
             Self::RequiredField => "REQUIRED_FIELD",
             Self::FieldType => "FIELD_TYPE",
+            Self::PatternInvalid => "PATTERN_INVALID",
             Self::InvalidShortCode => "INVALID_SHORT_CODE",
             Self::ShortCodeInUse => "SHORT_CODE_IN_USE",
             Self::SelfLink => "SELF_LINK",
@@ -227,6 +230,7 @@ mod tests {
             ErrorCode::NotAList,
             ErrorCode::RequiredField,
             ErrorCode::FieldType,
+            ErrorCode::PatternInvalid,
             ErrorCode::InvalidShortCode,
             ErrorCode::ShortCodeInUse,
             ErrorCode::SelfLink,

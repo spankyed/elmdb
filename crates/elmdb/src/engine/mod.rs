@@ -21,6 +21,7 @@ mod reads;
 mod relations;
 mod text;
 pub mod tracking;
+mod trigram;
 pub(crate) mod unit;
 mod values;
 mod vector;
@@ -147,6 +148,13 @@ pub(crate) fn drop_index_data(
                 }
             }
             db.delete(txn, &keys::text_stats(entity_type, index))?;
+            let (low, high) = crate::format::key::prefix_range(&keys::trigram_index(entity_type, index));
+            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+            let doomed: Vec<Vec<u8>> =
+                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+            for key in doomed {
+                db.delete(txn, &key)?;
+            }
             // A vector index's derived keys, the embeddings stored for it, and its graph
             for prefix in [
                 crate::format::Prefix::Vector,

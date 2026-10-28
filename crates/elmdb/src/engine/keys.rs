@@ -173,6 +173,27 @@ pub fn text_document(entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
     })
 }
 
+/// The places of the entities holding a trigram in a trigram index, in one block of places
+pub fn trigram(entity_type: &str, index: &str, trigram: &str, block: u64) -> Vec<u8> {
+    with(Prefix::Trigram, |w| {
+        w.string(entity_type).string(index).string(trigram).number(block as f64);
+    })
+}
+
+/// Every block of the places of the entities holding a trigram in a trigram index, in place order
+pub fn trigram_places(entity_type: &str, index: &str, trigram: &str) -> Vec<u8> {
+    with(Prefix::Trigram, |w| {
+        w.string(entity_type).string(index).string(trigram);
+    })
+}
+
+/// Every key of a trigram index of a type
+pub fn trigram_index(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::Trigram, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
 /// A text index's statistics
 pub fn text_stats(entity_type: &str, index: &str) -> Vec<u8> {
     with(Prefix::TextStats, |w| {

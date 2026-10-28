@@ -65,6 +65,8 @@ pub enum Prefix {
     TextStats,
     /// `d/fw type index word` → a stemming text index's words as written: the places of the entities holding the word
     TextWord,
+    /// `d/g type index trigram seq` → the entity at that place, whose text a trigram index holds the trigram in
+    Trigram,
     /// `p/q type index id chunk` → an embedding a caller wrote for a chunk: its model, the chunk's hash, the vector
     Vector,
     /// `d/qc type index id chunk` → a chunk of an entity's text a vector index embeds: its hash and its text
@@ -82,7 +84,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 25] = [
+    pub const ALL: [Prefix; 26] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -101,6 +103,7 @@ impl Prefix {
         Prefix::TextDocument,
         Prefix::TextStats,
         Prefix::TextWord,
+        Prefix::Trigram,
         Prefix::Vector,
         Prefix::VectorChunk,
         Prefix::VectorPending,
@@ -131,6 +134,7 @@ impl Prefix {
             Prefix::TextDocument => "d/fd",
             Prefix::TextStats => "d/fs",
             Prefix::TextWord => "d/fw",
+            Prefix::Trigram => "d/g",
             Prefix::Vector => "p/q",
             Prefix::VectorChunk => "d/qc",
             Prefix::VectorPending => "d/qp",

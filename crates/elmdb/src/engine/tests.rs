@@ -12,6 +12,7 @@ mod plans;
 mod reads;
 mod schema_versions;
 mod tracked;
+mod trigram;
 
 use serde_json::{Value as Json, json};
 
@@ -58,7 +59,10 @@ pub(super) fn schema() -> Schema {
                     "tags": { "type": "list", "of": { "type": "string" }, "optional": true },
                     "status": { "type": "enum", "values": ["open", "done"], "optional": true, "nullable": true }
                 },
-                "indexes": { "text": { "kind": "text", "fields": { "a": { "weight": 2 }, "b": {} } } }
+                "indexes": {
+                    "text": { "kind": "text", "fields": { "a": { "weight": 2 }, "b": {} } },
+                    "grams": { "kind": "trigram", "fields": ["a", "b"] }
+                }
             },
             "Doc": { "fields": { "title": { "type": "string" }, "body": { "type": "string", "optional": true } } },
             "Bag": { "additionalFields": "allow", "fields": {} }

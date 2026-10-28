@@ -145,7 +145,8 @@ fn place_for(t: &Txn<'_, '_>, id: &str, field: &str) -> Result<Option<u64>> {
         || super::text::text_indexes(t.schema, entity_type)
             .iter()
             .any(|i| i.fields.iter().any(|(name, _)| name == field))
-        || super::vector::vector_indexes(t.schema, entity_type).iter().any(|i| i.from.iter().any(|name| name == field));
+        || super::vector::vector_indexes(t.schema, entity_type).iter().any(|i| i.from.iter().any(|name| name == field))
+        || super::trigram::trigram_indexes(t.schema, entity_type).iter().any(|i| i.fields.iter().any(|f| f == field));
     if !covered {
         return Ok(None);
     }
@@ -163,6 +164,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     t.put_over(&key, &values::stored(value), stored.as_deref())?;
     super::text::refile(t, id, field, seq, Some(value))?;
     super::vector::refile(t, id, field, seq, Some(value))?;
+    super::trigram::refile(t, id, field, seq, before.as_ref(), Some(value))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, true)?;
@@ -180,6 +182,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     t.del_over(&key, Some(&stored))?;
     super::text::refile(t, id, field, seq, None)?;
     super::vector::refile(t, id, field, seq, None)?;
+    super::trigram::refile(t, id, field, seq, Some(&before), None)?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, false)?;
@@ -192,6 +195,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
 pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     super::text::remove(t, id)?;
     super::vector::remove(t, id)?;
+    super::trigram::remove(t, id)?;
     let seq = record(t, id)?.map(|r| r.seq);
     for (field, bytes) in fields_stored(t, id)? {
         let before = values::decode_stored(&bytes)?;
