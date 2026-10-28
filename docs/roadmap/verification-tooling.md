@@ -72,6 +72,13 @@ Acceptance:
   that use them run under `fail::FailScenario` and, with stage 4, one process each.
 - A release build of the binding contains no failpoint code (checked by building without the feature).
 
+**Built, 2026-10-28,** otherwise than this says: a process-global failpoint would fire in every test running at the
+time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
+`crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
+path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
+(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
+dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
+
 ## 3. Memory bounds as assertions
 
 Use [dhat](https://docs.rs/dhat/latest/dhat/) in its testing mode: a test installs the profiler as the global
@@ -150,13 +157,6 @@ Acceptance:
   same abstraction rather than two.
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
-
-**Built, 2026-10-28,** otherwise than this says: a process-global failpoint would fire in every test running at the
-time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
-`crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
-path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
-(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
-dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
 
 ## 9. Library no-clobber publication
 
