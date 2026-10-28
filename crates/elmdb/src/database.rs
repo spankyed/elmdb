@@ -13,12 +13,6 @@ use crate::schema::{Effect, SCHEMA_LANGUAGE, Schema, SchemaChange, diff};
 use crate::store::sync::Durable;
 use crate::store::{Store, StoreOptions, put_meta};
 
-#[cfg(test)]
-thread_local! {
-    pub(crate) static BEFORE_SCHEMA_RECOVERY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static BEFORE_SCHEMA_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
 /// How a database is opened
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
@@ -204,13 +198,8 @@ impl Database {
             *current = Arc::new(EngineSchema::new(applied.schema.clone()));
             *self.schema.write() = applied.schema.clone();
         }
-        #[cfg(test)]
         if applied.is_err() {
-            BEFORE_SCHEMA_RECOVERY.with_borrow_mut(|hook| {
-                if let Some(hook) = hook.take() {
-                    hook();
-                }
-            });
+            run_point!(SCHEMA_RECOVERY);
         }
         let unbuilt = match &mut applied {
             Ok(applied) => applied.unbuilt.clone(),
@@ -405,12 +394,7 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
     }
     let canonical = given.canonical();
     let hash = given.hash();
-    #[cfg(test)]
-    BEFORE_SCHEMA_WRITE.with_borrow_mut(|hook| {
-        if let Some(hook) = hook.take() {
-            hook();
-        }
-    });
+    run_point!(SCHEMA_WRITE);
     let ((unbuilt, changes), commit) = store.write_committed(
         |txn, db| {
             let held = crate::engine::held_in(txn, db, &version, &given)?;

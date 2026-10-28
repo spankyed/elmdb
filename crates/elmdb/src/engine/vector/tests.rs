@@ -471,7 +471,7 @@ fn single_vector_rebuild_spills_identifiers_and_preserves_embeddings_and_neighbo
     super::super::derive::sorted::with_budget(1, || db.rebuild(Some(("Doc", "meaning")))).unwrap();
     assert_eq!(ids(&db, docs(), json!([{ "step":"near","vector":[1.0,0.0,0.0],"k":3 }])), expected);
     assert!(db.check().unwrap().is_clean());
-    super::super::derive::fail_next_scratch();
+    crate::failpoints::fail_once_here(crate::failpoints::points::SCRATCH);
     assert_eq!(db.rebuild(Some(("Doc", "meaning"))).unwrap_err().code, ErrorCode::Io);
     assert!(db.check().unwrap().is_clean());
 }

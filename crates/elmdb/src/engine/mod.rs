@@ -43,11 +43,6 @@ use changes::ChangeSet;
 pub(crate) use reads::collator;
 use unit::{Check, Read as _, Txn, UnitState};
 
-#[cfg(test)]
-thread_local! {
-    static BEFORE_READ_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-}
-
 /// Finalizes every user-visible commit before reporting its sync outcome. `None` invalidates every owner for
 /// operations whose writes were not logged key by key.
 fn finish_commit(
@@ -274,15 +269,9 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     Ok(unbuilt)
 }
 
-#[cfg(test)]
-thread_local! { pub(crate) static FAIL_NEXT_INDEX_REFRESH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-
 /// Read pending index work without committing marker repairs while a caller is reporting a refused mutation.
 pub(crate) fn remaining_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
-    #[cfg(test)]
-    if FAIL_NEXT_INDEX_REFRESH.replace(false) {
-        return Err(Error::new(ErrorCode::Io, "injected index refresh failure"));
-    }
+    failure_point!(INDEX_REFRESH, Error::new(ErrorCode::Io, "injected index refresh failure"));
     store.read(|txn, db| {
         schema.validate(txn, db)?;
         let (empty, unbuilt) = unbuilt_indexes(&unit::Snapshot { txn, db, schema })?;
@@ -459,12 +448,7 @@ impl Database {
     pub fn read(&self, reads: &plan::Reads) -> Result<Vec<u8>> {
         let store = self.store()?;
         let schema = self.schema_guard();
-        #[cfg(test)]
-        BEFORE_READ_SNAPSHOT.with_borrow_mut(|hook| {
-            if let Some(pause) = hook.take() {
-                pause();
-            }
-        });
+        run_point!(READ_SNAPSHOT);
         let Some(token) = reads.track else {
             return store.read(|txn, db| {
                 schema.validate(txn, db)?;

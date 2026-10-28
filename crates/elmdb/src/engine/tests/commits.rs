@@ -7,17 +7,11 @@ use super::{batch, open, schema, write};
 use crate::engine::plan::{ReadOp, Reads};
 use crate::{Database, ErrorCode, OpenOptions};
 
-pub(super) struct FailedSync(std::path::PathBuf);
+/// Every sync of the database fails while this is held
+pub(super) struct FailedSync(#[allow(dead_code)] crate::failpoints::DisarmAt);
 impl FailedSync {
     pub(super) fn arm(db: &Database) -> Self {
-        let path = db.path().to_owned();
-        crate::store::FAIL_SYNC_AT.lock().unwrap().push(path.clone());
-        Self(path)
-    }
-}
-impl Drop for FailedSync {
-    fn drop(&mut self) {
-        crate::store::FAIL_SYNC_AT.lock().unwrap().retain(|path| path != &self.0);
+        Self(crate::failpoints::fail_while_at(crate::failpoints::points::SYNC, db.path()))
     }
 }
 
@@ -114,7 +108,7 @@ fn a_failed_commit_keeps_schema_and_data_and_notifies_nobody() {
         let before = db.read(&reads).unwrap();
         let sequence = db.sequence().unwrap();
         let held_schema = db.schema();
-        crate::store::FAIL_NEXT_COMMIT.with(|flag| flag.set(true));
+        crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
         let result = match operation {
             "batch" => db.write(&batch(vec![json!({"op":"set","id":"Task-1","fields":{"a":2}})]), true).map(|_| ()),
             "unit" => {
@@ -157,9 +151,11 @@ fn reset_checkpoint_preserves_one_logical_commit_and_falls_back_on_failure() {
         )
         .unwrap();
         let before = db.sequence().unwrap();
-        crate::store::FAIL_RESET_CHECKPOINT.with(|flag| flag.set(fail_checkpoint));
+        if fail_checkpoint {
+            crate::failpoints::fail_once_here(crate::failpoints::points::RESET_CHECKPOINT);
+        }
         db.reset().unwrap();
-        assert!(!crate::store::FAIL_RESET_CHECKPOINT.with(|flag| flag.get()));
+        assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::RESET_CHECKPOINT));
         assert_eq!(db.sequence().unwrap(), before + 1);
         assert_eq!(*seen.lock().unwrap(), 2);
         assert!(db.check().unwrap().is_clean());
@@ -227,7 +223,7 @@ fn unchanged_schema_marker_commits_finalize_before_failed_sync() {
     db.watch(reads, Box::new(|_| {})).unwrap();
     let before = db.sequence().unwrap();
     let _failure = FailedSync::arm(&db);
-    crate::engine::watch::PANIC_NEXT_READ.set(true);
+    crate::failpoints::run_once_here(crate::failpoints::points::WATCH_READ, || panic!("injected watch read panic"));
     assert_eq!(db.set_schema(schema()).unwrap_err().code, ErrorCode::NotDurable);
     assert_eq!(db.sequence().unwrap(), before + 1);
     assert_eq!(
@@ -235,6 +231,6 @@ fn unchanged_schema_marker_commits_finalize_before_failed_sync() {
         0,
         "committed marker repair delivered the watch, whose injected read panic removes it"
     );
-    assert!(!crate::engine::watch::PANIC_NEXT_READ.replace(false));
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::WATCH_READ));
     assert!(db.close().is_err());
 }

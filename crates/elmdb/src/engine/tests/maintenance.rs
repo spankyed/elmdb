@@ -295,7 +295,7 @@ fn scratch_failure_during_rebuild_and_replace_aborts_all_destination_changes() {
     let before = loads_of(&db);
     let sequence = db.sequence().unwrap();
     for replacement in [false, true] {
-        crate::engine::derive::fail_next_scratch();
+        crate::failpoints::fail_once_here(crate::failpoints::points::SCRATCH);
         let result = if replacement { db.replace_with(source.path()) } else { db.rebuild(None) };
         assert_eq!(result.unwrap_err().code, crate::ErrorCode::Io);
         assert_eq!(db.sequence().unwrap(), sequence);
@@ -349,7 +349,7 @@ fn single_index_rebuilds_spill_and_late_uniqueness_failure_rolls_back() {
     assert_eq!(loads_of(&db), before);
     assert!(db.check().unwrap().is_clean());
     for (ty, index) in [("Task", "a"), ("Task", "slug"), ("Note", "text")] {
-        super::super::derive::fail_next_scratch();
+        crate::failpoints::fail_once_here(crate::failpoints::points::SCRATCH);
         let error = db.rebuild(Some((ty, index))).unwrap_err();
         assert_eq!(error.code, crate::ErrorCode::Io);
     }

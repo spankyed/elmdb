@@ -22,17 +22,6 @@ const END: u32 = u32::MAX;
 const LOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const LOAD_BATCH_ROWS: usize = 1000;
 
-#[cfg(test)]
-type PublishHook = Box<dyn FnOnce(&Path)>;
-#[cfg(test)]
-type SyncHook = Box<dyn FnOnce() -> Result<()>>;
-
-#[cfg(test)]
-thread_local! {
-    static BEFORE_LOAD_PUBLISH: std::cell::RefCell<Option<PublishHook>> = const { std::cell::RefCell::new(None) };
-    static AFTER_LOAD_PUBLISH: std::cell::RefCell<Option<SyncHook>> = const { std::cell::RefCell::new(None) };
-}
-
 /// What a dump holds
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,12 +165,7 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     drop(loads);
     db.rebuild(None)?;
     db.close()?;
-    #[cfg(test)]
-    BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| {
-        if let Some(hook) = hook.take() {
-            hook(&target);
-        }
-    });
+    run_point!(LOAD_PUBLISH);
     // Publication is atomic and fails if any file already occupies the destination. The closed staging file is
     // on the same volume; no failed operation ever removes a destination file owned by another invocation.
     crate::store::publish_new(&stage.path().join("data.mdb"), &target.join("data.mdb")).map_err(|error| {
@@ -192,8 +176,7 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
         }
     })?;
     let published = (|| -> Result<()> {
-        #[cfg(test)]
-        AFTER_LOAD_PUBLISH.with_borrow_mut(|hook| hook.take().map_or(Ok(()), |hook| hook()))?;
+        failure_point!(LOAD_PUBLISHED, Error::new(ErrorCode::Io, "injected sync failure"));
         std::fs::OpenOptions::new().write(true).open(target.join("data.mdb"))?.sync_all()?;
         #[cfg(unix)]
         for dir in sync_dirs {
@@ -265,6 +248,7 @@ impl Drop for Written {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::failpoints::{self, points};
 
     fn fixture(root: &Path) -> std::path::PathBuf {
         let db = Database::open(root.join("source"), OpenOptions { syncs: false, ..Default::default() }).unwrap();
@@ -289,15 +273,14 @@ mod tests {
         let target = root.path().join("destination");
         std::fs::create_dir(&target).unwrap();
         std::fs::write(target.join("notes.txt"), b"unrelated").unwrap();
-        BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(|target| {
-                assert!(!target.join("data.mdb").exists(), "staged batches are never public");
-                assert!(matches!(
-                    Database::open(target, OpenOptions::default()),
-                    Err(Error { code: ErrorCode::AlreadyOpen, .. })
-                ));
-                std::fs::write(target.join("data.mdb"), b"foreign publisher").unwrap();
-            }))
+        let publishing = target.clone();
+        failpoints::run_once_here(points::LOAD_PUBLISH, move || {
+            assert!(!publishing.join("data.mdb").exists(), "staged batches are never public");
+            assert!(matches!(
+                Database::open(&publishing, OpenOptions::default()),
+                Err(Error { code: ErrorCode::AlreadyOpen, .. })
+            ));
+            std::fs::write(publishing.join("data.mdb"), b"foreign publisher").unwrap();
         });
         assert_eq!(load(&path, &target).unwrap_err().code, ErrorCode::IdInUse);
         assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), b"foreign publisher");
@@ -318,11 +301,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = fixture(root.path());
         let target = root.path().join("destination");
-        BEFORE_LOAD_PUBLISH.with_borrow_mut(|hook| *hook = Some(Box::new(|_| panic!("cancel import"))));
+        failpoints::run_once_here(points::LOAD_PUBLISH, || panic!("cancel import"));
         assert!(std::panic::catch_unwind(|| load(&path, &target)).is_err());
         assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
-        AFTER_LOAD_PUBLISH
-            .with_borrow_mut(|hook| *hook = Some(Box::new(|| Err(Error::new(ErrorCode::Io, "injected sync failure")))));
+        failpoints::fail_once_here(points::LOAD_PUBLISHED);
         let error = load(&path, &target).unwrap_err();
         assert_eq!(error.code, ErrorCode::Io);
         assert!(error.message.contains("complete loaded database") && error.message.contains("visible"));

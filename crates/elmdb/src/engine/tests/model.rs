@@ -556,7 +556,7 @@ fn apply_in(unit: &mut crate::Unit, step: &Step) -> Result<(), crate::Error> {
 fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
     match step {
         Step::RefuseNext => {
-            *crate::store::FAIL_COMMIT_AT.lock().unwrap() = Some(db.path().to_path_buf());
+            crate::failpoints::fail_once_at(crate::failpoints::points::COMMIT, db.path());
             Ok(())
         }
         Step::Unit { steps, throws, durable } => {
@@ -985,7 +985,7 @@ proptest! {
             prop_assert_eq!(sorted_far_ends(derived_of(&db)), derived_from(&model), "step {}: {:?}", i, step);
             prop_assert_eq!(plans_of(&db), plans_from(&model), "step {}: {:?}", i, step);
         }
-        *crate::store::FAIL_COMMIT_AT.lock().unwrap() = None;
+        crate::failpoints::disarm(crate::failpoints::points::COMMIT);
         let report = db.check().unwrap();
         prop_assert!(report.is_clean(), "check() after the workload: {:?}", report);
     }

@@ -150,7 +150,7 @@ fn a_schema_change_refuses_if_another_process_changes_its_input_before_the_write
     proposed["types"]["Task"]["fields"]["newField"] = json!({"type":"any", "optional":true});
     let proposed = Schema::from_json(&proposed).unwrap();
     let path = dir.path().to_owned();
-    crate::database::BEFORE_SCHEMA_WRITE.with_borrow_mut(|hook| *hook = Some(Box::new(move || change_in_child(&path))));
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_WRITE, move || change_in_child(&path));
     assert_eq!(db.set_schema(proposed).unwrap_err().code, ErrorCode::SchemaChanged);
     db.close().unwrap();
     let db = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
@@ -170,8 +170,7 @@ fn a_schema_change_rechecks_primary_inventory_in_its_write_transaction() {
         Database::open(dir.path(), OpenOptions { schema: Some(with_code("OLD")), syncs: false, ..Default::default() })
             .unwrap();
     let path = dir.path().to_owned();
-    crate::database::BEFORE_SCHEMA_WRITE
-        .with_borrow_mut(|hook| *hook = Some(Box::new(move || run_child(&path, "insert"))));
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_WRITE, move || run_child(&path, "insert"));
     let mut proposed = serde_json::to_value(with_code("OLD")).unwrap();
     let task = proposed["types"].as_object_mut().unwrap().remove("Task").unwrap();
     proposed["types"]["Note"] = task;
@@ -255,9 +254,8 @@ fn a_failed_schema_commit_keeps_its_error_when_recovery_sees_a_new_declaration()
         .unwrap();
     write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
     let path = dir.path().to_owned();
-    crate::database::BEFORE_SCHEMA_RECOVERY
-        .with_borrow_mut(|hook| *hook = Some(Box::new(move || change_in_child(&path))));
-    crate::store::FAIL_NEXT_COMMIT.set(true);
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, move || change_in_child(&path));
+    crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
     let error = db.set_schema(schema("b")).unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("refreshing index state also failed"));
@@ -290,12 +288,10 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     builder.stop();
     builder.queue([("Task".into(), "lookup".into())]);
     *db.builder() = Some(builder);
-    crate::database::BEFORE_SCHEMA_RECOVERY.with_borrow_mut(|hook| {
-        *hook = Some(Box::new(|| {
-            crate::engine::FAIL_NEXT_INDEX_REFRESH.set(true);
-        }))
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, || {
+        crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH)
     });
-    crate::store::FAIL_NEXT_COMMIT.set(true);
+    crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
     let error = db.set_schema(schema("b")).unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("refreshing index state also failed"));

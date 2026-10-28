@@ -8,26 +8,6 @@ use std::path::PathBuf;
 use super::{Registration, Store, open_paths};
 use crate::error::{Error, ErrorCode, Result};
 
-#[cfg(test)]
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum Point {
-    Ready,
-    Published,
-}
-
-#[cfg(test)]
-type Hook = Box<dyn FnMut(Point, &Path) -> Result<()>>;
-
-#[cfg(test)]
-thread_local! {
-    pub(super) static HOOK: std::cell::RefCell<Option<Hook>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn hook(point: Point, path: &Path) -> Result<()> {
-    HOOK.with_borrow_mut(|hook| hook.as_mut().map_or(Ok(()), |hook| hook(point, path)))
-}
-
 pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     let target = std::path::absolute(target)?;
     #[cfg(unix)]
@@ -63,12 +43,11 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     }
     // Closing the handle before publication also permits replacement on Windows. TempPath owns cleanup on failure.
     let partial = partial.into_temp_path();
-    #[cfg(test)]
-    hook(Point::Ready, &partial)?;
+    run_point!(BACKUP_READY);
+    failure_point!(BACKUP_PUBLISH, Error::new(ErrorCode::Io, "injected before publication"));
     publish(&partial, &target.join("data.mdb"))?;
     let synced = (|| -> Result<()> {
-        #[cfg(test)]
-        hook(Point::Published, &target)?;
+        failure_point!(BACKUP_PUBLISHED, Error::new(ErrorCode::Io, "injected sync failure"));
         #[cfg(unix)]
         for dir in sync_dirs {
             std::fs::File::open(dir)?.sync_all()?;

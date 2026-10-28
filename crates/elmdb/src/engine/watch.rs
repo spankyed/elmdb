@@ -140,17 +140,11 @@ impl Tracks {
     }
 }
 
-#[cfg(test)]
-thread_local! { pub(crate) static PANIC_NEXT_READ: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-
 /// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
 /// taken read nothing, so the whole store stands for what they read: any commit then names them, where an empty read
 /// set would leave whoever filed it on the failure for good
 pub(crate) fn run_tracked(store: &Store, schema: &EngineSchema, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
-    #[cfg(test)]
-    if PANIC_NEXT_READ.replace(false) {
-        panic!("injected watch read panic");
-    }
+    run_point!(WATCH_READ);
     let ran = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let snapshot = Snapshot { txn, db, schema };

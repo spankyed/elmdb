@@ -100,12 +100,12 @@ fn refuses_new_files_it_could_not_stamp_and_stamps_them_once_it_can() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     std::fs::create_dir_all(&path).unwrap();
-    *FAIL_STAMP_AT.lock().unwrap() = Some(path.canonicalize().unwrap());
+    crate::failpoints::fail_once_at(crate::failpoints::points::STAMP, &path.canonicalize().unwrap());
     let error = Store::open(&path, quiet()).err().unwrap();
     assert!(error.message.starts_with("Couldn't record the storage format of"), "{}", error.message);
     assert!(error.message.ends_with("No space left on device"), "{}", error.message);
 
-    *FAIL_STAMP_AT.lock().unwrap() = None;
+    crate::failpoints::disarm(crate::failpoints::points::STAMP);
     let store = Store::open(&path, quiet()).unwrap();
     assert_eq!(store.meta(meta::FORMAT).unwrap(), Some(format::FORMAT_VERSION.to_be_bytes().to_vec()));
     assert_eq!(store.meta(meta::KIND).unwrap().as_deref(), Some(format::KIND.as_bytes()));
@@ -514,17 +514,19 @@ fn backup_failure_owns_only_its_private_file_and_releases_destination() {
     put(&store, "value", b"new").unwrap();
     let sentinel = target.path().join("data.mdb.partial");
     std::fs::write(&sentinel, b"belongs to someone else").unwrap();
-    backup::HOOK.with_borrow_mut(|hook| {
-        *hook = Some(Box::new(|point, path| {
-            if point == backup::Point::Ready {
-                assert!(path.file_name().unwrap().to_string_lossy().starts_with(".elmdb-backup-"));
-                return Err(Error::new(ErrorCode::Io, "injected before publication"));
-            }
-            Ok(())
-        }))
+    // The copy is private until published: a temporary file of its own in the destination
+    let destination = target.path().to_owned();
+    crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_READY, move || {
+        assert!(
+            std::fs::read_dir(&destination).unwrap().any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".elmdb-backup-"))
+        );
     });
+    crate::failpoints::fail_once_here(crate::failpoints::points::BACKUP_PUBLISH);
     let failed = store.copy_to(target.path());
-    backup::HOOK.with_borrow_mut(|hook| *hook = None);
     assert_eq!(failed.unwrap_err().code, ErrorCode::Io);
     assert_eq!(std::fs::read(&sentinel).unwrap(), b"belongs to someone else");
     assert!(
@@ -553,20 +555,11 @@ fn backup_reserves_destination_against_open_and_another_publisher() {
     let destination = target.path().to_owned();
     let worker_store = store.clone();
     let worker = std::thread::spawn(move || {
-        backup::HOOK.with_borrow_mut(|hook| {
-            *hook = Some(Box::new(move |point, _| {
-                if point == backup::Point::Ready {
-                    entered.send(()).map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
-                    continued
-                        .recv_timeout(Duration::from_secs(5))
-                        .map_err(|error| Error::new(ErrorCode::Io, error.to_string()))?;
-                }
-                Ok(())
-            }))
+        crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_READY, move || {
+            entered.send(()).expect("the test waits for the publisher");
+            continued.recv_timeout(Duration::from_secs(5)).expect("the test lets the publisher go on");
         });
-        let result = worker_store.copy_to(&destination);
-        backup::HOOK.with_borrow_mut(|hook| *hook = None);
-        result
+        worker_store.copy_to(&destination)
     });
     ready.recv_timeout(Duration::from_secs(5)).expect("publisher reached ready point");
     let opened = Store::open(target.path(), quiet());
@@ -585,16 +578,8 @@ fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_cop
     let target = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
     put(&store, "value", b"complete").unwrap();
-    backup::HOOK.with_borrow_mut(|hook| {
-        *hook = Some(Box::new(|point, _| {
-            if point == backup::Point::Published {
-                return Err(Error::new(ErrorCode::Io, "injected sync failure"));
-            }
-            Ok(())
-        }))
-    });
+    crate::failpoints::fail_once_here(crate::failpoints::points::BACKUP_PUBLISHED);
     let result = store.copy_to(target.path());
-    backup::HOOK.with_borrow_mut(|hook| *hook = None);
     let error = result.unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"));
