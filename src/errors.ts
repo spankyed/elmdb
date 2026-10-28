@@ -37,14 +37,20 @@ export type EarsErrorCode =
   | 'CYCLE'
   /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
   | 'VALUE_INVALID'
-  /** `search` was on a type with no text index (no `search` in its manifest entry), or `near`, `like`, `hybrid` or `pendingEmbeddings` on one with no vector index (no `embed`) */
+  /**
+   * `search` was on a type with no text index (no `search` in its manifest entry), `near`, `like`, `hybrid` or
+   * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
+   * index (no `substrings`)
+   */
   | 'UNKNOWN_INDEX'
   /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
   | 'NO_SEARCH'
   /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
   | 'NOT_EXPLAINABLE'
   /** A write's value isn't of its field's type, as the entity type's shape declares it: the message names the field and the type */
-  | 'FIELD_TYPE';
+  | 'FIELD_TYPE'
+  /** `matching` was given a pattern Rust's `regex` syntax doesn't hold, look-around and backreferences among them: the message says why */
+  | 'PATTERN_INVALID';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

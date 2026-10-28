@@ -101,6 +101,12 @@ Held by the types and the engine specs, which say more than a rule over names co
   counting `stale` each whose chunk changed since. `near(vector, { k })`, `like(id, { k })` and `hybrid(text, vector,
   { k, ...searchOptions })` are plan steps that `hits()` ends as it does `search`; a pending chunk is found by none of
   them. The engine never calls a model: the SDK's `embedPending` does (`@apackdev/sdk/services`).
+- **Substrings and patterns.** A type whose row rules declare `substrings` (fields) has an elmdb trigram index named
+  `substrings` over them (`schema.ts`). `containing(text, { caseInsensitive? })` and `matching(pattern)` (Rust's
+  `regex` syntax; `PATTERN_INVALID` for look-around or backreferences) are plan steps that filter without ranking:
+  after a type start they read the index's candidates and check each, after other steps they filter what was reached
+  (`elmdb/docs/architecture/search.md`, Substrings and patterns as built). A type with none refuses them
+  (`UNKNOWN_INDEX`).
 - **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit that
   wrote into what it read, delivering each result that differs from the last, with the commit's sequence
   (`lastCommit()`: elmdb's, one per commit, increasing for as long as the database exists). Tracking is elmdb's

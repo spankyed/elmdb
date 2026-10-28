@@ -260,6 +260,9 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       groupBy: (field: string) => new Map(run(recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>),
 
       search: (text: string, options: Record<string, unknown> = {}) => next({ step: 'search', query: text, options }),
+      containing: (text: string, { caseInsensitive = false }: { caseInsensitive?: boolean } = {}) =>
+        next({ step: 'containing', text, caseInsensitive }),
+      matching: (pattern: string) => next({ step: 'matching', pattern }),
       after: (id: EARS.EntityId) => next({ step: 'after', id }),
       near: (vector: readonly number[], { k = 10 }: { k?: number } = {}) => next({ step: 'near', vector: [...vector], k }),
       like: (id: EARS.EntityId, { k = 10 }: { k?: number } = {}) => next({ step: 'like', id, k }),

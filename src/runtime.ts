@@ -67,6 +67,8 @@ export interface RowRules {
   search?: SearchDeclaration;
   /** The fields its vector index embeds, and the model it embeds them with: what `near`, `like` and `hybrid` rank by */
   embed?: EmbedDeclaration;
+  /** The fields its trigram index reads, strings or lists of strings: what `containing` and `matching` find */
+  substrings?: readonly string[];
   /**
    * The type of each field the shape declares, as its TypeScript type maps to one of elmdb's (`FieldRule`): what the
    * database holds every write to, from every writer. A field the shape doesn't declare is still taken
@@ -318,6 +320,18 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * steps it searches among the entities they reached
    */
   search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
+  /**
+   * The entities whose text, in a field of the type's trigram index (its manifest entry's `substrings`), holds `text`
+   * as it is written, or with `caseInsensitive` in any case: an error message, an id, a path. Unranked: the query keeps
+   * its order, and after other steps it filters the entities they reached
+   */
+  containing(text: string, options?: { caseInsensitive?: boolean }): QueryBuilder<E, D>;
+  /**
+   * The entities whose text, in a field of the type's trigram index, matches `pattern`, in Rust's `regex` syntax
+   * (`(?i)` ignores case), which has no look-around or backreferences: a pattern using them is refused
+   * (`PATTERN_INVALID`). Unranked, as `containing` is
+   */
+  matching(pattern: string): QueryBuilder<E, D>;
   /**
    * The `k` entities (10 unless given) whose embeddings in the type's vector index (its manifest entry's `embed`) are
    * nearest `vector`, nearest first, each scored `1 / (1 + distance)` by its nearest chunk; after other steps, among the
