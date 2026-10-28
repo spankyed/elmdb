@@ -123,48 +123,31 @@ pub(crate) fn publish_new(source: &Path, target: &Path) -> std::io::Result<()> {
     {
         move_file(source, target, false)
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(not(windows))]
     {
-        use std::os::unix::ffi::OsStrExt;
-        let source_c = std::ffi::CString::new(source.as_os_str().as_bytes())?;
-        let target_c = std::ffi::CString::new(target.as_os_str().as_bytes())?;
-        #[cfg(target_os = "linux")]
-        // SAFETY: both paths remain live terminated strings; AT_FDCWD uses their absolute paths and
-        // RENAME_NOREPLACE atomically refuses an existing destination without requiring hard links.
-        let result = unsafe {
-            libc::syscall(
-                libc::SYS_renameat2,
-                libc::AT_FDCWD,
-                source_c.as_ptr(),
-                libc::AT_FDCWD,
-                target_c.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        #[cfg(target_os = "macos")]
-        // SAFETY: the two live terminated paths are on the same volume; RENAME_EXCL refuses replacement atomically.
-        let result = unsafe { libc::renamex_np(source_c.as_ptr(), target_c.as_ptr(), libc::RENAME_EXCL) };
-        let result = if result == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) };
+        // tempfile renames without replacing (Linux's RENAME_NOREPLACE, macOS's RENAME_EXCL), and links where the
+        // kernel or the filesystem refuses that call (ENOSYS, EINVAL). Refused, the source stays the caller's
+        let renamed = tempfile::TempPath::try_from_path(source)?.persist_noclobber(target).map_err(|refused| {
+            let _ = refused.path.keep();
+            refused.error
+        });
         #[cfg(target_os = "linux")]
         {
-            exclusive_rename_or_link(source, target, result)
+            exclusive_rename_or_link(source, target, renamed)
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(not(target_os = "linux"))]
         {
-            result
+            renamed
         }
-    }
-    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-    {
-        std::fs::hard_link(source, target)
     }
 }
 
 #[cfg(target_os = "linux")]
 fn exclusive_rename_or_link(source: &Path, target: &Path, renamed: std::io::Result<()>) -> std::io::Result<()> {
     match renamed {
-        // Old kernels and filesystems such as NFS may not support exclusive rename. Linking the already synced
-        // private file publishes it atomically and also refuses an existing target; TempPath removes the source.
+        // A filesystem may refuse an exclusive rename with EOPNOTSUPP, which tempfile answers rather than linking.
+        // Linking the already synced private file publishes it atomically and also refuses an existing target; the
+        // caller's staging directory removes the source.
         Err(error) if matches!(error.raw_os_error(), Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)) => {
             std::fs::hard_link(source, target)
         }
