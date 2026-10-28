@@ -24,7 +24,7 @@ authorization.
 
 **Built.** elmdb's mutation checks are run by cargo-mutants (`.cargo/mutants.toml`, the commands in
 `docs/architecture/testing.md`, Mutation testing). A baseline over the six highest-risk modules found 169 survivors
-against the fast suite: 141 are killed, 5 by the model harness and the rest by new specs, and 27 are excluded, each with
+against the fast suite: 144 are killed, 5 by the model harness and the rest by new specs, and 24 are excluded, each with
 why it answers what the code answers. One is left as a finding. The specs cover what nothing had checked: BM25's
 scores, a query's parse, fusion depth, the filters before a driving index, plans over several types, the trash under
 walks, `plainObjects` on every terminal, EXPLAIN's times and index names, and more (`docs/evidence/verification-tooling.md`,
@@ -52,8 +52,8 @@ passed on Phases 2 and 3 (run 40674565378).
 
 - EXPLAIN's stage times: `pull` charging a stage's time to the stage before it shows in no count, so no spec catches
   it.
-- `past_filters`' `withRole` arm and `roles_declared` are never reached: an indexed `withRole` always drives.
-- `MAX_STEPS` (256) overflows a 2 MB debug-build stack. It holds on 8 MB, and nothing ties a read to such a thread.
+- `MAX_STEPS` (256) overflows a 2 MB debug-build stack and holds on 8 MB. A release build runs it on 512 KB, so only a
+  debug binding, whose reads run on libuv's worker threads, needs more.
 - Left by the roadmap: a baseline over `store/`, `engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`,
   and CI over `--in-diff`.
 

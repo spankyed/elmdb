@@ -67,9 +67,9 @@ the same directory.
 
 A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
 exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
-an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation, and a
-line that moves makes the excluded mutant show as missed rather than hiding another. The `--list --no-config` diff above
-is the check. The hand-made mutation scripts that remain
+an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. A line
+that moves shows the excluded mutant as missed, and can hide a mutant of the same kind in the same function that moves
+onto that line; the `--list --no-config` diff above shows what each exclusion hides, and is the check after an edit. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-windows-backup-mutation.py`,
 `check-maintenance-verification.py`) make platform-specific or heap and timing changes that cargo-mutants doesn't.
 

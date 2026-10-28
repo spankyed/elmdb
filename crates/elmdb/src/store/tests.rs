@@ -100,12 +100,13 @@ fn refuses_new_files_it_could_not_stamp_and_stamps_them_once_it_can() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("db");
     std::fs::create_dir_all(&path).unwrap();
-    crate::failpoints::fail_once_at(crate::failpoints::points::STAMP, &path.canonicalize().unwrap());
+    let canonical = path.canonicalize().unwrap();
+    crate::failpoints::fail_once_at(crate::failpoints::points::STAMP, &canonical);
     let error = Store::open(&path, quiet()).err().unwrap();
     assert!(error.message.starts_with("Couldn't record the storage format of"), "{}", error.message);
     assert!(error.message.ends_with("No space left on device"), "{}", error.message);
 
-    crate::failpoints::disarm(crate::failpoints::points::STAMP);
+    crate::failpoints::disarm_at(crate::failpoints::points::STAMP, &canonical);
     let store = Store::open(&path, quiet()).unwrap();
     assert_eq!(store.meta(meta::FORMAT).unwrap(), Some(format::FORMAT_VERSION.to_be_bytes().to_vec()));
     assert_eq!(store.meta(meta::KIND).unwrap().as_deref(), Some(format::KIND.as_bytes()));

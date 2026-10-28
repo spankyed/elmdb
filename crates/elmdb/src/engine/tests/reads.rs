@@ -583,6 +583,42 @@ fn the_filters_before_a_driving_index_keep_their_part() {
 }
 
 #[test]
+fn with_role_before_a_driving_index_is_checked_per_match_while_the_role_index_is_unbuilt() {
+    let f = fixture();
+    super::write(
+        &f.db,
+        vec![json!({ "op": "grant", "id": A, "role": "focus" }), json!({ "op": "grant", "id": B, "role": "focus" })],
+    )
+    .unwrap();
+    f.db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Task", "role"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let open = json!({ "step": "where", "field": "status", "value": "open" });
+    let focused = json!({ "step": "withRole", "role": "focus" });
+    let explained = reads(
+        &f.db,
+        vec![json!({ "read": "query", "explain": true, "plan": { "start": types(&["Task"]), "steps": [focused, open], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap();
+    assert_eq!(explained[0]["answer"]["ids"], json!([A]));
+    assert_eq!(explained[0]["stages"][2]["index"], "status", "the where drives");
+    let unknown = json!({ "step": "withRole", "role": "nope" });
+    let refused = reads(
+        &f.db,
+        vec![json!({ "read": "query", "plan": { "start": types(&["Task"]), "steps": [unknown, open], "terminal": { "answer": "ids" } } })],
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRole);
+}
+
+#[test]
 fn a_where_after_a_types_start_reads_every_type_indexed_or_not() {
     let f = fixture();
     super::write(

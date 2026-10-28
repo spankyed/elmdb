@@ -223,11 +223,10 @@ pub(crate) fn is_armed_here(name: &'static str) -> bool {
     HERE.with_borrow(|armed| armed.contains_key(name))
 }
 
-/// Disarms `name` on this thread and for every path, whatever it was armed with
+/// Disarms what `fail_once_at` armed `name` with for the database at `path`, leaving other paths' armings
 #[cfg(test)]
-pub(crate) fn disarm(name: &'static str) {
-    HERE.with_borrow_mut(|armed| armed.remove(name));
-    AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|at| at.name != name);
+pub(crate) fn disarm_at(name: &'static str, path: &Path) {
+    AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|at| !(at.name == name && at.path == path));
 }
 
 #[cfg(test)]
@@ -257,6 +256,11 @@ mod tests {
         assert!(!fails_at(points::STAMP, other));
         assert!(std::thread::spawn(move || fails_at(points::STAMP, Path::new("/one"))).join().unwrap());
         assert!(!fails_at(points::STAMP, one), "once");
+        fail_once_at(points::STAMP, one);
+        fail_once_at(points::STAMP, other);
+        disarm_at(points::STAMP, one);
+        assert!(!fails_at(points::STAMP, one), "disarmed");
+        assert!(fails_at(points::STAMP, other), "another path's arming is its own");
         let held = fail_while_at(points::SYNC, one);
         assert!(fails_at(points::SYNC, one) && fails_at(points::SYNC, one), "until disarmed");
         drop(held);

@@ -31,7 +31,8 @@ exclude_re = [
     "entities.rs:351:.*replace == with != in check_unique",
     # stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
     # within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
-    # being the threshold's on the line above; a line moved shows these as missed rather than hiding another
+    # being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here, which
+    # the `--list --no-config` diff (`docs/architecture/testing.md`, Mutation testing) shows
     "values.rs:42:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
     # parse's field name needs an alphabetic first character, which an empty name (name_end == at) doesn't have
     "search.rs:66:.*replace > with >= in parse",
@@ -64,8 +65,4 @@ exclude_re = [
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
     "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
-    # A withRole is always indexed (the built-in role index), so it drives rather than stands before a driving index:
-    # past_filters' withRole arm and roles_declared are never reached (a finding, docs/evidence/verification-tooling.md)
-    "reads.rs:.*delete match arm Step::WithRole\\{role\\} in Query<'_, R>::past_filters",
-    "reads.rs:.*Query<'_, R>::roles_declared",
 ]

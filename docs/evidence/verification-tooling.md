@@ -22,16 +22,17 @@ deadline catches it.
 |---|---|---|---|---|---|---|
 | `engine/trigram.rs` | 66 | 55 | 8 | 3 | 0 | 1 / 2 / 0 |
 | `engine/entities.rs` | 91 | 86 (both) | | 5 | 0 | 2 / 3 / 0 |
-| `engine/reads.rs` | 369 | 294 (both) | | 75 | 0 | 62 / 12 / 1 |
+| `engine/reads.rs` | 369 | 294 (both) | | 75 | 0 | 65 / 9 / 1 |
 | `engine/text/search.rs` | 232 | 177 (both) | | 50 | 5 | 43 / 7 / 0 |
 | `engine/values.rs` | 116 | 82 (both) | | 34 | 0 | 31 / 3 / 0 |
 | `schema/diff.rs` | 66 | 64 (both) | | 2 | 0 | 2 / 0 / 0 |
 
 Of `reads.rs`' 75, the whole suite (the model harness with it) caught 5 of the 12 it was run on before the specs for the
-rest made it unneeded; the 62 killed count those 5. Each kill is a cargo-mutants rerun of that mutant against the new
+rest made it unneeded; the 65 killed count those 5. Each kill is a cargo-mutants rerun of that mutant against the new
 specs: `--iterate` over `text/search.rs`, `values.rs` and `schema/diff.rs` (81 mutants: 76 caught, the 5 timeouts again),
-over `reads.rs` (61: 56 caught; of the 5 missed, the step limit's then caught by its new spec, three
-excluded as unreached and the finding left), and a fresh run of `entities.rs` (88: 82
+over `reads.rs` (61: 56 caught; of the 5 missed, the step limit's then caught by its new spec, the finding
+left, and three in `withRole`'s per-match check, caught by their spec in a run of that function's four mutants: 3
+caught, 1 unviable), and a fresh run of `entities.rs` (88: 82
 caught, 6 unviable, none missed). `trigram.rs`' was its own rerun (`9a978be`).
 
 **The end state**, a fresh reading of the four modules whose caught and unviable the first reading kept together, on
@@ -44,11 +45,13 @@ caught, 6 unviable, none missed). `trigram.rs`' was its own rerun (`9a978be`).
 | `engine/values.rs` | 101 | 12 | 0 | 0 |
 | `schema/diff.rs` | 64 | 2 | 0 | 0 |
 
-`reads.rs`' six missed are the stage-time finding below and five in `walk_type`, which the model harness kills: run
+That reading excluded `withRole`'s per-match check, whose four mutants are the run above; with them `reads.rs` is
+329 caught and 25 unviable. `reads.rs`' six missed are the stage-time finding below and five in `walk_type`, which the model harness kills: run
 against the whole suite, all five are caught (4 minutes). The five timeouts are `parse`'s and `within`'s counters
 turned into loops that never end. `entities.rs`' and `trigram.rs`' end states are their reruns above.
 
-**What the survivors showed untested**, each now a spec: a query's clauses as parsed; BM25's score over weighted fields,
+**What the survivors showed untested**, each now a spec: a query's clauses as parsed; `withRole` checked per match
+before a driving index while the role index is unbuilt; BM25's score over weighted fields,
 a fields option and a clause that doesn't match; recency's factor; a one-edit term over a two-edit one; a prefix only for
 the last word; search, `near` and `containing` among a set, past its first place and each entity once; highlights joined
 across touching terms; suggestions that exclude the word and give two letters no edit; `near`'s and hybrid's scores, and
@@ -65,18 +68,16 @@ entities' two single-field `unique_keys` arms and `check_unique`'s skip of its o
 byte of its msgpack; a field name with no first letter; the fuzzy DFA's own distance bound; an exact walk's distance-0
 match; an exact term already merged at weight 1; a phrase's union checked by `holds`; the trash and the live range
 never sharing a place; `nearest`'s first ask; `orderBy` then `limit` through `first_ordered` or the full sort, and its
-cut; a stage's answer, which no stage or terminal reads; the timestamp and finite guards no stored value reaches; and
-the `withRole` code below.
+cut; a stage's answer, which no stage or terminal reads; and the timestamp and finite guards no stored value reaches.
 
 **Findings:**
 
 - **EXPLAIN's stage times** (`reads.rs`, `pull`): a mutant that charges a downstream stage's time to the stage before it
   changes no count, only milliseconds, which no deterministic reading tells apart. Left as a survivor.
-- **Unreached code** (`reads.rs`): `past_filters`' `withRole` arm and `roles_declared`. A `withRole` is always indexed by
-  the built-in role index, so it drives rather than stands before a driving index. Excluded, as unreachable.
 - **The step limit and the stack** (`reads.rs`, `MAX_STEPS` 256): a plan of 256 steps overflows the 2 MB stack of a
-  test thread in a debug build; on 8 MB, Node's main thread's, it runs in debug and release. Nothing holds a read to a
-  thread of that size; the spec runs it on one.
+  test thread in a debug build, and runs on 8 MB. The binding's reads run on libuv's worker threads, not Node's main
+  thread; a release build runs the plan on 512 KB, so only a debug binding needs the larger stack. The spec runs it on
+  an 8 MB thread, so it passes in both.
 
 ### `--in-diff`
 
