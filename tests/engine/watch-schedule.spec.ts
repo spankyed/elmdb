@@ -291,4 +291,24 @@ describe('the watch scheduler', () => {
     expect(reader.last()).toEqual(rows());
     expect(reader.runs() - before).toBe(1);
   });
+
+  it('stops every watch quietly when its database is closed while one waits out its gap', async () => {
+    const errors: unknown[] = [];
+    let runs = 0;
+    watches.watch(() => { runs++; time.spend(1); return rows(); }, { next: () => {}, error: (error) => { errors.push(error); } });
+    await drain();
+    commit();
+    await turn();
+    expect(time.pending(), 'a timer stands for the watch in its gap').toBe(1);
+    const before = runs;
+    connection.database.close();
+    time.advance(WATCH_SCHEDULE.minimumGapMs * 4);
+    await turn();
+    expect(runs, 'nothing ran on the closed database').toBe(before);
+    expect(errors).toEqual([]);
+    expect(time.pending()).toBe(0);
+    expect(await settledNow()).toBe(true);
+    expect(watches.stats().watches).toBe(0);
+  });
 });
+
