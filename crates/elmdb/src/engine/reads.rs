@@ -531,6 +531,7 @@ impl<R: Read> Query<'_, R> {
                     && let Some(types) = self.start_types()
                     && let Some(part) = indexable(name, value)
                 {
+                    self.roles_declared(before)?;
                     return self.holding(types, name, &part, value, &mut |id| self.past_filters(before, id, visit));
                 }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
@@ -557,6 +558,7 @@ impl<R: Read> Query<'_, R> {
                 if self.driver() == Some(before)
                     && let Some(types) = self.start_types()
                 {
+                    self.roles_declared(before)?;
                     let part = Part::String(role.clone());
                     return self
                         .holding(types, field::ROLE, &part, &probe, &mut |id| self.past_filters(before, id, visit));
@@ -612,7 +614,14 @@ impl<R: Read> Query<'_, R> {
                 if before > 0
                     && let Step::OrderBy { field: name, descending } = &self.plan.steps[before - 1]
                 {
-                    return each(self.first_ordered(before - 1, name, *descending, take as usize)?, visit);
+                    let first = self.first_ordered(before - 1, name, *descending, take as usize)?;
+                    // The `orderBy` stage, which this read for it, kept what it hands on
+                    if let Some(stages) = self.stages {
+                        for _ in &first {
+                            stages.kept(before);
+                        }
+                    }
+                    return each(first, visit);
                 }
                 let mut taken = 0i64;
                 let mut stopped = false;
@@ -733,7 +742,14 @@ impl<R: Read> Query<'_, R> {
         for (at, entity_type) in types.iter().enumerate() {
             let text_index = match text::resolve(self.r.schema(), entity_type, index, "search") {
                 Ok(found) => found,
-                Err(e) if among.is_some() && index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                // Among a set, a type with no text index holds no match; one with several, none named, is refused
+                Err(_)
+                    if among.is_some()
+                        && index.is_none()
+                        && text::text_indexes(self.r.schema(), entity_type).is_empty() =>
+                {
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             let within = match &among {
@@ -816,7 +832,10 @@ impl<R: Read> Query<'_, R> {
         self.pull(before, &mut |id| {
             let found = match trigram::resolve(self.r.schema(), ids::type_of(id), index, via) {
                 Ok(found) => found,
-                Err(e) if index.is_none() && e.code == ErrorCode::UnknownIndex => return Ok(true),
+                // A type with no trigram index holds no match; one with several, none named, is refused
+                Err(_) if index.is_none() && trigram::trigram_indexes(self.r.schema(), ids::type_of(id)).is_empty() => {
+                    return Ok(true);
+                }
                 Err(e) => return Err(e),
             };
             if matcher.matches(self.r, &found, id)? { visit(id) } else { Ok(true) }
@@ -860,7 +879,13 @@ impl<R: Read> Query<'_, R> {
         for entity_type in &types {
             let def = match super::vector::resolve(self.r.schema(), entity_type, index, "near") {
                 Ok(def) => def,
-                Err(e) if among.is_some() && index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                Err(_)
+                    if among.is_some()
+                        && index.is_none()
+                        && super::vector::vector_indexes(self.r.schema(), entity_type).is_empty() =>
+                {
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             let within = match &among {
@@ -921,7 +946,13 @@ impl<R: Read> Query<'_, R> {
         for entity_type in &types {
             let def = match text::resolve(self.r.schema(), entity_type, text_index, "hybrid") {
                 Ok(def) => def,
-                Err(e) if among.is_some() && text_index.is_none() && e.code == ErrorCode::UnknownIndex => continue,
+                Err(_)
+                    if among.is_some()
+                        && text_index.is_none()
+                        && text::text_indexes(self.r.schema(), entity_type).is_empty() =>
+                {
+                    continue;
+                }
                 Err(e) => return Err(e),
             };
             let within = match &among {
@@ -1006,6 +1037,22 @@ impl<R: Read> Query<'_, R> {
         None
     }
 
+    /// Refuses a `withRole` among the filters before a driving index that names no declared role, as the step itself
+    /// does when it runs
+    fn roles_declared(&self, upto: usize) -> Result<()> {
+        for step in &self.plan.steps[..upto] {
+            if let Step::WithRole { role } = step
+                && !self.r.schema().roles.contains_key(role)
+            {
+                return Err(Error::new(
+                    ErrorCode::UnknownRole,
+                    format!("withRole(\"{role}\"): not a role the schema declares"),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Visits `id` if every one of the first `upto` steps, the filters before a driving index, keeps it
     fn past_filters(&self, upto: usize, id: &str, visit: &mut Visit<'_>) -> Result<bool> {
         for step in &self.plan.steps[..upto] {
@@ -1035,17 +1082,29 @@ impl<R: Read> Query<'_, R> {
             let o = compare(&collator, a, b);
             if descending { o.reverse() } else { o }
         };
-        let mut kept: Vec<(SortKey, String)> = Vec::with_capacity(take.min(1024) + 1);
+        // Ids are held as they come, up to twice `take`, then sorted (stably, so the earlier of two equals stays first)
+        // and cut to `take`: each id costs a log of `take`, whatever order the ids come in
+        let mut kept: Vec<(SortKey, String)> = Vec::with_capacity(take.min(1024) * 2 + 1);
+        // The last kept at the last cut: one ordered at or after it can't be among the first, an equal one having
+        // come later
+        let mut bound: Option<SortKey> = None;
+        let cut = |kept: &mut Vec<(SortKey, String)>| {
+            kept.sort_by(|(a, _), (b, _)| order(a, b));
+            kept.truncate(take);
+        };
         self.pull(upto, &mut |id| {
             let key = sort_key(get_value(self.r, id, name)?.as_ref());
-            // After every equal one already held, so the earlier of two equals stays first
-            let at = kept.partition_point(|(held, _)| order(held, &key) != Ordering::Greater);
-            if at < take {
-                kept.insert(at, (key, id.to_owned()));
-                kept.truncate(take);
+            if bound.as_ref().is_some_and(|last| order(last, &key) != Ordering::Greater) {
+                return Ok(true);
+            }
+            kept.push((key, id.to_owned()));
+            if kept.len() >= take.saturating_mul(2).max(1) {
+                cut(&mut kept);
+                bound = (kept.len() == take).then(|| kept[take - 1].0.clone());
             }
             Ok(true)
         })?;
+        cut(&mut kept);
         Ok(kept.into_iter().map(|(_, id)| id).collect())
     }
 

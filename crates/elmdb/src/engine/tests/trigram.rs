@@ -248,3 +248,24 @@ fn a_pattern_the_syntax_doesnt_hold_is_refused_naming_it() {
         assert!(refused.message.contains(pattern), "{}", refused.message);
     }
 }
+
+#[test]
+fn among_a_set_a_type_with_several_trigram_indexes_and_none_named_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(
+        &dir,
+        json!({ "grams": { "kind": "trigram", "fields": ["text"] }, "tagGrams": { "kind": "trigram", "fields": ["tags"] } }),
+    );
+    load(&db);
+    let among = |step: Json| {
+        let op: ReadOp = serde_json::from_value(json!({ "read": "query", "plan": {
+            "start": { "from": "ids", "ids": ["Message-0", "Message-tags"] }, "steps": [step], "terminal": { "answer": "ids" }
+        } }))
+        .unwrap();
+        db.read(&Reads { reads: vec![op], track: None })
+    };
+    let refused = among(json!({ "step": "containing", "text": "timeout" })).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownIndex, "{}", refused.message);
+    assert!(refused.message.contains("several"), "{}", refused.message);
+    assert!(among(json!({ "step": "containing", "text": "timeout", "index": "tagGrams" })).is_ok());
+}

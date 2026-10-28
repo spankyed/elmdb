@@ -65,7 +65,7 @@ pub enum Prefix {
     TextStats,
     /// `d/fw type index word` → a stemming text index's words as written: the places of the entities holding the word
     TextWord,
-    /// `d/g type index trigram seq` → the entity at that place, whose text a trigram index holds the trigram in
+    /// `d/g type index trigram block` → the places of the entities holding the trigram, case folded, in one block of places
     Trigram,
     /// `p/q type index id chunk` → an embedding a caller wrote for a chunk: its model, the chunk's hash, the vector
     Vector,

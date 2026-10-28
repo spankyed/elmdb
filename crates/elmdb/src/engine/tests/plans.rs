@@ -250,8 +250,8 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         stages,
         vec![
             json!({ "stage": "all", "visited": all, "kept": all }),
-            json!({ "stage": "orderBy", "visited": all, "kept": 0 }),
-            json!({ "stage": "limit", "visited": 0, "kept": 10 }),
+            json!({ "stage": "orderBy", "visited": all, "kept": 10 }),
+            json!({ "stage": "limit", "visited": 10, "kept": 10 }),
             json!({ "stage": "ids", "visited": 10, "kept": 10 }),
         ]
     );
