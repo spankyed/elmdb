@@ -3,7 +3,7 @@
 Status: partial implementation. Stage 3 has dedicated dhat assertions for selected value/text rebuilding and export
 (2026-10-27); stages 1, 2 and 9 were built on 2026-10-28 (`../archive/goals/goal-verification-tooling.md`, Outcome),
 each with what it leaves below. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
-maintenance measurements. Stages 1, 2 and 9 are planned as one pass in `../goals/goal-verification-tooling.md`.
+maintenance measurements, Failpoints and Mutation testing.
 
 ## Purpose and scope
 
@@ -51,8 +51,11 @@ Acceptance:
 **Built, 2026-10-28:** `.cargo/mutants.toml` and the commands in `../architecture/testing.md`, Mutation testing — a
 first pass against the suite without the model harness, then `--iterate` against the whole suite — with a baseline
 over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and `schema/diff.rs` triaged
-(`../evidence/verification-tooling.md`). The three mutation scripts make changes cargo-mutants doesn't (an expression
-swapped for another, a Windows attribute, heap and timing regressions) and stay. Left: the baseline over `store/`,
+(`../evidence/verification-tooling.md`): of 169 survivors, 141 killed (5 by the whole suite, the rest by new specs),
+27 excluded as answering what the code answers, and one finding left, EXPLAIN's stage times, which no count shows; the
+triage also found `withRole` code nothing reaches and a step limit that needs an 8 MB stack. The three mutation scripts
+make changes cargo-mutants doesn't (an expression swapped for another, a Windows attribute, heap and timing regressions)
+and stay, each saying why in its header. Left: the baseline over `store/`,
 `engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`, and CI over `--in-diff`.
 
 ## 2. Named failpoints

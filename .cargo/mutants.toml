@@ -28,11 +28,11 @@ exclude_re = [
     "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
     # check_unique's index read skips the entity's own entry; a unique index holds one entity a value, so stopping
     # at the first entry or the one after it finds the same holder
-    "entities.rs:.*replace == with != in check_unique",
+    "entities.rs:351:.*replace == with != in check_unique",
     # stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
     # within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
     # being the threshold's on the line above; a line moved shows these as missed rather than hiding another
-    "values.rs:42:.* in stored",
+    "values.rs:42:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
     # parse's field name needs an alphabetic first character, which an empty name (name_end == at) doesn't have
     "search.rs:66:.*replace > with >= in parse",
     # within's guard: the DFA is built for the distance within asks, and reports Exact only up to its own maximum
@@ -67,5 +67,5 @@ exclude_re = [
     # A withRole is always indexed (the built-in role index), so it drives rather than stands before a driving index:
     # past_filters' withRole arm and roles_declared are never reached (a finding, docs/evidence/verification-tooling.md)
     "reads.rs:.*delete match arm Step::WithRole\\{role\\} in Query<'_, R>::past_filters",
-    "reads.rs:.* in Query<'_, R>::roles_declared",
+    "reads.rs:.*Query<'_, R>::roles_declared",
 ]

@@ -3,6 +3,9 @@
 
 Requires full git history (1723d5b) and a local Criterion remediation-20261027 baseline.
 Run serially with all other local builds stopped; the disposable copies reuse this worktree's target cache.
+
+Not cargo-mutants: its regressions are a heap's growth and a duration's, measured against a baseline, which no source
+mutation cargo-mutants makes produces.
 """
 import argparse
 import io

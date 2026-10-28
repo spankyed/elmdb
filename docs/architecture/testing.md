@@ -51,15 +51,25 @@ the engine's suite against each mutant; one the suite passes is a test missing. 
 
 ```sh
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
-cargo mutants -j 4 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
-cargo mutants -j 4 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
+cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes
-git diff main... > /private/tmp/branch.diff && cargo mutants -j 4 --in-diff /private/tmp/branch.diff
+git diff main... > target/branch.diff && cargo mutants -j 3 --in-diff target/branch.diff
+# What the exclusions leave out of a file
+diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
 ```
 
+Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
+test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
+caught from the output directory's `previously_caught.txt`, so a pass is resumed, and narrowed, by running it again into
+the same directory.
+
 A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
-exactly what the code does; no assertion is loosened for either. The hand-made mutation scripts that remain
+exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
+an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation, and a
+line that moves makes the excluded mutant show as missed rather than hiding another. The `--list --no-config` diff above
+is the check. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-windows-backup-mutation.py`,
 `check-maintenance-verification.py`) make platform-specific or heap and timing changes that cargo-mutants doesn't.
 

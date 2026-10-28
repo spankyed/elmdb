@@ -10,7 +10,62 @@ benches, examples and xtask excluded, output under `target/`. The suite takes ab
 harness, and 24 s without it; so a first pass runs every mutant against the suite without the model harness
 (`-- -- --skip model::the_engine`) and a second (`--iterate`) only those it missed, against the whole suite.
 
-PENDING: the baseline.
+### The baseline
+
+The first reading of each module, against the fast suite, and what became of each survivor. Mutants counts every
+mutant of the module without the configuration's exclusions; caught and unviable are together where a run split over
+two invocations kept only the survivors separately. A timeout is a mutant that makes a loop never end: the suite's
+deadline catches it.
+
+| Module | Mutants | Caught | Unviable | Missed | Timeout | Survivors: killed / excluded / finding |
+|---|---|---|---|---|---|---|
+| `engine/trigram.rs` | 66 | 55 | 8 | 3 | 0 | 1 / 2 / 0 |
+| `engine/entities.rs` | 91 | 86 (both) | | 5 | 0 | 2 / 3 / 0 |
+| `engine/reads.rs` | 369 | 294 (both) | | 75 | 0 | 62 / 12 / 1 |
+| `engine/text/search.rs` | 232 | 177 (both) | | 50 | 5 | 43 / 7 / 0 |
+| `engine/values.rs` | 116 | 82 (both) | | 34 | 0 | 31 / 3 / 0 |
+| `schema/diff.rs` | 66 | 64 (both) | | 2 | 0 | 2 / 0 / 0 |
+
+Of `reads.rs`' 75, the whole suite (the model harness with it) caught 5 of the 12 it was run on before the specs for the
+rest made it unneeded; the 62 killed count those 5. Each kill is a cargo-mutants rerun of that mutant against the new
+specs: `--iterate` over `text/search.rs`, `values.rs` and `schema/diff.rs` (81 mutants: 76 caught, the 5 timeouts again),
+over `reads.rs` (61: 56 caught; of the 5 missed, the step limit's then caught by its new spec, three
+excluded as unreached and the finding left), and a fresh run of `entities.rs` (88: 82
+caught, 6 unviable, none missed). `trigram.rs`' was its own rerun (`9a978be`).
+
+**What the survivors showed untested**, each now a spec: a query's clauses as parsed; BM25's score over weighted fields,
+a fields option and a clause that doesn't match; recency's factor; a one-edit term over a two-edit one; a prefix only for
+the last word; search, `near` and `containing` among a set, past its first place and each entity once; highlights joined
+across touching terms; suggestions that exclude the word and give two letters no edit; `near`'s and hybrid's scores, and
+hybrid's vector list four times `k` deep; a timestamp's three encodings; the kind a refused value names; the value spec's
+refusal and the compression threshold; a relation widened from one-to-one and a field's type narrowed; `withRole` after
+another filter; the filters before a driving index; a `where` over several types, indexed and walked, in either order;
+deep walks, link filters and `edges` past the trash; `where` null over an index; `plainObjects` on a row read and on
+every terminal that writes rows or values; false before true; `distinct` and `groupBy` over lists; findLabels' ties in
+creation order; `findRelations` by both ends and by neither; EXPLAIN's milliseconds, its stages' times, and the indexes it
+names; and a plan of exactly the step limit.
+
+**Excluded as answering what the code answers** (`.cargo/mutants.toml`, each with its reason): trigram's block layout;
+entities' two single-field `unique_keys` arms and `check_unique`'s skip of its own entry; a compressed frame within a
+byte of its msgpack; a field name with no first letter; the fuzzy DFA's own distance bound; an exact walk's distance-0
+match; an exact term already merged at weight 1; a phrase's union checked by `holds`; the trash and the live range
+never sharing a place; `nearest`'s first ask; `orderBy` then `limit` through `first_ordered` or the full sort, and its
+cut; a stage's answer, which no stage or terminal reads; the timestamp and finite guards no stored value reaches; and
+the `withRole` code below.
+
+**Findings:**
+
+- **EXPLAIN's stage times** (`reads.rs`, `pull`): a mutant that charges a downstream stage's time to the stage before it
+  changes no count, only milliseconds, which no deterministic reading tells apart. Left as a survivor.
+- **Unreached code** (`reads.rs`): `past_filters`' `withRole` arm and `roles_declared`. A `withRole` is always indexed by
+  the built-in role index, so it drives rather than stands before a driving index. Excluded, as unreachable.
+- **The step limit and the stack** (`reads.rs`, `MAX_STEPS` 256): a plan of 256 steps overflows the 2 MB stack of a
+  test thread in a debug build; on 8 MB, Node's main thread's, it runs in debug and release. Nothing holds a read to a
+  thread of that size; the spec runs it on one.
+
+### `--in-diff`
+
+PENDING.
 
 ## Phase 2: named failpoints
 
