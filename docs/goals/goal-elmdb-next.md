@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 to 7 the same day (`next-phase-5.md` to `next-phase-7.md`). Phase 8 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 to 8 the same day (`next-phase-5.md` to `next-phase-8.md`). Phase 9 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -98,7 +98,10 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   change to a write, and reverted; readings and the gate's correction in `docs/evidence/next-phase-6.md`.
 - **Phase 7 done** (2026-10-27): a field write reads what it replaces once and the entity's place once (elmdb `c3c8021`):
   2 reads to 1, 5 to 4 and 23 to 13 for an unindexed, a value-indexed and a text-indexed field; `docs/evidence/next-phase-7.md`.
-- **Next action:** Phase 8, value compression.
+- **Phase 8 done** (2026-10-27): field values of 256 bytes or more stored zstd-compressed when smaller (elmdb `933aa19`,
+  apack pins it at `6d14be5b24`); G8's copy compacts to 122.1 MB from 267.8 MB; PR #3's eight targets pass;
+  `docs/evidence/next-phase-8.md`. A watch scheduler hang found on the way, fixed in apack `a1b6603e5a`.
+- **Next action:** Phase 9, substring and regex search.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -286,7 +289,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | Field types from apack's shapes (P5) | done | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | the strict chain, with G6's at the end |
 | Text postings in blocks, gated (P6) | done | apack `2df2961774`, elmdb `e4ff088`; `docs/evidence/next-phase-6.md`: the reading at three sizes, the gate's correction (G2, G5), fuzzy seeking built with its readings after, blocks measured at two sizes and not built | the strict chain, with G6's at the end |
 | Fewer reads per field write (P7) | done | elmdb `c3c8021`; `docs/evidence/next-phase-7.md`: the spec counting a field write's reads before and after, the model harness, G4's bench | the strict chain, with G6's at the end |
-| Value compression (P8) | missing | | all |
+| Value compression (P8) | done | elmdb `933aa19`, PR #3 (eight targets pass); apack `6d14be5b24`; `docs/evidence/next-phase-8.md`: size and long reads before and after on G8's copy, the threshold chosen, `check()` and `rebuild()` over compressed values, G4 | the strict chain, with G6's at the end |
 | Substring and regex search (P9) | missing | | all |
 | Designs (P10) | missing | | all |
 
