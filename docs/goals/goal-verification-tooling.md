@@ -46,7 +46,17 @@ move, since no behaviour of the binding changes.
   `EINVAL`, where `exclusive_rename_or_link` also falls back on `EOPNOTSUPP` and macOS today has no fallback; on Windows
   it clears every attribute (`FILE_ATTRIBUTE_NORMAL`) and moves without `MOVEFILE_WRITE_THROUGH`, which both of elmdb's
   publications pass.
-- **Next action:** Phase 1.
+- **Phase 2 built** (`2c9b64e`): fifteen hooks as failpoints through `crates/elmdb/src/failpoints.rs` (one,
+  `FAIL_SYNC_AT`, wasn't in Phases' list); V2's spec and mutation, V3's `cargo tree` and symbol check done. Left: three
+  workspace runs at default parallelism.
+- **Phase 3 built** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
+  write-through. Left: the eight-target matrix, dispatched as run 40674565378.
+- **Phase 1 under way** (`9a978be`): `trigram.rs` done (3 missed: `block_of`'s two, excluded as layout; `resolve`'s
+  name match, killed by a stronger spec). Pass 1 over the other five modules runs into `target/mutants-pass1`; at about
+  a minute a mutant under load, it is most of a day.
+- **Evidence:** `docs/evidence/verification-tooling.md`, with Phase 1's baseline still to record.
+- **Next action:** triage pass 1's survivors over the five modules, then pass 2 (`--iterate`) over the files with
+  survivors.
 
 ## Decisions
 

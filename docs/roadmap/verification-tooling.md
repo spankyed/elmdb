@@ -1,7 +1,8 @@
 # Tooling for tests that can fail, faults by name, and measured bounds
 
-Status: partial implementation, 2026-10-27. Stage 3 now has dedicated dhat assertions for selected value/text
-rebuilding and export. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
+Status: partial implementation. Stage 3 has dedicated dhat assertions for selected value/text rebuilding and export
+(2026-10-27); stages 1, 2 and 9 were built on 2026-10-28 (`../archive/goals/goal-verification-tooling.md`, Outcome),
+each with what it leaves below. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
 maintenance measurements. Stages 1, 2 and 9 are planned as one pass in `../goals/goal-verification-tooling.md`.
 
 ## Purpose and scope
@@ -46,6 +47,13 @@ Acceptance:
   same mutation; platform-specific ones it can't reach (a Windows attribute, a real read-only mount) stay.
 - CI runs it on the files a change touches (`--in-diff`), reporting survivors rather than failing, until the
   surviving list for those files is empty.
+
+**Built, 2026-10-28:** `.cargo/mutants.toml` and the commands in `../architecture/testing.md`, Mutation testing — a
+first pass against the suite without the model harness, then `--iterate` against the whole suite — with a baseline
+over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and `schema/diff.rs` triaged
+(`../evidence/verification-tooling.md`). The three mutation scripts make changes cargo-mutants doesn't (an expression
+swapped for another, a Windows attribute, heap and timing regressions) and stay. Left: the baseline over `store/`,
+`engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`, and CI over `--in-diff`.
 
 ## 2. Named failpoints
 
@@ -140,6 +148,13 @@ Acceptance:
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
 
+**Built, 2026-10-28,** otherwise than this says: a process-global failpoint would fire in every test running at the
+time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
+`crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
+path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
+(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
+dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
+
 ## 9. Library no-clobber publication
 
 Evaluate tempfile's [`persist_noclobber`](https://docs.rs/tempfile/latest/tempfile/struct.NamedTempFile.html#method.persist_noclobber)
@@ -153,6 +168,11 @@ Acceptance:
 - Directory syncs and the post-publication error that says the result is visible stay elmdb's; tempfile does
   neither.
 - If tempfile lacks a needed guarantee (Windows write-through), record that and keep the code.
+
+**Built, 2026-10-28:** on Unix, `publish_new` is `TempPath::persist_noclobber`, its unsafe `renameat2`/`renamex_np`
+calls gone; elmdb still links on `EOPNOTSUPP`, which tempfile returns rather than handling. tempfile 3.27.0 moves on
+Windows without `MOVEFILE_WRITE_THROUGH` and clears every attribute, so both Windows publications keep `move_file`; the
+backup's replacing publish on Unix stays `std::fs::rename`, which is what tempfile's `persist` does.
 
 ## Delivery and validation
 
