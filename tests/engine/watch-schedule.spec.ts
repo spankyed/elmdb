@@ -170,6 +170,20 @@ describe('the watch scheduler', () => {
     for (const w of ws) w.stop();
   });
 
+  it('settles once a watch due before its timer fired has run, the timer left to fire on nothing', async () => {
+    const w = watching(1);
+    await drain();
+    commit();
+    await turn();
+    // In its gap: a timer stands for when it is due. The clock passes that without the timer firing, as a loaded
+    // process's timers fire late, and the next commit finds it due and flushes it at once
+    expect(time.pending()).toBe(1);
+    time.spend(WATCH_SCHEDULE.minimumGapMs * 2);
+    commit();
+    expect(await Promise.race([watches.settled().then(() => 'settled'), turn().then(turn).then(() => 'waiting')])).toBe('settled');
+    expect(w.last()).toEqual(rows());
+  });
+
   it('always runs one watch a flush, however much its last run cost', async () => {
     const w = watching(50);
     await drain();

@@ -125,6 +125,11 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     for (const watch of dirty) earliest = Math.min(earliest, dueAt(watch));
     if (earliest === Infinity) return;
     if (earliest <= now) {
+      // A flush runs everything due, so a timer standing for one of them would fire on nothing
+      if (timer) {
+        clock.clearTimeout(timer.handle);
+        timer = undefined;
+      }
       if (queued) return;
       queued = true;
       if (soon) queueMicrotask(flush);
@@ -138,6 +143,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       handle: clock.setTimeout(() => {
         timer = undefined;
         plan(true);
+        settleWaiting();
       }, earliest - now),
     };
   };
@@ -234,11 +240,15 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       dirty = new Set([...left, ...dirty]);
     }
     if (dirty.size > 0) plan(false);
-    else if (!queued && !timer) {
-      const resolve = waiting;
-      waiting = [];
-      for (const done of resolve) done();
-    }
+    settleWaiting();
+  }
+
+  /** Resolves `settled()`'s callers once nothing waits to run: no watch dirty, no flush queued and no timer set */
+  function settleWaiting() {
+    if (dirty.size > 0 || queued || timer) return;
+    const resolve = waiting;
+    waiting = [];
+    for (const done of resolve) done();
   }
 
   return {
@@ -274,11 +284,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
             clock.clearTimeout(timer.handle);
             timer = undefined;
           }
-          if (dirty.size === 0 && !queued && !flushing) {
-            const resolve = waiting;
-            waiting = [];
-            for (const done of resolve) done();
-          }
+          if (!flushing) settleWaiting();
         },
       };
     },
