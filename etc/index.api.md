@@ -300,7 +300,9 @@ export type EarsErrorCode =
 /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
 | 'NO_SEARCH'
 /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
-| 'NOT_EXPLAINABLE';
+| 'NOT_EXPLAINABLE'
+/** A write's value isn't of its field's type, as the entity type's shape declares it: the message names the field and the type */
+| 'FIELD_TYPE';
 
 // @public
 export interface EARSRuntimeDeps {
@@ -383,6 +385,26 @@ export type EntityShapes = {
 
 // @public
 export const entityTypeOf: (id: EARS.EntityId) => EARS.Entity;
+
+// @public
+export type FieldRule = FieldType & {
+    readonly optional?: boolean;
+    readonly nullable?: boolean;
+};
+
+// @public
+export type FieldType = {
+    readonly type: 'string' | 'number' | 'boolean' | 'any';
+} | {
+    readonly type: 'enum';
+    readonly values: readonly string[];
+} | {
+    readonly type: 'ref';
+    readonly to: readonly string[];
+} | {
+    readonly type: 'list';
+    readonly of: FieldType;
+};
 
 // @public
 export type FieldValue<S extends EntityShapes, E extends string, K extends string> = [
@@ -607,6 +629,7 @@ export interface RowIdentity {
 // @public
 export interface RowRules {
     embed?: EmbedDeclaration;
+    fields?: Readonly<Record<string, FieldRule>>;
     indexes?: readonly string[];
     required: readonly string[];
     search?: SearchDeclaration;

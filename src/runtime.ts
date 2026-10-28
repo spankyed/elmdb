@@ -67,7 +67,25 @@ export interface RowRules {
   search?: SearchDeclaration;
   /** The fields its vector index embeds, and the model it embeds them with: what `near`, `like` and `hybrid` rank by */
   embed?: EmbedDeclaration;
+  /**
+   * The type of each field the shape declares, as its TypeScript type maps to one of elmdb's (`FieldRule`): what the
+   * database holds every write to, from every writer. A field the shape doesn't declare is still taken
+   */
+  fields?: Readonly<Record<string, FieldRule>>;
 }
+
+/**
+ * A field's type as the database holds a write to it, read off a shape's property: text, a finite number, a boolean,
+ * one of listed strings, an id of listed entity types, a list of one of these, or `any` for what maps to none of them
+ */
+export type FieldType =
+  | { readonly type: 'string' | 'number' | 'boolean' | 'any' }
+  | { readonly type: 'enum'; readonly values: readonly string[] }
+  | { readonly type: 'ref'; readonly to: readonly string[] }
+  | { readonly type: 'list'; readonly of: FieldType };
+
+/** A field's type, and whether the row may lack it (`?`) and whether it may hold `null` (`| null`) */
+export type FieldRule = FieldType & { readonly optional?: boolean; readonly nullable?: boolean };
 
 /** A type's text index, as its manifest entry declares it (`search`) */
 export interface SearchDeclaration {

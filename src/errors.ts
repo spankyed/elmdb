@@ -42,7 +42,9 @@ export type EarsErrorCode =
   /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
   | 'NO_SEARCH'
   /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
-  | 'NOT_EXPLAINABLE';
+  | 'NOT_EXPLAINABLE'
+  /** A write's value isn't of its field's type, as the entity type's shape declares it: the message names the field and the type */
+  | 'FIELD_TYPE';
 
 /** An engine refusal, with its code */
 export class EarsError extends Error {

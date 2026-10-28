@@ -1,7 +1,7 @@
 // The schema an engine's database holds, as apack's packs declare it, and the elmdb schema it becomes
 // (`elmdb/docs/architecture/schema.md`). Whoever creates the engine builds it from what is registered — the app from its packs, a
 // test from its own names — and changes it with `admin.setSchema` when that changes.
-import type { RowRules } from './runtime.ts';
+import type { FieldRule, FieldType, RowRules } from './runtime.ts';
 import { RESERVED_ATTRIBUTES } from './errors.ts';
 import { setField } from './ids.ts';
 
@@ -30,25 +30,54 @@ const isEngineField = (field: string) => (RESERVED_ATTRIBUTES as readonly string
 /** Whether the field is one of the engine's an index may cover */
 const isIndexableEngineField = (field: string) => field === 'createdAt' || field === 'updatedAt';
 
+/** A field's type with each `ref` held to the types the schema declares: a ref naming none of them is a string */
+function declaredType(field: FieldType, declared: ReadonlySet<string>): FieldType {
+  if (field.type === 'ref') {
+    const to = field.to.filter((type) => declared.has(type));
+    return to.length ? { type: 'ref', to } : { type: 'string' };
+  }
+  if (field.type === 'list') return { type: 'list', of: declaredType(field.of, declared) };
+  return field;
+}
+
+/** Whether a text or vector index can read a field of this type: text, a list of it, or anything */
+const holdsText = (field: FieldType) =>
+  field.type === 'string' || field.type === 'any' || (field.type === 'list' && (field.of.type === 'string' || field.of.type === 'any'));
+
 /**
- * The elmdb schema of `schema`. A type's fields are those its rules name: each required field, which may hold any value
- * including `null`, and each indexed field, which may be absent too; every other field is allowed, as a pack's shapes
- * are the compiler's to check. Each indexed field has a value index of its own, named after it; `role` and `shortCode`
- * are indexed by elmdb on every type. Every relation kind is many-to-many, and its edges may carry any info
+ * The elmdb schema of `schema`. A type's fields are those its rules type (`RowRules.fields`, read off its shape), each as
+ * its type, optional and nullable as the shape says; then each required field it doesn't type, which may hold any value
+ * including `null`, and each indexed field, which may be absent too. Every other field is allowed. A `ref` names only
+ * the types the schema declares, and a field a text or vector index reads is held to text or anything. Each indexed
+ * field has a value index of its own, named after it; `role` and `shortCode` are indexed by elmdb on every type. Every
+ * relation kind is many-to-many, and its edges may carry any info
  */
 export function toElmdbSchema(schema: EngineSchema): object {
+  const declared = new Set(Object.keys(schema.types));
   // An entity type or field may be named `__proto__`, so every name is written with `setField`
   const types: Record<string, object> = {};
   for (const [type, rules] of Object.entries(schema.types)) {
     const fields: Record<string, object> = {};
     const indexes: Record<string, object> = {};
+    const textRead = new Set([...Object.keys(rules.search?.fields ?? {}), ...(rules.embed?.from ?? [])]);
+    for (const [field, rule] of Object.entries(rules.fields ?? {}) as Array<[string, FieldRule]>) {
+      if (isEngineField(field)) continue;
+      const { optional, nullable, ...held } = rule;
+      const typed = declaredType(held as FieldType, declared);
+      setField(fields, field, {
+        ...(textRead.has(field) && !holdsText(typed) ? { type: 'any' } : typed),
+        ...(optional && { optional: true }),
+        ...(nullable && { nullable: true }),
+      });
+    }
+    const has = (field: string) => Object.prototype.hasOwnProperty.call(fields, field);
     for (const field of rules.indexes ?? []) {
       if (isEngineField(field) && !isIndexableEngineField(field)) continue;
-      if (!isIndexableEngineField(field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      if (!isIndexableEngineField(field) && !has(field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
       setField(indexes, field, { kind: 'value', fields: [field] });
     }
     for (const field of rules.required) {
-      if (!isEngineField(field)) setField(fields, field, { type: 'any', nullable: true });
+      if (!isEngineField(field) && !has(field)) setField(fields, field, { type: 'any', nullable: true });
     }
     // The text index (`search`), its fields declared as any field a rule hasn't: elmdb reads a string or a list of
     // strings in one, and no text in any other value

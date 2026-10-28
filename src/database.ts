@@ -150,6 +150,7 @@ const CODES: Record<string, EarsErrorCode> = {
   CYCLE: 'CYCLE',
   VALUE_INVALID: 'VALUE_INVALID',
   UNKNOWN_INDEX: 'UNKNOWN_INDEX',
+  FIELD_TYPE: 'FIELD_TYPE',
 };
 
 /**
