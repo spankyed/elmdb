@@ -40,9 +40,9 @@ function declaredType(field: FieldType, declared: ReadonlySet<string>): FieldTyp
   return field;
 }
 
-/** Whether a text or vector index can read a field of this type: text, a list of it, or anything */
+/** Whether a text, vector or trigram index can read a field of this type, as elmdb holds it: text, a list of text, or anything */
 const holdsText = (field: FieldType) =>
-  field.type === 'string' || field.type === 'any' || (field.type === 'list' && (field.of.type === 'string' || field.of.type === 'any'));
+  field.type === 'string' || field.type === 'any' || (field.type === 'list' && field.of.type === 'string');
 
 /**
  * The elmdb schema of `schema`. A type's fields are those its rules type (`RowRules.fields`, read off its shape), each as

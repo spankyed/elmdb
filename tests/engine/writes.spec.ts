@@ -547,7 +547,7 @@ describe("fields typed by a type's shape", () => {
     rowRules: {
       Task: {
         required: ['title'],
-        search: { fields: { body: 1 } },
+        search: { fields: { body: 1, notes: 1 } },
         fields: {
           title: { type: 'string' },
           rank: { type: 'number', optional: true },
@@ -557,6 +557,8 @@ describe("fields typed by a type's shape", () => {
           elsewhere: { type: 'ref', to: ['Nowhere'], optional: true },
           tags: { type: 'list', of: { type: 'string' }, optional: true },
           body: { type: 'enum', values: ['a'], optional: true },
+          // A list whose elements may be anything, as a pack that doesn't check nulls types every list
+          notes: { type: 'list', of: { type: 'any' }, optional: true },
         },
       },
     },
@@ -587,7 +589,8 @@ describe("fields typed by a type's shape", () => {
 
   it('holds a ref to a type the schema does not declare as text, and a field its text index reads as anything', () => {
     const e = typed();
-    const id = e.create('Task', { title: 'one', elsewhere: 'anything-at-all', body: 'not in the enum' }).id();
+    const id = e.create('Task', { title: 'one', elsewhere: 'anything-at-all', body: 'not in the enum', notes: ['found', null] }).id();
     expect(e.getRow(id)).toMatchObject({ elsewhere: 'anything-at-all', body: 'not in the enum' });
+    expect(e.query('Task').search('found').ids()).toEqual([id]);
   });
 });
