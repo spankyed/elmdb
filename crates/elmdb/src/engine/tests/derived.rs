@@ -5,6 +5,8 @@ use serde_json::{Value as Json, json};
 
 use super::{open, row, write};
 use crate::engine::admin::Purge;
+use crate::engine::keys;
+use crate::engine::unit::Read;
 use crate::error::ErrorCode;
 use crate::format::Prefix;
 use crate::schema::Schema;
@@ -1048,4 +1050,68 @@ fn duplicate_map_key_multiplicity_is_preserved_by_writes_and_audits() {
         assert!(db.check().unwrap().is_clean());
         assert_eq!(db.write(&create("Note-2", values[0].clone()), false).unwrap_err().code, crate::ErrorCode::Unique);
     }
+}
+
+#[test]
+fn a_removed_type_takes_its_indexes_data_with_it_and_keeps_its_rows() {
+    let doc = json!({
+        "fields": { "kind": { "type": "string" }, "body": { "type": "string" } },
+        "indexes": {
+            "kind": { "kind": "value", "fields": ["kind"] },
+            "words": { "kind": "text", "fields": { "body": {} } },
+            "grams": { "kind": "trigram", "fields": ["body"] },
+            "meaning": { "kind": "vector", "from": ["body"], "dims": 4, "model": "m" }
+        }
+    });
+    let schema = |types: Json| json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": types });
+    let held = |db: &Database| {
+        db.snapshot(|r| {
+            let mut ranges = vec![keys::index_range("Doc", "kind", &[]), keys::trigram_index("Doc", "grams")];
+            ranges.extend(keys::text_index_ranges("Doc", "words"));
+            ranges.extend(
+                [Prefix::VectorChunk, Prefix::VectorPending].map(|p| keys::vector_index_range(p, "Doc", "meaning")),
+            );
+            ranges.extend(["kind", "words", "grams", "meaning"].map(|index| keys::index_built("Doc", index)));
+            let mut n = 0;
+            for range in ranges {
+                n += Read::scan(r, &range)?.len();
+            }
+            Ok(n + usize::from(Read::get(r, &keys::text_stats("Doc", "words"))?.is_some()))
+        })
+        .unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema(json!({ "Doc": doc.clone() }))).unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "kind": "memo", "body": "the error text" } })])
+        .unwrap();
+    assert!(held(&db) > 0);
+    db.close().unwrap();
+
+    // Removed: its declared indexes' entries and markers go, its row stays, and check() finds nothing to report
+    let db = with_schema(&dir, schema(json!({}))).unwrap();
+    let mut effects = reported(&db);
+    effects.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        effects,
+        [
+            ("types.Doc".to_owned(), crate::schema::Effect::KeepsData),
+            ("types.Doc.indexes.grams".to_owned(), crate::schema::Effect::Drops),
+            ("types.Doc.indexes.kind".to_owned(), crate::schema::Effect::Drops),
+            ("types.Doc.indexes.meaning".to_owned(), crate::schema::Effect::Drops),
+            ("types.Doc.indexes.words".to_owned(), crate::schema::Effect::Drops),
+        ]
+    );
+    assert_eq!(held(&db), 0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    db.purge(&Purge::Type("Doc".into())).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert!(row(&db, "Doc-1").is_none());
+    db.close().unwrap();
+
+    // Declared again over nothing, its indexes are built empty and hold what is written next
+    let db = with_schema(&dir, schema(json!({ "Doc": doc }))).unwrap();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-2", "fields": { "kind": "memo", "body": "more error text" } })])
+        .unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
