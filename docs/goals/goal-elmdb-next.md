@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phase 5 the same day (`next-phase-5.md`). Phase 6 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 and 6 the same day (`next-phase-5.md`, `next-phase-6.md`). Phase 7 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -93,7 +93,10 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Disk:** the data volume runs near full. `apack-authoring-*` work dirs of checkouts that no longer exist are never
   swept, the sweep in apack's `tests/scripts/lib/authoring.sh` failing silently on the read-only compiler store inside
   each; 30 of them (about 15 GB) were removed on 2026-10-27 with the user's agreement. Not this goal's to fix.
-- **Next action:** Phase 6, text postings in blocks (gated): apack's bench gains the text cases its reading names.
+- **Phase 6 done** (2026-10-27): apack's text bench (`2df2961774`); fuzzy terms by seeking built (elmdb `e4ff088`, a rare
+  word's fuzzy search at 50,000 messages 16.7 ms to 1.24 ms); posting lists in blocks built, measured at two sizes, no
+  change to a write, and reverted; readings and the gate's correction in `docs/evidence/next-phase-6.md`.
+- **Next action:** Phase 7, fewer reads per field write.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -212,9 +215,12 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 - **Deliverable (`docs/roadmap/text-index-at-scale.md`):**
   - The reading: a message write's commit time, and a fuzzy search's time, at 1,000, 10,000 and 50,000 messages,
-    added to apack's bench as text cases.
+    added to apack's bench as text cases, over a dictionary that grows with the log.
   - **The gate:** posting lists in blocks are built if the write's time at 50,000 messages is more than twice its time
-    at 1,000; fuzzy terms by seeking, if the fuzzy search's is.
+    at 1,000; fuzzy terms by seeking, if a rare word's fuzzy search's is. A common word's fuzzy search ranks its
+    thousands of matches, whose growth is block-max scores' (G5: the first reading's fuzzy case was a common word, and
+    grew no more than its exact search; corrected 2026-10-27, `docs/evidence/next-phase-6.md`). What the gate calls
+    for is built and measured, and kept only where the reading after it improves (blocks, measured, did not).
   - What is built keeps search's specs and the model harness passing; existing text indexes are rebuilt (G3: derived
     data, no upgrade step).
 - **Dependencies:** Phase 2.
@@ -276,7 +282,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
 | The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | the strict chain, with G6's at the end |
 | Field types from apack's shapes (P5) | done | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | the strict chain, with G6's at the end |
-| Text postings in blocks, gated (P6) | missing | | all |
+| Text postings in blocks, gated (P6) | done | apack `2df2961774`, elmdb `e4ff088`; `docs/evidence/next-phase-6.md`: the reading at three sizes, the gate's correction (G2, G5), fuzzy seeking built with its readings after, blocks measured at two sizes and not built | the strict chain, with G6's at the end |
 | Fewer reads per field write (P7) | missing | | all |
 | Value compression (P8) | missing | | all |
 | Substring and regex search (P9) | missing | | all |

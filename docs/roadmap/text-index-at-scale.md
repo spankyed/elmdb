@@ -1,6 +1,6 @@
 # The text index at scale
 
-Status: fuzzy terms by seeking built, 2026-10-27, its reading calling for it; posting lists in blocks next, on the same reading (`../evidence/next-phase-6.md`); block-max scores not yet built, a common word's ranking measured and left to its trigger.
+Status: fuzzy terms by seeking built, 2026-10-27, its reading calling for it. Posting lists in blocks were built and measured at 4,096 and 1,024 places and changed no write's time — a write's growth is mostly the store's own, a message with no text growing alike — so they are not built (`../evidence/next-phase-6.md`). Block-max scores: a common word's ranking is measured, left to its trigger.
 
 ## Where it starts
 
