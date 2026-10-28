@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 to 8 the same day (`next-phase-5.md` to `next-phase-8.md`), Phase 9 on 2026-10-28 (`next-phase-9.md`). Phase 10 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 to 8 the same day (`next-phase-5.md` to `next-phase-8.md`), Phases 9 and 10 on 2026-10-28 (`next-phase-9.md`, `next-phase-10.md`). The final gates next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -106,7 +106,13 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   mutations fail the specs; on G8's copy places in blocks of 2^16 add 16.5 MB to 122.1 MB, where a key per trigram and
   entity tripled the file, and a rare substring is found in a millisecond against a 60 ms scan;
   `docs/evidence/next-phase-9.md`.
-- **Next action:** Phase 10, the designs.
+- **Phase 10 done** (2026-10-28): the five designs, each "Status: designed" with its format, API, risks, phases and
+  trigger — `plan-algebra.md`, `change-log.md`, `incremental-views.md`, `javascript-boundary.md` and a new
+  `value-dictionaries.md` — on readings of G8's data under apack's schema (`docs/evidence/next-phase-10.md`). The
+  change log is redesigned by its reading (G5): a log of writes would hold 57 times the values, so incremental backup
+  rests on the fields changed since a sequence.
+- **Next action:** the final gates — apack's full chain with native, G6's strict chain and the macOS compiler cases on
+  CI — then the Outcome, the archive and closure.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -296,7 +302,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | Fewer reads per field write (P7) | done | elmdb `c3c8021`; `docs/evidence/next-phase-7.md`: the spec counting a field write's reads before and after, the model harness, G4's bench | the strict chain, with G6's at the end |
 | Value compression (P8) | done | elmdb `933aa19`, PR #3 (eight targets pass); apack `6d14be5b24`; `docs/evidence/next-phase-8.md`: size and long reads before and after on G8's copy, the threshold chosen, `check()` and `rebuild()` over compressed values, G4 | the strict chain, with G6's at the end |
 | Substring and regex search (P9) | done | elmdb `7dd8a7f`, apack `a983092538`, PR #3 and #285; `docs/evidence/next-phase-9.md`: the model harness's nine searches and a fixed corpus equal a scan, `check()` and `rebuild()` over the index, eight mutations, the layout measured on G8's copy at four sizes, G4 | the strict chain, with G6's at the end |
-| Designs (P10) | missing | | all |
+| Designs (P10) | done | elmdb docs, `docs/evidence/next-phase-10.md`: value indexes counted and two filters timed against bitmaps; a log of writes replayed from G8's messages; a long read's decode; the largest thread; dictionaries trained per type | the strict chain, with G6's at the end |
 
 ## Constraints
 

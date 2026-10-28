@@ -55,8 +55,8 @@ does (a write holding it is no msgpack, and refused), followed by a zstd frame (
 other value is its msgpack as given. A read decompresses where it reads a field — a row, a field, a filter, an index's
 or a text index's derivation, `check()`, a dump — so nothing past the store sees the stored form, and a dump holds the
 value. Keys are never compressed, their bytes being their order; relation info and other primary records are stored
-as they are. Per-type dictionaries for small values, such as short messages, are a later design
-(`docs/roadmap.md`).
+as they are. Per-type dictionaries for small values are designed and not built: G8's values under 256 bytes average
+14 bytes, which no dictionary makes smaller than they are stored (`docs/roadmap/value-dictionaries.md`).
 
 ## Versions
 
