@@ -99,6 +99,22 @@ impl<R: Read> Read for Recording<'_, R> {
         outcome
     }
 
+    fn visit_from(&self, prefix: &[u8], from: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let mut stopped_at = None;
+        let outcome = self.inner.visit_from(prefix, from, |k, v| {
+            let go = visit(k, v);
+            if !go {
+                stopped_at = Some(k.to_vec());
+            }
+            go
+        });
+        let (low, high) = prefix_range(prefix);
+        // What was read starts where the visit did: a seek past a part of the range read none of it
+        let start = if from > low.as_slice() { from.to_vec() } else { low };
+        self.scanned(start, Some(high), if outcome.is_ok() { stopped_at } else { None });
+        outcome
+    }
+
     fn schema(&self) -> &Schema {
         self.inner.schema()
     }

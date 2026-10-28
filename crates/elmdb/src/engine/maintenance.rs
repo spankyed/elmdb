@@ -404,6 +404,9 @@ mod export_tests {
         fn visit_starting(&self, prefix: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
             self.0.visit_starting(prefix, f)
         }
+        fn visit_from(&self, prefix: &[u8], from: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.0.visit_from(prefix, from, f)
+        }
         fn schema(&self) -> &Schema {
             self.0.schema()
         }

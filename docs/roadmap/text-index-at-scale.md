@@ -1,6 +1,6 @@
 # The text index at scale
 
-Status: idea; built when a reading says it is needed.
+Status: fuzzy terms by seeking built, 2026-10-27, its reading calling for it; posting lists in blocks next, on the same reading (`../evidence/next-phase-6.md`); block-max scores not yet built, a common word's ranking measured and left to its trigger.
 
 ## Where it starts
 

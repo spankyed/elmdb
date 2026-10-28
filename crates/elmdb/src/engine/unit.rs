@@ -67,6 +67,9 @@ pub trait Read {
     /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries under `prefix` whose key is `from` or after it, in key order until `visit` answers false: a
+    /// walk that skips what it knows can't match seeks with it, rather than reading every entry
+    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     /// Fallible streaming visit: stop at the first consumer error without collecting the range.
     fn try_visit(&self, prefix: &[u8], mut each: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
         let mut result = Ok(());
@@ -107,6 +110,29 @@ fn visit_in(
 ) -> Result<()> {
     let (low, high) = prefix_range(prefix);
     let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+    for entry in db.range(txn, &range)? {
+        let (k, v) = entry?;
+        if !visit(k, v) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// The entries under `prefix` from `from` on: the later of the two to the prefix's end
+fn visit_from_in(
+    db: Db,
+    txn: &heed::RoTxn<'_, heed::WithoutTls>,
+    prefix: &[u8],
+    from: &[u8],
+    mut visit: impl FnMut(&[u8], &[u8]) -> bool,
+) -> Result<()> {
+    let (low, high) = prefix_range(prefix);
+    let start = if from > low.as_slice() { from } else { low.as_slice() };
+    if start >= high.as_slice() {
+        return Ok(());
+    }
+    let range = (std::ops::Bound::Included(start), std::ops::Bound::Excluded(high.as_slice()));
     for entry in db.range(txn, &range)? {
         let (k, v) = entry?;
         if !visit(k, v) {
@@ -162,6 +188,10 @@ impl Read for Snapshot<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
+    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_from_in(self.db, self.txn, prefix, from, visit)
+    }
+
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
         (self.txn, self.db)
     }
@@ -182,6 +212,10 @@ impl Read for Txn<'_, '_> {
 
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         visit_starting_in(self.db, self.txn, bytes, visit)
+    }
+
+    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_from_in(self.db, self.txn, prefix, from, visit)
     }
 
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {

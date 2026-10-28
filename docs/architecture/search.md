@@ -88,7 +88,9 @@ snapshot as a search when it needs to say that search is incomplete.
   `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
   written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
   five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; the word itself
-  outranks both.
+  outranks both. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
+  with the bytes read can match it seeks past them all, so a dictionary of names sharing their first letters (ids,
+  paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
   when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
   order.

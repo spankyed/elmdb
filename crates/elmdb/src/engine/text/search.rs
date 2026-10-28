@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::OnceLock;
 
-use levenshtein_automata::{DFA, Distance, LevenshteinAutomatonBuilder};
+use levenshtein_automata::{DFA, Distance, LevenshteinAutomatonBuilder, SINK_STATE};
 use roaring::RoaringTreemap;
 
 use crate::error::{Error, ErrorCode, Result};
@@ -186,28 +186,64 @@ fn term_of(key: &[u8]) -> Result<String> {
 }
 
 /// Every entry of a dictionary of the index (its terms, or its words as written) within `distance` edits of `word`,
-/// with its distance and its posting list
+/// with its distance and its posting list. The automaton reads each entry a byte at a time, and where no entry starting
+/// with the bytes read so far can match, the walk seeks past all of them: a dictionary is read where it can match, not
+/// whole. An entry's key is the dictionary's prefix, a string's tag and the entry's bytes, ended by a zero; an entry
+/// holding a zero, which an analyzer never makes, is read whole
 fn within(r: &impl Read, dictionary: &[u8], dfa: &DFA, distance: u8) -> Result<Vec<(String, u8, RoaringTreemap)>> {
+    // The entry's bytes start after the dictionary's prefix and the string's tag
+    let head = dictionary.len() + 1;
     let mut out = Vec::new();
-    let mut failed = None;
-    r.visit(dictionary, |key, value| {
-        let found = term_of(key).and_then(|entry| match dfa.eval(&entry) {
-            Distance::Exact(d) if d <= distance => Ok(Some((entry, d, decode_postings(value)?))),
-            _ => Ok(None),
-        });
-        match found {
-            Ok(Some(entry)) => out.push(entry),
-            Ok(None) => {}
-            Err(e) => {
-                failed = Some(e);
-                return false;
+    let mut from = dictionary.to_vec();
+    loop {
+        let mut failed = None;
+        let mut seek: Option<Vec<u8>> = None;
+        r.visit_from(dictionary, &from, |key, value| {
+            let bytes = key.get(head..key.len().saturating_sub(1)).unwrap_or_default();
+            let state = if bytes.contains(&0) {
+                None
+            } else {
+                let mut state = dfa.initial_state();
+                for (at, &byte) in bytes.iter().enumerate() {
+                    state = dfa.transition(state, byte);
+                    if state == SINK_STATE {
+                        // No entry starting with these bytes matches: on to the first that doesn't start with them. A
+                        // UTF-8 byte is never 0xFF, so raising the last one is that entry's lower bound
+                        let mut past = key[..head + at + 1].to_vec();
+                        *past.last_mut().expect("a byte was read") += 1;
+                        seek = Some(past);
+                        return false;
+                    }
+                }
+                Some(state)
+            };
+            let found = term_of(key).and_then(|entry| {
+                let distance_of = match state {
+                    Some(state) => dfa.distance(state),
+                    None => dfa.eval(&entry),
+                };
+                match distance_of {
+                    Distance::Exact(d) if d <= distance => Ok(Some((entry, d, decode_postings(value)?))),
+                    _ => Ok(None),
+                }
+            });
+            match found {
+                Ok(Some(entry)) => out.push(entry),
+                Ok(None) => {}
+                Err(e) => {
+                    failed = Some(e);
+                    return false;
+                }
             }
+            true
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
         }
-        true
-    })?;
-    match failed {
-        Some(e) => Err(e),
-        None => Ok(out),
+        match seek {
+            Some(past) => from = past,
+            None => return Ok(out),
+        }
     }
 }
 
@@ -575,4 +611,127 @@ pub fn places(r: &impl Read, ids: &[String]) -> Result<HashMap<u64, String>> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod seeking {
+    //! The fuzzy walk against the dictionary read whole: what it finds, and how little of it it reads
+
+    use super::*;
+    use crate::schema::Schema;
+    use crate::store::Db;
+    use crate::{Database, OpenOptions};
+    use serde_json::json;
+    use std::cell::Cell;
+
+    /// A read that counts the entries it hands over
+    struct Counting<'a, R> {
+        inner: &'a R,
+        entries: Cell<usize>,
+    }
+    impl<R: Read> Read for Counting<'_, R> {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            self.inner.get(key)
+        }
+        fn visit(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit(prefix, |k, v| {
+                self.entries.set(self.entries.get() + 1);
+                f(k, v)
+            })
+        }
+        fn visit_starting(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_starting(prefix, |k, v| {
+                self.entries.set(self.entries.get() + 1);
+                f(k, v)
+            })
+        }
+        fn visit_from(&self, prefix: &[u8], from: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_from(prefix, from, |k, v| {
+                self.entries.set(self.entries.get() + 1);
+                f(k, v)
+            })
+        }
+        fn schema(&self) -> &Schema {
+            self.inner.schema()
+        }
+        fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
+            self.inner.raw()
+        }
+    }
+
+    /// A word of five to eleven letters from twenty, so some lie an edit or two from each other and most don't
+    fn word(mut n: u64) -> String {
+        let mut out = String::new();
+        let len = 5 + (n % 7) as usize;
+        for _ in 0..len {
+            out.push(char::from(b'a' + (n % 20) as u8));
+            n = n.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407) >> 7;
+        }
+        out
+    }
+
+    #[test]
+    fn a_fuzzy_walk_finds_what_reading_every_term_finds_and_reads_far_fewer() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Message": {
+                "fields": { "text": { "type": "string", "optional": true } },
+                "indexes": { "text": { "kind": "text", "fields": { "text": {} } } }
+            } }
+        }))
+        .unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+            .unwrap();
+        // Words, and names a chat about code holds — ids that share their first letters, as a dictionary's many do
+        let queries: Vec<String> = (0..200u64).map(|n| word(n * 31 + 7)).collect();
+        let mut words: Vec<String> = (0..3_000).map(word).chain((0..20_000u64).map(|n| format!("idk{n:05x}"))).collect();
+        // Beside each query, a term the walk gives up on at its third byte and, one byte value above it there, a term an
+        // edit away: a seek past more than the dead term's own prefix would skip the match
+        for query in &queries {
+            let mut close = query.clone().into_bytes();
+            close[0] = if close[0] == b'z' { b'y' } else { b'z' };
+            let mut dead = close.clone();
+            if dead[2] > b'a' {
+                dead[2] -= 1;
+                words.push(String::from_utf8(dead).unwrap());
+                words.push(String::from_utf8(close).unwrap());
+            }
+        }
+        let ops: Vec<_> = words
+            .chunks(10)
+            .enumerate()
+            .map(|(i, chunk)| json!({ "op": "create", "type": "Message", "id": format!("Message-{i}"), "fields": { "text": chunk.join(" ") } }))
+            .collect();
+        crate::engine::tests::write(&db, ops).unwrap();
+        let dictionary = keys::text_terms("Message", "text");
+        db.snapshot(|r| {
+            let mut whole = Vec::new();
+            r.visit(&dictionary, |key, _| {
+                whole.push(term_of(key).unwrap());
+                true
+            })?;
+            assert!(whole.len() > 22_000, "the fixture's dictionary: {}", whole.len());
+            let mut read = 0;
+            for (query, edits) in queries.iter().zip((0..).map(|n: u64| 1 + (n % 2) as u8)) {
+                let dfa = automaton(edits).build_dfa(query);
+                let expected: Vec<(String, u8)> = whole
+                    .iter()
+                    .filter_map(|term| match dfa.eval(term) {
+                        Distance::Exact(d) if d <= edits => Some((term.clone(), d)),
+                        _ => None,
+                    })
+                    .collect();
+                let counting = Counting { inner: r, entries: Cell::new(0) };
+                let found: Vec<(String, u8)> =
+                    within(&counting, &dictionary, &dfa, edits)?.into_iter().map(|(term, d, _)| (term, d)).collect();
+                assert_eq!(found, expected, "{query} within {edits}");
+                read += counting.entries.get();
+            }
+            // The walk reads an entry where a match could start: a small part of every query reading the whole dictionary
+            assert!(read * 10 < whole.len() * 200, "read {read} entries for 200 walks of {}", whole.len());
+            Ok(())
+        })
+        .unwrap();
+    }
 }
