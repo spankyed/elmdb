@@ -2,7 +2,8 @@
 
 Status: partial implementation, 2026-10-27. Criterion maintenance benchmarks are implemented;
 stages 1 and 3–5 remain planned.
-See [current verification scope](maintenance-verification.md) for commands, evidence and remaining benchmark coverage.
+The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
+value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
 ## Purpose and scope
 

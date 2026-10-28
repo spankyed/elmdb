@@ -24,5 +24,3 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
   failpoints, heap assertions, per-process tests, model-based properties, profiling; initial heap gates implemented,
   other stages planned.
 
-[Maintenance verification after remediation](maintenance-verification.md) reconciles completed memory paths,
-current benchmark/heap gates and outstanding operational work.

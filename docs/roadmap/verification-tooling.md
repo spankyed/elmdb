@@ -1,7 +1,8 @@
 # Tooling for tests that can fail, faults by name, and measured bounds
 
 Status: partial implementation, 2026-10-27. Stage 3 now has dedicated dhat assertions for selected value/text
-rebuilding and export. Other stages remain planned. See [current verification scope](maintenance-verification.md).
+rebuilding and export. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
+maintenance measurements.
 
 ## Purpose and scope
 

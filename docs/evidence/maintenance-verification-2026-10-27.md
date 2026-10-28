@@ -8,7 +8,7 @@ format, public protocol, error code or production allocator changes are made by 
 
 Criterion 0.8.2 and dhat 0.3.3 are development dependencies. The lockfile adds 35 packages, replaces none, and normal
 production dependency edges include neither tool. Commands, limits and remaining coverage are in
-[maintenance verification](../roadmap/maintenance-verification.md). No private engine functions are exported merely
+[maintenance verification](../archive/roadmap/maintenance-verification.md). No private engine functions are exported merely
 to benchmark them. Public selected rebuilds cover the combined derivation/sorting cost; isolated microbenchmarks
 remain planned. Other library/tooling stages remain explicitly unimplemented.
 

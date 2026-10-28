@@ -1,6 +1,8 @@
 # Maintenance verification after remediation
 
-Status: 2026-10-27. This is the current disposition; older dated review/evidence sections retain their historical
+Status: archived, 2026-10-28. Its commands are in `docs/architecture/testing.md` (Repeatable maintenance
+measurements), and its open items are owned by `docs/roadmap/development-libraries.md`, `verification-tooling.md`,
+`docs/architecture/filesystems.md` and `docs/roadmap.md` (Later). As of 2026-10-27 this was the disposition; older dated review/evidence sections retain their historical
 observations. The remediation PRs (#1 and apack #283) are merged. The macOS claim diagnostic correction is c345182;
 apack's follow-up PR #284 pins that exact engine source. Diagnostic correction preserves ALREADY_LOADED and refusal.
 
@@ -71,7 +73,7 @@ Dhat's allocator is linked only into this dedicated test binary. No second LMDB 
 Sources: [Criterion](https://docs.rs/criterion/0.8.2/criterion/),
 [dhat testing and isolation](https://docs.rs/dhat/0.3.3/dhat/).
 
-Evidence and negative proofs are recorded in [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).
+Evidence and negative proofs are recorded in [measurement tooling evidence](../../evidence/maintenance-verification-2026-10-27.md).
 
 ## Next decisions
 

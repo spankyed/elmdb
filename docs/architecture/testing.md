@@ -77,4 +77,50 @@ export and indexed limit queries. Criterion reports comparisons; timing is not a
 `cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture`
 runs one isolated dhat test, asserting workload-specific heap allowances for export and selected value/text
 rebuilds at 1k/10k entities. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
-their allocator. Scope, exclusions and baseline commands are in [maintenance verification](../roadmap/maintenance-verification.md).
+their allocator.
+
+**Timing.** A comparison is two runs on one host and toolchain, with comparable cache and load:
+
+```sh
+cargo bench -p elmdb --bench maintenance -- --save-baseline before
+# after the change:
+cargo bench -p elmdb --bench maintenance -- --baseline before
+# every case built and run once, no baseline:
+cargo bench -p elmdb --bench maintenance -- --test
+```
+
+Criterion takes 20 samples, a one-second warmup and a three-second window. Fixture creation, the open and the first
+derivation are outside the timing; a selected rebuild replaces the same contents again, so it is steady-state
+maintenance, not a first build or a recovery. Syncs are off, an export drops its loads without writing a dump, and an
+indexed query answers at most 50 ids. The fixture holds eight 96-byte indexed tags per entity and 16 distinct words per
+text document, at 1k and 10k entities, and key encoding uses 16, 128 and 1,024-byte strings. Report input sizes,
+hardware, toolchain, commit and load with a result, and keep `target/criterion` outside the worktree when comparing
+commits. Unchanged code has varied substantially between runs here, so a difference is checked against that variation
+before it is acted on. `scripts/measure-recovery.mjs` stays the measure of RSS, populated replacement, disk and scratch,
+which Criterion doesn't see.
+
+**Heap.** The heap gate's one ignored test owns a dhat allocator in its own executable, builds each fixture before
+profiling and measures only the export or the rebuild. Its allowances are 24 MiB for an export (with an 8 KiB relation
+payload per entity), 16 MiB for a value rebuild and 32 MiB for a text rebuild, each case printing its peak: regression
+allowances for those inputs, not memory limits. They leave out what was live before profiling, native allocations,
+LMDB's mappings and RSS. Timing and heap profiling run apart, allocation backtraces distorting CPU time. Criterion 0.8.2
+and dhat 0.3.3 are development dependencies only, Criterion without default features, and dhat's allocator is linked
+into that one test binary.
+
+**A CPU profile**, before optimizing a maintenance path:
+
+```sh
+cargo build -p elmdb --release --example profile-maintenance
+target/release/examples/profile-maintenance 10000 30   # prints PROFILE_READY and its PID once the fixture is built
+sample PID 10 1 -file /private/tmp/elmdb-text-rebuild.sample.txt   # macOS, while the rebuilds run
+```
+
+Thirty selected text rebuilds of one 10k fixture, with no allocator or sampling loop of its own. Sampling slows it, so
+it chooses the next experiment rather than timing one.
+
+**The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
+with current changes into a disposable directory, restores the export and value collectors that held whole collections,
+buffers text memberships, and slows the timed key encoding by a millisecond: each heap mutation must fail its
+assertion and the slowdown must be reported as a regression. Run it serially, in a full history, after
+`cargo bench -p elmdb --bench maintenance -- --save-baseline <name>`; it reuses `target`, so rebuild afterwards. The
+evidence is [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).

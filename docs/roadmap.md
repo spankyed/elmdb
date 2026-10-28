@@ -82,3 +82,7 @@ reading it names calls for it:
 Directions past these, each a design to argue for before it is built, are in `roadmap/` (`roadmap/README.md`).
 
 - LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
+- Scratch files with a configured placement and quota, and reclaimed after a hard exit (`elmdb-check-*` directories a
+  SIGKILL leaves; `architecture/engine.md`, Recovery resources).
+- `NOT_DURABLE` naming the tokens its commit touched, so a caller invalidates those rather than every watch.
+- Populated replacement measured across broader profiles, and each recovery operation on its own.
