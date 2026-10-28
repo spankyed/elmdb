@@ -259,7 +259,7 @@ fn among_a_set_a_type_with_several_trigram_indexes_and_none_named_is_refused() {
     load(&db);
     let among = |step: Json| {
         let op: ReadOp = serde_json::from_value(json!({ "read": "query", "plan": {
-            "start": { "from": "ids", "ids": ["Message-0", "Message-tags"] }, "steps": [step], "terminal": { "answer": "ids" }
+            "start": { "from": "ids", "ids": ["Message-1", "Message-tags"] }, "steps": [step], "terminal": { "answer": "ids" }
         } }))
         .unwrap();
         db.read(&Reads { reads: vec![op], track: None })
@@ -267,5 +267,11 @@ fn among_a_set_a_type_with_several_trigram_indexes_and_none_named_is_refused() {
     let refused = among(json!({ "step": "containing", "text": "timeout" })).unwrap_err();
     assert_eq!(refused.code, ErrorCode::UnknownIndex, "{}", refused.message);
     assert!(refused.message.contains("several"), "{}", refused.message);
-    assert!(among(json!({ "step": "containing", "text": "timeout", "index": "tagGrams" })).is_ok());
+    // Named, each index reads its own fields: Message-1's text says timeout, Message-tags' tags do
+    let found = |index: &str| {
+        let bytes = among(json!({ "step": "containing", "text": "timeout", "index": index })).unwrap();
+        serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["ids"].clone()
+    };
+    assert_eq!(found("grams"), json!(["Message-1"]));
+    assert_eq!(found("tagGrams"), json!(["Message-tags"]));
 }

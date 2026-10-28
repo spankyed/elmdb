@@ -1,0 +1,24 @@
+# cargo-mutants: what it mutates and how it tests each mutant. A run is scoped by `--file` or `--in-diff`, never the
+# whole crate (`docs/architecture/testing.md`, Mutation testing, has the commands and the two passes).
+
+# The tests themselves, and code no spec of the engine's covers by design
+exclude_globs = [
+    "crates/elmdb/src/**/tests/**",
+    "crates/elmdb/src/**/tests.rs",
+    "crates/elmdb/benches/**",
+    "crates/elmdb/examples/**",
+    "xtask/**",
+]
+# A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
+test_package = ["elmdb"]
+# Under the machine's other load a suite can run several times its baseline
+timeout_multiplier = 3.0
+# Inside target/, which is gitignored and which cargo-mutants doesn't copy
+output = "target"
+
+# Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
+exclude_re = [
+    # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
+    # function of the place answers the same, and only the file's size and a write's cost tell them apart
+    "trigram.rs:.*replace block_of -> u64 with",
+]
