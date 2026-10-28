@@ -148,7 +148,7 @@ move, since no behaviour of the binding changes.
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| cargo-mutants configured, the baseline run and every survivor triaged (P1) | done | `9a978be`, `c8c00ee`, `26650b0`, `0c75818`, `cc17cd7`, `fdabbdd`, `82a8064`; `docs/evidence/verification-tooling.md`, Phase 1: each module's report, every survivor killed, excluded with its reason or a finding, each kill a cargo-mutants rerun, `--in-diff` over this goal's diff | |
+| cargo-mutants configured, the baseline run and every survivor triaged (P1) | done | `9a978be`, `c8c00ee`, `26650b0`, `0c75818`, `cc17cd7`, `fdabbdd`, `82a8064`, `3f725ed`; `docs/evidence/verification-tooling.md`, Phase 1: each module's report, its end state on current source (caught, unviable, missed and timeout apart), every survivor killed, excluded with its reason or a finding, each kill a cargo-mutants rerun, `--in-diff` over this goal's diff | |
 | The fault hooks replaced by failpoints, each test's faults its own, none in a normal build (P2) | done | `2c9b64e`; evidence, Phase 2: the hooks and their points, the thread and path specs and the helper's mutation, `cargo tree` and the release binding's symbols, three loaded workspace runs | |
 | Publication on `tempfile` where it holds the same guarantees (P3) | done | `87e31c9`; evidence, Phase 3: tempfile 3.27.0 against each guarantee by platform, Unix on `persist_noclobber`, Windows kept for write-through; CI run 40674565378, eight targets | |
 | The docs describe what was built | done | `docs/architecture/testing.md` (Failpoints, Mutation testing), `docs/roadmap/verification-tooling.md` (stages 1, 2 and 9's Built notes), the kept scripts' headers | |
