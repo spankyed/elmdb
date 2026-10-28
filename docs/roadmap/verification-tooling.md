@@ -2,7 +2,7 @@
 
 Status: partial implementation, 2026-10-27. Stage 3 now has dedicated dhat assertions for selected value/text
 rebuilding and export. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
-maintenance measurements.
+maintenance measurements. Stages 1, 2 and 9 are planned as one pass in `../goals/goal-verification-tooling.md`.
 
 ## Purpose and scope
 
