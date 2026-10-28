@@ -129,13 +129,32 @@ pub fn fields(t: &impl Read, id: &str) -> Result<Vec<(String, Vec<u8>)>> {
         .collect()
 }
 
-/// Writes a field, keeping its type's value indexes and, for `trashedAt`, the trash
+/// The entity's place, for the indexes of its type that cover `field`: read once for all of them, and not at all when
+/// none does
+fn place_for(t: &Txn<'_, '_>, id: &str, field: &str) -> Result<Option<u64>> {
+    let entity_type = ids::type_of(id);
+    let covered = value_indexes(t.schema(), entity_type).iter().any(|i| i.fields.iter().any(|f| f == field))
+        || super::text::text_indexes(t.schema, entity_type)
+            .iter()
+            .any(|i| i.fields.iter().any(|(name, _)| name == field))
+        || super::vector::vector_indexes(t.schema, entity_type).iter().any(|i| i.from.iter().any(|name| name == field));
+    if !covered {
+        return Ok(None);
+    }
+    Ok(record(t, id)?.map(|r| r.seq))
+}
+
+/// Writes a field, keeping its type's value indexes and, for `trashedAt`, the trash. What the field held is read once,
+/// for the indexes and the unit's undo log both, and the entity's place once for all its indexes
 pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> Result<()> {
-    let before = get(t, id, field)?;
-    reindex(t, id, field, before.as_ref(), Some(value))?;
-    t.put(&keys::value(id, field), &values::encode(value))?;
-    super::text::refile(t, id, Some(field))?;
-    super::vector::refile(t, id, Some(field))?;
+    let key = keys::value(id, field);
+    let stored = t.get(&key)?;
+    let before = stored.as_deref().map(values::decode).transpose()?;
+    let seq = place_for(t, id, field)?;
+    reindex(t, id, field, before.as_ref(), Some(value), seq)?;
+    t.put_over(&key, &values::encode(value), stored.as_deref())?;
+    super::text::refile(t, id, field, seq, Some(value))?;
+    super::vector::refile(t, id, field, seq, Some(value))?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, true)?;
@@ -143,13 +162,16 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     Ok(())
 }
 
-/// Removes a field, keeping its type's value indexes and, for `trashedAt`, the trash
+/// Removes a field, keeping its type's value indexes and, for `trashedAt`, the trash, reading as `put_field` does
 pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
-    let Some(before) = get(t, id, field)? else { return Ok(()) };
-    reindex(t, id, field, Some(&before), None)?;
-    t.del(&keys::value(id, field))?;
-    super::text::refile(t, id, Some(field))?;
-    super::vector::refile(t, id, Some(field))?;
+    let key = keys::value(id, field);
+    let Some(stored) = t.get(&key)? else { return Ok(()) };
+    let before = values::decode(&stored)?;
+    let seq = place_for(t, id, field)?;
+    reindex(t, id, field, Some(&before), None, seq)?;
+    t.del_over(&key, Some(&stored))?;
+    super::text::refile(t, id, field, seq, None)?;
+    super::vector::refile(t, id, field, seq, None)?;
     t.event(Event::Field { id: id.to_owned(), field: field.to_owned() });
     if field == field::TRASHED_AT {
         set_trashed(t, id, false)?;
@@ -162,10 +184,11 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
 pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     super::text::remove(t, id)?;
     super::vector::remove(t, id)?;
+    let seq = record(t, id)?.map(|r| r.seq);
     for (field, bytes) in fields(t, id)? {
         let before = values::decode(&bytes)?;
-        reindex(t, id, &field, Some(&before), None)?;
-        t.del(&keys::value(id, &field))?;
+        reindex(t, id, &field, Some(&before), None, seq)?;
+        t.del_over(&keys::value(id, &field), Some(&bytes))?;
     }
     if let Some(record) = record(t, id)? {
         let entity_type = ids::type_of(id).to_owned();
@@ -337,14 +360,23 @@ fn check_unique(
 
 /// Refiles the entity in each of its type's value indexes that covers `field`, as its value goes from `before` to
 /// `after`, refusing a value a unique index holds for another entity (`UNIQUE`, `SHORT_CODE_IN_USE`)
-fn reindex(t: &mut Txn<'_, '_>, id: &str, field: &str, before: Option<&Value>, after: Option<&Value>) -> Result<()> {
+/// Keeps the value indexes covering `field` of the entity at `seq` (none for one not stored) as it goes from `before`
+/// to `after`
+fn reindex(
+    t: &mut Txn<'_, '_>,
+    id: &str,
+    field: &str,
+    before: Option<&Value>,
+    after: Option<&Value>,
+    seq: Option<u64>,
+) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     let indexes: Vec<ValueIndex> =
         value_indexes(t.schema(), &entity_type).into_iter().filter(|i| i.fields.iter().any(|f| f == field)).collect();
     if indexes.is_empty() {
         return Ok(());
     }
-    let Some(seq) = record(t, id)?.map(|r| r.seq) else { return Ok(()) };
+    let Some(seq) = seq else { return Ok(()) };
     for index in indexes {
         let mut values_before = Vec::new();
         let mut values_after = Vec::new();

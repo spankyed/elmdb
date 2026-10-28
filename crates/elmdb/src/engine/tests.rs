@@ -3,6 +3,7 @@
 
 mod commits;
 mod derived;
+mod field_writes;
 mod lifecycle;
 mod maintenance;
 mod model;

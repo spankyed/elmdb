@@ -40,6 +40,10 @@ pub struct UnitState {
     /// were as the unit began, and its commit is then heard as writing everything. A savepoint rolled back keeps its
     /// keys, which can only name a token that didn't need to be, never miss one
     pub(super) written: Option<HashSet<Vec<u8>>>,
+    /// How many reads of the store the unit's writes have made: gets, visits and the undo log's reads of a value before
+    /// it is replaced. What a spec counts a write by
+    #[cfg(test)]
+    pub(crate) reads: std::cell::Cell<u64>,
 }
 
 impl UnitState {
@@ -203,18 +207,22 @@ impl Read for Snapshot<'_, '_> {
 
 impl Read for Txn<'_, '_> {
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.counted();
         Ok(self.db.get(self.txn, key)?.map(<[u8]>::to_vec))
     }
 
     fn visit(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.counted();
         visit_in(self.db, self.txn, prefix, visit)
     }
 
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.counted();
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
     fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.counted();
         visit_from_in(self.db, self.txn, prefix, from, visit)
     }
 
@@ -238,11 +246,18 @@ pub struct Txn<'a, 'e> {
 }
 
 impl Txn<'_, '_> {
+    /// One read of the store, counted for a spec
+    fn counted(&self) {
+        #[cfg(test)]
+        self.state.reads.set(self.state.reads.get() + 1);
+    }
+
     fn record(&mut self, key: &[u8]) -> Result<()> {
         let Some(level) = self.state.levels.last_mut() else { return Ok(()) };
         if level.recorded.contains(key) {
             return Ok(());
         }
+        self.counted();
         let before = self.db.get(self.txn, key)?.map(<[u8]>::to_vec);
         let level = self.state.levels.last_mut().expect("checked above");
         level.recorded.insert(key.to_vec());
@@ -260,6 +275,30 @@ impl Txn<'_, '_> {
         self.record(key)?;
         self.log(key);
         self.db.put(self.txn, key, value)?;
+        Ok(())
+    }
+
+    /// Records `before` as what `key` held, which the caller has just read, so the undo log needn't read it again
+    fn record_known(&mut self, key: &[u8], before: Option<&[u8]>) {
+        let Some(level) = self.state.levels.last_mut() else { return };
+        if level.recorded.insert(key.to_vec()) {
+            level.undo.push((key.to_vec(), before.map(<[u8]>::to_vec)));
+        }
+    }
+
+    /// `put`, given what `key` holds now, as the caller read it in this call
+    pub fn put_over(&mut self, key: &[u8], value: &[u8], before: Option<&[u8]>) -> Result<()> {
+        self.record_known(key, before);
+        self.log(key);
+        self.db.put(self.txn, key, value)?;
+        Ok(())
+    }
+
+    /// `del`, given what `key` holds now, as the caller read it in this call
+    pub fn del_over(&mut self, key: &[u8], before: Option<&[u8]>) -> Result<()> {
+        self.record_known(key, before);
+        self.log(key);
+        self.db.delete(self.txn, key)?;
         Ok(())
     }
 

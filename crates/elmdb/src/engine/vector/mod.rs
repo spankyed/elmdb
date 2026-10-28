@@ -275,21 +275,22 @@ fn remove_item(t: &mut Txn<'_, '_>, entity_type: &str, index: &str, id: &str, ch
     t.put(&keys::vector_item_key(Prefix::VectorJournal, entity_type, index, item), &values::encode(&false.into()))
 }
 
-/// Refiles the entity in each vector index of its type that embeds `field` (every one when `None`), from its fields
-/// as they are now: a chunk whose text changed or is gone loses its embedding and its graph item, and a chunk with no
-/// embedding of its text under the index's model is pending
-pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: Option<&str>) -> Result<()> {
-    let entity_type = ids::type_of(id).to_owned();
-    let indexes: Vec<VectorIndex> = vector_indexes(t.schema, &entity_type)
-        .into_iter()
-        .filter(|i| field.is_none_or(|f| i.from.iter().any(|name| name == f)))
-        .collect();
-    if indexes.is_empty() || entities::record(t, id)?.is_none() {
+/// Refiles the entity at `seq` (none for one not stored) in each vector index of its type that embeds `field`, which
+/// now holds `written`: a chunk whose text changed or is gone loses its embedding and its graph item, and a chunk with
+/// no embedding of its text under the index's model is pending
+pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: &str, seq: Option<u64>, written: Option<&Value>) -> Result<()> {
+    if seq.is_none() {
         return Ok(());
     }
-    for index in &indexes {
-        let now = chunks_of(index, &field_values(t, index, id)?);
-        file(t, &entity_type, index, id, &now)?;
+    let entity_type = ids::type_of(id).to_owned();
+    for index in vector_indexes(t.schema, &entity_type).into_iter().filter(|i| i.from.iter().any(|name| name == field))
+    {
+        let values = index
+            .from
+            .iter()
+            .map(|f| if f == field { Ok(written.cloned()) } else { entities::get(t, id, f) })
+            .collect::<Result<Vec<_>>>()?;
+        file(t, &entity_type, &index, id, &chunks_of(&index, &values))?;
     }
     Ok(())
 }

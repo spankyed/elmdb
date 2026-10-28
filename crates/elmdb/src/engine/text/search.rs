@@ -685,7 +685,8 @@ mod seeking {
             .unwrap();
         // Words, and names a chat about code holds — ids that share their first letters, as a dictionary's many do
         let queries: Vec<String> = (0..200u64).map(|n| word(n * 31 + 7)).collect();
-        let mut words: Vec<String> = (0..3_000).map(word).chain((0..20_000u64).map(|n| format!("idk{n:05x}"))).collect();
+        let mut words: Vec<String> =
+            (0..3_000).map(word).chain((0..20_000u64).map(|n| format!("idk{n:05x}"))).collect();
         // Beside each query, a term the walk gives up on at its third byte and, one byte value above it there, a term an
         // edit away: a seek past more than the dead term's own prefix would skip the match
         for query in &queries {

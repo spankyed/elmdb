@@ -272,10 +272,15 @@ fn encode_stats(stats: &Stats) -> Vec<u8> {
 }
 
 pub fn stats(r: &impl Read, entity_type: &str, index: &TextIndex) -> Result<Stats> {
-    let Some(stored) = r.get(&keys::text_stats(entity_type, &index.name))? else {
+    stats_from(r.get(&keys::text_stats(entity_type, &index.name))?.as_deref(), index)
+}
+
+/// The statistics an index's stored record holds, or none yet
+fn stats_from(stored: Option<&[u8]>, index: &TextIndex) -> Result<Stats> {
+    let Some(stored) = stored else {
         return Ok(Stats { documents: 0, lengths: vec![0; index.fields.len()] });
     };
-    let value = values::decode(&stored)?;
+    let value = values::decode(stored)?;
     let items = value.as_array().filter(|i| i.len() == 2).ok_or_else(|| corrupt("statistics"))?;
     let documents = items[0].as_u64().ok_or_else(|| corrupt("statistics"))?;
     let mut lengths: Vec<u64> = items[1]
@@ -292,21 +297,20 @@ pub fn document(r: &impl Read, entity_type: &str, index: &str, seq: u64) -> Resu
     r.get(&keys::text_document(entity_type, index, seq))?.map(|b| decode_document(&b)).transpose()
 }
 
-/// Refiles the entity in each text index of its type covering `field` (every one when `None`), from its fields as
-/// they are now: the terms it no longer holds lose it, the terms it now holds gain it, and the statistics follow
-pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: Option<&str>) -> Result<()> {
+/// Refiles the entity at `seq` (none for one not stored) in each text index of its type covering `field`, which now
+/// holds `written`: the terms it no longer holds lose it, the terms it now holds gain it, and the statistics follow
+pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: &str, seq: Option<u64>, written: Option<&Value>) -> Result<()> {
+    let Some(seq) = seq else { return Ok(()) };
     let entity_type = ids::type_of(id).to_owned();
-    let indexes: Vec<TextIndex> = text_indexes(t.schema, &entity_type)
-        .into_iter()
-        .filter(|i| field.is_none_or(|f| i.fields.iter().any(|(name, _)| name == f)))
-        .collect();
-    if indexes.is_empty() {
-        return Ok(());
-    }
-    let Some(seq) = entities::record(t, id)?.map(|r| r.seq) else { return Ok(()) };
-    for index in &indexes {
-        let now = document_of(index, &field_values(t, index, id)?);
-        file(t, &entity_type, index, id, seq, &now)?;
+    for index in
+        text_indexes(t.schema, &entity_type).into_iter().filter(|i| i.fields.iter().any(|(name, _)| name == field))
+    {
+        let values = index
+            .fields
+            .iter()
+            .map(|(f, _)| if f == field { Ok(written.cloned()) } else { entities::get(t, id, f) })
+            .collect::<Result<Vec<_>>>()?;
+        file(t, &entity_type, &index, id, seq, &document_of(&index, &values))?;
     }
     Ok(())
 }
@@ -331,7 +335,10 @@ pub fn remove(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
 /// Moves what the index holds of the entity at `seq` from its stored document to `now`
 fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq: u64, now: &Document) -> Result<()> {
     let name = index.name.as_str();
-    let before = document(t, entity_type, name, seq)?;
+    // Each key read here is replaced with what was read, so the unit's undo log reads none of them again
+    let document_key = keys::text_document(entity_type, name, seq);
+    let stored_document = t.get(&document_key)?;
+    let before = stored_document.as_deref().map(decode_document).transpose()?;
     if before.is_none() && now.is_empty() {
         return Ok(());
     }
@@ -341,24 +348,27 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
         if let Some(stored) = t.get(&key)? {
             let mut postings = decode_postings(&stored)?;
             postings.remove(seq);
-            if postings.is_empty() { t.del(&key)? } else { t.put(&key, &encode_postings(&postings))? }
+            if postings.is_empty() {
+                t.del_over(&key, Some(&stored))?
+            } else {
+                t.put_over(&key, &encode_postings(&postings), Some(&stored))?
+            }
         }
         t.del(&keys::text_positions(entity_type, name, term, seq))?;
     }
     for (term, places) in &now.terms {
         if before_terms.binary_search(term).is_err() {
             let key = keys::text_term(entity_type, name, term);
-            let mut postings = match t.get(&key)? {
-                Some(stored) => decode_postings(&stored)?,
-                None => RoaringTreemap::new(),
-            };
+            let stored = t.get(&key)?;
+            let mut postings = stored.as_deref().map(decode_postings).transpose()?.unwrap_or_default();
             postings.insert(seq);
-            t.put(&key, &encode_postings(&postings))?;
+            t.put_over(&key, &encode_postings(&postings), stored.as_deref())?;
         }
         let key = keys::text_positions(entity_type, name, term, seq);
         let encoded = encode_places(places);
-        if t.get(&key)?.as_deref() != Some(encoded.as_slice()) {
-            t.put(&key, &encoded)?;
+        let held = t.get(&key)?;
+        if held.as_deref() != Some(encoded.as_slice()) {
+            t.put_over(&key, &encoded, held.as_deref())?;
         }
     }
     let before_words: Vec<String> = before.as_ref().map(|d| d.words.clone()).unwrap_or_default();
@@ -367,19 +377,23 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
         if let Some(stored) = t.get(&key)? {
             let mut postings = decode_postings(&stored)?;
             postings.remove(seq);
-            if postings.is_empty() { t.del(&key)? } else { t.put(&key, &encode_postings(&postings))? }
+            if postings.is_empty() {
+                t.del_over(&key, Some(&stored))?
+            } else {
+                t.put_over(&key, &encode_postings(&postings), Some(&stored))?
+            }
         }
     }
     for word in now.words.iter().filter(|word| before_words.binary_search(word).is_err()) {
         let key = keys::text_word(entity_type, name, word);
-        let mut postings = match t.get(&key)? {
-            Some(stored) => decode_postings(&stored)?,
-            None => RoaringTreemap::new(),
-        };
+        let stored = t.get(&key)?;
+        let mut postings = stored.as_deref().map(decode_postings).transpose()?.unwrap_or_default();
         postings.insert(seq);
-        t.put(&key, &encode_postings(&postings))?;
+        t.put_over(&key, &encode_postings(&postings), stored.as_deref())?;
     }
-    let mut stats = stats(t, entity_type, index)?;
+    let stats_key = keys::text_stats(entity_type, name);
+    let stored_stats = t.get(&stats_key)?;
+    let mut stats = stats_from(stored_stats.as_deref(), index)?;
     if let Some(before) = &before {
         stats.documents -= 1;
         for (total, l) in stats.lengths.iter_mut().zip(&before.lengths) {
@@ -391,12 +405,15 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
         for (total, l) in stats.lengths.iter_mut().zip(&now.lengths) {
             *total += u64::from(*l);
         }
-        t.put(&keys::text_document(entity_type, name, seq), &encode_document(id, now))?;
+        t.put_over(&document_key, &encode_document(id, now), stored_document.as_deref())?;
     } else {
-        t.del(&keys::text_document(entity_type, name, seq))?;
+        t.del_over(&document_key, stored_document.as_deref())?;
     }
-    let key = keys::text_stats(entity_type, name);
-    if stats.documents == 0 { t.del(&key) } else { t.put(&key, &encode_stats(&stats)) }
+    if stats.documents == 0 {
+        t.del_over(&stats_key, stored_stats.as_deref())
+    } else {
+        t.put_over(&stats_key, &encode_stats(&stats), stored_stats.as_deref())
+    }
 }
 
 pub fn entries_into(

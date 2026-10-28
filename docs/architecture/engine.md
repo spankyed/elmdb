@@ -161,7 +161,10 @@ The operations:
   cycle in a kind), unlink, unlink all, update and remove a relation, destroy.
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
   it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
-  is an undo log of each key's previous value, so rolling one back costs what it wrote.
+  is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
+  key hands the log what it read, so the log reads it again only where the write didn't: a field write reads what the
+  field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts
+  them; `docs/evidence/next-phase-7.md`).
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role, a missing required field, an id
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
