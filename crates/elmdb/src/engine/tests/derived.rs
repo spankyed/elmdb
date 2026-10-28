@@ -576,12 +576,19 @@ fn a_where_on_a_compound_index_s_first_field_answers_as_a_scan_does() {
 fn a_plan_past_the_step_limit_is_refused_rather_than_overflowing_the_stack() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
-    let steps: Vec<Json> =
-        (0..=crate::engine::reads::MAX_STEPS).map(|_| json!({ "step": "ofType", "type": "Task" })).collect();
-    let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
-        "start": { "from": "all" }, "steps": steps, "terminal": { "answer": "ids" } } }] }))
-    .unwrap();
-    assert_eq!(db.read(&reads).unwrap_err().code, ErrorCode::BatchInvalid);
+    let plan_of = |n: usize| -> crate::engine::plan::Reads {
+        let steps: Vec<Json> = (0..n).map(|_| json!({ "step": "ofType", "type": "Task" })).collect();
+        serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+            "start": { "from": "all" }, "steps": steps, "terminal": { "answer": "ids" } } }] }))
+        .unwrap()
+    };
+    // On a stack the size of Node's main thread's, 8 MB
+    let at_limit = plan_of(crate::engine::reads::MAX_STEPS);
+    let held = std::thread::scope(|s| {
+        std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(s, || db.read(&at_limit).is_ok()).unwrap().join()
+    });
+    assert!(held.unwrap(), "the limit itself is held");
+    assert_eq!(db.read(&plan_of(crate::engine::reads::MAX_STEPS + 1)).unwrap_err().code, ErrorCode::BatchInvalid);
 }
 
 /// The paths and effects an open reported

@@ -64,4 +64,8 @@ exclude_re = [
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
     "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
+    # A withRole is always indexed (the built-in role index), so it drives rather than stands before a driving index:
+    # past_filters' withRole arm and roles_declared are never reached (a finding, docs/evidence/verification-tooling.md)
+    "reads.rs:.*delete match arm Step::WithRole\\{role\\} in Query<'_, R>::past_filters",
+    "reads.rs:.* in Query<'_, R>::roles_declared",
 ]
