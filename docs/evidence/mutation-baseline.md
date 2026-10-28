@@ -83,6 +83,11 @@ the finding. `backup.rs`' Linux fallback, `exclusive_rename_or_link`, against th
 `backup.rs`' other 14 are `cfg(windows)`: the Windows target builds and tests them, and
 `scripts/check-windows-backup-mutation.py` mutates the attribute they clear.
 
+CI on this branch's head (`4d5d0d5`, run 40782911891) passed all eight targets and the Linux checks: the Windows
+target ran the Windows claim, pin and publication code under every suite and the attribute mutation script, every
+target's binding job ran `test/process.test.mjs` over `claim`'s mapping, and the Linux job ran
+`check-process-publication-mutations.py`.
+
 ## The end state
 
 On `c9b91d5`, every file of the first reading's on the source it has at the branch's end, with the configuration's
