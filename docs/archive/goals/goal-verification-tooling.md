@@ -1,6 +1,6 @@
 # Goal: mutation testing, named failpoints and tempfile publication
 
-Status: in progress, 2026-10-28. Stages 1, 2 and 9 of `docs/roadmap/verification-tooling.md`, in one pass.
+Status: done, 2026-10-28. Stages 1, 2 and 9 of `docs/roadmap/verification-tooling.md`, in one pass.
 
 ```text
 # Goal: mutation testing, named failpoints and tempfile publication
@@ -19,6 +19,43 @@ Finished when:
 Commit usable checkpoints as you go. Keep Current handoff current. Do not expand or reduce scope without the user's
 authorization.
 ```
+
+## Outcome
+
+**Built.** elmdb's mutation checks are run by cargo-mutants (`.cargo/mutants.toml`, the commands in
+`docs/architecture/testing.md`, Mutation testing). A baseline over the six highest-risk modules found 169 survivors
+against the fast suite: 141 are killed, 5 by the model harness and the rest by new specs, and 27 are excluded, each with
+why it answers what the code answers. One is left as a finding. The specs cover what nothing had checked: BM25's
+scores, a query's parse, fusion depth, the filters before a driving index, plans over several types, the trash under
+walks, `plainObjects` on every terminal, EXPLAIN's times and index names, and more (`docs/evidence/verification-tooling.md`,
+The baseline). `--in-diff` over this goal's own diff: 33 mutants, none surviving that runs on the platform.
+
+The engine's fifteen test-only fault hooks are `fail` failpoints behind `crates/elmdb/src/failpoints.rs`, armed on the
+arming thread or for a database's path, so parallel tests keep their faults; a normal build holds none of them. On Unix
+the dump's no-clobber publication is tempfile's `persist_noclobber`, its unsafe calls gone. CI's eight-target matrix
+passed on Phases 2 and 3 (run 40674565378).
+
+**What the run changed from the plan.**
+
+- **Windows keeps `move_file`.** tempfile 3.27.0 moves without `MOVEFILE_WRITE_THROUGH` and replaces every attribute,
+  so both Windows publications stay hand-written (V6). The backup's replacing publish on Unix was already
+  `std::fs::rename`, which is all tempfile's `persist` does, so it stays too.
+- **Pass 2 ran on 12 mutants, not all of them.** The whole suite takes about a minute a mutant under this machine's
+  load, so a pass over the 161 fast-suite survivors would have taken hours. New specs killed the rest against the fast
+  suite instead.
+- **Hooks.** `FAIL_SYNC_AT` was a hook that Phases' list missed, and it became a point. The backup's `HOOK` at `Ready`
+  became two points, a run and a failure.
+- **Disk.** A `mutants` cargo profile without debug info was added, and runs use `-j 3`. This was after a `-j 5` run's
+  copies held 15 GB.
+
+**Findings, each the user's or a later goal's:**
+
+- EXPLAIN's stage times: `pull` charging a stage's time to the stage before it shows in no count, so no spec catches
+  it.
+- `past_filters`' `withRole` arm and `roles_declared` are never reached: an indexed `withRole` always drives.
+- `MAX_STEPS` (256) overflows a 2 MB debug-build stack. It holds on 8 MB, and nothing ties a read to such a thread.
+- Left by the roadmap: a baseline over `store/`, `engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`,
+  and CI over `--in-diff`.
 
 ## Scope
 
@@ -39,33 +76,10 @@ move, since no behaviour of the binding changes.
 
 ## Current handoff
 
-- **State:** started 2026-10-28 on `session/verification-tooling`, from `main` at `0646348`, after elmdb-next merged
-  (apack `master` at `98386b36a1`, whose chain passed with it linked). cargo-mutants 27.1.0 is installed.
-- **Phase 3's reading of `tempfile` 3.27.0** (`src/file/imp/{unix,windows}.rs`), before Phase 3 starts: on Linux and
-  macOS `persist_noclobber` renames with `RENAME_NOREPLACE` and falls back to a hard link and an unlink on `ENOSYS` or
-  `EINVAL`, where `exclusive_rename_or_link` also falls back on `EOPNOTSUPP` and macOS today has no fallback; on Windows
-  it clears every attribute (`FILE_ATTRIBUTE_NORMAL`) and moves without `MOVEFILE_WRITE_THROUGH`, which both of elmdb's
-  publications pass.
-- **Phase 2 done** (`2c9b64e`): fifteen hooks as failpoints through `crates/elmdb/src/failpoints.rs` (one,
-  `FAIL_SYNC_AT`, wasn't in Phases' list); V2's spec and mutation, V3's `cargo tree` and symbol check, and three
-  workspace runs at a load of 205 to 250.
-- **Phase 3 done** (`87e31c9`): Unix's `publish_new` on `persist_noclobber`, Windows' `move_file` kept for
-  write-through; the eight-target matrix passed (run 40674565378).
-- **Phase 1 under way.** `trigram.rs` done (`9a978be`). Pass 1 (the fast suite) over `reads.rs`, `text/search.rs`,
-  `entities.rs`, `values.rs` and `schema/diff.rs` finished: 667 mutants, 465 caught, 161 missed, 36 unviable,
-  5 timeouts; results kept in `target/mutants-pass1/mutants.out`, whose `previously_caught.txt` `--iterate` reads.
-  `entities.rs` done (`c8c00ee`). `values.rs`, `text/search.rs` and `schema/diff.rs`' survivors have specs or
-  exclusions (`26650b0`), being confirmed by a fast-suite `--iterate` over those three. `reads.rs`: of its 75
-  survivors, a full-suite pass reached 12 before it was stopped (it ran from a tree without the new specs): 5 caught,
-  7 missed, of which `answer`'s, `find_relations`' three and `stage`'s `withRole` now have specs,
-  `walk_type`'s `<=` is excluded, and `pull`'s `upto + 1` moves only which stage a time is charged to — a finding, no
-  count showing it.
-- **Disk:** each cargo-mutants copy takes about 1.3 GB on the `mutants` profile; -j 3.
-- **To continue:** after the confirmation, the full suite over `reads.rs`' survivors:
-  `cargo mutants -j 3 -o target/mutants-pass1 --iterate --file crates/elmdb/src/engine/reads.rs`; then the same
-  over the other three files for what the fast suite left; then `--in-diff` once against `main`.
-- **Evidence:** `docs/evidence/verification-tooling.md`, with Phase 1's baseline still to record.
-- **Next action:** triage what the full suite leaves in `reads.rs`, record the baseline, then `--in-diff`.
+- **State:** done on `session/verification-tooling` (from `main` at `0646348`), closure committed; the branch is for a
+  PR. Each phase's commits are in Acceptance.
+- **Machine:** cargo-mutants' output directories under `target/` and its copies under the system's temporary directory
+  are removed.
 
 ## Decisions
 
@@ -134,10 +148,10 @@ move, since no behaviour of the binding changes.
 
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
-| cargo-mutants configured, the baseline run and every survivor triaged (P1) | missing | | all |
-| The fault hooks replaced by failpoints, each test's faults its own, none in a normal build (P2) | missing | | all |
-| Publication on `tempfile` where it holds the same guarantees (P3) | missing | | all |
-| The docs describe what was built | missing | | all |
+| cargo-mutants configured, the baseline run and every survivor triaged (P1) | done | `9a978be`, `c8c00ee`, `26650b0`, `0c75818`, `cc17cd7`, `fdabbdd`, `82a8064`; `docs/evidence/verification-tooling.md`, Phase 1: each module's report, every survivor killed, excluded with its reason or a finding, each kill a cargo-mutants rerun, `--in-diff` over this goal's diff | |
+| The fault hooks replaced by failpoints, each test's faults its own, none in a normal build (P2) | done | `2c9b64e`; evidence, Phase 2: the hooks and their points, the thread and path specs and the helper's mutation, `cargo tree` and the release binding's symbols, three loaded workspace runs | |
+| Publication on `tempfile` where it holds the same guarantees (P3) | done | `87e31c9`; evidence, Phase 3: tempfile 3.27.0 against each guarantee by platform, Unix on `persist_noclobber`, Windows kept for write-through; CI run 40674565378, eight targets | |
+| The docs describe what was built | done | `docs/architecture/testing.md` (Failpoints, Mutation testing), `docs/roadmap/verification-tooling.md` (stages 1, 2 and 9's Built notes), the kept scripts' headers | |
 
 ## Constraints
 

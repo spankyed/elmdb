@@ -1,6 +1,7 @@
 # goal-verification-tooling: mutation testing, named failpoints and tempfile publication
 
-2026-10-28, on `session/verification-tooling`. Machine: Apple M1 Pro, 10 cores, under the goal's own load (cargo-mutants'
+The evidence of [goal-verification-tooling](../archive/goals/goal-verification-tooling.md). 2026-10-28, on
+`session/verification-tooling`. Machine: Apple M1 Pro, 10 cores, under the goal's own load (cargo-mutants'
 jobs) and others'.
 
 ## Phase 1: cargo-mutants
@@ -65,7 +66,12 @@ the `withRole` code below.
 
 ### `--in-diff`
 
-PENDING.
+Against this goal's own diff (`git diff main...` at `82a8064`, the whole suite): 33 mutants, in the failpoint sites,
+`failpoints.rs` and the publication; 25 caught, 7 unviable, 1 missed, in 11 minutes. The missed one replaces
+`exclusive_rename_or_link` with `Ok(())`: the function is `cfg(target_os = "linux")`, so on this Mac neither it nor its
+specs compile and the mutant changes nothing that runs. On Linux both `publication_tests` cases fail under it (the
+target is never written, and its read fails), and elmdb's CI runs them in each Linux job beside
+`check-process-publication-mutations.py`, which mutates that fallback's link.
 
 ## Phase 2: named failpoints
 
