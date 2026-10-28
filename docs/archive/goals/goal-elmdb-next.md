@@ -1,11 +1,11 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`), Phases 5 to 8 the same day (`next-phase-5.md` to `next-phase-8.md`), Phases 9 and 10 on 2026-10-28 (`next-phase-9.md`, `next-phase-10.md`). The final gates next.
+Status: done, 2026-10-28. Phases 1 and 2 on 2026-10-26, Phases 3 to 8 on 2026-10-27, Phases 9 and 10 and the final gates on 2026-10-28 (`docs/evidence/next-phase-3.md` to `next-phase-10.md`); the Outcome is below.
 
 ```text
 # Goal: elmdb after v1, measured and typed
 
-Implement elmdb/docs/goals/goal-elmdb-next.md. Read Scope, Current handoff, Decisions, Phases,
+Implement elmdb/docs/archive/goals/goal-elmdb-next.md. Read Scope, Current handoff, Decisions, Phases,
 Acceptance and Constraints before continuing. Phase 1 is goal-elmdb.md, finished by its own
 document. The directions the later phases build or design are in elmdb/docs/roadmap/ and
 elmdb/docs/roadmap.md ("Next, in order"); apack's side of Phase 5 is
@@ -28,6 +28,41 @@ Finished when:
 Commit usable checkpoints as you go. Keep Current handoff current. Do not expand or reduce scope
 without the user's authorization.
 ```
+
+## Outcome
+
+**Built.** After v1 (Phase 1) and live queries on `master` (Phase 2), apack's real work was measured and the engine
+changed where the readings said it paid. A chat turn and a flow run were counted call by call: elmdb is under 1% of a
+turn, so no loop needed turning into a set read, and apack's watch scheduler (G14) bounds every view under any write
+rate, 51 to 11,899 commits a second in the stress reading. The planner reads an indexed `where` wherever it stands among
+a type start's filters, stops a lookup at its `limit`, holds only the first `limit` of an `orderBy`, and answers
+EXPLAIN. Field types come from apack's shapes and the database holds every writer to them. Fuzzy terms are found by
+seeking the term dictionary; a field write reads what it replaces once; values of 256 bytes or more are stored
+zstd-compressed, G8's file from 267.8 MB to 122.1 MB; and a trigram index answers substring and regex search, equal to
+a scan, Message's text declaring it. Five directions are designed, each with its readings and its trigger. Every
+phase's evidence is `docs/evidence/next-phase-3.md` to `next-phase-10.md`; the final gates are apack's chain with native passed locally (run `2026-10-28T05-04-09Z-53905`, apack `ab78fc3df1`); G6's strict chain, CI run 40634712585, and the macOS compiler cases, 40636829724, passed on that commit.
+
+**What the run changed from the plan.**
+- Phase 6's gate was misread and corrected (G2, G5): posting lists in blocks were built, measured at two sizes, changed
+  no write's time, and were reverted; fuzzy seeking was built instead, its reading calling for it.
+- Phase 9's first layout, a key per trigram and entity, tripled G8's file; places in blocks of 2^16, the layout
+  `text-index-at-scale.md` designed for postings, add an eighth.
+- Phase 10's change log was redesigned by its reading (G5): a log of writes would hold 57 times G8's values, so
+  incremental backup rests on the fields changed since a sequence, and sync and undo are left to apack's decisions.
+- A host unit spec failing since Phase 5 was found only by the final chain: the phantom-contract spec's source pattern
+  caught the field-type reader's read of the id brand `__entity`, which it now names as its exception (`ab78fc3df1`).
+- apack's watch scheduler hung `settled()` when a flush ran a watch before its timer fired, found under load in
+  Phase 8 and fixed (`a1b6603e5a`).
+
+**Left, each the user's or a later goal's:**
+- Merging elmdb's PR #3 (fast-forward, G7) before apack's PR #285.
+- A message sent before the threads surface has its chat start goes out with `mode: ''` and no flow answers it; the fix
+  is the user's call (Current handoff).
+- The designs' triggers (`docs/roadmap.md`, Designed, each waiting for its trigger).
+- The 17 duplicate short codes and the rows Phase 5's audit found in the user's real data, to resolve when it is
+  converted.
+- `apack-authoring-*` temporary directories that the packaged-authoring sweep can't remove from the read-only compiler
+  store (Current handoff).
 
 ## Scope
 
@@ -111,8 +146,12 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
   `value-dictionaries.md` — on readings of G8's data under apack's schema (`docs/evidence/next-phase-10.md`). The
   change log is redesigned by its reading (G5): a log of writes would hold 57 times the values, so incremental backup
   rests on the fields changed since a sequence.
-- **Next action:** the final gates — apack's full chain with native, G6's strict chain and the macOS compiler cases on
-  CI — then the Outcome, the archive and closure.
+- **Final gates passed** (2026-10-28): apack's chain with native passed locally (run `2026-10-28T05-04-09Z-53905`, apack `ab78fc3df1`); G6's strict chain, CI run 40634712585, and the macOS compiler cases, 40636829724, passed on that commit. The chain found a host unit spec failing since Phase 5,
+  the phantom-contract spec refusing the field-type reader's read of the id brand `__entity`; the spec names that brand
+  as its one exception (`ab78fc3df1`). A first run failed for a full disk (ENOSPC), freed by removing elmdb's debug
+  build cache.
+- **Next action:** none; the goal is closed. Merging elmdb's PR #3 (fast-forward, hashes kept) and then apack's #285
+  is the user's.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -291,18 +330,20 @@ Final unless marked open. Each cites the document that owns it; change the owner
 
 ## Acceptance
 
+The final gates, on every row below: apack's chain with native passed locally (run `2026-10-28T05-04-09Z-53905`, apack `ab78fc3df1`); G6's strict chain, CI run 40634712585, and the macOS compiler cases, 40636829724, passed on that commit.
+
 | Requirement | Implementation / source | Evidence | Remaining work |
 |---|---|---|---|
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
-| A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
-| The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | the strict chain, with G6's at the end |
-| Field types from apack's shapes (P5) | done | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | the strict chain, with G6's at the end |
-| Text postings in blocks, gated (P6) | done | apack `2df2961774`, elmdb `e4ff088`; `docs/evidence/next-phase-6.md`: the reading at three sizes, the gate's correction (G2, G5), fuzzy seeking built with its readings after, blocks measured at two sizes and not built | the strict chain, with G6's at the end |
-| Fewer reads per field write (P7) | done | elmdb `c3c8021`; `docs/evidence/next-phase-7.md`: the spec counting a field write's reads before and after, the model harness, G4's bench | the strict chain, with G6's at the end |
-| Value compression (P8) | done | elmdb `933aa19`, PR #3 (eight targets pass); apack `6d14be5b24`; `docs/evidence/next-phase-8.md`: size and long reads before and after on G8's copy, the threshold chosen, `check()` and `rebuild()` over compressed values, G4 | the strict chain, with G6's at the end |
-| Substring and regex search (P9) | done | elmdb `7dd8a7f`, apack `a983092538`, PR #3 and #285; `docs/evidence/next-phase-9.md`: the model harness's nine searches and a fixed corpus equal a scan, `check()` and `rebuild()` over the index, eight mutations, the layout measured on G8's copy at four sizes, G4 | the strict chain, with G6's at the end |
-| Designs (P10) | done | elmdb docs, `docs/evidence/next-phase-10.md`: value indexes counted and two filters timed against bitmaps; a log of writes replayed from G8's messages; a long read's decode; the largest thread; dictionaries trained per type | the strict chain, with G6's at the end |
+| A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | |
+| The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | |
+| Field types from apack's shapes (P5) | done | apack `914316d725`, PR #285; `docs/evidence/next-phase-5.md`: the mapping, the schema, the audit on G8's copy, the writers fixed | |
+| Text postings in blocks, gated (P6) | done | apack `2df2961774`, elmdb `e4ff088`; `docs/evidence/next-phase-6.md`: the reading at three sizes, the gate's correction (G2, G5), fuzzy seeking built with its readings after, blocks measured at two sizes and not built | |
+| Fewer reads per field write (P7) | done | elmdb `c3c8021`; `docs/evidence/next-phase-7.md`: the spec counting a field write's reads before and after, the model harness, G4's bench | |
+| Value compression (P8) | done | elmdb `933aa19`, PR #3 (eight targets pass); apack `6d14be5b24`; `docs/evidence/next-phase-8.md`: size and long reads before and after on G8's copy, the threshold chosen, `check()` and `rebuild()` over compressed values, G4 | |
+| Substring and regex search (P9) | done | elmdb `7dd8a7f`, apack `a983092538`, PR #3 and #285; `docs/evidence/next-phase-9.md`: the model harness's nine searches and a fixed corpus equal a scan, `check()` and `rebuild()` over the index, eight mutations, the layout measured on G8's copy at four sizes, G4 | |
+| Designs (P10) | done | elmdb docs, `docs/evidence/next-phase-10.md`: value indexes counted and two filters timed against bitmaps; a log of writes replayed from G8's messages; a long read's decode; the largest thread; dictionaries trained per type | |
 
 ## Constraints
 

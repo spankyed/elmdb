@@ -1,4 +1,4 @@
-//! What one field write reads of the store, counted (Phase 7 of `docs/goals/goal-elmdb-next.md`): a field no index
+//! What one field write reads of the store, counted (Phase 7 of `docs/archive/goals/goal-elmdb-next.md`): a field no index
 //! covers, a field a value index covers, a field a text index reads, each inside a unit with a savepoint open, where
 //! the undo log records what a write replaces. The counts are a write's cost the compiler can't show; one more read in
 //! a field write fails the case naming it.

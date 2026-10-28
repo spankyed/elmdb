@@ -5,7 +5,7 @@ Date: 2026-10-26. Status: assessment complete; recommendations proposed, fixes n
 ## Scope and baseline
 
 This review assesses elmdb's current implementation and the intended shape after
-[goal-elmdb-next.md](../goals/goal-elmdb-next.md). It covers storage safety, durability, transactions, watches,
+[goal-elmdb-next.md](../archive/goals/goal-elmdb-next.md). It covers storage safety, durability, transactions, watches,
 query semantics and complexity, indexes, recovery, the Rust and JavaScript APIs, and maintainability. AgentBuddy's
 integration was read to distinguish engine guarantees from behavior supplied by its caller.
 

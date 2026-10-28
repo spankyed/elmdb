@@ -10,8 +10,7 @@ preserving its contracts: Rust owns behavior, a plan/batch crosses once, results
 transactional, and refusals occur at the operation that caused them.
 
 This research plan is separate from the [completed remediation](../archive/goals/goal-elmdb-remediation.md) and
-[goal-elmdb-next.md](../goals/goal-elmdb-next.md), which stays paused pending the user's review/landing/resumption
-decision. Their acceptance does not depend on this research. After evidence exists, propose a specific implementation
+[goal-elmdb-next.md](../archive/goals/goal-elmdb-next.md), closed 2026-10-28. Their acceptance does not depend on this research. After evidence exists, propose a specific implementation
 in its owning goal or roadmap; adding a required deliverable to a goal needs user authorization. A demonstrated
 correctness issue should be reported promptly with its reproduction and existing requirement, without silently adding a performance project.
 
