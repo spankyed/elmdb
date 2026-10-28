@@ -1,6 +1,6 @@
 # Goal: elmdb after v1, measured and typed
 
-Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phase 3 done the same day (`docs/evidence/next-phase-3.md`). Phase 4 next.
+Status: Phases 1 and 2 done, 2026-10-26: elmdb v1 and live queries are on apack's `master` (#278). The review's remediation landed 2026-10-27; Phases 3 and 4 done the same day (`docs/evidence/next-phase-3.md`, `next-phase-4.md`). Phase 5 next.
 
 ```text
 # Goal: elmdb after v1, measured and typed
@@ -76,9 +76,20 @@ SDK's codegen (`packages/apack-sdk/src/build/`), `bench/ears.bench.ts`, and `dri
 - **Phase 3 done** (2026-10-27): the call counter (`admin.calls`, apack `48fbb9c3d1`) and the watch scheduler
   (`WATCH_SCHEDULE`, `19214e4d38`), each with its specs; the readings, the stress reading and G4's bench in
   `docs/evidence/next-phase-3.md`. No loop the readings show reached a measurable share of its action: elmdb is under
-  1% of a chat turn's wall time. The apack chain has not run on these commits yet; G6's strict chain is at the end.
-- **Next action:** Phase 4, the planner's three fixes and EXPLAIN, starting from the indexed `where` with a `limit`
-  (the stress reading's page view reads about 6,700 matches for 50 rows, 2.1 ms a run).
+  1% of a chat turn's wall time.
+- **Phase 4 done** (2026-10-27): the planner's three fixes and EXPLAIN (elmdb `f8dc82e`), apack's `explain()` and the
+  Database console's stage table (`d4db390d0f`, pinning `f8dc82e`); readings and mutation checks in
+  `docs/evidence/next-phase-4.md`. elmdb's PR is #3 (G6: merged with its hashes kept, before apack's #285).
+- **Validation:** apack's `npm run chain -- --no-native` passed over Phases 3 and 4 at `d4db390d0f` (run
+  `2026-10-27T23-57-59Z-32736`, 1,047 s). Not yet run: `test:native`, and G6's strict chain and macOS compiler cases at
+  the end.
+- **Next action:** Phase 5, field types from apack's shapes (apack's `docs/plans/field-types-from-shapes.md`). Two things
+  found reading for it: a shape names `EARS.EntityId` through the pack's `#generated/ears`, which codegen writes after
+  reading the shapes and which is gitignored, so the reader must be handed the `ears.ts` codegen is about to write or a
+  clean checkout's first build types every id `any`; and an elmdb `ref` names only declared types, so a target no
+  registered pack declares is narrowed out where the schema is built. elmdb's `schema.md` (apack's schema) says objects
+  map to `object` and `additionalFields` is `refuse`, where the plan says `any` and `allow`: the plan is built, and
+  `schema.md` corrected to it.
 - **Taking a reading:**
   - Driving scripts are local: `drive/` is gitignored but for its README and config, so a reading's evidence is what
     is recorded (Constraints, Evidence).
@@ -259,7 +270,7 @@ Final unless marked open. Each cites the document that owns it; change the owner
 | elmdb v1 (P1) | done | `docs/archive/goals/goal-elmdb.md`; elmdb `8158696`, CI run 40289842885; PR #276 | |
 | One branch, live queries merged, its PR open (P2) | done | PR #278, merged as `0e6d0ffce`; merges `97513f457`, `5d1de25d2`; strict chain run 40326956990. The two driving scripts the done-when names were run and not committed: neither is in apack's history | |
 | A user action's calls to elmdb, its loops fixed, and watches bounded (P3) | done | apack `48fbb9c3d1` (count), `19214e4d38` (scheduler), PR #285; `docs/evidence/next-phase-3.md`: chat turn and flow run before and after, the stress reading before and after with the constants, G4's bench; specs `calls.spec.ts`, `watch-schedule.spec.ts`, the model harness | the strict chain, with G6's at the end |
-| The planner's three fixes and EXPLAIN (P4) | missing | | all |
+| The planner's three fixes and EXPLAIN (P4) | done | elmdb `f8dc82e`, PR #3; apack `d4db390d0f`, PR #285; `docs/evidence/next-phase-4.md`: visits on each fix, EXPLAIN on a plan of each kind, mutation checks, G4's bench and single-row read | the strict chain, with G6's at the end |
 | Field types from apack's shapes (P5) | missing | | all |
 | Text postings in blocks, gated (P6) | missing | | all |
 | Fewer reads per field write (P7) | missing | | all |
