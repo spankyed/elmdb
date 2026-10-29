@@ -1,7 +1,7 @@
 //! A relation hop's walk: `reverse` straight after a hop from one entity over one kind reads its edges from the last,
 //! so a `limit` after it reads only what it keeps, and answers what reversing the whole walk answers: the far ends in
 //! place order backward, each once at its first edge's place, a trashed one left out. A tracked read of it is written
-//! into by a new last edge and by an edge it kept going.
+//! into by an edge from its last to where it stopped, and by none before.
 
 use serde_json::{Value as Json, json};
 
@@ -124,14 +124,39 @@ fn a_reverse_after_a_hop_from_several_entities_or_kinds_reverses_the_whole_walk(
 }
 
 #[test]
-fn a_tracked_reverse_after_a_hop_is_written_into_by_a_new_last_edge_and_by_an_edge_it_kept_going() {
+fn a_tracked_reverse_after_a_hop_is_written_into_as_far_back_as_it_read_and_no_further() {
     let (_dir, db) = fixture();
     let last = json!({ "read": "query", "plan": plan(&["Task-0"],
-        json!([{ "step": "out", "kinds": ["refs"] }, { "step": "reverse" }, { "step": "limit", "n": 3 }])) });
-    let touched = |ops: Vec<Json>| db.write(&batch(ops), false).unwrap().1.touched;
-    read(&db, last.clone(), Some(4));
-    assert_eq!(touched(vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-401" })]), [4]);
-    db.untrack(4);
-    read(&db, last, Some(5));
-    assert_eq!(touched(vec![json!({ "op": "unlink", "source": "Task-0", "kind": "refs", "target": "Task-400" })]), [5]);
+        json!([{ "step": "out", "kinds": ["tags"] }, { "step": "reverse" }, { "step": "limit", "n": 3 }])) });
+    // `tags` is unique, so the walk reads no edge's ends but through its edges
+    let mut token = 0;
+    // A fresh read of the last three for each write, so each asks of what that read reached
+    let mut touches = |op: Json| {
+        token += 1;
+        read(&db, last.clone(), Some(token));
+        let touched = db.write(&batch(vec![op]), false).unwrap().1.touched;
+        db.untrack(token);
+        !touched.is_empty()
+    };
+    let unlink = |target: &str| json!({ "op": "unlink", "source": "Task-0", "kind": "tags", "target": target });
+    assert!(
+        touches(json!({ "op": "link", "source": "Task-0", "kind": "tags", "target": "Task-401" })),
+        "a new last edge"
+    );
+    assert!(touches(unlink("Task-401")), "the last edge, the first it kept");
+    assert!(touches(unlink("Task-399")), "the edge it stopped at, the last of Note-40, Task-400 and Task-399 it kept");
+    assert!(!touches(unlink("Task-2")), "an edge before where it stopped is no write into it");
+}
+
+#[test]
+fn a_reverse_after_a_hop_in_a_unit_reads_the_unit_s_own_edges() {
+    let (_dir, db) = fixture();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-401" })]))
+        .unwrap();
+    let op = json!({ "read": "query", "plan": plan(&["Task-0"],
+        json!([{ "step": "out", "kinds": ["refs"] }, { "step": "reverse" }, { "step": "limit", "n": 2 }])) });
+    let bytes = unit.read(&Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None }).unwrap();
+    let answer = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    assert_eq!(answer[0]["ids"], json!(["Task-401", "Note-40"]));
 }
