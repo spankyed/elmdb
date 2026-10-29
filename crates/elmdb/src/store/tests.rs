@@ -232,6 +232,7 @@ fn a_durable_write_commits_with_its_sync_and_owes_nothing_after() {
 
 /// The writer half of the next test, run as a child of this test binary
 #[test]
+#[ignore = "run only by the next test, as its child process"]
 fn child_writer() {
     let Ok(path) = std::env::var("ELMDB_CHILD_DB") else { return };
     let store = Store::open(
@@ -254,7 +255,7 @@ fn child_writer() {
 fn keeps_a_write_its_process_committed_though_the_process_is_killed_as_it_returns() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "store::tests::child_writer", "--nocapture", "--test-threads=1"])
+        .args(["--ignored", "--exact", "store::tests::child_writer", "--nocapture", "--test-threads=1"])
         .env("ELMDB_CHILD_DB", dir.path())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -384,6 +385,7 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
 
 /// The writer half of the next test, run as a child of this test binary: it overwrites `a` and closes
 #[test]
+#[ignore = "run only by the next test, as its child process"]
 fn child_overwriter() {
     let Ok(path) = std::env::var("ELMDB_OVERWRITE_DB") else { return };
     let store = Store::open(Path::new(&path), quiet()).unwrap();
@@ -400,7 +402,7 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "store::tests::child_overwriter", "--nocapture", "--test-threads=1"])
+        .args(["--ignored", "--exact", "store::tests::child_overwriter", "--nocapture", "--test-threads=1"])
         .env("ELMDB_OVERWRITE_DB", dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -472,6 +474,7 @@ fn a_close_returns_though_a_wait_for_durability_is_still_held() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "run only by the next test, as its child process"]
 fn child_read_only_requires_registration() {
     let Ok(path) = std::env::var("ELMDB_REVIEW_READ_ONLY") else { return };
     println!("ELMDB_READ_ONLY_CHILD_ENTERED");
@@ -496,7 +499,7 @@ fn a_read_only_process_requires_registration_while_a_writer_is_open() {
     let lock = directory.path().join("lock.mdb");
     std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o444)).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "store::tests::child_read_only_requires_registration", "--nocapture"])
+        .args(["--ignored", "--exact", "store::tests::child_read_only_requires_registration", "--nocapture"])
         .env("ELMDB_REVIEW_READ_ONLY", directory.path())
         .output()
         .unwrap();
@@ -778,6 +781,7 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
 
 /// The grower half of the next test, run as a child of this test binary: writes well past its parent's map, and closes
 #[test]
+#[ignore = "run only by the next test, as its child process"]
 fn child_grower() {
     let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
     let store = Store::open(Path::new(&path), quiet()).unwrap();
@@ -804,7 +808,7 @@ fn a_read_adopts_the_map_another_process_grew_the_file_past() {
     let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * page), ..quiet() }).unwrap());
     put(&store, "a", b"1").unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
         .env("ELMDB_GROW_DB", dir.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

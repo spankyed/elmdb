@@ -1387,6 +1387,7 @@ mod crash {
 
     /// The writer half, run as a child of this test binary
     #[test]
+    #[ignore = "run only by the next test, as its child process"]
     fn child_runs_a_seeded_workload_acknowledging_each_step() {
         let (Ok(path), Ok(seed)) = (std::env::var("ELMDB_CRASH_DB"), std::env::var("ELMDB_CRASH_SEED")) else { return };
         // Syncs on, as the app runs: a commit survives the process's death before any sync
@@ -1415,6 +1416,7 @@ mod crash {
             let kill_at = 6 + (seed as usize * 7) % steps.len().max(7);
             let mut child = Command::new(std::env::current_exe().unwrap())
                 .args([
+                    "--ignored",
                     "--exact",
                     "engine::tests::model::crash::child_runs_a_seeded_workload_acknowledging_each_step",
                     "--nocapture",
@@ -1448,6 +1450,8 @@ mod crash {
                     acked = i.parse::<usize>().unwrap() + 1;
                 }
             }
+            // A child that never ran its workload leaves no files, which the model's empty state would match
+            assert!(acked > 0, "seed {seed}: the child acknowledged no step");
             let db = Database::open(dir.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
             let mut model = Model::default();
             for step in &steps[..acked] {
