@@ -59,10 +59,11 @@ and stay, each saying why in its header. The baseline over `store/`, `engine/wat
 `derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
 killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
 would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
-Linux container, the Windows 14 a finding. `process.rs` runs against elmdb-node's suite, its Linux claim caught in a
-Linux container; its Windows code, `claim`'s napi mapping and an acquisition error other than an occupied claim are
-findings. CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, reporting the survivors in the
-files it touches. Left: cargo-mutants on a Windows machine for the Windows code.
+Linux container, the Windows 14 read on Windows. `process.rs` runs against elmdb-node's suite, its Linux claim caught
+in a Linux container. On Windows, of the Windows code's 21 mutants, a new spec killed 2 of the 6 survivors, 3 are
+excluded as disjoint flags or equivalent, and `pin_module` joins `claim`'s napi mapping as a finding the binding's suite
+catches; those and an acquisition error other than an occupied claim are the findings. CI's `mutants` job runs
+`scripts/mutants-in-diff.py` on every pull request, reporting the survivors in the files it touches.
 
 ## 2. Named failpoints
 

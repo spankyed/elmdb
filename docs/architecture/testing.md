@@ -66,8 +66,8 @@ cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip m
 
 Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
 the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants installed in it, against a copy of the
-tree). The Windows ones have no reading: the Windows CI target builds and tests that code but doesn't mutate it, and
-`scripts/check-windows-backup-mutation.py` mutates one of its lines (`docs/evidence/mutation-baseline.md`).
+tree), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
+(`docs/evidence/mutation-baseline.md`, The Windows reading).
 
 CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into: each
 missed mutant is annotated on its line and listed in the job's summary, and the job fails only when cargo-mutants does.
