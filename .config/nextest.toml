@@ -7,7 +7,7 @@ nextest-version = "0.9.148"
 # Every test but the model harness ends within a minute or two on CI's slowest runner, Intel macOS
 slow-timeout = { period = "60s", terminate-after = 4 }
 
-# The model harness: about a minute on an Apple-silicon laptop, and four on CI's Intel macOS runner
+# The model harness: about a minute on an Apple-silicon laptop, and four to five on CI's Intel macOS runner
 [[profile.default.overrides]]
 filter = "test(=engine::tests::model::the_engine_holds_what_the_model_holds_after_every_step)"
 slow-timeout = { period = "60s", terminate-after = 15 }
