@@ -58,8 +58,10 @@ make changes cargo-mutants doesn't (an expression swapped for another, a Windows
 and stay, each saying why in its header. The baseline over `store/`, `engine/watch.rs`, `engine/derive.rs` with
 `derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
 killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
-would need terabytes of map for) and 17 in Windows and Linux publication code, read on those platforms; `process.rs` runs
-against elmdb-node's suite, its Linux claim in a Linux container. Left: CI over `--in-diff`.
+would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
+Linux container, the Windows 14 a finding. `process.rs` runs against elmdb-node's suite, its Linux claim caught in a
+Linux container; its Windows code and an acquisition error other than an occupied claim are findings. Left: CI over
+`--in-diff`, and cargo-mutants on a Windows machine for the Windows code.
 
 ## 2. Named failpoints
 
