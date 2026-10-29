@@ -64,3 +64,8 @@ debug = 0
 [profile.release]
 lto = true
 codegen-units = 1
+
+# The release build with line tables, so a native profiler names Rust functions and lines (`docs/architecture/testing.md`)
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

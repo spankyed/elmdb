@@ -52,11 +52,45 @@ pub fn stored(value: &Value) -> Vec<u8> {
 /// A stored field value's msgpack: the bytes as they are, or decompressed
 pub fn unstored(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
     match bytes.split_first() {
-        Some((&COMPRESSED, frame)) => zstd::stream::decode_all(frame)
+        Some((&COMPRESSED, frame)) => decompress(frame)
             .map(std::borrow::Cow::Owned)
             .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A stored value doesn't decompress: {e}"))),
         _ => Ok(std::borrow::Cow::Borrowed(bytes)),
     }
+}
+
+/// `unstored` of bytes the caller owns: a value stored uncompressed is those bytes, not a copy of them
+pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.first() == Some(&COMPRESSED) { Ok(unstored(&bytes)?.into_owned()) } else { Ok(bytes) }
+}
+
+/// The largest value decompressed in one call into a buffer of the size its frame records. A frame that records more,
+/// or no size, is read as a stream, so a damaged header can't ask for a large allocation
+const ONE_CALL_UP_TO: u64 = 16 << 20;
+
+thread_local! {
+    /// One decompression context a thread, for every value it reads: a context costs about 100 KB to allocate, where
+    /// the values it reads are a kilobyte or two (`docs/evidence/read-allocation-codec.md`). Each call decompresses one
+    /// whole frame, so nothing one value leaves in it reaches the next
+    static DECOMPRESSOR: std::cell::RefCell<Option<zstd::bulk::Decompressor<'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
+    let size = match zstd::zstd_safe::get_frame_content_size(frame) {
+        Ok(Some(size)) if size <= ONE_CALL_UP_TO => size as usize,
+        _ => return zstd::stream::decode_all(frame),
+    };
+    DECOMPRESSOR.with(|context| {
+        let mut context = context.borrow_mut();
+        let decompressor = match context.as_mut() {
+            Some(decompressor) => decompressor,
+            None => context.insert(zstd::bulk::Decompressor::new()?),
+        };
+        let mut out = Vec::with_capacity(size);
+        decompressor.decompress_to_buffer(frame, &mut out)?;
+        Ok(out)
+    })
 }
 
 /// A stored field value, decoded

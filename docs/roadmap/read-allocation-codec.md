@@ -95,5 +95,8 @@ Create `docs/evidence/read-allocation-codec.md` when measurements begin. Record 
 commands, fixture generator, environment, raw samples/profiles, allocation definitions, semantic checks,
 failed trials, candidate dispositions and limits. Keep historical evidence separate from this plan.
 
-Plan only. Next: inspect current read and codec call paths, select the four bounded fixtures, establish
-baselines and profile them. No performance result or implementation is claimed.
+Done, 2026-10-29: [the readings](../evidence/read-allocation-codec.md). Both candidates kept: a stored value
+decompresses in one call into the size its frame records, with a context reused per thread, and an uncompressed
+value's bytes aren't copied again; a page of whole rows and a read of every row are each about 30% faster in Rust and
+26 to 28% through `readSync`. The field scan, its key decoding and vector growth lead the profile after, and reopen
+this plan if a read's profile is led by them. The JavaScript decoding is apack's companion plan's.

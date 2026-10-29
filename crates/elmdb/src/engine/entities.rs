@@ -116,10 +116,7 @@ pub fn get(t: &impl Read, id: &str, field: &str) -> Result<Option<Value>> {
 
 /// The entity's fields, in key order, each as its msgpack, decompressed where it is stored compressed
 pub fn fields(t: &impl Read, id: &str) -> Result<Vec<(String, Vec<u8>)>> {
-    fields_stored(t, id)?
-        .into_iter()
-        .map(|(field, bytes)| Ok((field, values::unstored(&bytes)?.into_owned())))
-        .collect()
+    fields_stored(t, id)?.into_iter().map(|(field, bytes)| Ok((field, values::unstored_owned(bytes)?))).collect()
 }
 
 /// The entity's fields, in key order, as their stored bytes: what a copy of them or an undo of their removal keeps
