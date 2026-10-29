@@ -178,7 +178,7 @@ peak: regression allowances for those inputs, not memory limits. Full derivation
 by design, so they are held to growth instead: between 6,000 and 12,000 entities of 250-byte values (each entity's
 entries about 2.4 KB, past every sorter's 8 MiB at both sizes), a full rebuild or check may grow 1,024 bytes an entity,
 its inventory measuring about 300; between 1,000 and 2,000 vectors of 256 dimensions, a vector rebuild may grow 768,
-measuring 325 to 352, where one decoded vector is 1 KB. They leave out what was live before profiling, native allocations,
+measuring about 320 to 350, where one decoded vector is 1 KB. They leave out what was live before profiling, native allocations,
 LMDB's mappings and RSS. Timing and heap profiling run apart, allocation backtraces distorting CPU time. Criterion 0.8.2
 and dhat 0.3.3 are development dependencies only, Criterion without default features, and dhat's allocator is linked
 into that one test binary.

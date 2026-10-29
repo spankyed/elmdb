@@ -106,7 +106,7 @@ Acceptance:
 Full derivation and a selected vector rebuild keep something per entity by design, so the heap test holds them to
 growth between two sizes rather than to an invented constant: a full rebuild or check at most 1,024 bytes an entity
 between 6,000 and 12,000 entities whose entries fill every sorter at both (measured 387 to 469, the inventory alone
-about 300), and a selected vector rebuild at most 768 bytes a vector between 1,000 and 2,000 (measured 325 to 352). In
+about 300), and a selected vector rebuild at most 768 bytes a vector between 1,000 and 2,000 (measured about 320 to 350). In
 disposable copies, full derivation keeping one value index's entries before emitting them grows a full rebuild 3,372
 bytes an entity and a full check 3,290, and a vector flush keeping every decoded vector grows a vector rebuild 1,506;
 each fails. The heap test takes about three minutes on an M1 Pro.

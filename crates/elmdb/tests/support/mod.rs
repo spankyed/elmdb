@@ -113,13 +113,13 @@ impl Fixture {
         let answers: serde_json::Value = rmp_serde::from_slice(&db.read(&pending).unwrap()).unwrap();
         let chunks = answers[0]["chunks"].as_array().unwrap();
         assert_eq!(chunks.len(), rows);
-        for (first, batch) in chunks.chunks(1000).enumerate() {
+        for (number, batch) in chunks.chunks(1000).enumerate() {
             let ops = batch
                 .iter()
                 .enumerate()
                 .map(|(n, c)| {
                     // A direction of its own for each document, so the graph has neighbours to tell apart
-                    let i = first * 1000 + n;
+                    let i = number * 1000 + n;
                     let vector: Vec<f32> = (0..dims).map(|d| ((i * dims + d) as f32 * 0.618).sin()).collect();
                     serde_json::from_value(json!({"op":"embed", "id":c["id"], "index":"meaning", "chunk":c["chunk"],
                         "hash":c["hash"], "model":"m", "vector":vector}))
@@ -128,6 +128,10 @@ impl Fixture {
                 .collect();
             db.write(&Batch { ops, now: None }, false).unwrap();
         }
+        // An embedding of text a chunk no longer holds would be kept as stale rather than refused, so nothing is left
+        // pending only once every vector was filed
+        let answers: serde_json::Value = rmp_serde::from_slice(&db.read(&pending).unwrap()).unwrap();
+        assert_eq!(answers[0]["chunks"].as_array().unwrap().len(), 0, "every chunk is embedded");
         Self { db, directory, rows }
     }
 
