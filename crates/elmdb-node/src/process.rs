@@ -192,6 +192,10 @@ fn claim_once<T>(slot: &Mutex<Option<T>>, acquire: impl FnOnce() -> io::Result<T
 mod tests {
     use super::*;
 
+    /// Held while a test holds a kernel claim and while a test starts a child: a child holds a copy of every open
+    /// descriptor until it execs, so a claim dropped while one starts stays bound until it has
+    static CHILDREN: Mutex<()> = Mutex::new(());
+
     #[test]
     fn failed_claims_are_retryable_and_success_is_cached() {
         let slot = Mutex::new(None::<()>);
@@ -217,6 +221,7 @@ mod tests {
 
     #[test]
     fn a_claim_held_elsewhere_in_the_process_is_refused_as_already_loaded_and_made_once_free() {
+        let _starting = CHILDREN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "process::tests::child_claimer", "--nocapture", "--test-threads=1"])
             .env("ELMDB_CHILD_CLAIM", "1")
@@ -232,6 +237,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn independent_kernel_claims_conflict_and_are_reclaimed_on_close() {
+        let _claiming = CHILDREN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let first = acquire_claim().unwrap();
         assert_eq!(acquire_claim().unwrap_err().kind(), io::ErrorKind::WouldBlock);
         drop(first);
