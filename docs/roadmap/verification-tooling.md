@@ -114,6 +114,13 @@ Acceptance:
 - `cargo nextest run` is the documented test command and CI's; doc tests still run under `cargo test --doc`.
 - A test filtered to nothing is reported as zero tests run, which CI treats as a failure.
 
+`cargo nextest run` is the documented command and CI's on every target, and cargo-mutants runs through it
+(`.cargo/mutants.toml`'s `test_tool`), so a mutant that hangs a test is caught at that test's deadline. The nine watch
+tests behind `bounded_watch_child` are ordinary tests under a ten-second deadline; a test hung in a disposable copy was
+killed at it and the run failed. A filter selecting nothing exits 4. The read-only registration child stays, with the
+other tests that run the binary again: each needs a second process, since this process's open of the same directory is
+refused before LMDB's lock file is reached, and its marker check stays because libtest reports a child filtered to
+nothing as a pass.
 ## 5. Model-based property tests
 
 Use [proptest-state-machine](https://docs.rs/proptest-state-machine/latest/proptest_state_machine/), on the proptest

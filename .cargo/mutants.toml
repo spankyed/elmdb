@@ -11,6 +11,8 @@ exclude_globs = [
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
+# Each test in its own process under `.config/nextest.toml`'s deadlines, so a mutant that hangs one is caught at it
+test_tool = "nextest"
 # Under the machine's other load a suite can run several times its baseline
 timeout_multiplier = 3.0
 # Inside target/, which is gitignored and which cargo-mutants doesn't copy
