@@ -103,6 +103,14 @@ Acceptance:
   separate observations rather than an invented constant-heap guarantee.
 - dhat measures the Rust heap only. LMDB's mapped pages and the process RSS remain `scripts/measure-recovery.mjs`'s.
 
+Full derivation and a selected vector rebuild keep something per entity by design, so the heap test holds them to
+growth between two sizes rather than to an invented constant: a full rebuild or check at most 1,024 bytes an entity
+between 6,000 and 12,000 entities whose entries fill every sorter at both (measured 387 to 469, the inventory alone
+about 300), and a selected vector rebuild at most 768 bytes a vector between 1,000 and 2,000 (measured 390 to 460). In
+disposable copies, full derivation keeping one value index's entries before emitting them grows a full rebuild 3,372
+bytes an entity and a full check 3,290, and a vector flush keeping every decoded vector grows a vector rebuild 1,602;
+each fails. The heap test takes about three minutes on an M1 Pro.
+
 ## 4. One process per test
 
 Run the suite with [cargo-nextest](https://nexte.st/). Each test is its own process, with per-test slow and kill

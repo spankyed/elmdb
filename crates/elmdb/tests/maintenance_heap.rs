@@ -16,6 +16,29 @@ fn measure(name: &str, budget_mib: usize, operation: impl FnOnce()) {
     dhat::assert!(stats.max_bytes <= budget_mib * 1024 * 1024);
 }
 
+/// The peak heap of `operation` over a fixture of each size, and how much it grew per entity between them: an
+/// operation that keeps something per entity is bounded by what it keeps, where a fixed budget would be invented
+fn measure_growth(
+    name: &str,
+    per_entity_bytes: usize,
+    sizes: [usize; 2],
+    fixture: impl Fn(usize) -> Fixture,
+    operation: impl Fn(&Fixture),
+) {
+    let peaks = sizes.map(|rows| {
+        let fixture = fixture(rows);
+        let _profiler = dhat::Profiler::builder().testing().trim_backtraces(Some(4)).build();
+        operation(&fixture);
+        dhat::HeapStats::get().max_bytes
+    });
+    let growth = peaks[1].saturating_sub(peaks[0]) / (sizes[1] - sizes[0]);
+    eprintln!(
+        "{name}/{}..{}: peak_heap_bytes={}..{} growth_per_entity_bytes={growth} allowance_bytes={per_entity_bytes}",
+        sizes[0], sizes[1], peaks[0], peaks[1]
+    );
+    assert!(growth <= per_entity_bytes, "{name} grew {growth} bytes per entity, more than {per_entity_bytes}");
+}
+
 #[test]
 #[ignore = "dedicated heap gate: cargo test -p elmdb --release --test maintenance_heap -- --ignored --nocapture"]
 fn maintenance_heap_bounds() {
@@ -49,4 +72,20 @@ fn maintenance_heap_bounds() {
         measure(&format!("text_rebuild/{rows}"), 32, || fixture.db.rebuild(Some(("Doc", "text"))).unwrap());
         assert!(fixture.db.check().unwrap().is_clean());
     }
+    // Full derivation spills every entry but keeps an inventory of every entity: about 300 bytes an entity, measured
+    // with nothing indexed. Each entity's index entries come to about 2.4 KB, so both sizes overflow each sorter's 8 MiB,
+    // whose state moves a peak by about 2 MB, about 350 bytes an entity over the 6,000 between them; an index's entries
+    // kept whole would add some 2.8 KB an entity
+    let wide = |rows| Fixture::with_tags(rows, 250, false, false);
+    measure_growth("full_rebuild", 1024, [6_000, 12_000], wide, |fixture| fixture.db.rebuild(None).unwrap());
+    measure_growth("full_check", 1024, [6_000, 12_000], wide, |fixture| {
+        assert!(fixture.db.check().unwrap().is_clean())
+    });
+    // A selected vector rebuild spills its ids and decodes one added vector at a time, beside hannoy's graph builder:
+    // 390 to 460 bytes a vector, measured, the graph's share varying run to run. One decoded 256-dimension vector is
+    // 1 KB, so decoding them all would add that
+    let vectors = |rows| Fixture::with_vectors(rows, 256);
+    measure_growth("vector_rebuild", 768, [1_000, 2_000], vectors, |fixture| {
+        fixture.db.rebuild(Some(("Doc", "meaning"))).unwrap()
+    });
 }

@@ -147,7 +147,8 @@ are recorded in [maintenance memory evidence](../evidence/maintenance-memory-202
 export and indexed limit queries. Criterion reports comparisons; timing is not a CI pass/fail budget.
 `cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture`
 runs one isolated dhat test, asserting workload-specific heap allowances for export and selected value/text
-rebuilds at 1k/10k entities. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
+rebuilds at 1k/10k entities, and how much a full rebuild, a full check and a selected vector rebuild grow per entity
+between two sizes. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
 their allocator.
 
 **Timing.** A comparison is two runs on one host and toolchain, with comparable cache and load:
@@ -173,7 +174,11 @@ which Criterion doesn't see.
 **Heap.** The heap gate's one ignored test owns a dhat allocator in its own executable, builds each fixture before
 profiling and measures only the export or the rebuild. Its allowances are 24 MiB for an export (with an 8 KiB relation
 payload per entity), 16 MiB for a value rebuild and 32 MiB for a text rebuild, each case printing its peak: regression
-allowances for those inputs, not memory limits. They leave out what was live before profiling, native allocations,
+allowances for those inputs, not memory limits. Full derivation and a selected vector rebuild keep something per entity
+by design, so they are held to growth instead: between 6,000 and 12,000 entities of 250-byte values (each entity's
+entries about 2.4 KB, past every sorter's 8 MiB at both sizes), a full rebuild or check may grow 1,024 bytes an entity,
+its inventory measuring about 300; between 1,000 and 2,000 vectors of 256 dimensions, a vector rebuild may grow 768,
+measuring 390 to 460, where one decoded vector is 1 KB. They leave out what was live before profiling, native allocations,
 LMDB's mappings and RSS. Timing and heap profiling run apart, allocation backtraces distorting CPU time. Criterion 0.8.2
 and dhat 0.3.3 are development dependencies only, Criterion without default features, and dhat's allocator is linked
 into that one test binary.

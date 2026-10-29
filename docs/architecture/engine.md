@@ -320,7 +320,9 @@ These bounds concern intermediate collections. One decoded entity and its index 
 hannoy's graph builder, and LMDB's dirty/resident pages have separate workload-dependent costs. A list-valued field
 can emit an entry per indexable element; compound value indexes take scalar fields. Full check/rebuild also retain
 entity/graph inventories, primary constraint/uniqueness auditing and output reports; the complete operation does not
-have an 8 MiB or constant-RSS bound. Replacement streams primary ranges from one source snapshot. The historical
+have an 8 MiB or constant-RSS bound. What it adds per entity is bounded instead: the heap test holds a full rebuild and
+a full check to 1 KiB of heap an entity beyond the sorters, and a selected vector rebuild to 768 bytes a vector
+(`testing.md`, Heap). Replacement streams primary ranges from one source snapshot. The historical
 measurements below concern full rebuilds; later single-index/export observations have their own [dated evidence](../evidence/maintenance-memory-2026-10-27.md).
 
 The recorded operating envelope is the explicit synthetic shapes in the
