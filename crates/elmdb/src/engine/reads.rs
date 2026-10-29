@@ -354,6 +354,10 @@ struct Query<'r, R: Read> {
     stages: Option<&'r Stages>,
     /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
     hits: RefCell<HashMap<String, (Hit, String)>>,
+    /// The stage of a hop a `reverse` straight after it asks to walk its edges from the last (`Step::Reverse`)
+    backward_hop: Cell<Option<usize>>,
+    /// The stage of a hop that did, handing its ids on already reversed
+    walked_back: Cell<Option<usize>>,
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
@@ -602,7 +606,23 @@ impl<R: Read> Query<'_, R> {
                 Ok(true)
             }
             Step::Reverse => {
-                let mut ids = self.collect(before)?;
+                // A hop straight before walks its edges from the last where it can, handing its ids on reversed, so a
+                // limit after this one reads only as far as it keeps
+                if before > 0 && matches!(self.plan.steps[before - 1], Step::Out { .. } | Step::In { .. }) {
+                    self.backward_hop.set(Some(before));
+                }
+                let mut ids = Vec::new();
+                let go = self.pull(before, &mut |id| {
+                    if self.walked_back.get() == Some(before) {
+                        visit(id)
+                    } else {
+                        ids.push(id.to_owned());
+                        Ok(true)
+                    }
+                })?;
+                if self.walked_back.get() == Some(before) {
+                    return Ok(go);
+                }
                 ids.reverse();
                 each(ids, visit)
             }
@@ -1208,20 +1228,67 @@ impl<R: Read> Query<'_, R> {
             relations::definition(self.r, kind)?;
         }
         let mut reached = HashSet::new();
-        self.pull(before, &mut |from| {
-            for kind in kinds {
-                for (_, far) in relations::edges(self.r, from, outward, Some(kind))? {
-                    if far == from || !of_types(&far, types) || reached.contains(&far) {
-                        continue;
-                    }
-                    reached.insert(far.clone());
-                    if self.alive(&far)? && !visit(&far)? {
+        if self.backward_hop.get() == Some(before + 1) {
+            // From one entity over one kind, its edges from the last are its ids reversed; otherwise the `reverse`
+            // collects them
+            let sources = self.collect(before)?;
+            if let ([from], [kind]) = (sources.as_slice(), kinds) {
+                let unique = relations::definition(self.r, kind)?.unique;
+                self.walked_back.set(Some(before + 1));
+                return self.walk_edges(from, kind, types, outward, Some(unique), &mut reached, visit);
+            }
+            for from in &sources {
+                for kind in kinds {
+                    if !self.walk_edges(from, kind, types, outward, None, &mut reached, visit)? {
                         return Ok(false);
                     }
                 }
             }
+            return Ok(true);
+        }
+        self.pull(before, &mut |from| {
+            for kind in kinds {
+                if !self.walk_edges(from, kind, types, outward, None, &mut reached, visit)? {
+                    return Ok(false);
+                }
+            }
             Ok(true)
         })
+    }
+
+    /// Visits the far ends of `from`'s edges of `kind` a step may reach, each once, in place order, or from the last
+    /// when `backward` says whether the kind is `unique`; false when `visit` stopped the walk. From the last, an end
+    /// joined by several edges of a kind that isn't unique is visited at its first edge's place, where the walk in
+    /// place order visits it
+    #[allow(clippy::too_many_arguments)]
+    fn walk_edges(
+        &self,
+        from: &str,
+        kind: &str,
+        types: Option<&[String]>,
+        outward: bool,
+        backward: Option<bool>,
+        reached: &mut HashSet<String>,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
+        let mut go = true;
+        relations::visit_edges(self.r, from, outward, Some(kind), backward.is_some(), |place, far| {
+            if far == from || !of_types(&far, types) || reached.contains(&far) {
+                return Ok(true);
+            }
+            if backward == Some(false) {
+                let (source, target) = if outward { (from, far.as_str()) } else { (far.as_str(), from) };
+                if relations::first_between(self.r, source, kind, target)? != Some(place) {
+                    return Ok(true);
+                }
+            }
+            reached.insert(far.clone());
+            if self.alive(&far)? && !visit(&far)? {
+                go = false;
+            }
+            Ok(go)
+        })?;
+        Ok(go)
     }
 
     fn reach(
@@ -1605,7 +1672,15 @@ fn query_with(
             format!("A plan holds at most {MAX_STEPS} steps, and this one {}", plan.steps.len()),
         ));
     }
-    let q = Query { r, plan, visited: Cell::new(0), stages, hits: RefCell::new(HashMap::new()) };
+    let q = Query {
+        r,
+        plan,
+        visited: Cell::new(0),
+        stages,
+        hits: RefCell::new(HashMap::new()),
+        backward_hop: Cell::new(None),
+        walked_back: Cell::new(None),
+    };
     let last = plan.steps.len();
     let mut w = W(out);
     match &plan.terminal {
