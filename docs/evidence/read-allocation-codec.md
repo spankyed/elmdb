@@ -75,3 +75,38 @@ alternately; otherwise reverted and recorded.
 Out of these: the key decoding and the scan's own copies are the field loop's structure (a field's name is its key's),
 and the projected page's cost is the lookups it asks for, which [Query work efficiency](../roadmap/query-work-efficiency.md)
 owns.
+
+## Results
+
+Each comparison alternates a disposable copy of the source before the change with one after it, each with its own
+target directory, Criterion medians, load averages 8 to 19 through them.
+
+**1. Kept** (`574797f`). Three runs a side against `89ecb6c`:
+
+| Read | Before | After |
+|---|---|---|
+| `field` | 1.02 to 1.04 µs | 1.00 to 1.03 µs |
+| `page` | 304 to 308 µs | 222 to 228 µs, 27% faster |
+| `page_projected` | 78.9 to 80.2 µs | 80.2 to 84.6 µs, a path that decompresses nothing |
+| `all_rows` | 58.6 to 59.5 ms | 42.1 to 45.0 ms, 27% faster |
+
+Bytes allocated a read: `page` 6,975,796 to 422,046, `all_rows` 1,402,353,634 to 91,603,634.
+`a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_short_is_corrupted`
+(`engine/tests/compression.rs`) reads back a frame that records its size, one that records none and one past 16 MiB,
+and refuses a frame cut short as `CORRUPTED`; in disposable copies it fails with the streaming path removed and with
+the one-call path's error ignored.
+
+**2. Kept** (`63ba2f3`). Four runs a side against `574797f`: `all_rows` 42.6 to 43.4 ms before, 40.9 to 41.9 after,
+every run after faster than every run before (4% on the means, against a 0.8 ms spread before); `page` 221 to 236 µs
+to 214 to 220; `page_projected`, whose per-field reads lose the same copy, 80.6 to 87.5 µs to 77.8 to 79.6; `field`
+unchanged. Allocations a read: `page` 5,124 to 4,684, `all_rows` 984,053 to 896,053.
+
+Through the binding after both, load 9: `readSync` 2.0 µs, 251 µs, 80.5 µs and 46.4 ms, from 2.1, 340, 80.6 and 64.0;
+msgpackr's decoding unchanged, 0.4 µs, 79.6 µs, 11.9 µs and 21.7 ms, which apack's companion plan owns.
+
+The page's profile after: `values::unstored`, `ZSTD_freeDCtx` and the kernel's reclaim are out of its top; the field
+scan is 25%, the key decoding 22% and vector growth 21%. Those are the next costs, outside this plan's two candidates:
+reopen it on a read whose profile they lead.
+
+Checks on `63ba2f3`: `cargo fmt`, workspace clippy, `cargo nextest run --workspace` (339 passed), doc tests,
+`check-generated`, `check-one-lmdb`, the binding's build, typecheck and 37 tests.

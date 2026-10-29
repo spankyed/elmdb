@@ -162,6 +162,12 @@ Acceptance:
   symbols (`debug = "line-tables-only"` on a profiling profile, never the release one).
 - One recorded profile attributes a known cost to a named Rust function, so the method is shown to work.
 
+`[profile.profiling]` and `testing.md`'s command profile `examples/profile-reads`, one of the read benchmark's reads
+repeated. Its profile of a page of whole rows attributed 29% of the read to `values::unstored`, 12% to `ZSTD_freeDCtx`
+and 20% to the kernel's reclaim of freed blocks: a decompression context made for every value, which the
+[read allocation plan](read-allocation-codec.md) then removed (`../evidence/read-allocation-codec.md`). The binding under
+Node isn't profiled yet: its release build has no line tables.
+
 ## 7. Instruction-count benchmarks
 
 Use [iai-callgrind](https://github.com/iai-callgrind/iai-callgrind) for the operations Criterion times. It counts
