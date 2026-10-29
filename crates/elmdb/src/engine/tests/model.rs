@@ -2,7 +2,8 @@
 //! so they collide, refer to each other and are refused, checked after every operation against a reference model kept
 //! as plainly as a model can be. The engine must hold what the model holds, refuse what it refuses, and keep every
 //! derived key in step: a type's live and trashed entities in creation order, its count, each value index's entries,
-//! the role index, each entity's edges out and in, and what a text index matches.
+//! the role index, each entity's edges out and in, and what a text index matches, whether maintained by writes or
+//! derived again by a rebuild.
 
 use std::collections::BTreeMap;
 
@@ -19,6 +20,9 @@ const IDS: [&str; 6] = ["Task-1", "Task-2", "Task-3", "Task-4", "Note-1", "Note-
 const KEYS: [&str; 3] = ["a", "b", "c"];
 const KINDS: [&str; 2] = ["refs", "blocks"];
 const ROLES: [&str; 2] = ["r1", "r2"];
+/// Every index rebuilt, or one of each kind
+const REBUILDS: [Option<(&str, &str)>; 4] =
+    [None, Some(("Task", "a")), Some(("Note", "text")), Some(("Note", "grams"))];
 /// The engine's own fields, which the model leaves out of a row
 const ENGINE_FIELDS: [&str; 5] = ["createdAt", "updatedAt", "shortCode", "trashedAt", "role"];
 
@@ -119,6 +123,11 @@ enum Step {
     },
     /// The store refuses the next commit it is asked to make, as a full disk would
     RefuseNext,
+    /// Derived data deleted and derived again from primary data, every index's or one's: the reconstruction `check()`
+    /// shares, so only the model's answers can tell it wrong
+    Rebuild {
+        index: Option<(&'static str, &'static str)>,
+    },
 }
 
 fn value() -> impl Strategy<Value = Json> {
@@ -186,7 +195,8 @@ fn unit_of(steps: BoxedStrategy<Step>) -> BoxedStrategy<Step> {
 /// Any step: a write, a unit of writes (one of them sometimes a unit of its own), or the store refusing a commit
 fn step() -> BoxedStrategy<Step> {
     let unit_write = prop_oneof![4 => write(), 1 => unit_of(write())].boxed();
-    prop_oneof![8 => write(), 2 => unit_of(unit_write), 1 => Just(Step::RefuseNext)].boxed()
+    let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index });
+    prop_oneof![8 => write(), 2 => unit_of(unit_write), 1 => Just(Step::RefuseNext), 1 => rebuild].boxed()
 }
 
 /// Every id created first, with fields of its own, so what follows lands on data; then single steps, and now and then
@@ -405,6 +415,8 @@ impl Model {
                     return Ok(());
                 }
             }
+            // What the model holds is primary data, which a rebuild leaves as it is
+            Step::Rebuild { .. } => {}
             Step::RefuseNext => unreachable!("only at the top"),
         }
         Ok(())
@@ -531,7 +543,11 @@ fn op_of_plain(step: &Step) -> Json {
         Step::Restore { id } => json!({ "op": "restore", "id": id }),
         Step::Grant { id, role } => json!({ "op": "grant", "id": id, "role": role }),
         Step::Revoke { id, role } => json!({ "op": "revoke", "id": id, "role": role }),
-        Step::RemoveRelation { .. } | Step::MoveRelation { .. } | Step::Unit { .. } | Step::RefuseNext => {
+        Step::RemoveRelation { .. }
+        | Step::MoveRelation { .. }
+        | Step::Unit { .. }
+        | Step::RefuseNext
+        | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
     }
@@ -559,6 +575,7 @@ fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
             crate::failpoints::fail_once_at(crate::failpoints::points::COMMIT, db.path());
             Ok(())
         }
+        Step::Rebuild { index } => db.rebuild(*index),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -802,6 +819,25 @@ fn derived_reads() -> Vec<(String, Json)> {
                 ));
             }
         }
+        // Ordered, whole and its first one or three, the path that keeps only the first: and a filter's first two
+        for field in ["a", "b"] {
+            for descending in [false, true] {
+                for limit in [None, Some(1), Some(3)] {
+                    let mut steps = vec![json!({ "step": "orderBy", "field": field, "descending": descending })];
+                    steps.extend(limit.map(|n| json!({ "step": "limit", "n": n })));
+                    let label = format!(
+                        "{t} order {field} {} {}",
+                        if descending { "desc" } else { "asc" },
+                        limit.map_or("all".to_owned(), |n| n.to_string())
+                    );
+                    out.push((label, ids(start.clone(), json!(steps), "live")));
+                }
+            }
+            for probe in [3, 5] {
+                let steps = json!([{ "step": "where", "field": field, "value": probe }, { "step": "limit", "n": 2 }]);
+                out.push((format!("{t} first 2 where {field} {probe}"), ids(start.clone(), steps, "live")));
+            }
+        }
         if t == "Note" {
             for n in 0..GREPS.len() {
                 out.push((format!("{t} grep {n}"), ids(start.clone(), json!([grep_step(n)]), "live")));
@@ -864,6 +900,29 @@ fn plans_of(db: &Database) -> BTreeMap<String, Json> {
         .collect()
 }
 
+/// How `orderBy` orders two values: booleans, numbers, strings by the root collation, a list or map by its JSON, then
+/// a missing or null value
+fn ordered_as(
+    collator: &icu_collator::CollatorBorrowed<'static>,
+    a: Option<&Json>,
+    b: Option<&Json>,
+) -> std::cmp::Ordering {
+    let class = |v: Option<&Json>| match v {
+        None | Some(Json::Null) => 4,
+        Some(Json::Bool(_)) => 0,
+        Some(Json::Number(_)) => 1,
+        Some(Json::String(_)) => 2,
+        Some(_) => 3,
+    };
+    class(a).cmp(&class(b)).then_with(|| match (a, b) {
+        (Some(Json::Bool(x)), Some(Json::Bool(y))) => x.cmp(y),
+        (Some(Json::Number(x)), Some(Json::Number(y))) => x.as_f64().partial_cmp(&y.as_f64()).unwrap(),
+        (Some(Json::String(x)), Some(Json::String(y))) => collator.compare(x, y),
+        (Some(x), Some(y)) if class(a) == 3 => collator.compare(&x.to_string(), &y.to_string()),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
 /// What the derived reads should answer, from the model
 fn plans_from(m: &Model) -> BTreeMap<String, Json> {
     let mut by_seq: Vec<(&String, &Entity)> = m.entities.iter().collect();
@@ -874,6 +933,7 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
         Some(Json::Array(items)) => items.iter().any(|v| v == probe),
         Some(v) => v == probe,
     };
+    let collator = icu_collator::CollatorBorrowed::try_new(Default::default(), Default::default()).unwrap();
     let mut out = BTreeMap::new();
     for (label, _) in derived_reads() {
         let words: Vec<&str> = label.split(' ').collect();
@@ -948,6 +1008,25 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                         .map(|(id, _)| id)
                         .collect::<Vec<_>>()
                 ),
+                ["order", field, direction, limit] => {
+                    let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    let take = limit.parse().unwrap_or(usize::MAX);
+                    json!(ordered.into_iter().take(take).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["first", n, "where", field, probe] => {
+                    let probe = Json::from(probe.parse::<i64>().unwrap());
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && holds(e.fields.get(*field), &probe))
+                            .take(n.parse().unwrap())
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
                 ["where", field, rest @ ..] => {
                     let probe = match rest {
                         ["long", digit] => Json::from(digit.repeat(2100)),

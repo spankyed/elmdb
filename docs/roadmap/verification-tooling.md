@@ -136,6 +136,16 @@ Acceptance:
 - A mutation in shared derivation that `check()` cannot see (H04's case) fails the model.
 - Expanded to schema changes and units only once the first model has caught something or proven cheap to keep.
 
+The model harness (`engine/tests/model.rs`) was already this model, on plain proptest: random step sequences over a
+pool of ids, shrunk to the shortest by dropping steps, every refusal compared with the model's, and every derived read
+answered by the model alone, units and savepoints included. It kept that form rather than moving to
+proptest-state-machine, whose state-dependent generation a harness that compares refusals has no use for. What it
+lacked was a rebuild, so derive.rs's reconstruction, which `check()` shares, was never compared with the model: a
+workload now rebuilds every index or one, and the model compares an order by a field, whole and its first one or three,
+and a filter's first two. Mutations in disposable copies: a single-index rebuild that skips an entity passes the old
+harness and the hand-written H04 test and fails this one; a count derived one too many fails both harnesses and H04's
+test, which, the model now covering it, goes.
+
 ## 6. Native profiling
 
 Use [samply](https://github.com/mstange/samply) for native CPU profiles of the engine and of the binding under Node.
