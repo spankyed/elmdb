@@ -59,7 +59,7 @@ machine's spread.
 - **Tracked range, pinned further:** over a unique kind, which reads no edge's ends, an unlink of the edge the read
   stopped at writes into it, and one before it doesn't. A unit's read walks back over its own new edge.
 - **CI:** the in-diff mutation jobs, Linux and Windows, caught 42 of 42.
-- **Suites:** `cargo nextest run --workspace` passed all 346 tests, the five new ones and the model harness among them.
+- **Suites:** `cargo nextest run --workspace` passed all 345 tests, the five new ones and the model harness among them.
 
 ## Not admitted
 
