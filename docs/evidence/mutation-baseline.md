@@ -34,7 +34,7 @@ A timeout is a mutant that makes a loop never end, which the suite's deadline ca
 
 Of elmdb's 90: 47 killed by new specs, 13 gone with the dead code they were in, 11 excluded as answering what the code
 answers, 2 left as a finding, and 17 in code this Mac doesn't compile (`backup.rs`'s publication): its Linux 3
-killed in a Linux container, and its Windows 14 a finding below.
+killed in a Linux container, and its Windows 14 read on Windows below.
 
 **What the survivors showed untested**, each now a spec: a new map's size; the read-only open's message, and a writable
 open refused the same files without it; which stores run group commit, and the syncs it counts; an idle read
@@ -63,10 +63,9 @@ exactly half the map.
 - **An acquisition error other than an occupied claim** (`process.rs`, `claim_process`): the guard that tells them
   apart is mutated to treat every error as occupied, and nothing a test can do makes the kernel refuse a claim
   otherwise. Left as a survivor.
-- **Windows code isn't mutated** (`backup.rs`' `move_file` and Windows `publish`, 14; `process.rs`' named event and
-  module pin, 7): it compiles only on the Windows CI target, which builds and tests it but where cargo-mutants doesn't
-  run, and `scripts/check-windows-backup-mutation.py` mutates one of its lines, the attribute it clears. Left as
-  survivors until a Windows machine runs cargo-mutants over it.
+- **`pin_module`** (`process.rs`, 1): replaced with `Ok(())`, the Rust suite passes, and the binding's
+  `test/process.test.mjs` fails "a claim outlives its first worker" with `ALREADY_LOADED`; a suite cargo-mutants doesn't
+  run, as for `claim`'s mapping. Left as a survivor.
 - **The claim for any other platform** (`process.rs`, 1): compiled by no target elmdb builds, so no reading reaches it.
 - **`claim`'s mapping** (`process.rs`, 1): its napi error links only in Node, so the Rust suite can't call it, and the
   binding's suite that does (`test/process.test.mjs`, refused as `ALREADY_LOADED`, run by CI in every target's binding
@@ -80,15 +79,14 @@ refused as `ALREADY_LOADED`, drops it and claims. On this Mac, 20 mutants: 6 cau
 
 - `claim`'s mapping and the acquisition error, the findings above;
 - Linux's claim (3), read below;
-- Windows' named event and module pin (7), compiled and run only by the Windows target;
+- Windows' named event and module pin (7), read on Windows below;
 - the claim for any other platform (1), which no target elmdb builds compiles.
 
 **The Linux reading**, in the container on `23d5515`: `process.rs` against elmdb-node's suite, 20 mutants, 5 caught,
 2 unviable, 13 missed. Linux's claim is all caught or unviable (`acquire_claim`'s `AddrInUse` check caught; its and
 `claim_address`'s whole answers don't compile), and the 13 missed are the macOS (3), Windows (7) and other-platform
 (1) code and the two findings. `backup.rs`' Linux fallback, `exclusive_rename_or_link`, against the fast suite: 3
-mutants, 3 caught. `backup.rs`' other 14 are `cfg(windows)`: the Windows target builds and tests them, and
-`scripts/check-windows-backup-mutation.py` mutates the attribute they clear.
+mutants, 3 caught. `backup.rs`' other 14 are `cfg(windows)`, read on Windows below.
 
 CI on `4d5d0d5` (run 40782911891), whose source is the branch's final source, passed all eight targets and the Linux
 checks: the Windows target ran the Windows claim, pin and publication code under every suite and the attribute mutation
@@ -112,3 +110,25 @@ against the fast suite: 447 mutants in 84 minutes, 335 caught, 61 unviable, 19 m
 
 The 19 missed are the ones triaged above as compiled elsewhere or a finding: `backup.rs`' Linux fallback (3, caught in
 the Linux container) and Windows code (14), and `write_committed`'s `MAX_GROWTHS` bound (2).
+
+## The Windows reading
+
+On the Windows development VM (`../references/guides/windows-development-vm.md` in apack; Windows NT 10.0.26100, two
+cores, rustc 1.99.1, cargo-mutants 27.1.0 at `-j 2`), on `8cba243`, `backup.rs` against the fast suite and `process.rs`
+against elmdb-node's. Of the Windows code's 21 mutants, 15 caught and 6 missed; every other missed mutant is code for
+another platform or a finding above.
+
+| Windows code | Mutants | Caught | Missed |
+|---|---|---|---|
+| `backup.rs`' `move_file` and `publish` | 14 | 10 | 4 |
+| `process.rs`' named event, claim and module pin | 7 | 5 | 2 |
+
+**What became of the 6:**
+
+- `move_file`'s temporary-attribute check, `&` to `^`, and its `NORMAL` fallback, `==` to `!=`: killed by
+  `publishing_clears_the_temporary_attribute_and_keeps_every_other`, a Windows spec publishing a file temporary, temporary
+  and hidden, and hidden alone. A re-run of lines 103 and 106 on the branch: 4 mutants, 4 caught.
+- `move_file`'s check, `&` to `|`, which always takes the branch, and for a file without the attribute sets the ones it
+  already has: excluded.
+- `MoveFileExW`'s and `GetModuleHandleExW`'s flags, `|` to `^` (2): disjoint bits, which both join alike. Excluded.
+- `pin_module` replaced with `Ok(())`: the finding above, which the binding's suite catches.

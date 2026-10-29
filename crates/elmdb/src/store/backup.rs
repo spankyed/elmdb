@@ -155,6 +155,43 @@ fn exclusive_rename_or_link(source: &Path, target: &Path, renamed: std::io::Resu
     }
 }
 
+#[cfg(all(test, windows))]
+mod windows_publication_tests {
+    use super::*;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::MetadataExt;
+
+    const HIDDEN: u32 = 0x2;
+    const ARCHIVE: u32 = 0x20;
+    const NORMAL: u32 = 0x80;
+    const TEMPORARY: u32 = 0x100;
+
+    fn set_attributes(path: &Path, attributes: u32) {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
+        }
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        // SAFETY: wide is a live NUL-terminated UTF-16 path for the call's duration
+        assert_ne!(unsafe { SetFileAttributesW(wide.as_ptr(), attributes) }, 0, "{}", std::io::Error::last_os_error());
+    }
+
+    #[test]
+    fn publishing_clears_the_temporary_attribute_and_keeps_every_other() {
+        for (before, after) in [(TEMPORARY, 0), (TEMPORARY | HIDDEN, HIDDEN), (HIDDEN, HIDDEN)] {
+            let dir = tempfile::tempdir().unwrap();
+            let source = dir.path().join("source");
+            let target = dir.path().join("target");
+            std::fs::write(&source, b"complete").unwrap();
+            set_attributes(&source, before);
+            publish_new(&source, &target).unwrap();
+            // Windows marks a moved file for archiving, and NORMAL is only ever a file's sole attribute
+            let published = std::fs::metadata(&target).unwrap().file_attributes();
+            assert_eq!(published & !(ARCHIVE | NORMAL), after, "published {published:#x} from {before:#x}");
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod publication_tests {
     use super::*;
