@@ -81,8 +81,10 @@ the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants i
 tree), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
 (`docs/evidence/mutation-baseline.md`, The Windows reading).
 
-CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into: each
-missed mutant is annotated on its line and listed in the job's summary, and the job fails only when cargo-mutants does.
+CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into, on Linux
+and on Windows, so a change to code only one of them compiles is mutated where it runs: each missed mutant is annotated
+on its line and listed in the job's summary, and the job fails only when cargo-mutants does. A change to code for the
+other platform shows its mutants as missed there, since the job compiles them to nothing.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 
@@ -96,8 +98,8 @@ exactly what the code does; no assertion is loosened for either. An exclusion na
 an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. A line
 that moves shows the excluded mutant as missed, and can hide a mutant of the same kind in the same function that moves
 onto that line; the `--list --no-config` diff above shows what each exclusion hides, and is the check after an edit. The hand-made mutation scripts that remain
-(`scripts/check-process-publication-mutations.py`, `check-windows-backup-mutation.py`,
-`check-maintenance-verification.py`) make platform-specific or heap and timing changes that cargo-mutants doesn't.
+(`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`) make changes cargo-mutants
+doesn't: one expression swapped for another, and heap and timing regressions.
 
 ## Derived data
 
