@@ -68,6 +68,9 @@ exactly half the map.
   run, and `scripts/check-windows-backup-mutation.py` mutates one of its lines, the attribute it clears. Left as
   survivors until a Windows machine runs cargo-mutants over it.
 - **The claim for any other platform** (`process.rs`, 1): compiled by no target elmdb builds, so no reading reaches it.
+- **`claim`'s mapping** (`process.rs`, 1): its napi error links only in Node, so the Rust suite can't call it, and the
+  binding's suite that does (`test/process.test.mjs`, refused as `ALREADY_LOADED`, run by CI in every target's binding
+  job) isn't one cargo-mutants runs. Left as a survivor.
 
 ## `process.rs`
 
@@ -75,23 +78,21 @@ exactly half the map.
 answering a code and a message, and `claim` maps it. A spec in a child process holds a claim, finds `claim_process`
 refused as `ALREADY_LOADED`, drops it and claims. On this Mac, 20 mutants: 6 caught, 1 unviable, 13 missed:
 
-- `claim`'s mapping, run by the binding's own suite (`test/process.test.mjs`, refused as `ALREADY_LOADED`), which CI
-  runs in every target's binding job;
-- the finding above;
+- `claim`'s mapping and the acquisition error, the findings above;
 - Linux's claim (3), read below;
 - Windows' named event and module pin (7), compiled and run only by the Windows target;
 - the claim for any other platform (1), which no target elmdb builds compiles.
 
 **The Linux reading**, in the container on `23d5515`: `process.rs` against elmdb-node's suite, 20 mutants, 5 caught,
 2 unviable, 13 missed. Linux's claim is all caught or unviable (`acquire_claim`'s `AddrInUse` check caught; its and
-`claim_address`'s whole answers don't compile), and the 13 missed are the macOS and Windows code, `claim`'s mapping and
-the finding. `backup.rs`' Linux fallback, `exclusive_rename_or_link`, against the fast suite: 3 mutants, 3 caught.
-`backup.rs`' other 14 are `cfg(windows)`: the Windows target builds and tests them, and
+`claim_address`'s whole answers don't compile), and the 13 missed are the macOS (3), Windows (7) and other-platform
+(1) code and the two findings. `backup.rs`' Linux fallback, `exclusive_rename_or_link`, against the fast suite: 3
+mutants, 3 caught. `backup.rs`' other 14 are `cfg(windows)`: the Windows target builds and tests them, and
 `scripts/check-windows-backup-mutation.py` mutates the attribute they clear.
 
-CI on this branch's head (`4d5d0d5`, run 40782911891) passed all eight targets and the Linux checks: the Windows
-target ran the Windows claim, pin and publication code under every suite and the attribute mutation script, every
-target's binding job ran `test/process.test.mjs` over `claim`'s mapping, and the Linux job ran
+CI on `4d5d0d5` (run 40782911891), whose source is the branch's final source, passed all eight targets and the Linux
+checks: the Windows target ran the Windows claim, pin and publication code under every suite and the attribute mutation
+script, every target's binding job ran `test/process.test.mjs` over `claim`'s mapping, and the Linux job ran
 `check-process-publication-mutations.py`.
 
 ## The end state

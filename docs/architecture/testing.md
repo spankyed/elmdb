@@ -66,8 +66,8 @@ cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip m
 
 Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
 the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants installed in it, against a copy of the
-tree), and the Windows ones are run by the Windows CI target and `scripts/check-windows-backup-mutation.py`
-(`docs/evidence/mutation-baseline.md`).
+tree). The Windows ones have no reading: the Windows CI target builds and tests that code but doesn't mutate it, and
+`scripts/check-windows-backup-mutation.py` mutates one of its lines (`docs/evidence/mutation-baseline.md`).
 
 Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
 test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
