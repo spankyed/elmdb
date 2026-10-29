@@ -60,8 +60,8 @@ and stay, each saying why in its header. The baseline over `store/`, `engine/wat
 killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
 would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
 Linux container, the Windows 14 a finding. `process.rs` runs against elmdb-node's suite, its Linux claim caught in a
-Linux container; its Windows code and an acquisition error other than an occupied claim are findings. Left: CI over
-`--in-diff`, and cargo-mutants on a Windows machine for the Windows code.
+Linux container; its Windows code, `claim`'s napi mapping and an acquisition error other than an occupied claim are
+findings. Left: CI over `--in-diff`, and cargo-mutants on a Windows machine for the Windows code.
 
 ## 2. Named failpoints
 
