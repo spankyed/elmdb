@@ -2,11 +2,11 @@
 
 What proves elmdb correct, and where each proof lives. `cargo nextest run --workspace` runs the Rust suites, each test in
 its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's. A test that hangs is
-killed at its deadline in `.config/nextest.toml`, ten seconds for a watch test, where a regression deadlocks a
-delivery, and four minutes for any other; the rest run on. A filter that selects no test fails the run. A test still
-runs the test binary again where it needs a second process: the crash harnesses' killed writers, another process's
-commit, schema change and map growth seen by this one, a read-only open beside another process's writer, and the
-process claim.
+killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test, where a regression deadlocks a
+delivery, fifteen minutes for the model harness, which takes four on CI's Intel macOS runner, and four for any other;
+the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
+a second process: the crash harnesses' killed writers, another process's commit, schema change and map growth seen by
+this one, a read-only open beside another process's writer, and the process claim.
 
 ## The model harness
 
