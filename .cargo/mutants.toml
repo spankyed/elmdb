@@ -85,4 +85,10 @@ exclude_re = [
     # build_chunk's unique check skips the entity's own entry: a write checks a unique value against the rows while the
     # index is unbuilt, so an entity's own entry and another's for the same value are never both in the index
     "derive.rs:587:.*replace == with != in build_chunk",
+    # move_file's temporary-attribute check: clearing an attribute a file doesn't have sets the attributes it has
+    "backup.rs:103:.*replace & with \\| in move_file",
+    # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
+    # from-address and pin
+    "backup.rs:.*replace \\| with \\^ in move_file",
+    "process.rs:.*replace \\| with \\^ in pin_module",
 ]
