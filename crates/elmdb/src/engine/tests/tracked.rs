@@ -261,48 +261,8 @@ fn a_panicking_listener_is_removed_without_changing_the_commit_outcome() {
     db.close().unwrap();
 }
 
-fn bounded_watch_child(test: &str) -> bool {
-    // A regression must fail within a deadline rather than hang the entire test runner.
-    const CHILD: &str = "ELMDB_TEST_BOUNDED_WATCH_CHILD";
-    if std::env::var_os(CHILD).as_deref() != Some(std::ffi::OsStr::new(test)) {
-        let marker = tempfile::tempdir().unwrap();
-        let entered = marker.path().join("entered");
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
-            .env(CHILD, test)
-            .env("ELMDB_TEST_BOUNDED_WATCH_MARKER", &entered)
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
-            if let Some(status) = child.try_wait().unwrap() {
-                assert!(status.success(), "callback close subprocess failed: {status}");
-                assert_eq!(
-                    std::fs::read_to_string(&entered).unwrap(),
-                    "entered",
-                    "the selected child test must actually run"
-                );
-                return true;
-            }
-            if std::time::Instant::now() >= deadline {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!("callback close subprocess exceeded ten seconds");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-    if let Some(marker) = std::env::var_os("ELMDB_TEST_BOUNDED_WATCH_MARKER") {
-        std::fs::write(marker, "entered").unwrap();
-    }
-    false
-}
-
 #[test]
 fn callback_close_refuses_before_taking_the_store() {
-    if bounded_watch_child("engine::tests::tracked::callback_close_refuses_before_taking_the_store") {
-        return;
-    }
     use crate::error::ErrorCode;
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(open(&dir));
@@ -333,9 +293,6 @@ fn callback_close_refuses_before_taking_the_store() {
 
 #[test]
 fn callback_schema_unwatch_and_nested_delivery_terminate() {
-    if bounded_watch_child("engine::tests::tracked::callback_schema_unwatch_and_nested_delivery_terminate") {
-        return;
-    }
     for action in ["schema", "unwatch", "nested"] {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(open(&dir));
@@ -401,9 +358,6 @@ fn callback_schema_unwatch_and_nested_delivery_terminate() {
 
 #[test]
 fn database_cleanup_after_callback_tls_destruction_terminates() {
-    if bounded_watch_child("engine::tests::tracked::database_cleanup_after_callback_tls_destruction_terminates") {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().to_owned();
     std::thread::spawn(move || {
@@ -423,9 +377,6 @@ fn database_cleanup_after_callback_tls_destruction_terminates() {
 
 #[test]
 fn watch_delivery_from_thread_exit_destructors_is_guarded() {
-    if bounded_watch_child("engine::tests::tracked::watch_delivery_from_thread_exit_destructors_is_guarded") {
-        return;
-    }
     struct OnExit(Option<Arc<Database>>);
     impl Drop for OnExit {
         fn drop(&mut self) {
@@ -573,11 +524,6 @@ fn measure_tracking_contention() {
 
 #[test]
 fn watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_delivery() {
-    if bounded_watch_child(
-        "engine::tests::tracked::watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_delivery",
-    ) {
-        return;
-    }
     use std::sync::atomic::{AtomicBool, Ordering};
     let schema = |task: bool| {
         crate::schema::Schema::from_json(&json!({
@@ -645,9 +591,6 @@ fn watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_de
 
 #[test]
 fn a_threaded_read_holds_its_schema_before_taking_the_snapshot() {
-    if bounded_watch_child("engine::tests::tracked::a_threaded_read_holds_its_schema_before_taking_the_snapshot") {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(open(&dir));
     let entered = Arc::new(std::sync::Barrier::new(2));
@@ -673,11 +616,6 @@ fn a_threaded_read_holds_its_schema_before_taking_the_snapshot() {
 
 #[test]
 fn an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schema() {
-    if bounded_watch_child(
-        "engine::tests::tracked::an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schema",
-    ) {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     db.primary_snapshot(|declared, snapshot| {
@@ -694,11 +632,6 @@ fn an_export_snapshot_keeps_its_schema_while_callbacks_can_change_the_live_schem
 
 #[test]
 fn dropping_a_listeners_last_database_reference_does_not_wait_on_its_unit() {
-    if bounded_watch_child(
-        "engine::tests::tracked::dropping_a_listeners_last_database_reference_does_not_wait_on_its_unit",
-    ) {
-        return;
-    }
     for action in ["unwatch", "panic"] {
         let dir = tempfile::tempdir().unwrap();
         let db = Arc::new(open(&dir));
@@ -766,11 +699,6 @@ fn a_panicking_watch_read_is_removed_and_does_not_hide_failed_durability() {
 
 #[test]
 fn a_unit_opened_between_writer_checks_is_refused_without_holding_schema() {
-    if bounded_watch_child(
-        "engine::tests::tracked::a_unit_opened_between_writer_checks_is_refused_without_holding_schema",
-    ) {
-        return;
-    }
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(open(&dir));
     let (ready, queued) = std::sync::mpsc::channel();

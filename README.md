@@ -27,6 +27,7 @@ sets with tracked reads, the admin operations and the CLI, with the model, crash
 (`docs/architecture/testing.md`). The order of work, and what comes next, is `docs/roadmap.md`.
 
 ```sh
-cargo test --workspace   # the Rust suites
+cargo nextest run --workspace   # the Rust suites
+cargo test --workspace --doc    # and their doc tests
 npm run build && npm test  # the Node binding, and its tests
 ```

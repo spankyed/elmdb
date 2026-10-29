@@ -1,0 +1,16 @@
+# Each test runs in its own process, so a test that hangs is killed at its deadline and the rest run on.
+
+# What CI installs, and the oldest that reads this file as written
+nextest-version = "0.9.148"
+
+[profile.default]
+# The engine's model harness takes a minute on a laptop; nothing else takes a fifth of that
+slow-timeout = { period = "60s", terminate-after = 4 }
+
+# A watch callback that closes, unwatches or delivers again from inside a delivery deadlocks when it regresses
+[[profile.default.overrides]]
+filter = "test(/^engine::tests::tracked::/)"
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+[profile.ci]
+fail-fast = false

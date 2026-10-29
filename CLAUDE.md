@@ -20,7 +20,8 @@ Run what your change touches, and all of them before a commit that lands an engi
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace  # each test in its own process, under .config/nextest.toml's deadlines
+cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
