@@ -1,7 +1,6 @@
 # Read allocations, copies and codecs
 
-Status: planned, 2026-10-29. Documentation only. Surveyed elmdb `main` at
-`6007d8607372716ec8e25c302b60610c20411dff`; inspect current source before implementation.
+Status: done, 2026-10-29: [the readings](../evidence/read-allocation-codec.md).
 
 ## Outcome and relationship to existing plans
 
