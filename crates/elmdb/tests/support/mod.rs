@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use elmdb::engine::batch::Batch;
 use elmdb::engine::maintenance::Load;
 use elmdb::engine::plan::Reads;
 use elmdb::schema::{SCHEMA_LANGUAGE, Schema};
@@ -20,6 +21,12 @@ impl Fixture {
     /// Eight 96-byte indexed values per entity, optional text with 16 distinct words per document, and optional
     /// 8 KiB relation payloads. Seeding and initial derivation are outside all measurement windows.
     pub fn new(rows: usize, text: bool, relations: bool) -> Self {
+        Self::with_tags(rows, 96, text, relations)
+    }
+
+    /// The same, each of the eight values `tag_bytes` long: at 250, just under the longest string a value index holds
+    /// (256 bytes), an entity's entries are about 2.4 KB, so a few thousand entities fill a sorter
+    pub fn with_tags(rows: usize, tag_bytes: usize, text: bool, relations: bool) -> Self {
         let mut indexes = json!({"tags": {"kind":"value", "fields":["tags"]}});
         if text {
             indexes["text"] = json!({"kind":"text", "fields":{"body":{}}});
@@ -54,7 +61,7 @@ impl Fixture {
             } else {
                 "body ".repeat(200)
             };
-            let tags = (0..8).map(|j| Value::from(format!("tag{j:02}{}", "x".repeat(91)))).collect();
+            let tags = (0..8).map(|j| Value::from(format!("tag{j:02}{}", "x".repeat(tag_bytes - 5)))).collect();
             let fields =
                 BTreeMap::from([("tags".to_owned(), Value::Array(tags)), ("body".to_owned(), Value::from(body))]);
             loads.push(Load::Entity { id: format!("Doc-{i:08}"), fields, trashed: false });
@@ -72,6 +79,59 @@ impl Fixture {
         }
         db.bulk_load(&loads).unwrap();
         drop(loads);
+        Self { db, directory, rows }
+    }
+
+    /// One document an entity, each embedded in a `dims`-dimension vector index the way a caller's worker embeds:
+    /// its pending chunks read, and a vector written for each. Seeding and embedding are outside all measurement windows
+    // The heap test's alone, where the benchmark and the profiling example share this module
+    #[allow(dead_code)]
+    pub fn with_vectors(rows: usize, dims: usize) -> Self {
+        let schema = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types":{"Doc":{"fields":{"body":{"type":"string"}},"indexes":{
+                "meaning":{"kind":"vector", "from":["body"], "chunk":"paragraph", "dims":dims, "model":"m"}
+            }}}
+        }))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let db =
+            Database::open(directory.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+                .unwrap();
+        let loads: Vec<Load> = (0..rows)
+            .map(|i| Load::Entity {
+                id: format!("Doc-{i:08}"),
+                fields: BTreeMap::from([("body".to_owned(), Value::from(format!("document {i}")))]),
+                trashed: false,
+            })
+            .collect();
+        db.bulk_load(&loads).unwrap();
+        let pending: Reads = serde_json::from_value(json!({"reads":[
+            {"read":"pendingEmbeddings", "type":"Doc", "index":"meaning", "limit":rows}
+        ]}))
+        .unwrap();
+        let answers: serde_json::Value = rmp_serde::from_slice(&db.read(&pending).unwrap()).unwrap();
+        let chunks = answers[0]["chunks"].as_array().unwrap();
+        assert_eq!(chunks.len(), rows);
+        for (number, batch) in chunks.chunks(1000).enumerate() {
+            let ops = batch
+                .iter()
+                .enumerate()
+                .map(|(n, c)| {
+                    // A direction of its own for each document, so the graph has neighbours to tell apart
+                    let i = number * 1000 + n;
+                    let vector: Vec<f32> = (0..dims).map(|d| ((i * dims + d) as f32 * 0.618).sin()).collect();
+                    serde_json::from_value(json!({"op":"embed", "id":c["id"], "index":"meaning", "chunk":c["chunk"],
+                        "hash":c["hash"], "model":"m", "vector":vector}))
+                    .unwrap()
+                })
+                .collect();
+            db.write(&Batch { ops, now: None }, false).unwrap();
+        }
+        // An embedding of text a chunk no longer holds would be kept as stale rather than refused, so nothing is left
+        // pending only once every vector was filed
+        let answers: serde_json::Value = rmp_serde::from_slice(&db.read(&pending).unwrap()).unwrap();
+        assert_eq!(answers[0]["chunks"].as_array().unwrap().len(), 0, "every chunk is embedded");
         Self { db, directory, rows }
     }
 
