@@ -186,32 +186,175 @@ fn write() -> BoxedStrategy<Step> {
     .boxed()
 }
 
-fn unit_of(steps: BoxedStrategy<Step>) -> BoxedStrategy<Step> {
-    (prop::collection::vec(steps, 1..6), any::<bool>(), any::<bool>())
+/// A step and whether it was chosen from the model's state to succeed. Shrinking drops an aimed step the model would
+/// refuse once what it was aimed at is gone (`preconditions`), so a shrunk case keeps steps that do what they were
+/// chosen for; an arbitrary one is kept whatever it meets, so refusals are still compared
+#[derive(Debug, Clone)]
+struct Aimed {
+    step: Step,
+    aimed: bool,
+}
+
+/// The model as the state machine carries it: the model, the prelude that made it, and what the last step answered,
+/// which the engine's answer must match
+#[derive(Debug, Clone)]
+struct Reference {
+    model: Model,
+    prelude: Vec<Step>,
+    outcome: Result<(), Refusal>,
+}
+
+/// The workload as a state machine (proptest-state-machine): every id created first, with fields of its own, then
+/// steps chosen from what the model holds, and one in eight chosen blind
+struct ModelMachine;
+
+impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
+    type State = Reference;
+    type Transition = Aimed;
+
+    fn init_state() -> BoxedStrategy<Reference> {
+        prop::collection::vec(fields(), IDS.len())
+            .prop_map(|all| {
+                let prelude: Vec<Step> = IDS.iter().zip(all).map(|(id, fields)| Step::Create { id, fields }).collect();
+                let mut model = Model::default();
+                for step in &prelude {
+                    model.step(step).expect("the prelude creates each id once");
+                }
+                Reference { model, prelude, outcome: Ok(()) }
+            })
+            .boxed()
+    }
+
+    fn transitions(state: &Reference) -> BoxedStrategy<Aimed> {
+        let aimed = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: true });
+        let blind = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: false });
+        let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
+        prop_oneof![
+            7 => aimed(aimed_write(&state.model)),
+            1 => blind(write()),
+            2 => aimed(aimed_unit(&state.model, true)),
+            1 => blind(Just(Step::RefuseNext).boxed()),
+            1 => blind(rebuild),
+        ]
+        .boxed()
+    }
+
+    fn preconditions(state: &Reference, transition: &Aimed) -> bool {
+        !transition.aimed
+            || matches!(
+                state.model.clone().step(&transition.step),
+                Ok(()) | Err("the unit threw" | "the store refused the commit")
+            )
+    }
+
+    fn apply(mut state: Reference, transition: &Aimed) -> Reference {
+        state.outcome = state.model.step(&transition.step);
+        state
+    }
+}
+
+/// The pool entry a model's string names, so a step built from the model holds the same `&'static str` a blind one does
+fn named(pool: &[&'static str], name: &str) -> &'static str {
+    pool.iter().copied().find(|p| *p == name).expect("the model names only the pool's")
+}
+
+/// One write the model would take, chosen from what it holds: an id it has, or lacks for a create; an edge it has; a
+/// key holding a list, or none, for a list's operations
+fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
+    let ids = |keep: &dyn Fn(Option<&Entity>) -> bool| -> Vec<&'static str> {
+        IDS.iter().copied().filter(|id| keep(m.entities.get(*id))).collect()
+    };
+    let existing = ids(&|e| e.is_some());
+    let missing = ids(&|e| e.is_none());
+    let trashed = ids(&|e| e.is_some_and(|e| e.trashed));
+    let edges: Vec<(&'static str, &'static str, &'static str)> =
+        m.edges.keys().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let keys_where = |keep: &dyn Fn(Option<&Json>) -> bool| -> Vec<(&'static str, &'static str)> {
+        existing
+            .iter()
+            .flat_map(|id| KEYS.iter().map(move |key| (*id, *key)))
+            .filter(|(id, key)| keep(m.entities[*id].fields.get(*key)))
+            .collect()
+    };
+    let listable = keys_where(&|v| matches!(v, None | Some(Json::Array(_))));
+    let lists = keys_where(&|v| matches!(v, Some(Json::Array(_))));
+    let removable = if lists.is_empty() { listable.clone() } else { lists };
+
+    let mut options: Vec<(u32, BoxedStrategy<Step>)> = vec![
+        (1, (id(), fields()).prop_map(|(id, fields)| Step::Upsert { id, fields }).boxed()),
+        (1, id().prop_map(|id| Step::TakeLabel { id }).boxed()),
+    ];
+    if !missing.is_empty() {
+        let id = prop::sample::select(missing);
+        options.push((3, (id, fields()).prop_map(|(id, fields)| Step::Create { id, fields }).boxed()));
+    }
+    if !existing.is_empty() {
+        let id = || prop::sample::select(existing.clone());
+        options.extend([
+            (3, (id(), key(), value()).prop_map(|(id, key, value)| Step::Set { id, key, value }).boxed()),
+            (1, (id(), key()).prop_map(|(id, key)| Step::Delete { id, key }).boxed()),
+            (1, id().prop_map(|id| Step::Destroy { id }).boxed()),
+            (1, id().prop_map(|id| Step::Trash { id }).boxed()),
+            (1, (id(), role()).prop_map(|(id, role)| Step::Grant { id, role }).boxed()),
+            (1, (id(), role()).prop_map(|(id, role)| Step::Revoke { id, role }).boxed()),
+            (1, (id(), role()).prop_map(|(id, role)| Step::GrantExclusive { id, role }).boxed()),
+            (1, (id(), key(), value()).prop_map(|(id, key, value)| Step::Merge { id, key, value }).boxed()),
+        ]);
+    }
+    if !listable.is_empty() {
+        let at = prop::sample::select(listable);
+        options.push((2, (at, 0i64..10).prop_map(|((id, key), value)| Step::Append { id, key, value }).boxed()));
+    }
+    if !removable.is_empty() {
+        let at = || prop::sample::select(removable.clone());
+        let member = prop_oneof![
+            (0i64..10).prop_map(Json::from),
+            prop::collection::btree_map("[k-m]", 0i64..3, 1..2).prop_map(|m| json!(m)),
+        ];
+        options.extend([
+            (1, (at(), 0u32..3).prop_map(|((id, key), index)| Step::RemoveAt { id, key, index }).boxed()),
+            (1, (at(), member).prop_map(|((id, key), value)| Step::RemoveValue { id, key, value }).boxed()),
+        ]);
+    }
+    let pairs: Vec<(&'static str, &'static str)> =
+        existing.iter().flat_map(|s| existing.iter().filter(move |t| *t != s).map(move |t| (*s, *t))).collect();
+    if !pairs.is_empty() {
+        let pair = prop::sample::select(pairs);
+        options.push((3, (pair, kind()).prop_map(|((id, target), kind)| Step::Link { id, kind, target }).boxed()));
+    }
+    if !edges.is_empty() {
+        let edge = || prop::sample::select(edges.clone());
+        options.extend([
+            (1, edge().prop_map(|(id, kind, target)| Step::Unlink { id, kind, target }).boxed()),
+            (1, edge().prop_map(|(id, kind, target)| Step::RemoveRelation { id, kind, target }).boxed()),
+        ]);
+        let moves: Vec<_> = edges
+            .iter()
+            .flat_map(|edge| {
+                existing.iter().filter(move |to| **to != edge.0 && **to != edge.2).map(move |to| (*edge, *to))
+            })
+            .collect();
+        if !moves.is_empty() {
+            let moved = prop::sample::select(moves);
+            options.push((
+                1,
+                moved.prop_map(|((id, kind, target), to)| Step::MoveRelation { id, kind, target, to }).boxed(),
+            ));
+        }
+    }
+    if !trashed.is_empty() {
+        options.push((1, prop::sample::select(trashed).prop_map(|id| Step::Restore { id }).boxed()));
+    }
+    prop::strategy::Union::new_weighted(options).boxed()
+}
+
+/// Writes made as one unit, each chosen from the model as the unit starts, one in four throwing; at the top, one of them
+/// sometimes a unit of its own, a savepoint
+fn aimed_unit(m: &Model, top: bool) -> BoxedStrategy<Step> {
+    let inner = if top { prop_oneof![4 => aimed_write(m), 1 => aimed_unit(m, false)].boxed() } else { aimed_write(m) };
+    (prop::collection::vec(inner, 1..6), prop::bool::weighted(0.25), any::<bool>())
         .prop_map(|(steps, throws, durable)| Step::Unit { steps, throws, durable })
         .boxed()
-}
-
-/// Any step: a write, a unit of writes (one of them sometimes a unit of its own), or the store refusing a commit
-fn step() -> BoxedStrategy<Step> {
-    let unit_write = prop_oneof![4 => write(), 1 => unit_of(write())].boxed();
-    let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index });
-    prop_oneof![8 => write(), 2 => unit_of(unit_write), 1 => Just(Step::RefuseNext), 1 => rebuild].boxed()
-}
-
-/// Every id created first, with fields of its own, so what follows lands on data; then single steps, and now and then
-/// an edge linked, unlinked and linked again, which independent steps over 72 possible edges almost never make
-fn workload() -> impl Strategy<Value = Vec<Step>> {
-    let prelude = prop::collection::vec(fields(), IDS.len())
-        .prop_map(|all| IDS.iter().zip(all).map(|(id, fields)| Step::Create { id, fields }).collect::<Vec<_>>());
-    let relink = (id(), kind(), id()).prop_map(|(id, kind, target)| {
-        vec![Step::Link { id, kind, target }, Step::Unlink { id, kind, target }, Step::Link { id, kind, target }]
-    });
-    let chunks = prop::collection::vec(prop_oneof![9 => step().prop_map(|s| vec![s]), 1 => relink], 10..60);
-    (prelude, chunks).prop_map(|(mut steps, chunks)| {
-        steps.extend(chunks.into_iter().flatten());
-        steps
-    })
 }
 
 /// One entity as the model holds it
@@ -1048,25 +1191,151 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
     out
 }
 
-proptest! {
+/// The engine under the model: the prelude written, each step run and its answer compared, and after each the data, every
+/// derived key and every derived read compared with the model's; after the workload, `check()` finds nothing
+struct Engine {
+    db: Database,
+    _dir: tempfile::TempDir,
+}
+
+struct EngineMachine;
+
+impl proptest_state_machine::StateMachineTest for EngineMachine {
+    type SystemUnderTest = Engine;
+    type Reference = ModelMachine;
+
+    fn init_test(reference: &Reference) -> Engine {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        for step in &reference.prelude {
+            run(&db, step).unwrap();
+        }
+        Engine { db, _dir: dir }
+    }
+
+    fn apply(engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
+        let got = run(&engine.db, &transition.step);
+        assert_eq!(
+            got.is_ok(),
+            reference.outcome.is_ok(),
+            "{:?}: the engine said {got:?}, the model {:?}",
+            transition.step,
+            reference.outcome
+        );
+        engine
+    }
+
+    fn check_invariants(engine: &Engine, reference: &Reference) {
+        assert_eq!(state_of(&engine.db), model_state(&reference.model));
+        assert_eq!(sorted_far_ends(derived_of(&engine.db)), derived_from(&reference.model));
+        assert_eq!(plans_of(&engine.db), plans_from(&reference.model));
+    }
+
+    fn teardown(engine: Engine, _: Reference) {
+        crate::failpoints::disarm_at(crate::failpoints::points::COMMIT, engine.db.path());
+        let report = engine.db.check().unwrap();
+        assert!(report.is_clean(), "check() after the workload: {report:?}");
+    }
+}
+
+proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
     #[test]
-    fn the_engine_holds_what_the_model_holds_after_every_step(steps in workload()) {
-        let dir = tempfile::tempdir().unwrap();
-        let db = open(&dir);
-        let mut model = Model::default();
-        for (i, step) in steps.iter().enumerate() {
-            let expected = model.step(step);
-            let got = run(&db, step);
-            prop_assert_eq!(got.is_ok(), expected.is_ok(), "step {}: {:?}: the engine said {:?}, the model {:?}", i, step, got, expected);
-            prop_assert_eq!(state_of(&db), model_state(&model), "step {}: {:?}", i, step);
-            prop_assert_eq!(sorted_far_ends(derived_of(&db)), derived_from(&model), "step {}: {:?}", i, step);
-            prop_assert_eq!(plans_of(&db), plans_from(&model), "step {}: {:?}", i, step);
+    fn the_engine_holds_what_the_model_holds_after_every_step(sequential 10..60 => EngineMachine);
+}
+
+/// Every kind of step, as `kind_of` names it
+const STEP_KINDS: [&str; 22] = [
+    "Create",
+    "Set",
+    "Append",
+    "Delete",
+    "Link",
+    "Unlink",
+    "Destroy",
+    "Trash",
+    "Restore",
+    "Grant",
+    "Revoke",
+    "Upsert",
+    "Merge",
+    "RemoveAt",
+    "RemoveValue",
+    "GrantExclusive",
+    "RemoveRelation",
+    "MoveRelation",
+    "TakeLabel",
+    "Unit",
+    "RefuseNext",
+    "Rebuild",
+];
+
+fn kind_of(step: &Step) -> &'static str {
+    match step {
+        Step::Create { .. } => "Create",
+        Step::Set { .. } => "Set",
+        Step::Append { .. } => "Append",
+        Step::Delete { .. } => "Delete",
+        Step::Link { .. } => "Link",
+        Step::Unlink { .. } => "Unlink",
+        Step::Destroy { .. } => "Destroy",
+        Step::Trash { .. } => "Trash",
+        Step::Restore { .. } => "Restore",
+        Step::Grant { .. } => "Grant",
+        Step::Revoke { .. } => "Revoke",
+        Step::Upsert { .. } => "Upsert",
+        Step::Merge { .. } => "Merge",
+        Step::RemoveAt { .. } => "RemoveAt",
+        Step::RemoveValue { .. } => "RemoveValue",
+        Step::GrantExclusive { .. } => "GrantExclusive",
+        Step::RemoveRelation { .. } => "RemoveRelation",
+        Step::MoveRelation { .. } => "MoveRelation",
+        Step::TakeLabel { .. } => "TakeLabel",
+        Step::Unit { .. } => "Unit",
+        Step::RefuseNext => "RefuseNext",
+        Step::Rebuild { .. } => "Rebuild",
+    }
+}
+
+/// Generated workloads complete every kind of step many times, and still make each refusal the model has: a kind no
+/// workload completes is one the harness never tests, which choosing ids blind made of moving and removing a relation
+#[test]
+fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
+    use proptest_state_machine::ReferenceStateMachine;
+    // Each reason `Model::apply` and `Model::step` refuse with
+    const REFUSALS: [&str; 8] = [
+        "id in use",
+        "no such entity",
+        "not a list",
+        "self link",
+        "no such relation",
+        "link target missing at commit",
+        "the unit threw",
+        "the store refused the commit",
+    ];
+    let mut runner = TestRunner::deterministic();
+    let mut completed: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut refused: BTreeMap<&str, usize> = BTreeMap::new();
+    for _ in 0..200 {
+        let (reference, transitions, _) =
+            ModelMachine::sequential_strategy(10..60).new_tree(&mut runner).unwrap().current();
+        let mut model = reference.model;
+        for transition in transitions {
+            match model.step(&transition.step) {
+                Ok(()) => *completed.entry(kind_of(&transition.step)).or_default() += 1,
+                Err(reason) => *refused.entry(reason).or_default() += 1,
+            }
         }
-        crate::failpoints::disarm_at(crate::failpoints::points::COMMIT, db.path());
-        let report = db.check().unwrap();
-        prop_assert!(report.is_clean(), "check() after the workload: {:?}", report);
+    }
+    for kind in STEP_KINDS {
+        let n = completed.get(kind).copied().unwrap_or(0);
+        assert!(n >= 20, "{kind} completed {n} times in 200 workloads: {completed:?}");
+    }
+    for reason in REFUSALS {
+        assert!(refused.contains_key(reason), "no step was refused with {reason:?}: {refused:?}");
     }
 }
 
@@ -1078,8 +1347,9 @@ mod crash {
     use std::io::{BufRead, BufReader, Write as _};
     use std::process::{Command, Stdio};
 
-    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::strategy::ValueTree;
     use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+    use proptest_state_machine::ReferenceStateMachine;
 
     use super::*;
 
@@ -1088,8 +1358,14 @@ mod crash {
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&seed.to_le_bytes());
         let mut runner = TestRunner::new_with_rng(Config::default(), TestRng::from_seed(RngAlgorithm::ChaCha, &bytes));
-        let steps = workload().new_tree(&mut runner).unwrap().current();
-        steps.into_iter().filter(|s| !matches!(s, Step::RefuseNext)).collect()
+        let (reference, transitions, _) =
+            ModelMachine::sequential_strategy(10..60).new_tree(&mut runner).unwrap().current();
+        reference
+            .prelude
+            .into_iter()
+            .chain(transitions.into_iter().map(|t| t.step))
+            .filter(|s| !matches!(s, Step::RefuseNext))
+            .collect()
     }
 
     /// What differs between two states: each entity that differs and each edge one has and the other doesn't

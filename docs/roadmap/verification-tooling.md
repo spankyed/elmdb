@@ -136,15 +136,19 @@ Acceptance:
 - A mutation in shared derivation that `check()` cannot see (H04's case) fails the model.
 - Expanded to schema changes and units only once the first model has caught something or proven cheap to keep.
 
-The model harness (`engine/tests/model.rs`) was already this model, on plain proptest: random step sequences over a
-pool of ids, shrunk to the shortest by dropping steps, every refusal compared with the model's, and every derived read
-answered by the model alone, units and savepoints included. It kept that form rather than moving to
-proptest-state-machine, whose state-dependent generation a harness that compares refusals has no use for. What it
-lacked was a rebuild, so derive.rs's reconstruction, which `check()` shares, was never compared with the model: a
-workload now rebuilds every index or one, and the model compares an order by a field, whole and its first one or three,
-and a filter's first two. Mutations in disposable copies: a single-index rebuild that skips an entity passes the old
-harness and the hand-written H04 test and fails this one; a count derived one too many fails both harnesses and H04's
-test, which, the model now covering it, goes.
+The model harness (`engine/tests/model.rs`) is this model: every derived read answered by the model alone, units and
+savepoints included, and a workload that rebuilds every index or one, so derive.rs's reconstruction, which `check()`
+shares, is compared with the model; it compares an order by a field, whole and its first one or three, and a filter's
+first two. Its workload is a proptest-state-machine reference machine: each write chosen from what the model holds, one
+in eight blind so refusals are still compared, and a chosen step that shrinking left without its target dropped rather
+than kept as a refusal. Before, every step picked from the pool blind: over 500 generated workloads, 25.6% of steps were
+refused by a rule, and removing or moving a relation succeeded about one time in thirty. With the reference machine,
+2.5%, every one of them blind, and both about four times in five; `generated_workloads_complete_every_kind_of_step_and_make_every_refusal`
+holds generation to completing every kind of step at least twenty times in 200 workloads and making each of the model's
+refusals, and fails with moving a relation no longer chosen from the model. Mutations in disposable copies: a move that
+changes only the target and isn't filed again passes the blind harness and fails this one in seconds; a single-index
+rebuild that skips an entity, which the hand-written H04 test missed, fails it; a count derived one too many fails it, as
+it did H04's test, which, the model covering it, went.
 
 ## 6. Native profiling
 
