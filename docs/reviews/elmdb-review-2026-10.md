@@ -334,6 +334,10 @@ the table below records the accepted finding dispositions.
 | H03 | Confirmed and repaired with bounded optimistic registration | `5146508`, first query attempts run outside the tracking mutex; validation/registration preserves notification order, with bounded serialized fallback. Alternating token/watch/locked measurements and deterministic firing cases; synchronous callback latency remains caller-owned |
 | H04 | Resolved by independent verification, not by trusting shared derivation | `42423db`, independent query/model and primary fixtures; shared count mutation leaves check clean but fails the independent count assertion. Shared check/rebuild remains deliberate and is not a standalone correctness oracle |
 
+Where two of these proofs live now: R06's callback regressions are ordinary tests under nextest's per-test deadline
+(`.config/nextest.toml`) rather than in a bounded subprocess, and H04's independent count is the model harness's, whose
+workloads rebuild and compare every derived read with the model (`../architecture/testing.md`, The model harness).
+
 The principal-engineering direction remains to keep the architecture and consolidate around these contracts. Preserve
 the independent models and fault-injection cases as features evolve. Enforce production-shaped measurements before
 optimizing, document resource envelopes by shape, and keep unsafe/environment/filesystem ownership explicit. Current
