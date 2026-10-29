@@ -585,6 +585,7 @@ dependencies = [
  "libc",
  "parking_lot 0.13.0",
  "proptest",
+ "proptest-state-machine",
  "rand 0.10.3",
  "regex",
  "regex-syntax",
@@ -1550,6 +1551,15 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "proptest-state-machine"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76fe42bc434fdb72020f41a6e9dbc6d29fdcc3ac43fb3470dba5147039cf5220"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

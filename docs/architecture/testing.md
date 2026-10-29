@@ -11,14 +11,19 @@ process claim.
 ## The model harness
 
 The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model.rs`), ported from apack's
-(`@apackdev/ears`, `tests/_harness/`): random workloads (proptest) over a small pool of ids, so writes collide, refer
-to each other and are refused, checked after every operation against a plain reference model. The engine must hold
-what the model holds, refuse what it refuses, and answer every derived read as the model does: a type's entities,
-count and trash, value index lookups and their first two, an order by a field and its first one or three, roles, each
-edge's far ends, and a text index's matches for a few words. A unit, a savepoint and a refused commit roll back with
-it. A workload also rebuilds every index or one now and then: `check()` derives what it compares with the code a
-rebuild writes with, so after a rebuild only the model's answers can show that code wrong. Ranking is checked separately, against fixed corpora
-(`engine/text/tests.rs`, `engine/vector/tests.rs`).
+(`@apackdev/ears`, `tests/_harness/`): random workloads over a small pool of ids, so writes collide, refer to each
+other and are refused, checked after every operation against a plain reference model. The workload is a state machine
+(proptest-state-machine): each step is chosen from what the model holds — an id it has, an edge it has, a key holding a
+list — and one write in eight blind, so the engine is still checked to refuse what the model refuses. A failing case shrinks
+to its shortest, dropping a chosen step whose target an earlier deletion removed rather than keeping it as a refusal,
+and `generated_workloads_complete_every_kind_of_step_and_make_every_refusal` holds the generation to completing every
+kind of step and making every refusal. The engine must hold what the model holds, refuse what it refuses, and answer
+every derived read as the model does: a type's entities, count and trash, value index lookups and their first two, an
+order by a field and its first one or three, roles, each edge's far ends, and a text index's matches for a few words. A
+unit, a savepoint and a refused commit roll back with it. A workload also rebuilds every index or one now and then:
+`check()` derives what it compares with the code a rebuild writes with, so after a rebuild only the model's answers can
+show that code wrong. Ranking is checked separately, against fixed corpora (`engine/text/tests.rs`,
+`engine/vector/tests.rs`).
 
 It runs in two places:
 
