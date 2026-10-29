@@ -112,17 +112,8 @@ pub fn is_built(r: &impl Read, entity_type: &str, index: &str) -> Result<bool> {
     r.contains(&keys::index_built(entity_type, index))
 }
 
-/// What every derived key should hold: each type's live and trashed ranges and its count, every built index's entries,
-/// and every relation's edges
-pub fn derive(r: &impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
-    let mut out = BTreeMap::new();
-    derive_into(r, |key, value| {
-        out.insert(key, value);
-        Ok(())
-    })?;
-    Ok(out)
-}
-
+/// Emits what every derived key should hold: each type's live and trashed ranges and its count, every built index's
+/// entries, and every relation's edges
 fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>) -> Result<()> {
     let all = entities_of(r)?;
     let mut live: BTreeMap<&str, i64> = BTreeMap::new();
@@ -703,6 +694,7 @@ mod audit_tests {
                         }
                         assert_eq!(count, size);
                         assert!(visited <= 3 * size as usize, "rows={size}, visited={visited}");
+                        assert!(visited >= size as usize, "every row is read: rows={size}, visited={visited}");
                         println!("rows={size}, cursor_entries={visited}, chunk=64");
                         Ok(())
                     },

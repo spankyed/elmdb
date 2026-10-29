@@ -133,11 +133,6 @@ impl Tracks {
         }
         touched
     }
-
-    /// Every watch, to run again after a commit whose writes aren't known
-    pub fn all_watches(&self) -> Vec<u64> {
-        self.watches.keys().copied().collect()
-    }
 }
 
 /// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
@@ -460,5 +455,45 @@ mod registration_tests {
         .unwrap();
         assert_eq!(tracks.lock().stats(), (0, 0, 0));
         assert!(tracks.lock().pending_reads.is_empty());
+    }
+
+    #[test]
+    fn a_watch_whose_reads_meet_a_commit_twice_reads_a_third_time_under_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+        let tracks = SharedTracks::default();
+        tracks.lock().watches.insert(
+            1,
+            Watching { reads: Reads { reads: Vec::new(), track: None }, last: None, listener: None, again: false },
+        );
+        let mut runs = 0;
+        let (answer, _) = read_watch_with(&tracks, &store, 1, |_| {
+            runs += 1;
+            if runs < 3 {
+                store.write(|_, _| Ok(()), false).unwrap();
+            } else {
+                assert!(tracks.try_lock().is_none(), "the last attempt is serialized");
+            }
+            (Ok(vec![runs]), dependency())
+        })
+        .unwrap();
+        assert_eq!(answer.unwrap(), [3]);
+        assert_eq!(runs, 3);
+    }
+
+    #[test]
+    fn reads_in_flight_together_each_file_their_own_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+        let tracks = SharedTracks::default();
+        read_registered(&tracks, &store, 7, || {
+            read_registered(&tracks, &store, 8, || (Ok(Vec::new()), dependency())).unwrap();
+            (Ok(Vec::new()), dependency())
+        })
+        .unwrap();
+        let keys = [b"key".to_vec()].into();
+        let mut touched = tracks.lock().touched(Some(&keys)).tokens;
+        touched.sort_unstable();
+        assert_eq!(touched, [7, 8]);
     }
 }

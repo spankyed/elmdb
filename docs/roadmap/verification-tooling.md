@@ -55,8 +55,13 @@ over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.r
 24 excluded as answering what the code answers, and one finding left, EXPLAIN's stage times, which no count shows; the
 triage also found a step limit whose plan needs more than a debug test thread's 2 MB stack. The three mutation scripts
 make changes cargo-mutants doesn't (an expression swapped for another, a Windows attribute, heap and timing regressions)
-and stay, each saying why in its header. Left: the baseline over `store/`,
-`engine/watch.rs`, `engine/derive/` and `elmdb-node/src/process.rs`, and CI over `--in-diff`.
+and stay, each saying why in its header. The baseline over `store/`, `engine/watch.rs`, `engine/derive.rs` with
+`derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
+killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
+would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
+Linux container, the Windows 14 a finding. `process.rs` runs against elmdb-node's suite, its Linux claim caught in a
+Linux container; its Windows code, `claim`'s napi mapping and an acquisition error other than an occupied claim are
+findings. Left: CI over `--in-diff`, and cargo-mutants on a Windows machine for the Windows code.
 
 ## 2. Named failpoints
 
@@ -71,6 +76,13 @@ Acceptance:
 - The existing fault-injection tests pass unchanged in what they assert. Failpoints are process-global, so the tests
   that use them run under `fail::FailScenario` and, with stage 4, one process each.
 - A release build of the binding contains no failpoint code (checked by building without the feature).
+
+**Built, 2026-10-28,** otherwise than this says: a process-global failpoint would fire in every test running at the
+time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
+`crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
+path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
+(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
+dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
 
 ## 3. Memory bounds as assertions
 
@@ -150,13 +162,6 @@ Acceptance:
   same abstraction rather than two.
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
-
-**Built, 2026-10-28,** otherwise than this says: a process-global failpoint would fire in every test running at the
-time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
-`crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
-path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
-(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
-dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
 
 ## 9. Library no-clobber publication
 

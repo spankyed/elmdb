@@ -146,6 +146,11 @@ fn pin_module() -> io::Result<()> {
 /// Claims the process before this binary opens any database. Each independently loaded binary owns its own claim mutex
 /// and independently acquired OS handle, so only one wins even when first opens race across worker threads.
 pub fn claim() -> Result<(), Code> {
+    claim_process().map_err(|(code, message)| napi::Error::new(Code(code), message))
+}
+
+/// `claim`, answering a refusal as its error code and message
+fn claim_process() -> std::result::Result<(), (&'static str, String)> {
     static CLAIMED: Mutex<Option<Claim>> = Mutex::new(None);
     match claim_once(&CLAIMED, || {
         let claim = acquire_claim()?;
@@ -165,10 +170,10 @@ pub fn claim() -> Result<(), Code> {
             let message = format!(
                 "Another elmdb binary already claimed this process, so {mine} can't open a database. Load one elmdb package"
             );
-            Err(napi::Error::new(Code("ALREADY_LOADED"), message))
+            Err(("ALREADY_LOADED", message))
         }
-        Err(error) => Err(napi::Error::new(
-            Code("IO"),
+        Err(error) => Err((
+            "IO",
             format!("Cannot claim this process: {error}. Ensure the operating system permits the process claim"),
         )),
     }
@@ -193,6 +198,35 @@ mod tests {
         assert!(claim_once(&slot, || Err(io::Error::other("transient failure"))).is_err());
         claim_once(&slot, || Ok(())).unwrap();
         claim_once(&slot, || panic!("a successful claim must not be reacquired")).unwrap();
+    }
+
+    /// The claimer half of the next test, run as a child of this test binary: a claim is the process's once made
+    #[test]
+    fn child_claimer() {
+        if std::env::var("ELMDB_CHILD_CLAIM").is_err() {
+            return;
+        }
+        let held = acquire_claim().unwrap();
+        let (code, message) = claim_process().unwrap_err();
+        assert_eq!(code, "ALREADY_LOADED", "{message}");
+        drop(held);
+        claim_process().unwrap();
+        claim_process().unwrap();
+        println!("claimed");
+    }
+
+    #[test]
+    fn a_claim_held_elsewhere_in_the_process_is_refused_as_already_loaded_and_made_once_free() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "process::tests::child_claimer", "--nocapture", "--test-threads=1"])
+            .env("ELMDB_CHILD_CLAIM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("claimed"),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[cfg(unix)]

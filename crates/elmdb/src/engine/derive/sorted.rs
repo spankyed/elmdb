@@ -260,6 +260,33 @@ mod tests {
         assert!(!path.exists());
     }
     #[test]
+    fn the_last_of_several_rows_pushed_under_one_key_wins_within_a_run() {
+        let mut scratch = Scratch::new().unwrap();
+        let mut expected = BTreeMap::new();
+        for i in 0..10_000u64 {
+            let key = (i % 10).to_be_bytes().to_vec();
+            let value = i.to_be_bytes().to_vec();
+            expected.insert(key.clone(), value.clone());
+            scratch.push(key, value).unwrap();
+        }
+        assert!(scratch.runs.is_empty(), "nothing spilled");
+        let mut sorted = scratch.finish().unwrap();
+        for row in expected {
+            assert_eq!(sorted.next().unwrap(), Some(row));
+        }
+        assert!(sorted.next().unwrap().is_none());
+    }
+    #[test]
+    fn runs_merge_by_level_sixteen_of_one_into_one_of_the_next() {
+        let mut scratch = Scratch::new().unwrap();
+        scratch.budget = 1;
+        for i in 0..(FAN_IN * FAN_IN) as u64 {
+            scratch.push(i.to_be_bytes().to_vec(), Vec::new()).unwrap();
+        }
+        let levels: Vec<usize> = scratch.runs.iter().map(|(_, level)| *level).collect();
+        assert_eq!(levels, [2]);
+    }
+    #[test]
     fn incoming_runs_compact_without_retaining_every_path() {
         let mut scratch = Scratch::new().unwrap();
         scratch.budget = 1;

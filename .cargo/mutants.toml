@@ -65,4 +65,24 @@ exclude_re = [
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
     "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
+    # check_stamp's newer-format arm: the format equal to this elmdb's is the arm above it
+    "store/mod.rs:.*replace > with >= in check_stamp",
+    # The worker's owed check: a sync is due only after a commit since the last sync began, so whenever one is due the
+    # commits outnumber the synced
+    "sync.rs:330:.*replace > with >= in run",
+    # A manual clock's worker would wait a millisecond at a time rather than to be woken: the same syncs, polled
+    "sync.rs:343:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
+    # A build error other than a refusal recurs in the fallback's walk of the same rows, which returns it
+    "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
+    # The spill budget sets when rows go to disk, which no answer shows; the release heap test
+    # (tests/maintenance_heap.rs) holds what it bounds
+    "sorted.rs:11:.*replace \\* with",
+    # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
+    # own entry under one key
+    "derive.rs:.*replace match guard \\*other != id with true in buildable_entry",
+    # begin's growth when more than half the map is used: at exactly half, growing or not is a page's difference
+    "store/mod.rs:.*replace > with >= in Store::begin",
+    # build_chunk's unique check skips the entity's own entry: a write checks a unique value against the rows while the
+    # index is unbuilt, so an entity's own entry and another's for the same value are never both in the index
+    "derive.rs:587:.*replace == with != in build_chunk",
 ]

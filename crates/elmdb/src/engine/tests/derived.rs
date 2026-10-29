@@ -1122,3 +1122,50 @@ fn a_removed_type_takes_its_indexes_data_with_it_and_keeps_its_rows() {
         .unwrap();
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
+
+/// The ids a plan over Notes with one step answers
+fn note_ids(db: &Database, step: Json) -> Json {
+    let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Note"] }, "steps": [step], "terminal": { "answer": "ids" } } }] }))
+    .unwrap();
+    let bytes = db.read(&reads).unwrap();
+    serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["ids"].clone()
+}
+
+#[test]
+fn each_of_a_types_text_and_trigram_indexes_is_built_and_rebuilt_from_its_own_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["body"] = json!({ "type": "string", "optional": true });
+    let db = with_schema(&dir, notes(fields.clone(), json!({}))).unwrap();
+    let words = [("title", "alpha"), ("kind", "gamma"), ("body", "delta")];
+    let row: serde_json::Map<String, Json> = words.iter().map(|(f, w)| (f.to_string(), json!(w))).collect();
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": row })]).unwrap();
+    // Three of each kind, so that an index built or rebuilt from another's fields leaves one of them without its own
+    let mut indexes = serde_json::Map::new();
+    for (field, _) in words {
+        indexes.insert(format!("{field}Text"), json!({ "kind": "text", "fields": { field: {} } }));
+        indexes.insert(format!("{field}Grams"), json!({ "kind": "trigram", "fields": [field] }));
+    }
+    db.set_schema(Schema::from_json(&notes(fields, Json::Object(indexes))).unwrap()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let each_finds_its_word = |db: &Database, after: &str| {
+        for (field, word) in words {
+            let searched = note_ids(db, json!({ "step": "search", "query": word, "index": format!("{field}Text") }));
+            assert_eq!(searched, json!(["Note-1"]), "{field}Text finds {word} {after}");
+            let gram = &word[1..4];
+            let contained =
+                note_ids(db, json!({ "step": "containing", "text": gram, "index": format!("{field}Grams") }));
+            assert_eq!(contained, json!(["Note-1"]), "{field}Grams finds {gram} {after}");
+        }
+    };
+    each_finds_its_word(&db, "built in the background");
+    for (field, _) in words {
+        for kind in ["Text", "Grams"] {
+            let index = format!("{field}{kind}");
+            db.rebuild(Some(("Note", &index))).unwrap();
+            each_finds_its_word(&db, &format!("after {index} is rebuilt"));
+        }
+    }
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}

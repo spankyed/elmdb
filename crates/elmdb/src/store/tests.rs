@@ -83,7 +83,17 @@ fn a_read_only_store_refuses_files_without_reader_registration() {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o444)).unwrap();
     }
     match Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }) {
-        Err(error) => assert_eq!(error.code, ErrorCode::Io),
+        Err(error) => {
+            assert_eq!(error.code, ErrorCode::Io);
+            assert!(
+                error.message.contains("Grant read access to data.mdb and write access to lock.mdb"),
+                "{}",
+                error.message
+            );
+            // A writable open refused the same files is refused for writing, not for reader registration
+            let writable = Store::open(dir.path(), quiet()).err().unwrap();
+            assert!(!writable.message.contains("reader registration"), "{}", writable.message);
+        }
         // An elevated user can still write the lock file: it retains ordinary LMDB reader registration.
         Ok(store) => {
             assert!(std::fs::OpenOptions::new().write(true).open(dir.path().join("lock.mdb")).is_ok());
@@ -650,4 +660,185 @@ fn read_only_mount_requires_reader_registration() {
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("registration"));
     println!("ELMDB_READ_ONLY_MOUNT_REFUSED");
+}
+
+#[test]
+fn a_new_map_is_twice_the_file_in_whole_steps_and_a_step_at_least() {
+    assert_eq!(initial_map_size(0), MAP_STEP);
+    assert_eq!(initial_map_size(MAP_STEP as u64), 2 * MAP_STEP);
+    assert_eq!(initial_map_size(MAP_STEP as u64 + 1), 3 * MAP_STEP);
+}
+
+#[test]
+fn only_a_writable_store_that_syncs_runs_group_commit_and_counts_its_syncs() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(store.durable().is_none());
+    assert_eq!(store.syncs(), 0);
+    assert_eq!(store.file_size(), std::fs::metadata(dir.path().join("data.mdb")).unwrap().len());
+    store.close().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..Default::default() }).unwrap();
+    assert!(store.durable().is_none(), "a read-only store has nothing to sync");
+    store.close().unwrap();
+    let store = Store::open(
+        dir.path(),
+        StoreOptions {
+            sync_interval: Duration::from_secs(60),
+            sync_idle: Duration::from_secs(60),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    store.write(|txn, db| db.put(txn, b"k", b"1").map_err(Into::into), true).unwrap();
+    store.write(|txn, db| db.put(txn, b"k", b"2").map_err(Into::into), true).unwrap();
+    assert_eq!(store.syncs(), 2, "a sync for each durable write");
+    store.close().unwrap();
+}
+
+#[test]
+fn a_read_leaves_its_transaction_for_the_next_and_at_most_max_idle_are_kept() {
+    fn nested(store: &Store, depth: usize) -> Result<()> {
+        if depth == 0 { Ok(()) } else { store.read(|_, _| nested(store, depth - 1)) }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+    assert_eq!(store.idle.lock().unwrap().len(), 1, "the second read took the first's transaction");
+    // Reads within reads each hold a transaction of their own
+    nested(&store, MAX_IDLE + 1).unwrap();
+    assert_eq!(store.idle.lock().unwrap().len(), MAX_IDLE);
+}
+
+/// Creates at `path` an elmdb database, stamped, with only the graph databases named
+fn stamped_with_graphs(path: &Path, graphs: &[&str]) {
+    // SAFETY: a test's own new directory, opened once
+    let env = unsafe { EnvOpenOptions::new().max_dbs(8).open(path) }.unwrap();
+    let wtxn = env.write_txn().unwrap();
+    env.create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
+        let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
+        put_meta(wtxn, db, meta::KIND, format::KIND.as_bytes())?;
+        put_meta(wtxn, db, meta::FORMAT, &format::FORMAT_VERSION.to_be_bytes())?;
+        for name in graphs {
+            opener.create_database::<Bytes, Bytes>(wtxn, Some(name))?;
+        }
+        Ok(CommitOrAbort::<_, ()>::Commit(()))
+    })
+    .unwrap();
+    env.prepare_for_closing().wait();
+}
+
+#[test]
+fn a_writable_open_creates_the_graph_databases_it_lacks_and_a_read_only_one_opens_without_them() {
+    let dir = tempfile::tempdir().unwrap();
+    stamped_with_graphs(dir.path(), &[]);
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    assert!(store.db.cosine.is_none() && store.db.euclidean.is_none());
+    store.close().unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    stamped_with_graphs(dir.path(), &[format::COSINE_GRAPHS]);
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    assert!(store.db.cosine.is_some() && store.db.euclidean.is_some(), "the one missing is created");
+}
+
+#[test]
+fn a_unit_grows_the_map_first_once_the_map_is_more_than_half_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = 16 << 10;
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(64 * page), ..quiet() }).unwrap();
+    let half_used = |store: &Store| {
+        let page = store.env.unnamed_database_stat().page_size as usize;
+        (store.env.info().last_page_number + 1) * page * 2 > store.env.info().map_size
+    };
+    let mut n = 0u64;
+    while !half_used(&store) {
+        store.write(|txn, db| db.put(txn, &n.to_be_bytes(), &[1u8; 512]).map_err(Into::into), false).unwrap();
+        n += 1;
+    }
+    let before = store.map_size();
+    let (txn, gate) = store.begin().unwrap();
+    txn.abort();
+    drop(gate);
+    store.end_unit();
+    assert!(store.map_size() > before, "the map grew from {before} before the unit began");
+}
+
+#[test]
+fn a_store_closing_at_exit_reports_a_sync_that_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let _failing = crate::failpoints::fail_while_at(crate::failpoints::points::SYNC, store.path());
+    let error = store.close_at_exit(Duration::ZERO).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+}
+
+/// The grower half of the next test, run as a child of this test binary: writes well past its parent's map, and closes
+#[test]
+fn child_grower() {
+    let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
+    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    let value = vec![9u8; 64 << 10];
+    store
+        .write(
+            |txn, db| {
+                for i in 0..64u32 {
+                    db.put(txn, &i.to_be_bytes(), &value)?;
+                }
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    put(&store, "grown", b"yes").unwrap();
+    store.close().unwrap();
+}
+
+#[test]
+fn a_read_adopts_the_map_another_process_grew_the_file_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = 16 << 10;
+    let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * page), ..quiet() }).unwrap());
+    put(&store, "a", b"1").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let before = store.map_size();
+    let (sent, read) = std::sync::mpsc::channel();
+    {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || sent.send(get(&store, "grown")).unwrap());
+    }
+    let value = read.recv_timeout(Duration::from_secs(30)).expect("the read adopted the grown map");
+    assert_eq!(value.as_deref(), Some(&b"yes"[..]));
+    assert!(store.map_size() > before);
+}
+
+#[test]
+fn a_commit_is_synced_on_its_own_once_writes_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        dir.path(),
+        StoreOptions {
+            sync_idle: Duration::from_millis(20),
+            sync_interval: Duration::from_secs(60),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    put(&store, "a", b"1").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while store.syncs() == 0 {
+        assert!(std::time::Instant::now() < deadline, "no sync followed the idle time");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    store.close().unwrap();
 }
