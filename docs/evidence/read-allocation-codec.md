@@ -94,7 +94,10 @@ Bytes allocated a read: `page` 6,975,796 to 422,046, `all_rows` 1,402,353,634 to
 `a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_short_is_corrupted`
 (`engine/tests/compression.rs`) reads back a frame that records its size, one that records none and one past 16 MiB,
 and refuses a frame cut short as `CORRUPTED`; in disposable copies it fails with the streaming path removed and with
-the one-call path's error ignored.
+the one-call path's error ignored. CI's `mutants` job left four survivors on the one-call limit: two that stream
+every value, excluded in `.cargo/mutants.toml` since the stream answers the same bytes, and two that would allocate
+whatever a frame claims, now killed by
+`a_frame_claiming_more_than_any_buffer_holds_is_corrupted_without_allocating_its_claim`, a frame claiming 2^63 bytes.
 
 **2. Kept** (`63ba2f3`). Four runs a side against `574797f`: `all_rows` 42.6 to 43.4 ms before, 40.9 to 41.9 after,
 every run after faster than every run before (4% on the means, against a 0.8 ms spread before); `page` 221 to 236 µs

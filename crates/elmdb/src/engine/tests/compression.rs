@@ -173,3 +173,17 @@ fn a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_shor
         assert_eq!(values::unstored(cut).unwrap_err().code, crate::ErrorCode::Corrupted);
     }
 }
+
+/// A damaged frame that claims far more than it holds is `CORRUPTED`, read as a stream rather than into a buffer of the
+/// size it claims, which here no allocation could be
+#[test]
+fn a_frame_claiming_more_than_any_buffer_holds_is_corrupted_without_allocating_its_claim() {
+    // A zstd frame: its magic, a header of an eight-byte content size in one segment, a claim of 2^63 bytes, then one
+    // last raw block of four
+    let mut frame = vec![values::COMPRESSED, 0x28, 0xb5, 0x2f, 0xfd, 0xe0];
+    frame.extend_from_slice(&(1u64 << 63).to_le_bytes());
+    frame.extend_from_slice(&[(4 << 3) | 1, 0, 0]);
+    frame.extend_from_slice(b"data");
+    assert_eq!(zstd::zstd_safe::get_frame_content_size(&frame[1..]).unwrap(), Some(1 << 63));
+    assert_eq!(values::unstored(&frame).unwrap_err().code, crate::ErrorCode::Corrupted);
+}
