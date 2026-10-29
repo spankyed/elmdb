@@ -189,6 +189,19 @@ sample PID 10 1 -file /private/tmp/elmdb-text-rebuild.sample.txt   # macOS, whil
 Thirty selected text rebuilds of one 10k fixture, with no allocator or sampling loop of its own. Sampling slows it, so
 it chooses the next experiment rather than timing one.
 
+**A profile that names Rust functions**, with samply, which records a process it starts without sudo on macOS and on
+Linux, and the `profiling` profile, the release build with line tables:
+
+```sh
+cargo build -p elmdb --profile profiling --example profile-reads
+samply record --save-only --unstable-presymbolicate -o reads.json.gz -- target/profiling/examples/profile-reads page 20000
+samply load reads.json.gz   # the Firefox Profiler, in a browser
+```
+
+`profile-reads` repeats one of the read benchmark's reads (`field`, `page`, `page_projected`, `all_rows`) after its
+fixture is built; `--unstable-presymbolicate` writes the symbols beside the profile, so it can be read without the
+binary. `read-allocations` counts each read's allocations with dhat. Readings: `docs/evidence/read-allocation-codec.md`.
+
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
 buffers text memberships, and slows the timed key encoding by a millisecond: each heap mutation must fail its
