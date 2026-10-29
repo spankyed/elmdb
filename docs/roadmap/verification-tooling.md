@@ -63,7 +63,8 @@ Linux container, the Windows 14 read on Windows. `process.rs` runs against elmdb
 in a Linux container. On Windows, of the Windows code's 21 mutants, a new spec killed 2 of the 6 survivors, 3 are
 excluded as disjoint flags or equivalent, and `pin_module` joins `claim`'s napi mapping as a finding the binding's suite
 catches; those and an acquisition error other than an occupied claim are the findings. CI's `mutants` job runs
-`scripts/mutants-in-diff.py` on every pull request, reporting the survivors in the files it touches.
+`scripts/mutants-in-diff.py` on every pull request, on Linux and on Windows, reporting the survivors in the files it
+touches; it replaced `check-windows-backup-mutation.py`, which broke one line of the Windows publication by hand.
 
 ## 2. Named failpoints
 
