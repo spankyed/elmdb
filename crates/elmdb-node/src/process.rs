@@ -206,6 +206,7 @@ mod tests {
 
     /// The claimer half of the next test, run as a child of this test binary: a claim is the process's once made
     #[test]
+    #[ignore = "run only by the next test, as its child process"]
     fn child_claimer() {
         if std::env::var("ELMDB_CHILD_CLAIM").is_err() {
             return;
@@ -223,7 +224,7 @@ mod tests {
     fn a_claim_held_elsewhere_in_the_process_is_refused_as_already_loaded_and_made_once_free() {
         let _starting = CHILDREN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let out = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "process::tests::child_claimer", "--nocapture", "--test-threads=1"])
+            .args(["--ignored", "--exact", "process::tests::child_claimer", "--nocapture", "--test-threads=1"])
             .env("ELMDB_CHILD_CLAIM", "1")
             .output()
             .unwrap();
