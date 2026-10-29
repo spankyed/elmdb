@@ -926,24 +926,6 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
 }
 
 #[test]
-fn rebuild_is_checked_against_independent_query_expectations_not_only_check() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open(&dir);
-    write(&db, (1..=3).map(|i| json!({"op":"create", "type":"Task", "id":format!("Task-{i}")})).collect()).unwrap();
-    db.rebuild(None).unwrap();
-    assert!(db.check().unwrap().is_clean());
-    let reads = serde_json::from_value(json!({"reads":[
-        {"read":"query", "plan":{"start":{"from":"types", "types":["Task"]}, "terminal":{"answer":"count"}}},
-        {"read":"query", "plan":{"start":{"from":"types", "types":["Task"]}, "terminal":{"answer":"ids"}}}
-    ]}))
-    .unwrap();
-    let bytes = db.read(&reads).unwrap();
-    let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
-    assert_eq!(answer[0]["n"], 3, "a shared derive/check bug must not define the expected count");
-    assert_eq!(answer[1]["ids"], json!(["Task-1", "Task-2", "Task-3"]));
-}
-
-#[test]
 fn unchecked_field_audit_covers_every_declared_value_type_and_presence_rule() {
     use crate::engine::maintenance::Load;
     let dir = tempfile::tempdir().unwrap();

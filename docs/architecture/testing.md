@@ -9,8 +9,10 @@ The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model.rs
 (`@apackdev/ears`, `tests/_harness/`): random workloads (proptest) over a small pool of ids, so writes collide, refer
 to each other and are refused, checked after every operation against a plain reference model. The engine must hold
 what the model holds, refuse what it refuses, and answer every derived read as the model does: a type's entities,
-count and trash, value index lookups, roles, each edge's far ends, and a text index's matches for a few words. A unit,
-a savepoint and a refused commit roll back with it. Ranking is checked separately, against fixed corpora
+count and trash, value index lookups and their first two, an order by a field and its first one or three, roles, each
+edge's far ends, and a text index's matches for a few words. A unit, a savepoint and a refused commit roll back with
+it. A workload also rebuilds every index or one now and then: `check()` derives what it compares with the code a
+rebuild writes with, so after a rebuild only the model's answers can show that code wrong. Ranking is checked separately, against fixed corpora
 (`engine/text/tests.rs`, `engine/vector/tests.rs`).
 
 It runs in two places:
