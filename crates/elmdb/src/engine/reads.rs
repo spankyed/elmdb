@@ -256,7 +256,7 @@ fn get(r: &impl Read, id: &str, name: &str) -> Result<Option<Vec<u8>>> {
     if name == field::ENTITY_TYPE {
         return Ok(entities::record(r, id)?.map(|_| values::encode(&ids::type_of(id).into())));
     }
-    r.get(&keys::value(id, name))?.map(|bytes| Ok(values::unstored(&bytes)?.into_owned())).transpose()
+    r.get(&keys::value(id, name))?.map(values::unstored_owned).transpose()
 }
 
 fn get_value(r: &impl Read, id: &str, name: &str) -> Result<Option<Value>> {

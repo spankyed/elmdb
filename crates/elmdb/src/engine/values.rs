@@ -59,6 +59,11 @@ pub fn unstored(bytes: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>> {
     }
 }
 
+/// `unstored` of bytes the caller owns: a value stored uncompressed is those bytes, not a copy of them
+pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.first() == Some(&COMPRESSED) { Ok(unstored(&bytes)?.into_owned()) } else { Ok(bytes) }
+}
+
 /// The largest value decompressed in one call into a buffer of the size its frame records. A frame that records more,
 /// or no size, is read as a stream, so a damaged header can't ask for a large allocation
 const ONE_CALL_UP_TO: u64 = 16 << 20;
