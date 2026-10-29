@@ -56,7 +56,10 @@ machine's spread.
   - the hop never asked to walk backward fails the work check;
   - the first-edge check removed fails the duplicate, equivalence and tracked cases;
   - the tracked range recorded on the wrong side of the stop fails the tracked case.
-- **Suites:** `cargo nextest run --workspace` passed all 344 tests, the four new ones and the model harness among them.
+- **Tracked range, pinned further:** over a unique kind, which reads no edge's ends, an unlink of the edge the read
+  stopped at writes into it, and one before it doesn't. A unit's read walks back over its own new edge.
+- **CI:** the in-diff mutation jobs, Linux and Windows, caught 42 of 42.
+- **Suites:** `cargo nextest run --workspace` passed all 346 tests, the five new ones and the model harness among them.
 
 ## Not admitted
 
