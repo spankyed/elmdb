@@ -33,7 +33,8 @@ A timeout is a mutant that makes a loop never end, which the suite's deadline ca
 ## What became of each survivor
 
 Of elmdb's 90: 47 killed by new specs, 13 gone with the dead code they were in, 11 excluded as answering what the code
-answers, 2 left as a finding, and 17 in code this Mac doesn't compile (`backup.rs`'s Windows and Linux publication).
+answers, 2 left as a finding, and 17 in code this Mac doesn't compile (`backup.rs`'s publication): its Linux 3
+killed in a Linux container, and its Windows 14 a finding below.
 
 **What the survivors showed untested**, each now a spec: a new map's size; the read-only open's message, and a writable
 open refused the same files without it; which stores run group commit, and the syncs it counts; an idle read
@@ -62,6 +63,11 @@ exactly half the map.
 - **An acquisition error other than an occupied claim** (`process.rs`, `claim_process`): the guard that tells them
   apart is mutated to treat every error as occupied, and nothing a test can do makes the kernel refuse a claim
   otherwise. Left as a survivor.
+- **Windows code isn't mutated** (`backup.rs`' `move_file` and Windows `publish`, 14; `process.rs`' named event and
+  module pin, 7): it compiles only on the Windows CI target, which builds and tests it but where cargo-mutants doesn't
+  run, and `scripts/check-windows-backup-mutation.py` mutates one of its lines, the attribute it clears. Left as
+  survivors until a Windows machine runs cargo-mutants over it.
+- **The claim for any other platform** (`process.rs`, 1): compiled by no target elmdb builds, so no reading reaches it.
 
 ## `process.rs`
 
@@ -90,22 +96,18 @@ target's binding job ran `test/process.test.mjs` over `claim`'s mapping, and the
 
 ## The end state
 
-On `c9b91d5`, every file of the first reading's on the source it has at the branch's end, with the configuration's
-exclusions then, against the fast suite: 450 mutants in 83 minutes.
+On `01ea879`, the branch's final source, every file of the first reading's with the configuration's exclusions,
+against the fast suite: 447 mutants in 84 minutes, 335 caught, 61 unviable, 19 missed, 32 timeouts.
 
 | File | Caught | Unviable | Missed | Timeout |
 |---|---|---|---|---|
-| `store/mod.rs` | 89 | 22 | 3 | 4 |
+| `store/mod.rs` | 89 | 22 | 2 | 4 |
 | `store/backup.rs` | 8 | 0 | 17 | 0 |
-| `store/sync.rs` | 40 | 19 | 3 | 7 |
+| `store/sync.rs` | 43 | 19 | 0 | 7 |
 | `engine/watch.rs` | 62 | 3 | 0 | 2 |
-| `engine/derive.rs` | 65 | 5 | 4 | 4 |
+| `engine/derive.rs` | 67 | 5 | 0 | 4 |
 | `engine/derive/audit.rs` | 44 | 3 | 0 | 2 |
 | `engine/derive/sorted.rs` | 22 | 9 | 0 | 13 |
 
-Of its 27 missed, 17 are `backup.rs`' other platforms', 2 the `MAX_GROWTHS` finding, and 8 were triaged after it on
-`23d5515`, whose elmdb source is the same: 5 killed by specs made stronger, and 3 excluded (`begin` at half the map, and
-the two own-entry skips). The kills are cargo-mutants reruns: every mutant on the lines of `stop_at_exit`'s deadline,
-`lock_before`'s guard, the text and vector rebuilds' names and `build_chunk`'s own-entry skip, 9 mutants, 6 caught, 1
-unviable, and the vector rebuild's and the skip's missed; the vector rebuild's then caught by its spec (1 mutant, 1
-caught), and the skip excluded.
+The 19 missed are the ones triaged above as compiled elsewhere or a finding: `backup.rs`' Linux fallback (3, caught in
+the Linux container) and Windows code (14), and `write_committed`'s `MAX_GROWTHS` bound (2).
