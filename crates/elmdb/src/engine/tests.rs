@@ -13,6 +13,7 @@ mod reads;
 mod schema_versions;
 mod tracked;
 mod trigram;
+mod walks;
 
 use serde_json::{Value as Json, json};
 

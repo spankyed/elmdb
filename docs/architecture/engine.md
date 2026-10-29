@@ -103,7 +103,7 @@ A plan is a scope, a start, steps and a terminal:
   entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
-their answer, and a live type's `count` is read off its counter. The planner makes three choices, none of which changes
+their answer, and a live type's `count` is read off its counter. The planner makes four choices, none of which changes
 an answer:
 
 - **A type start's filters are read from an index.** A `where` or `withRole` straight after a type start reads a built
@@ -115,6 +115,11 @@ an answer:
   reaches it.
 - **An index lookup visits its matches as it reads them.** One value's entries are keyed by place, so they come in
   creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
+- **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
+  further than its answer. A `reverse` straight after `out` or `in` from one entity over one kind reads that entity's
+  edges from the last instead of collecting the walk, an end joined by several edges of a kind that isn't `unique`
+  coming at its first edge's place as in the walk, so the last `limit` edges cost the limit and not the list. From
+  several entities or kinds, the `reverse` collects the walk.
 - **`orderBy` then `limit` holds the first `limit`**, in order with ties kept as they came, rather than sorting the whole
   set: the set is still read, and the memory is the limit's.
 

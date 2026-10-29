@@ -115,6 +115,25 @@ impl<R: Read> Read for Recording<'_, R> {
         outcome
     }
 
+    fn visit_back(&self, prefix: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let mut stopped_at = None;
+        let outcome = self.inner.visit_back(prefix, |k, v| {
+            let go = visit(k, v);
+            if !go {
+                stopped_at = Some(k.to_vec());
+            }
+            go
+        });
+        let (low, high) = prefix_range(prefix);
+        // A walk from the last read from where it stopped to the range's end; one that failed is recorded whole
+        let low = match (outcome.is_ok(), stopped_at) {
+            (true, Some(at)) => at,
+            _ => low,
+        };
+        self.reads.borrow_mut().ranges.push((low, Some(high)));
+        outcome
+    }
+
     fn schema(&self) -> &Schema {
         self.inner.schema()
     }

@@ -651,6 +651,12 @@ mod seeking {
                 f(k, v)
             })
         }
+        fn visit_back(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_back(prefix, |k, v| {
+                self.entries.set(self.entries.get() + 1);
+                f(k, v)
+            })
+        }
         fn schema(&self) -> &Schema {
             self.inner.schema()
         }

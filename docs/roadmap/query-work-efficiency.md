@@ -1,7 +1,6 @@
 # Query work efficiency
 
-Status: planned, 2026-10-29. Documentation only. Surveyed elmdb `main` at
-`6007d8607372716ec8e25c302b60610c20411dff`; inspect current source before implementation.
+Status: done, 2026-10-29: [the readings](../evidence/query-work-efficiency.md).
 
 ## Outcome and existing guarantees
 
@@ -86,5 +85,8 @@ that actually change (candidate count, page size, sort input and returned bytes)
 Stop after the admitted query set. Close non-beneficial candidates with a reopening trigger. New
 queries or larger optimizer mechanisms are additional scope, not an obligation to keep tuning.
 
-Plan only; no new measurements or execution changes. Next: coordinate the bounded query selection
-with apack, inspect current plan execution and record baselines before choosing any extension.
+Done, 2026-10-29: [the readings](../evidence/query-work-efficiency.md). apack admitted three queries; two were
+caller-only. The third, a thread's last messages, admitted one engine change: a hop streams its edges, and `reverse`
+straight after a hop from one entity over one kind reads them from the last, so `reverse` then `limit k` costs `k`, not
+the list. Not admitted, each with its reopening trigger there: `orderBy` over a walk, `after`, index entries reading
+their records, `count` after a hop.

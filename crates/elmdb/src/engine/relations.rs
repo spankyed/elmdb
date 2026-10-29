@@ -69,6 +69,48 @@ pub fn edges(t: &impl Read, entity: &str, outward: bool, kind: Option<&str>) -> 
     t.scan(&keys::edges_of(outward, entity, kind))?.into_iter().map(|(_, v)| edge_of(&v)).collect()
 }
 
+/// Visits an entity's edges out or in, of one kind or of every kind, in place order or (`backward`) from the last,
+/// until `each` answers false: each edge's place and far end. It reads no edge past the one `each` stopped at
+pub fn visit_edges(
+    t: &impl Read,
+    entity: &str,
+    outward: bool,
+    kind: Option<&str>,
+    backward: bool,
+    mut each: impl FnMut(u64, String) -> Result<bool>,
+) -> Result<()> {
+    let mut result = Ok(true);
+    let on = |key: &[u8], value: &[u8]| {
+        result = place_of(key).and_then(|place| each(place, edge_of(value)?.1));
+        matches!(result, Ok(true))
+    };
+    let prefix = keys::edges_of(outward, entity, kind);
+    if backward {
+        t.visit_back(&prefix, on)?
+    } else {
+        t.visit(&prefix, on)?
+    }
+    result.map(|_| ())
+}
+
+/// The place of the first edge of a kind from `source` to `target`, the place order of its edges being their order
+pub fn first_between(t: &impl Read, source: &str, kind: &str, target: &str) -> Result<Option<u64>> {
+    let mut first = Ok(None);
+    t.visit(&keys::between_range(source, kind, target), |key, _| {
+        first = place_of(key).map(Some);
+        false
+    })?;
+    first
+}
+
+/// The place an edge's or a between entry's key ends with
+fn place_of(key: &[u8]) -> Result<u64> {
+    match crate::format::key::decode(key)?.pop() {
+        Some(crate::format::key::Part::Number(n)) => Ok(n as u64),
+        _ => Err(Error::new(ErrorCode::Corrupted, "An edge key's place doesn't read")),
+    }
+}
+
 /// The relations of a kind between two ends, in the order linked
 pub fn between(t: &impl Read, source: &str, kind: &str, target: &str) -> Result<Vec<String>> {
     t.scan(&keys::between_range(source, kind, target))?
