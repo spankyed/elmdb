@@ -96,6 +96,10 @@ and regression criteria. A production fix is a separately owned deliverable, not
 
 ### L02: allocations, copies and repeated codec work
 
+The focused read investigation and selected internal fixes are owned by
+[Read allocations, copies and codecs](read-allocation-codec.md). Use that plan for execution and
+read-specific evidence; the write-path questions below remain research here. Do not run duplicate read investigations.
+
 **Question:** which redundant operations dominate an actual elmdb read/write, and which can be removed without changing
 validation, errors, storage bytes or result ownership?
 

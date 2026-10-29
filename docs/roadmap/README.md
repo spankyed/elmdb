@@ -24,3 +24,10 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
   failpoints, heap assertions, per-process tests, model-based properties, profiling; initial heap gates implemented,
   other stages planned.
 
+
+## Focused read efficiency
+
+- [Read allocations, copies and codecs](read-allocation-codec.md): bounded profiling and only
+  evidence-backed internal fixes; owns the focused read implementation path from lmdb-js research L02.
+- [Query work efficiency](query-work-efficiency.md): retain existing filter/limit/projection behavior
+  and admit extensions only for demonstrated costly queries; larger designs remain in plan algebra.
