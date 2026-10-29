@@ -54,8 +54,8 @@ the engine's suite against each mutant; one the suite passes is a test missing. 
 cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
 cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
-# A branch's own changes
-git diff main... > target/branch.diff && cargo mutants -j 3 --in-diff target/branch.diff
+# A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
+python3 scripts/mutants-in-diff.py main
 # What the exclusions leave out of a file
 diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
@@ -68,6 +68,11 @@ Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Ma
 the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants installed in it, against a copy of the
 tree). The Windows ones have no reading: the Windows CI target builds and tests that code but doesn't mutate it, and
 `scripts/check-windows-backup-mutation.py` mutates one of its lines (`docs/evidence/mutation-baseline.md`).
+
+CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into: each
+missed mutant is annotated on its line and listed in the job's summary, and the job fails only when cargo-mutants does.
+`--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
+the script runs each crate's files against that crate's suite.
 
 Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
 test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
