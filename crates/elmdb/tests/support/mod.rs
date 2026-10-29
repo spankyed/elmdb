@@ -113,13 +113,14 @@ impl Fixture {
         let answers: serde_json::Value = rmp_serde::from_slice(&db.read(&pending).unwrap()).unwrap();
         let chunks = answers[0]["chunks"].as_array().unwrap();
         assert_eq!(chunks.len(), rows);
-        for batch in chunks.chunks(1000) {
+        for (first, batch) in chunks.chunks(1000).enumerate() {
             let ops = batch
                 .iter()
                 .enumerate()
                 .map(|(n, c)| {
                     // A direction of its own for each document, so the graph has neighbours to tell apart
-                    let vector: Vec<f32> = (0..dims).map(|d| ((n * 31 + d * 17) % 97) as f32 / 97.0).collect();
+                    let i = first * 1000 + n;
+                    let vector: Vec<f32> = (0..dims).map(|d| ((i * dims + d) as f32 * 0.618).sin()).collect();
                     serde_json::from_value(json!({"op":"embed", "id":c["id"], "index":"meaning", "chunk":c["chunk"],
                         "hash":c["hash"], "model":"m", "vector":vector}))
                     .unwrap()

@@ -82,7 +82,7 @@ fn maintenance_heap_bounds() {
         assert!(fixture.db.check().unwrap().is_clean())
     });
     // A selected vector rebuild spills its ids and decodes one added vector at a time, beside hannoy's graph builder:
-    // 390 to 460 bytes a vector, measured, the graph's share varying run to run. One decoded 256-dimension vector is
+    // 325 to 352 bytes a vector, measured, the graph's share varying run to run. One decoded 256-dimension vector is
     // 1 KB, so decoding them all would add that
     let vectors = |rows| Fixture::with_vectors(rows, 256);
     measure_growth("vector_rebuild", 768, [1_000, 2_000], vectors, |fixture| {
