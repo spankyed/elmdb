@@ -49,6 +49,30 @@ jobs:
       - name: the generated loader and declarations are committed
         run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts
 
+  # Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and
+  # in the summary, not failed on (docs/architecture/testing.md, Mutation testing)
+  mutants:
+    name: mutants in the change
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      # The merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - run: python3 scripts/mutants-in-diff.py HEAD^1 2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-in-diff
+          path: target/mutants-in-diff
+          if-no-files-found: ignore
+
   platforms:
     name: ${{ matrix.target }} on Node ${{ matrix.node }}
     if: github.event_name != 'push'

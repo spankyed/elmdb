@@ -61,7 +61,8 @@ killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 
 would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
 Linux container, the Windows 14 a finding. `process.rs` runs against elmdb-node's suite, its Linux claim caught in a
 Linux container; its Windows code, `claim`'s napi mapping and an acquisition error other than an occupied claim are
-findings. Left: CI over `--in-diff`, and cargo-mutants on a Windows machine for the Windows code.
+findings. CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, reporting the survivors in the
+files it touches. Left: cargo-mutants on a Windows machine for the Windows code.
 
 ## 2. Named failpoints
 
