@@ -144,3 +144,32 @@ fn every_reader_sees_the_value_written_and_check_rebuild_and_a_dump_agree() {
     });
     assert_eq!(held, Some(text.into()));
 }
+
+/// A stored value decompresses to its msgpack whether its frame records its size, records none (a streaming encoder's,
+/// which a reader takes as a stream) or records more than one call decompresses; a frame cut short is `CORRUPTED`
+#[test]
+fn a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_short_is_corrupted() {
+    use std::io::Write;
+    let value = rmpv::Value::from(prose());
+    let plain = values::encode(&value);
+    let sized = values::stored(&value);
+    assert_eq!(sized[0], values::COMPRESSED);
+    assert_eq!(values::unstored(&sized).unwrap().as_ref(), plain.as_slice());
+
+    let mut encoder = zstd::stream::Encoder::new(vec![values::COMPRESSED], 3).unwrap();
+    encoder.include_contentsize(false).unwrap();
+    encoder.write_all(&plain).unwrap();
+    let streamed = encoder.finish().unwrap();
+    assert_eq!(zstd::zstd_safe::get_frame_content_size(&streamed[1..]).unwrap(), None);
+    assert_eq!(values::unstored(&streamed).unwrap().as_ref(), plain.as_slice());
+
+    let large = rmpv::Value::from("a".repeat(17 << 20));
+    let stored = values::stored(&large);
+    assert!(zstd::zstd_safe::get_frame_content_size(&stored[1..]).unwrap().unwrap() > 16 << 20);
+    assert_eq!(values::unstored(&stored).unwrap().as_ref(), values::encode(&large).as_slice());
+
+    for frame in [&sized, &streamed] {
+        let cut = &frame[..frame.len() - 4];
+        assert_eq!(values::unstored(cut).unwrap_err().code, crate::ErrorCode::Corrupted);
+    }
+}
