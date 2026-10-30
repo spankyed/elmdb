@@ -129,25 +129,40 @@ that a stopped scan is tracked as far as it went, the commit sequence, and `Data
 
 ## Concurrency models
 
-Loom runs a model in every interleaving of its threads within a bound, so a race that a real-thread test reaches only
-by luck fails on every run. A model exercises the production code itself: the primitives it synchronizes with come
-from `crate::sync` (`src/sync.rs`), which is `std`'s in every build and Loom's in one built with `--cfg loom`.
+A model runs production code on a scheduler's threads instead of the operating system's, so a race that a
+real-thread test reaches only by luck is reached on purpose. Loom runs every interleaving within a bound; Shuttle runs
+random schedules, as many as asked, and reaches models too large for Loom. The primitives the modelled code
+synchronizes with come from `crate::sync` (`src/sync.rs`): `std`'s and parking_lot's in every build, Loom's in one
+built with `--cfg loom`, Shuttle's in one built with `--cfg shuttle`. A model names its threads and its exploration
+through `crate::sync::model`, so one model runs under either.
 
-`store/unit_slot.rs` is the one model: whether a unit holds the environment's one write transaction. It holds that a
+`store/unit_slot.rs`'s model is whether a unit holds the environment's one write transaction. It holds that a
 plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
 waiter returns when the unit ends or once woken after its stop is set. LMDB's writer lock is a Loom mutex in the model:
 LMDB, the operating system's locks and other processes are outside it, and the real-process and barrier tests in
 `store/tests.rs` still cover them.
 
+`engine/watch/model.rs` is watch delivery and token registration, under Shuttle, against a stand-in store of one key
+whose commits do what `finish_commit` does. It holds that commits delivering together leave the listener with the last
+answer and never one twice; that once `unwatch` returns from another thread the listener isn't called again and has
+been dropped once; that listeners ending their own or each other's watch don't wait on a delivery; and that a commit
+racing a tracked read names its token unless the read already saw the write. The engine's reads, LMDB and the
+binding are outside it; `engine/tests/tracked.rs` covers them on real threads.
+
 ```sh
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
   cargo test -p elmdb --release --lib store::unit_slot::model
+RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
+  cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
 ```
 
-Its own target directory keeps the flag from rebuilding the everyday one. In that build every other test would run on
-Loom's primitives outside a model, so only the models are run. `LOOM_MAX_PREEMPTIONS=3` bounds how many times a thread
-is preempted in one interleaving. CI's `loom` job runs the same command. What a mutation of the slot showed:
-[`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md).
+Each has its own target directory, which keeps its flag from rebuilding the everyday one. In those builds every other
+test would run on the model's primitives outside a model, so only the models are run. `LOOM_MAX_PREEMPTIONS=3` bounds
+how many times a thread is preempted in one interleaving; `ELMDB_SHUTTLE_ITERATIONS` sets Shuttle's schedules per
+model, 100,000 by default, and a failure prints its schedule for `shuttle::replay` and its seed for
+`SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands. What mutations showed:
+[`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md) and
+[`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md).
 
 ## The binding
 

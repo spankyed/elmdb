@@ -2,7 +2,7 @@
 
 Status: partial implementation. Stage 3 has dedicated dhat assertions for selected value/text rebuilding and export
 (2026-10-27); stages 1, 2 and 9 were built on 2026-10-28 (`../archive/goals/goal-verification-tooling.md`, Outcome),
-and stages 4 to 7 since, each with what it leaves below. Stage 8 remains planned. The commands are in
+and stages 4 to 8 since, each with what it leaves below. The commands are in
 `../architecture/testing.md`: Repeatable maintenance measurements (instruction counts among them), Failpoints and
 Mutation testing.
 
@@ -208,6 +208,13 @@ Acceptance:
   same abstraction rather than two.
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
+
+Built (2026-10-30): Shuttle runs the unit slot's model and watch delivery's (`engine/watch/model.rs`) on the
+primitives Loom uses (`../architecture/testing.md`, Concurrency models). The write slipping between the unit check and
+the writer fails the slot's model. The listener dropped outside the callback guard isn't in the model: the guard is
+what `Database::close` consults, and the database is outside it; the mutations the model does catch are in
+[the record](../evidence/shuttle-watch.md). Its first run found `unwatch` returning while another thread's delivery
+was about to call the listener, which it now waits for.
 
 ## 9. Library no-clobber publication
 

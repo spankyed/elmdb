@@ -414,6 +414,9 @@ fn read_registered(
     answer
 }
 
+#[cfg(all(test, shuttle))]
+mod model;
+
 #[cfg(test)]
 mod registration_tests {
     use super::*;
