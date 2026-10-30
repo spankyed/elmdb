@@ -98,8 +98,10 @@ A plan is a scope, a start, steps and a terminal:
   refused (`UNKNOWN_TYPE`), as a kind or role a read names is.
 - **Filters:** `ofType`, `within`, `where` (a value, or a list holding it; a `null` matches a field that is null or
   missing), `has`, `lacks`, `withRole`, `linkedWith`, `linkedTo`, `linkedFrom`, `unlinkedTo`, `unlinkedFrom`.
-- **Walks:** `out` and `in` (each far end once, of the types when given), `descendants` and `ancestors` (nearest first,
-  each entity once, so a cycle ends the walk).
+- **Walks:** `out`, `in` and `both` (each far end once, of the types when given), `descendants` and `ancestors`
+  (nearest first, each entity once, so a cycle ends the walk; with `depth`, at most that many edges away), and `pathTo`
+  (a shortest path from an entity of the set to `to`, following edges `out`, `in` or `both` ways and at most `depth`
+  long when given: its entities in order, both ends included, or none; of paths as short, the one found first).
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
   then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
   after an id, a page's cursor; an id no longer in the answer answers nothing, so a caller pages again from the
@@ -108,7 +110,8 @@ A plan is a scope, a start, steps and a terminal:
   and `matching` (a trigram index's substring and pattern matches, in the set's order; `search.md`, Substrings and
   patterns as built), a pattern the syntax doesn't hold refused (`PATTERN_INVALID`).
 - **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
-  `edges` (relation rows), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
+  `edges` (relation rows), `degrees` (each entity with how many edges of the kinds it has, out, in or both ways, counting
+  those `edges` would answer), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
   entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
