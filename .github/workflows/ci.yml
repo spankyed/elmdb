@@ -84,6 +84,25 @@ jobs:
           path: target/mutants-in-diff
           if-no-files-found: ignore
 
+  # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
+  # the runner's load, so the step summary shows what the change costs. Reported, never a failure
+  instructions:
+    name: instruction counts (Linux)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      # The merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@0.20.0
+      - run: python3 scripts/instruction-counts.py HEAD^1
+
   platforms:
     name: ${{ matrix.target }} on Node ${{ matrix.node }}
     if: github.event_name != 'push'

@@ -165,11 +165,35 @@ Criterion takes 20 samples, a one-second warmup and a three-second window. Fixtu
 derivation are outside the timing; a selected rebuild replaces the same contents again, so it is steady-state
 maintenance, not a first build or a recovery. Syncs are off, an export drops its loads without writing a dump, and an
 indexed query answers at most 50 ids. The fixture holds eight 96-byte indexed tags per entity and 16 distinct words per
-text document, at 1k and 10k entities, and key encoding uses 16, 128 and 1,024-byte strings. Report input sizes,
+text document, at 1k entities, or at the counts `ELMDB_BENCH_ROWS` lists (`ELMDB_BENCH_ROWS=1000,10000` to see how a
+cost grows with the data), and key encoding uses 16, 128 and 1,024-byte strings. Report input sizes,
 hardware, toolchain, commit and load with a result, and keep `target/criterion` outside the worktree when comparing
 commits. Unchanged code has varied substantially between runs here, so a difference is checked against that variation
 before it is acted on. `scripts/measure-recovery.mjs` stays the measure of RSS, populated replacement, disk and scratch,
 which Criterion doesn't see.
+
+**Instruction counts.** `benches/instructions.rs` counts the instructions of the same operations under Valgrind's
+Callgrind, through [gungraun](https://github.com/gungraun/gungraun) (the renamed iai-callgrind): each run once, its
+setup, fixture and answer check outside the count, the maintenance ones at 1k entities and the reads over the same
+10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare. Text
+work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
+`text_rebuild` moves by a small fraction of a percent between runs of one commit
+(`../evidence/instruction-counts.md`). Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
+runs in a Linux container, with Valgrind and the runner at the dependency's version installed:
+
+```sh
+docker run --rm --security-opt seccomp=unconfined -v "$COPY:/w" -w /w rust:1-bookworm sh -euc '
+  apt-get update -qq && apt-get install -y -qq valgrind
+  cargo install --locked gungraun-runner --version 0.20.0
+  cargo bench -p elmdb --bench instructions'
+```
+
+`$COPY` is a copy of the tree. The runner turns off address randomization for each count, a call Docker's default
+seccomp profile refuses, hence `unconfined`. A run compares itself with the one before it in `target/gungraun`;
+`-- --save-baseline=<name>` and `-- --baseline=<name>` keep and compare named ones. On every pull request CI's
+`instructions` job runs `scripts/instruction-counts.py`: the base it merges into, then the change against it, each
+operation's count and change written to the job's summary. A count is reported and never fails the job, until the
+counts' movement across toolchain updates is known.
 
 **Heap.** The heap gate's one ignored test owns a dhat allocator in its own executable, builds each fixture before
 profiling and measures only the export, the rebuild or the check. Its allowances are 24 MiB for an export (with an

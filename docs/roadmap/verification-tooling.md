@@ -2,8 +2,9 @@
 
 Status: partial implementation. Stage 3 has dedicated dhat assertions for selected value/text rebuilding and export
 (2026-10-27); stages 1, 2 and 9 were built on 2026-10-28 (`../archive/goals/goal-verification-tooling.md`, Outcome),
-each with what it leaves below. Other stages remain planned. The commands are in `../architecture/testing.md`, Repeatable
-maintenance measurements, Failpoints and Mutation testing.
+and stages 4 to 7 since, each with what it leaves below. Stage 8 remains planned. The commands are in
+`../architecture/testing.md`: Repeatable maintenance measurements (instruction counts among them), Failpoints and
+Mutation testing.
 
 ## Purpose and scope
 
@@ -26,7 +27,7 @@ dependencies; the crates are development dependencies or behind a feature that r
 | 4 | cargo-nextest | The `bounded_watch_child` harness and `--exact` child-test selection |
 | 5 | proptest-state-machine | Small hand-written independent models (H04) |
 | 6 | samply | Native profiles that macOS refused without sudo, and V8 `--prof` symbol guesses |
-| 7 | iai-callgrind | Wall-clock comparisons on a loaded machine; complements Criterion (development-libraries.md, stage 2) |
+| 7 | gungraun (iai-callgrind) | Wall-clock comparisons on a loaded machine; complements Criterion (development-libraries.md, stage 2) |
 | 8 | shuttle | Interleavings Loom can't reach at a tractable bound; complements Loom (development-libraries.md, stage 4) |
 | 9 | tempfile `persist_noclobber` | The hand-written no-clobber publication in `store/backup.rs` |
 
@@ -187,6 +188,13 @@ Acceptance:
 - The same operations as the Criterion stage, so a regression can be seen in both.
 - A deliberate slowdown in a disposable copy shows in the counts; the counts of two unchanged runs are identical.
 - Reported, not gated, until normal variance across toolchain updates is known.
+
+The crate is gungraun now, iai-callgrind renamed. `benches/instructions.rs` counts the Criterion benchmarks' operations,
+and CI's `instructions` job reports each one's count on a pull request against its base
+(`scripts/instruction-counts.py`). Two runs of one commit counted the same for every operation but the text rebuild,
+which moves by 0.07% from the tokenizer's randomly seeded hash map; a disposable copy encoding each key twice doubled
+key encoding's counts and added 3.6% to the text rebuild, and moved nothing else
+(`../evidence/instruction-counts.md`).
 
 ## 8. Randomized concurrency testing
 
