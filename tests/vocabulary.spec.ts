@@ -93,6 +93,7 @@ function absentAsNull(face: Record<string, unknown>): string[] {
 /** The members that break a rule on purpose, each with why. One that no longer breaks it is reported as stale */
 const UNPAIRED_BY_DESIGN: Record<string, string> = {
   unlinkAll: 'removes every edge of the entity; its positive is a link per edge, not one call',
+  pathTo: "names where the path ends, not a way edges run: the query's set is its start, `direction` the way it walks",
 };
 
 describe('rules read off the names', () => {

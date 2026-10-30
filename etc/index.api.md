@@ -346,6 +346,9 @@ export interface EarsUnit {
 }
 
 // @public
+export type EdgeDirection = 'out' | 'in' | 'both';
+
+// @public
 export interface EmbedDeclaration {
     readonly chunk?: 'whole' | 'paragraph' | 'heading';
     readonly dims: number;
@@ -468,17 +471,31 @@ export interface Query extends QueryEntries {
 // @public
 export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
     after(id: EARS.EntityId): QueryBuilder<E, D>;
-    ancestors<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
+    ancestors<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined, options?: {
+        depth?: number;
+    }): QueryBuilder<T, D>;
     // (undocumented)
-    ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: {
+        depth?: number;
+    }): QueryBuilder<string, D>;
+    both<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
+    // (undocumented)
+    both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
     containing(text: string, options?: {
         caseInsensitive?: boolean;
     }): QueryBuilder<E, D>;
     // (undocumented)
     count(): number;
-    descendants<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
+    degrees<T extends string = string>(kinds: D['relKinds'] | readonly D['relKinds'][], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[], options?: {
+        direction?: EdgeDirection;
+    }): Map<EARS.EntityId<E>, number>;
+    descendants<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined, options?: {
+        depth?: number;
+    }): QueryBuilder<T, D>;
     // (undocumented)
-    descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: {
+        depth?: number;
+    }): QueryBuilder<string, D>;
     // (undocumented)
     distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
     // (undocumented)
@@ -534,6 +551,10 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     // (undocumented)
     out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
     outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+    pathTo(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
+        direction?: EdgeDirection;
+        depth?: number;
+    }): QueryBuilder<string, D>;
     // (undocumented)
     pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(fields: A): ({
         id: EARS.EntityId<E>;

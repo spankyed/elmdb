@@ -191,6 +191,9 @@ describe('relation kinds', () => {
       ['findRelations', () => e.findRelations({ kind: 'blokcs' })],
       ['descendants', () => e.query.ids(a).descendants('blokcs')],
       ['ancestors', () => e.query.ids(b).ancestors('blokcs')],
+      ['both', () => e.query.ids(a).both('blokcs')],
+      ['pathTo', () => e.query.ids(a).pathTo(b, 'blokcs')],
+      ['degrees', () => e.query.ids(a).degrees('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -240,6 +243,60 @@ describe('hierarchy walks', () => {
     e.write(mid).trash();
     expect(e.query.ids(leaf).ancestors('child').ids()).toEqual([deep]);
     expect(e.query.withTrashed.ids(leaf).ancestors('child').ids()).toEqual([deep, mid, root]);
+  });
+
+  it('stops at a depth, a count of edges taken as limit takes one', () => {
+    const [a, b, c, d] = [task('a'), task('b'), task('c'), task('d')];
+    e.write(a).link('child', b);
+    e.write(b).link('child', c);
+    e.write(c).link('child', d);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 1 }).ids()).toEqual([b]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 2.9 }).ids()).toEqual([b, c]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 0 }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: -1 }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: Infinity }).ids()).toEqual([b, c, d]);
+    expect(e.query.ids(d).ancestors('child', 'Task', { depth: 2 }).ids()).toEqual([c, b]);
+  });
+});
+
+describe('graph walks', () => {
+  it('both follows edges out and in, each far end once', () => {
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refs', b);
+    e.write(c).link('refs', a);
+    e.write(b).link('refs', a);
+    expect(e.query.ids(a).both('refs').ids()).toEqual([b, c]);
+    expect(e.query.ids(a).both('refs', 'Task').pick(['title'])).toEqual([{ id: b, title: 'b' }, { id: c, title: 'c' }]);
+  });
+
+  it('pathTo answers a shortest path from the set, following edges the way it is told, or none', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    e.write(a).link('refs', b);
+    e.write(b).link('refs', c);
+    e.write(c).link('refs', d);
+    e.write(a).link('blocks', d);
+    expect(e.query.ids(a).pathTo(d, 'refs').ids()).toEqual([a, b, c, d]);
+    expect(e.query.ids(a).pathTo(d, ['refs', 'blocks']).ids()).toEqual([a, d]);
+    expect(e.query.ids(a).pathTo(d, 'refs', { depth: 2 }).ids()).toEqual([]);
+    expect(e.query.ids(a).pathTo(x, 'refs').ids()).toEqual([]);
+    expect(e.query.ids(d).pathTo(a, 'refs').ids()).toEqual([]);
+    expect(e.query.ids(d).pathTo(a, 'refs', { direction: 'in' }).ids()).toEqual([d, c, b, a]);
+    expect(e.query.ids(c).pathTo(a, 'refs', { direction: 'both' }).pick(['title']).map((r) => r.title)).toEqual(['c', 'b', 'a']);
+    // A trashed entity is walked around, unless the query reaches the trash
+    e.write(b).trash();
+    expect(e.query.ids(a).pathTo(c, 'refs').ids()).toEqual([]);
+    expect(e.query.withTrashed.ids(a).pathTo(c, 'refs').ids()).toEqual([a, b, c]);
+  });
+
+  it("degrees counts each entity's edges as outEdges and inEdges answer them", () => {
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    const project = e.create('Project').id();
+    e.write(a).link('refs', b).link('refs', c).link('refs', project);
+    e.write(b).link('refs', a);
+    expect(e.query.ids([a, b, c]).degrees('refs')).toEqual(new Map([[a, 3], [b, 1], [c, 0]]));
+    expect(e.query.ids([a, b, c]).degrees('refs', undefined, { direction: 'in' })).toEqual(new Map([[a, 1], [b, 1], [c, 1]]));
+    expect(e.query.ids([a, b, c]).degrees('refs', 'Task', { direction: 'both' })).toEqual(new Map([[a, 3], [b, 2], [c, 1]]));
+    expect(e.query.ids(a).degrees('refs').get(a)).toBe(e.query.ids(a).outEdges('refs').length);
   });
 });
 

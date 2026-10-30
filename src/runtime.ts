@@ -161,6 +161,9 @@ export interface SearchHit<E extends string = string> {
   highlights?: SearchHighlights;
 }
 
+/** Which of an entity's edges a walk follows (`pathTo`, `degrees`): those out of it, those into it, or both */
+export type EdgeDirection = 'out' | 'in' | 'both';
+
 /** One stage of a query's plan as the database ran it: its start, a step or its terminal (`explain()`) */
 export interface QueryStage {
   /** The stage's name: `types`, `ids` or `all` for the start, a step's (`where`, `orderBy`, …), the terminal's */
@@ -273,24 +276,39 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
   ): QueryBuilder<T, D>;
   in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  /** Walks the entities' edges of the kinds both ways, out and in, to the entities at their other end, each once */
+  both<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
   /**
-   * Every entity the set reaches through outgoing edges of the kinds, any number deep: a subtree, nearest first,
-   * each once, never an entity of the set itself. `type` keeps the reached entities of the types.
+   * Every entity the set reaches through outgoing edges of the kinds, any number deep or at most `depth`: a subtree,
+   * nearest first, each once, never an entity of the set itself. `type` keeps the reached entities of the types.
    */
   descendants<T extends string>(
     kinds: D['relKinds'] | readonly D['relKinds'][],
     type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+    options?: { depth?: number },
   ): QueryBuilder<T, D>;
-  descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: { depth?: number }): QueryBuilder<string, D>;
   /**
-   * Every entity that reaches the set through edges of the kinds, any number deep: in a tree, the parent first
-   * and the root last, each once, never an entity of the set itself. `type` keeps the reached entities of the types.
+   * Every entity that reaches the set through edges of the kinds, any number deep or at most `depth`: in a tree, the
+   * parent first and the root last, each once, never an entity of the set itself. `type` keeps the reached entities
+   * of the types.
    */
   ancestors<T extends string>(
     kinds: D['relKinds'] | readonly D['relKinds'][],
     type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+    options?: { depth?: number },
   ): QueryBuilder<T, D>;
-  ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: { depth?: number }): QueryBuilder<string, D>;
+  /**
+   * A shortest path through edges of the kinds from an entity of the set to `to`: its entities in order, both ends
+   * included, or none when there is no path (of at most `depth` edges, when given). Edges are followed `out` unless
+   * `direction` says `in` or `both`; of paths as short, the first found. Its entities may be of any type.
+   */
+  pathTo(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: EdgeDirection; depth?: number }): QueryBuilder<string, D>;
   /**
    * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
    * `findRelations`' shape, one per edge
@@ -298,6 +316,15 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
   outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
   /** Each incoming edge of the kinds whose source this query could reach: its relation row */
   inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+  /**
+   * Each entity's number of edges of the kinds, in query order, `0` included: those `outEdges` (or with `direction`,
+   * `inEdges`, or both) would answer, so only edges whose other end this query could reach, of `type` when given
+   */
+  degrees<T extends string = string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[],
+    options?: { direction?: EdgeDirection },
+  ): Map<EARS.EntityId<E>, number>;
   pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];

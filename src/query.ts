@@ -1,7 +1,7 @@
 // The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
-import type { QueryBuilder, QueryStage, RelationEdge } from './runtime.ts';
+import type { EdgeDirection, QueryBuilder, QueryStage, RelationEdge } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import type { Answer } from './database.ts';
 import type { TypeName } from './write.ts';
@@ -86,10 +86,17 @@ export function relationRow(row: Record<string, unknown>): RelationEdge {
 const FIRST: readonly string[] = ['first', 'exists', 'firstRow'];
 /** The steps that keep or walk the ids one at a time, so the first id of their answer comes from the first ids they're given */
 const STREAMING: readonly string[] = [
-  'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'limit',
+  'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both', 'limit',
 ];
 /** The steps whose hits `hits()` answers */
 const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid'];
+
+/**
+ * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
+ * for an infinite count, or one past what a `u32` holds, nothing sent, so any number
+ */
+const edgeCount = (name: string, n: number | undefined) =>
+  n === undefined || n >= 2 ** 32 ? {} : { [name]: Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n)) };
 
 /** Whether a value is one a `where` sends to elmdb, which matches it with `===` or as an element of a list */
 const sendable = (v: unknown) =>
@@ -198,9 +205,9 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       builder({ ...recipe, steps: [...recipe.steps, { step }], ...(unindexedWhere && { unindexed: unindexedWhere }) });
     const atStart = recipe.steps.length === 0 && recipe.start.from === 'types' ? recipe.start.types : undefined;
     const ids = () => run(recipe, { answer: 'ids' }).ids as EARS.EntityId[];
-    const walk = (via: string, step: string, kinds: MaybeArr<string>, type?: MaybeArr<string>) => {
+    const walk = (via: string, step: string, kinds: MaybeArr<string>, type?: MaybeArr<string>, depth?: number) => {
       names.relationKinds(kinds, via);
-      return next({ step, kinds: asArr(kinds), ...(type !== undefined && { types: asArr(type) }) });
+      return next({ step, kinds: asArr(kinds), ...(type !== undefined && { types: asArr(type) }), ...edgeCount('depth', depth) });
     };
     const filterByLink = (step: string, kind: string, other?: EARS.EntityId) => {
       names.relationKinds(kind, step);
@@ -240,10 +247,22 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       unlinkedFrom: (kind: string, other?: EARS.EntityId) => filterByLink('unlinkedFrom', kind, other),
       out: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('out', 'out', kinds, type),
       in: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('in', 'in', kinds, type),
-      descendants: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('descendants', 'descendants', kinds, type),
-      ancestors: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('ancestors', 'ancestors', kinds, type),
+      both: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('both', 'both', kinds, type),
+      descendants: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number } = {}) =>
+        walk('descendants', 'descendants', kinds, type, depth),
+      ancestors: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number } = {}) =>
+        walk('ancestors', 'ancestors', kinds, type, depth),
+      pathTo: (to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', depth }: { direction?: EdgeDirection; depth?: number } = {}) => {
+        names.relationKinds(kinds, 'pathTo');
+        return next({ step: 'pathTo', to, kinds: asArr(kinds), direction, ...edgeCount('depth', depth) });
+      },
       outEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('outEdges', kinds, type, true),
       inEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('inEdges', kinds, type, false),
+      degrees: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { direction = 'out' }: { direction?: EdgeDirection } = {}) => {
+        names.relationKinds(kinds, 'degrees');
+        const answer = run(recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
+        return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
+      },
 
       pick: (fields: readonly string[]) => run(recipe, { answer: 'rows', fields: [...fields] }).rows,
       // The first row: the fields picked, or with none the whole row, as pickAll reads it
