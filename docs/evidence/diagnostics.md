@@ -13,8 +13,8 @@ Spans under the target `elmdb`, each ending with an `outcome` (`committed`, `dur
 | Span | Fields |
 |---|---|
 | `rebuild` | `entity_type`, `index` (both empty for a full rebuild) |
-| `write` | `durable`, `waited_us` (until it held the writer), `growths`, `resizes` |
-| `begin` | `waited_us`, `resizes` |
+| `write` | `durable`, `waited_us` (until it held the writer), `growths` |
+| `begin` | `waited_us` |
 | `unit_wait` | `waited_us` |
 | `sort` | `rows`, `runs`, `spilled_bytes` (scratch bytes at its finish) |
 
@@ -79,6 +79,6 @@ about a microsecond a write, within the runs' spread.
 
 Kept, behind the feature. Nothing collecting, the spans are within a twentieth of a percent of every benchmarked
 operation, held there by a gate on every pull request. The binding's `collectDiagnostics()`/`takeDiagnostics()` is an
-experiment behind its own feature, off by default: a pull API, since spans close on elmdb's threads rather than
-JavaScript's. Whether the release binding is built with the feature, and what a public collection API looks like, wait
+experiment behind its own feature, off by default, installing elmdb's `Collector`: a pull API, since spans close on
+elmdb's threads rather than JavaScript's. Whether the release binding is built with the feature, and what a public collection API looks like, wait
 for a stall that needs them; apack's use is proposed separately.

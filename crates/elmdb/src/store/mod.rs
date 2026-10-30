@@ -471,7 +471,6 @@ impl Store {
             ));
         }
         let mut growths = 0;
-        let mut resizes = 0;
         loop {
             run_point!(WRITE_RESERVATION);
             // Claimed under the unit's lock: a unit that slipped between the earlier check and write_txn would leave
@@ -485,8 +484,6 @@ impl Store {
                 }
             })??;
             let Some((mut txn, guard)) = claimed else {
-                resizes += 1;
-                op.record(names::RESIZES, || resizes);
                 self.adopt_map_size()?;
                 continue;
             };
@@ -602,7 +599,6 @@ impl Store {
             if (info.last_page_number + 1) * page * 2 > info.map_size {
                 self.grow()?;
             }
-            let mut resizes = 0;
             loop {
                 let guard = self.gate.read_arc();
                 match self.env.write_txn() {
@@ -613,8 +609,6 @@ impl Store {
                     // Another process grew the file: adopting its size takes the gate for writing, so this
                     // transaction's hold on it goes first
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        resizes += 1;
-                        op.record(names::RESIZES, || resizes);
                         drop(guard);
                         self.adopt_map_size()?;
                     }

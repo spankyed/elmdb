@@ -3,7 +3,7 @@
 //!
 //! Spans are coarse — one per operation or phase, never one per row — and carry phases, counts, durations and outcomes:
 //! schema names, never entity values, ids, query payloads or paths. The engine never installs a collector; the
-//! program embedding it does, or nothing is collected.
+//! program embedding it does — [`Collector`] is one — or nothing is collected.
 //!
 //! Without the `diagnostics` feature, which is off by default, `tracing` is not a dependency and an [`Op`] is empty, so
 //! every call here compiles to nothing. With it and no collector, an [`Op`] is `None` after one check of its callsite,
@@ -11,6 +11,11 @@
 
 #[cfg(feature = "diagnostics")]
 use std::time::Instant;
+
+#[cfg(feature = "diagnostics")]
+mod collector;
+#[cfg(feature = "diagnostics")]
+pub use collector::{Collector, Taken};
 
 use crate::error::{Error, Result};
 
@@ -39,8 +44,6 @@ pub mod names {
     pub const WAITED_US: &str = "waited_us";
     /// Times a write grew the map after filling it, and ran again
     pub const GROWTHS: &str = "growths";
-    /// Times a write found another process had grown the file, and adopted its size
-    pub const RESIZES: &str = "resizes";
     /// Entries a sort was given
     pub const ROWS: &str = "rows";
     /// Runs a sort wrote to scratch files, the last one at its finish included, and the bytes they held then
@@ -88,7 +91,7 @@ impl Op {
         {
             use tracing::field::Empty;
             Self::live(tracing::info_span!(
-                target: TARGET, "write", durable, waited_us = Empty, growths = Empty, resizes = Empty,
+                target: TARGET, "write", durable, waited_us = Empty, growths = Empty,
                 outcome = Empty, error = Empty, elapsed_us = Empty
             ))
         }
@@ -105,7 +108,7 @@ impl Op {
         {
             use tracing::field::Empty;
             Self::live(tracing::info_span!(
-                target: TARGET, "begin", waited_us = Empty, resizes = Empty, outcome = Empty, error = Empty,
+                target: TARGET, "begin", waited_us = Empty, outcome = Empty, error = Empty,
                 elapsed_us = Empty
             ))
         }

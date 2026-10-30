@@ -7,73 +7,32 @@
 #[allow(dead_code)]
 mod support;
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use elmdb::diagnostics::{TARGET, names};
+use elmdb::diagnostics::{Collector, names};
 use elmdb::engine::batch::Batch;
-use serde_json::json;
-use tracing::field::{Field, Visit};
-use tracing::span::{Attributes, Id, Record};
-use tracing::{Event, Metadata, Subscriber};
+use serde_json::{Value, json};
 
-/// A span as a collector heard it: its name, its parent's name and every field recorded on it
-#[derive(Debug, Clone)]
-struct Heard {
-    name: &'static str,
-    parent: Option<&'static str>,
-    fields: BTreeMap<&'static str, String>,
-}
+/// A span as elmdb's collector kept it
+struct Heard(Value);
 
-/// A collector keeping every span of elmdb's it hears
-#[derive(Default, Clone)]
-struct Collector {
-    spans: Arc<Mutex<Vec<Heard>>>,
-    next: Arc<AtomicU64>,
-    stack: Arc<Mutex<Vec<u64>>>,
-}
-
-struct Fields<'a>(&'a mut BTreeMap<&'static str, String>);
-
-impl Visit for Fields<'_> {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name(), format!("{value:?}"));
+impl Heard {
+    fn name(&self) -> &str {
+        self.0["span"].as_str().unwrap()
     }
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.0.insert(field.name(), value.to_owned());
+    fn parent(&self) -> Option<&str> {
+        self.0["parent"].as_str()
     }
-}
-
-impl Subscriber for Collector {
-    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.target() == TARGET
+    /// A field as text, empty when the span doesn't have it
+    fn field(&self, field: &str) -> String {
+        match &self.0[field] {
+            Value::Null => String::new(),
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
     }
-    fn new_span(&self, attributes: &Attributes<'_>) -> Id {
-        let mut fields = BTreeMap::new();
-        attributes.record(&mut Fields(&mut fields));
-        let mut spans = self.spans.lock().unwrap();
-        let parent = self.stack.lock().unwrap().last().map(|&at| spans[at as usize - 1].name);
-        spans.push(Heard { name: attributes.metadata().name(), parent, fields });
-        Id::from_u64(self.next.fetch_add(1, Ordering::SeqCst) + 1)
-    }
-    fn record(&self, span: &Id, values: &Record<'_>) {
-        let mut spans = self.spans.lock().unwrap();
-        values.record(&mut Fields(&mut spans[span.into_u64() as usize - 1].fields));
-    }
-    fn record_follows_from(&self, _: &Id, _: &Id) {}
-    fn event(&self, _: &Event<'_>) {}
-    fn enter(&self, span: &Id) {
-        self.stack.lock().unwrap().push(span.into_u64());
-    }
-    fn exit(&self, _: &Id) {
-        self.stack.lock().unwrap().pop();
-    }
-}
-
-impl Collector {
-    fn heard(&self) -> Vec<Heard> {
-        self.spans.lock().unwrap().clone()
+    fn has(&self, field: &str) -> bool {
+        self.0.get(field).is_some()
     }
 }
 
@@ -105,50 +64,50 @@ fn the_engine_never_installs_a_collector_and_one_installed_hears_every_operation
     let uncollected = operations(&fixture);
     assert!(!tracing::dispatcher::has_been_set(), "no operation may install a collector of its own");
 
-    let collector = Collector::default();
-    let collected = tracing::subscriber::with_default(collector.clone(), || operations(&fixture));
-    assert_eq!(collected, uncollected, "collecting changes no operation's answer");
+    let collector = Arc::new(Collector::new(1000));
+    let collected = tracing::subscriber::with_default(Arc::clone(&collector), || operations(&fixture));
+    assert_eq!(collected, uncollected, "collecting changes no answer");
 
-    let heard = collector.heard();
-    let named = |name: &str| heard.iter().filter(|h| h.name == name).cloned().collect::<Vec<_>>();
-    let field = |h: &Heard, f: &str| h.fields.get(f).cloned().unwrap_or_default();
+    let taken = collector.take();
+    assert_eq!(taken.dropped, 0);
+    let heard: Vec<Heard> = taken.spans.iter().map(|span| Heard(serde_json::from_str(span).unwrap())).collect();
+    let named = |name: &str| heard.iter().filter(|h| h.name() == name).collect::<Vec<_>>();
 
     let begun = named(names::BEGIN);
     assert_eq!(begun.len(), 1);
-    assert_eq!(field(&begun[0], names::OUTCOME), "begun");
-    assert!(begun[0].fields.contains_key(names::WAITED_US));
+    assert_eq!(begun[0].field(names::OUTCOME), "begun");
+    assert!(begun[0].has(names::WAITED_US));
 
     // The plain write's: the rebuilds' own writes are their children
-    let writes: Vec<_> = named(names::WRITE).into_iter().filter(|h| h.parent.is_none()).collect();
+    let writes: Vec<_> = named(names::WRITE).into_iter().filter(|h| h.parent().is_none()).collect();
     assert_eq!(writes.len(), 1);
-    assert_eq!(field(&writes[0], "durable"), "false");
-    assert_eq!(field(&writes[0], names::OUTCOME), "committed");
-    assert!(writes[0].fields.contains_key(names::WAITED_US) && writes[0].fields.contains_key(names::ELAPSED_US));
+    assert_eq!(writes[0].field("durable"), "false");
+    assert_eq!(writes[0].field(names::OUTCOME), "committed");
+    assert!(writes[0].has(names::WAITED_US) && writes[0].has(names::ELAPSED_US));
 
     let rebuilds = named(names::REBUILD);
     assert_eq!(rebuilds.len(), 3);
-    assert_eq!((field(&rebuilds[0], "entity_type"), field(&rebuilds[0], "index")), ("Doc".into(), "tags".into()));
-    assert_eq!(field(&rebuilds[0], names::OUTCOME), "durable");
-    assert_eq!(field(&rebuilds[1], names::OUTCOME), "failed");
-    assert_eq!(field(&rebuilds[1], names::ERROR), "UnknownIndex");
-    assert_eq!(field(&rebuilds[2], names::OUTCOME), "durable");
+    assert_eq!((rebuilds[0].field("entity_type"), rebuilds[0].field("index")), ("Doc".into(), "tags".into()));
+    assert_eq!(rebuilds[0].field(names::OUTCOME), "durable");
+    assert_eq!(rebuilds[1].field(names::OUTCOME), "failed");
+    assert_eq!(rebuilds[1].field(names::ERROR), "UnknownIndex");
+    assert_eq!(rebuilds[2].field(names::OUTCOME), "durable");
+    // A full rebuild of 200 entities' tags and text takes far longer than a microsecond
+    let elapsed = rebuilds[2].field(names::ELAPSED_US).parse::<u64>().unwrap();
+    assert!(elapsed > 100, "{}", rebuilds[2].0);
 
     let sorts = named(names::SORT);
     assert!(
-        !sorts.is_empty() && sorts.iter().all(|s| s.parent == Some(names::REBUILD)),
+        !sorts.is_empty() && sorts.iter().all(|s| s.parent() == Some(names::REBUILD)),
         "a rebuild's sorts are its own"
     );
-    assert!(sorts.iter().all(|s| field(s, names::OUTCOME) == "sorted"));
+    assert!(sorts.iter().all(|s| s.field(names::OUTCOME) == "sorted"));
     // One index's entries: eight tags for each of the 200 entities
-    assert_eq!(field(&sorts[0], names::ROWS), "1600");
-    assert!(sorts.iter().all(|s| s.fields.contains_key(names::RUNS) && s.fields.contains_key(names::SPILLED_BYTES)));
+    assert_eq!(sorts[0].field(names::ROWS), "1600");
+    assert!(sorts.iter().all(|s| s.has(names::RUNS) && s.has(names::SPILLED_BYTES)));
 
     for h in &heard {
-        for value in h.fields.values() {
-            assert!(
-                !value.contains("Doc-") && !value.contains("secret") && !value.contains("tag0"),
-                "{h:?} names data"
-            );
-        }
+        let text = h.0.to_string();
+        assert!(!text.contains("Doc-") && !text.contains("secret") && !text.contains("tag0"), "{text} names data");
     }
 }

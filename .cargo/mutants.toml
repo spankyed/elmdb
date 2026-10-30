@@ -103,6 +103,9 @@ exclude_re = [
     # `ALREADY_LOADED`, and a claim outliving its first worker), which cargo-mutants doesn't run
     "process.rs:.*replace claim -> ",
     "process.rs:.*replace pin_module -> ",
+    # The binding's diagnostics experiment: installing elmdb's collector for the process and taking from it, each a call
+    # of elmdb's tested Collector that needs Node, which `examples/diagnostics.mjs` runs and cargo-mutants doesn't
+    "elmdb-node/src/diagnostics.rs:.*replace (collect_diagnostics|take_diagnostics) -> ",
     # A stored value streamed, which every one is with the guard false or the one-call size made 0: the stream
     # decompresses the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
     "values.rs:.*replace match guard size <= ONE_CALL_UP_TO with false in decompress",

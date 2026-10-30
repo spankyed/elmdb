@@ -74,7 +74,8 @@ other build), and without it a site is nothing: a release binding holds no point
 The engine reports its slow operations as [`tracing`](https://docs.rs/tracing) spans (`crates/elmdb/src/diagnostics.rs`):
 `rebuild`, `write`, `begin`, `unit_wait` and `sort`, each with its outcome, its elapsed and waited microseconds and its
 counts, under the target `elmdb`. A span is one operation or phase, never one row, and names no entity value, id, query
-or path. The engine never installs a collector: the embedding program does, or nothing is collected.
+or path. The engine never installs a collector: the embedding program does, or nothing is collected. With the
+feature, `elmdb::diagnostics::Collector` is one it may install, keeping each span as a JSON object until taken.
 
 Diagnostics are off by default, and three checks hold that claim:
 
@@ -97,9 +98,10 @@ Diagnostics are off by default, and three checks hold that claim:
   operation and asserts no collector was installed, then runs them again under a test collector and asserts what it
   heard, that collecting changed no answer, and that no field names data.
 
-`cargo nextest run -p elmdb --features diagnostics` runs the engine's suite with the spans compiled in. The binding's
-`diagnostics` feature, also off by default, adds `collectDiagnostics()` and `takeDiagnostics()`, an experiment that
-collects the spans from Node; `crates/elmdb-node/examples/diagnostics.mjs` runs it. Readings and the gates' firing
+`cargo nextest run -p elmdb --features diagnostics` runs the engine's suite with the spans compiled in, and
+`scripts/mutants-in-diff.py` mutates a crate declaring the feature with it on. The binding's `diagnostics` feature, also
+off by default, adds `collectDiagnostics()` and `takeDiagnostics()`, an experiment installing that collector from Node;
+`crates/elmdb-node/examples/diagnostics.mjs` runs it. Readings and the gates' firing
 cases: `../evidence/diagnostics.md`.
 
 ## Mutation testing
