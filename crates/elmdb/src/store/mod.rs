@@ -165,10 +165,26 @@ impl Drop for Registration {
     }
 }
 
+/// Retry reader acquisition once after LMDB removes slots whose owning processes are dead.
+/// Live readers are never evicted; all other errors, including a second READERS_FULL, remain refusals.
+fn with_reader_recovery<T>(env: &Env<WithoutTls>, mut begin: impl FnMut() -> heed::Result<T>) -> heed::Result<T> {
+    match begin() {
+        Err(heed::Error::Mdb(heed::MdbError::ReadersFull)) => {
+            env.clear_stale_readers()?;
+            begin()
+        }
+        result => result,
+    }
+}
+
+fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutTls>> {
+    with_reader_recovery(env, || env.read_txn())
+}
+
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
-    let _reader = env.read_txn()?;
+    let _reader = read_txn(env)?;
     if env.info().number_of_readers == 0 {
         return Err(Error::new(
             ErrorCode::Io,
@@ -251,7 +267,7 @@ impl Store {
             )
         });
         let sequence = {
-            let txn = env.read_txn()?;
+            let txn = read_txn(&env)?;
             let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
             held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
         };
@@ -273,7 +289,7 @@ impl Store {
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
     fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool) -> Result<Db> {
-        let rtxn = env.read_txn()?;
+        let rtxn = read_txn(env)?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
                 let elmdb = opener.open_database::<Bytes, Bytes>(rtxn, Some(format::DB_NAME))?;
@@ -284,7 +300,7 @@ impl Store {
         // The unnamed database lists the named ones: anything in it but elmdb's own is another program's data
         let foreign = match main {
             Some(main) => {
-                let txn = env.read_txn()?;
+                let txn = read_txn(env)?;
                 main.iter(&txn)?.any(|e| {
                     e.is_ok_and(|(k, _)| {
                         ![format::DB_NAME, format::COSINE_GRAPHS, format::EUCLIDEAN_GRAPHS]
@@ -331,7 +347,7 @@ impl Store {
     /// The databases around `main`: hannoy's graph databases, created in a writable environment that lacks them, and
     /// opened, when there, in a read-only one
     fn with_graphs(env: &Env<WithoutTls>, main: heed::Database<'static, Bytes, Bytes>, read_only: bool) -> Result<Db> {
-        let rtxn = env.read_txn()?;
+        let rtxn = read_txn(env)?;
         let (cosine, euclidean) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
                 let cosine = opener.open_database(rtxn, Some(format::COSINE_GRAPHS))?;
@@ -375,7 +391,7 @@ impl Store {
             let guard = self.gate();
             let txn = match self.current_idle() {
                 Some(txn) => txn,
-                None => match self.env.clone().static_read_txn() {
+                None => match with_reader_recovery(&self.env, || self.env.clone().static_read_txn()) {
                     Ok(txn) => txn,
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                         drop(guard);
@@ -772,7 +788,7 @@ pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name:
 }
 
 fn check_stamp(env: &Env<WithoutTls>, db: heed::Database<'_, Bytes, Bytes>, path: &Path) -> Result<()> {
-    let txn = env.read_txn()?;
+    let txn = read_txn(env)?;
     let kind = db.get(&txn, &meta_key(meta::KIND))?;
     if kind != Some(format::KIND.as_bytes()) {
         return Err(Error::new(ErrorCode::NotADatabase, format!("{} holds no elmdb database", path.display())));

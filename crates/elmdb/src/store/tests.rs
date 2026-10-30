@@ -854,3 +854,129 @@ fn a_commit_is_synced_on_its_own_once_writes_pause() {
     }
     store.close().unwrap();
 }
+
+/// Saturates the reader table without exiting cleanly, so the parent can distinguish live and stale slots.
+#[test]
+#[ignore = "run only by the reader-recovery tests, as their child process"]
+fn child_holds_every_reader_slot() {
+    use std::io::Write;
+    let path = std::env::var("ELMDB_READER_RECOVERY_DB").expect("reader-recovery parent supplies its database");
+    let mut options = EnvOpenOptions::new().read_txn_without_tls();
+    options.max_dbs(8);
+    // SAFETY: this is a child process opening the parent's LMDB environment through LMDB's locks.
+    let env = unsafe { options.open(path) }.unwrap();
+    let mut held = Vec::new();
+    loop {
+        match env.read_txn() {
+            Ok(txn) => held.push(txn),
+            Err(heed::Error::Mdb(heed::MdbError::ReadersFull)) => break,
+            Err(error) => panic!("reader saturation failed: {error}"),
+        }
+    }
+    assert_eq!(held.len(), env.max_readers() as usize);
+    println!("ELMDB_READERS_FULL_READY");
+    std::io::stdout().flush().unwrap();
+    // The parent's kill deliberately skips the read transactions' destructors. A failed/killed parent
+    // must not leave its child behind indefinitely.
+    std::thread::sleep(Duration::from_secs(20));
+    panic!("reader-recovery parent did not terminate its child");
+}
+
+struct SaturatedReaders(std::process::Child);
+
+impl SaturatedReaders {
+    fn start(path: &Path) -> Self {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "store::tests::child_holds_every_reader_slot", "--nocapture"])
+            .env("ELMDB_READER_RECOVERY_DB", path)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut child = Self(child);
+        let stdout = BufReader::new(child.0.stdout.take().unwrap());
+        assert!(
+            stdout.lines().any(|line| line.unwrap() == "ELMDB_READERS_FULL_READY"),
+            "child must fill the reader table"
+        );
+        child
+    }
+
+    fn kill_and_wait(&mut self) {
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
+    }
+}
+
+impl Drop for SaturatedReaders {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn a_read_refuses_live_reader_exhaustion_then_recovers_the_killed_readers() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "key", b"value").unwrap();
+    let mut readers = SaturatedReaders::start(dir.path());
+    let error = store.read(|_, _| Ok(())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::ReadersFull, "live readers must not be cleared");
+    readers.kill_and_wait();
+    assert_eq!(get(&store, "key").as_deref(), Some(b"value".as_slice()));
+}
+
+#[test]
+fn a_read_only_open_recovers_slots_left_by_a_killed_reader() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "key", b"value").unwrap();
+    store.close().unwrap();
+    let mut readers = SaturatedReaders::start(dir.path());
+    // Keep the environment mapped until after the child dies: the first opener otherwise resets the table.
+    let mut options = EnvOpenOptions::new().read_txn_without_tls();
+    options.max_dbs(8);
+    // SAFETY: the Store has closed; this is the only environment handle in this process.
+    let env = unsafe { options.open(dir.path()) }.unwrap();
+    readers.kill_and_wait();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_opens_after_reader_death", "--nocapture"])
+        .env("ELMDB_READER_RECOVERY_DB", dir.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("ELMDB_READER_RECOVERY_OPENED"),
+        "the child must really open and read"
+    );
+    drop(env);
+}
+
+#[test]
+fn reader_recovery_retries_only_once_and_only_readers_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let mut calls = 0;
+    let result: heed::Result<()> = with_reader_recovery(&store.env, || {
+        calls += 1;
+        Err(heed::Error::Mdb(heed::MdbError::ReadersFull))
+    });
+    assert!(matches!(result, Err(heed::Error::Mdb(heed::MdbError::ReadersFull))));
+    assert_eq!(calls, 2);
+    let mut calls = 0;
+    let result: heed::Result<()> = with_reader_recovery(&store.env, || {
+        calls += 1;
+        Err(heed::Error::Mdb(heed::MdbError::BadTxn))
+    });
+    assert!(matches!(result, Err(heed::Error::Mdb(heed::MdbError::BadTxn))));
+    assert_eq!(calls, 1);
+}
+
+#[test]
+#[ignore = "run only by the reader-recovery open test, as its child process"]
+fn child_opens_after_reader_death() {
+    let path = std::env::var("ELMDB_READER_RECOVERY_DB").expect("reader-recovery parent supplies its database");
+    let store = Store::open(Path::new(&path), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    assert_eq!(get(&store, "key").as_deref(), Some(b"value".as_slice()));
+    println!("ELMDB_READER_RECOVERY_OPENED");
+}
