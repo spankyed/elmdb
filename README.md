@@ -1,6 +1,6 @@
 # elmdb
 
-An embedded graph database for ECMAScript, written in Rust on LMDB.
+Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
 
 The name is E (ECMAScript) and LMDB, and it's how "LMDB" sounds said out loud.
 

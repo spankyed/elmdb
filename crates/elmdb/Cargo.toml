@@ -1,6 +1,8 @@
 [package]
 name = "elmdb"
-description = "An embedded graph database written in Rust on LMDB"
+description = "Embedded entity-relation database on LMDB: schema'd entities and relations, value, text and vector indexes in the data's own transaction, and change sets for live reads"
+keywords = ["database", "embedded", "lmdb", "vector-search", "full-text-search"]
+categories = ["database-implementations"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

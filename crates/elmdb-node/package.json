@@ -1,7 +1,8 @@
 {
   "name": "elmdb",
   "version": "0.0.0",
-  "description": "An embedded graph database for ECMAScript, written in Rust on LMDB",
+  "description": "Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.",
+  "keywords": ["embedded-database", "lmdb", "vector-search", "full-text-search", "electron", "local-first", "reactive"],
   "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",

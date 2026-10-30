@@ -1,6 +1,6 @@
 # Design
 
-elmdb is an embedded graph database for JavaScript, written in Rust on LMDB. It holds typed entities, their attributes
+elmdb is an embedded database for Node.js and Electron, written in Rust on LMDB. It holds typed entities, their attributes
 and the relations between them, keeps value, text and vector indexes in the same transaction as the data, runs a read
 as one plan and a write as one batch, and reports what every commit changed.
 
