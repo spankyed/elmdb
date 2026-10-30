@@ -186,7 +186,7 @@ fn out_and_in_walk_edges_by_kinds_and_types_and_edges_answer_relation_rows() {
     assert_eq!(ids(db, of_ids(&[A, B]), json!([{ "step": "in", "kinds": ["contains"] }])), json!([P]));
     let edges = query(
         db,
-        json!({ "start": of_ids(&[P]), "terminal": { "answer": "edges", "kinds": ["owns", "contains"], "outward": true } }),
+        json!({ "start": of_ids(&[P]), "terminal": { "answer": "edges", "kinds": ["owns", "contains"], "direction": "out" } }),
     );
     let shape: Vec<(Json, Json, Json)> = edges["relations"]
         .as_array()
@@ -683,7 +683,7 @@ fn edges_leave_out_a_far_end_in_the_trash() {
     super::write(&f.db, vec![json!({ "op": "trash", "id": B })]).unwrap();
     let edges = query(
         &f.db,
-        json!({ "start": of_ids(&[P]), "terminal": { "answer": "edges", "kinds": ["contains"], "outward": true, "types": ["Task"] } }),
+        json!({ "start": of_ids(&[P]), "terminal": { "answer": "edges", "kinds": ["contains"], "direction": "out", "types": ["Task"] } }),
     );
     let targets: Vec<&Json> = edges["relations"].as_array().unwrap().iter().map(|r| &r["target"]).collect();
     assert_eq!(targets, [&json!(A)]);

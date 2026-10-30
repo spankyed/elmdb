@@ -437,15 +437,18 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(optional))]
         fields: Option<Vec<String>>,
     },
-    /// Each edge of the kinds out of (or into) the set whose far end the query could reach, as a relation row
+    /// Each edge of the kinds on the direction's sides of the set whose far end the query could reach, as a relation
+    /// row, each relation once
     Edges {
         kinds: Vec<String>,
-        outward: bool,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
-    /// Each entity with how many edges of the kinds it has, counting those `edges` would answer
+    /// Each entity with how many edges of the kinds it has, counting those `edges` from it alone would answer
     Degrees {
         kinds: Vec<String>,
         #[serde(default)]

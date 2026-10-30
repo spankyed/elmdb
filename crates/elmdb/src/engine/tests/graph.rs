@@ -253,6 +253,50 @@ fn degrees_count_each_entity_s_edges_as_edges_would_answer_them() {
 }
 
 #[test]
+fn edges_answer_each_relation_on_the_direction_s_sides_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-a", "Task-b", "Task-c"]);
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-n" })]).unwrap();
+    link(
+        &db,
+        &[
+            ("Task-a", "refs", "Task-b"),
+            ("Task-c", "refs", "Task-a"),
+            ("Task-b", "refs", "Task-c"),
+            ("Note-n", "refs", "Task-a"),
+        ],
+    );
+    let edges = |from: &[&str], direction: Json, types: Json| -> Vec<(String, String)> {
+        let mut terminal = json!({ "answer": "edges", "kinds": ["refs"], "types": types });
+        if !direction.is_null() {
+            terminal["direction"] = direction;
+        }
+        let plan = json!({ "start": { "from": "ids", "ids": from }, "terminal": terminal });
+        query(&db, plan)["relations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["source"].as_str().unwrap().into(), r["target"].as_str().unwrap().into()))
+            .collect()
+    };
+    let pair = |s: &str, t: &str| (s.to_string(), t.to_string());
+    assert_eq!(edges(&["Task-a"], json!("out"), Json::Null), [pair("Task-a", "Task-b")]);
+    assert_eq!(edges(&["Task-a"], Json::Null, Json::Null), [pair("Task-a", "Task-b")], "out unless told otherwise");
+    assert_eq!(edges(&["Task-a"], json!("in"), Json::Null), [pair("Task-c", "Task-a"), pair("Note-n", "Task-a")]);
+    assert_eq!(
+        edges(&["Task-a"], json!("both"), json!(["Task"])),
+        [pair("Task-a", "Task-b"), pair("Task-c", "Task-a")],
+        "out then in, a Note's edge left out"
+    );
+    assert_eq!(
+        edges(&["Task-a", "Task-b"], json!("both"), json!(["Task"])),
+        [pair("Task-a", "Task-b"), pair("Task-c", "Task-a"), pair("Task-b", "Task-c")],
+        "the edge between two of the set answered once"
+    );
+}
+
+#[test]
 fn explain_names_the_new_stages() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
