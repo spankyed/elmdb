@@ -49,6 +49,7 @@ jobs:
           npm run typecheck
           npm test
           node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
+          python3 -B scripts/test-read-profile.py
           python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
       - name: preserve read measurement reports
         if: always()

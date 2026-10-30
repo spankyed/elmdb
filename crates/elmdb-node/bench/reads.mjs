@@ -61,6 +61,26 @@ const schema = {
   },
 };
 
+// Source and binary identity are captured before measuring; invalid provenance fails before seeding.
+let source, binary;
+if (json) {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const suppliedCommit = process.env.ELMDB_PROFILE_SOURCE_COMMIT;
+  const suppliedDirty = process.env.ELMDB_PROFILE_SOURCE_DIRTY;
+  assert.equal(suppliedCommit === undefined, suppliedDirty === undefined, 'snapshot commit and dirty state must be supplied together');
+  if (suppliedCommit !== undefined) {
+    assert.match(suppliedCommit, /^[a-f0-9]{40}$/, 'snapshot commit must be a full Git SHA');
+    assert.ok(suppliedDirty === 'true' || suppliedDirty === 'false', 'snapshot dirty state must be explicit');
+  }
+  source = suppliedCommit === undefined
+    ? { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=normal')), provenance: 'git' }
+    : { commit: suppliedCommit, dirty: suppliedDirty === 'true', provenance: 'caller-provided snapshot' };
+  const binaries = Object.keys(require.cache).filter((path) => path.endsWith('.node') && path.startsWith(fileURLToPath(new URL('../', import.meta.url))));
+  assert.equal(binaries.length, 1, 'identify the actual loaded elmdb binary');
+
+  binary = { name: binaries[0].split(/[\\/]/).at(-1), sha256: createHash('sha256').update(readFileSync(binaries[0])).digest('hex') };
+}
 const dir = mkdtempSync(join(tmpdir(), 'elmdb-read-bench-'));
 let db;
 try {
@@ -77,10 +97,12 @@ try {
   const workloads = [
     ['field', { reads: [{ read: 'field', id: id(742), field: 'title' }] }, (a) => assert.deepEqual(a, { kind: 'field', present: true, value: 'message 742' })],
     ['page', page({ answer: 'rows' }), (a) => {
+      assert.equal(a.kind, 'rows');
       assert.equal(a.rows.length, 50);
       a.rows.forEach((row, offset) => assert.deepEqual(row, { id: id(700 + offset), entityType: 'Message', ...message(700 + offset) }));
     }],
     ['page_projected', page({ answer: 'rows', fields: ['title', 'sender'] }), (a) => {
+      assert.equal(a.kind, 'rows');
       assert.equal(a.rows.length, 50);
       a.rows.forEach((row, offset) => {
         const i = 700 + offset;
@@ -89,6 +111,7 @@ try {
     }],
     ['all_rows', { reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Message'] }, terminal: { answer: 'rows' } } }] },
       (a) => {
+        assert.equal(a.kind, 'rows');
         assert.equal(a.rows.length, ROWS);
         a.rows.forEach((row, i) => assert.deepEqual(row, { id: id(i), entityType: 'Message', ...message(i) }));
       }],
@@ -115,27 +138,14 @@ try {
     if (!json) console.log(`${name}: readSync_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
   }
   if (json) {
-    const root = fileURLToPath(new URL('../../../', import.meta.url));
-    const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
-    const suppliedCommit = process.env.ELMDB_PROFILE_SOURCE_COMMIT;
-    const suppliedDirty = process.env.ELMDB_PROFILE_SOURCE_DIRTY;
-    if (suppliedCommit !== undefined) {
-      assert.match(suppliedCommit, /^[a-f0-9]{40}$/, 'snapshot commit must be a full Git SHA');
-      assert.ok(suppliedDirty === 'true' || suppliedDirty === 'false', 'snapshot dirty state must be explicit');
-    }
-    const source = suppliedCommit === undefined
-      ? { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=normal')), provenance: 'git' }
-      : { commit: suppliedCommit, dirty: suppliedDirty === 'true', provenance: 'caller-provided snapshot' };
-    const binaries = Object.keys(require.cache).filter((path) => path.endsWith('.node') && path.startsWith(fileURLToPath(new URL('../', import.meta.url))));
-    assert.equal(binaries.length, 1, 'identify the actual loaded elmdb binary');
     console.log(JSON.stringify({
       schemaVersion: 1,
       measurement: 'node-read-and-decode',
       source,
-      binary: { name: binaries[0].split(/[\\/]/).at(-1), sha256: createHash('sha256').update(readFileSync(binaries[0])).digest('hex') },
+      binary,
       runtime: { node: process.versions.node, napi: process.versions.napi, v8: process.versions.v8, platform: process.platform, arch: process.arch },
       host: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryBytes: totalmem(), loadAverage: loadavg() },
-      fixture: { version: 1, rows: ROWS, perChannel: PER_CHANNEL, syncs: false },
+      fixture: { version: 2, rows: ROWS, perChannel: PER_CHANNEL, syncs: false },
       policy: 'fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate',
       workloads: measurements,
     }));

@@ -13,6 +13,8 @@ use serde_json::json;
 
 /// How many messages a channel holds: a page is the first 50 of one
 pub const PER_CHANNEL: usize = 100;
+/// Version 2 stores integral scores as integers, matching the JavaScript fixture's Number encoding.
+pub const FIXTURE_VERSION: u32 = 2;
 
 pub struct Messages {
     // Close the database before removing its files, also on Windows.
@@ -43,7 +45,10 @@ impl Messages {
     /// nested map, a list, bytes, a number, a boolean, a field that is null on every third and missing on every
     /// fifth. Seeding and initial derivation happen here, outside any measurement
     pub fn new(rows: usize) -> Self {
-        assert!(rows >= PER_CHANNEL && rows.is_multiple_of(PER_CHANNEL), "whole channels of {PER_CHANNEL}");
+        assert!(
+            rows >= 8 * PER_CHANNEL && rows.is_multiple_of(PER_CHANNEL),
+            "fixture v{FIXTURE_VERSION} requires at least eight whole channels of {PER_CHANNEL}"
+        );
         let schema = Schema::from_json(&json!({
             "$schema": SCHEMA_LANGUAGE,
             "types":{"Message":{"fields":{
@@ -91,6 +96,7 @@ impl Messages {
                 name: "page",
                 reads: page(json!({"answer":"rows"})),
                 check: |answer, _| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
                     for (offset, row) in rows.iter().enumerate() {
@@ -102,6 +108,7 @@ impl Messages {
                 name: "page_projected",
                 reads: page(json!({"answer":"rows","fields":["title","sender"]})),
                 check: |answer, _| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
                     for (offset, row) in rows.iter().enumerate() {
@@ -120,6 +127,7 @@ impl Messages {
                 }}]}))
                 .unwrap(),
                 check: |answer, rows| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let found = answer["rows"].as_array().unwrap();
                     assert_eq!(found.len(), rows);
                     for (i, row) in found.iter().enumerate() {
@@ -157,7 +165,7 @@ fn message(i: usize) -> BTreeMap<String, Value> {
         ),
         ("tags".to_owned(), Value::Array((0..3).map(|j| Value::from(format!("tag-{}", (i + j) % 17))).collect())),
         ("attachment".to_owned(), Value::Binary((0..64).map(|j| ((i * 31 + j) % 251) as u8).collect())),
-        ("score".to_owned(), Value::from(i as f64 / 7.0)),
+        ("score".to_owned(), if i.is_multiple_of(7) { Value::from(i / 7) } else { Value::from(i as f64 / 7.0) }),
         ("read".to_owned(), Value::from(i.is_multiple_of(2))),
     ]);
     if !i.is_multiple_of(5) {

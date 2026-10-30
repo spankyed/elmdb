@@ -263,13 +263,14 @@ native CPU sampling (`docs/evidence/read-allocation-codec.md`). Each workload ch
 values before measuring: rows, order, projected fields, nested objects, bytes, and missing/null values.
 The Node benchmark imports the same deterministic rows as Rust and checks its answers independently.
 Earlier Node benchmark seeding used create(), which added timestamps absent from the Rust import fixture;
-new structured reports define fixture version 1 explicitly without those timestamps. Do not treat the
-historical Node measurements as bit-for-bit identical fixtures or compare their sizes without accounting
-for that difference.
+fixture version 2 imports rows without those timestamps and encodes integral scores as integers in both
+implementations. Both reports include answer SHA-256 values; validation requires byte-identical answers
+for each workload. Historical measurements and fixture versions must not be compared without accounting
+for those differences.
 These are engine/binding measurements, not end-to-end application action timings.
 
 `cargo run -p elmdb --profile profiling --example read-allocations -- --json` emits schema version 1
-JSON with each workload's answer size, iteration denominator, total allocations, allocated bytes and
+JSON with each workload's answer size/checksum, iteration denominator, total allocations, allocated bytes and
 peak heap. It reports whether debug assertions are enabled. Fixture creation and warmup precede dhat;
 preexisting/native allocations, mappings and RSS are outside that measurement. Keep CPU timing apart
 from dhat instrumentation. Normalize totals by the recorded iterations rather than truncated text ratios.
@@ -284,7 +285,8 @@ without `.git` can supply `ELMDB_PROFILE_SOURCE_COMMIT` (full SHA) and `ELMDB_PR
 (`true` or `false`); the report labels this as caller-provided provenance rather than Git verification.
 
 `--runs 2` is a bounded execution/format smoke check, not performance evidence. Linux CI runs that
-smoke, validates both JSON reports with `scripts/check-read-profile.py`, exercises Criterion's reads
+smoke, validates both JSON reports and their equivalence with `scripts/check-read-profile.py`, runs
+`scripts/test-read-profile.py`'s malformed/mismatched-report cases, exercises Criterion's reads
 once with `--test`, and preserves the reports. Its allocation smoke uses the development profile, marked
 in its output, to avoid a second production-profile build. No timing or allocation threshold is inferred
 from these smoke reports; comparable production-profile runs remain necessary for optimization claims.

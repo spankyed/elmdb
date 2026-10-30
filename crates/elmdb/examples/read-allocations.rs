@@ -7,6 +7,8 @@ mod reads;
 #[global_allocator]
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
+use sha2::{Digest, Sha256};
+
 fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let json = match args.as_slice() {
@@ -19,7 +21,10 @@ fn main() {
     for workload in messages.workloads() {
         workload.assert_answer(&messages.db, messages.rows);
         let request = rmp_serde::to_vec_named(&workload.reads).unwrap();
-        let answer = messages.db.read_bytes(&request).unwrap().len();
+        let (answer, answer_sha256) = {
+            let bytes = messages.db.read_bytes(&request).unwrap();
+            (bytes.len(), Sha256::digest(&bytes).iter().map(|byte| format!("{byte:02x}")).collect::<String>())
+        };
         let reads: u64 = if workload.name == "all_rows" { 3 } else { 100 };
         let _profiler = dhat::Profiler::builder().testing().build();
         for _ in 0..reads {
@@ -30,6 +35,7 @@ fn main() {
             "workload": workload.name,
             "iterations": reads,
             "answerBytes": answer,
+            "answerSha256": answer_sha256,
             "totalAllocations": stats.total_blocks,
             "totalAllocatedBytes": stats.total_bytes,
             "peakHeapBytes": stats.max_bytes,
@@ -50,7 +56,7 @@ fn main() {
             serde_json::json!({
                 "schemaVersion": 1,
                 "measurement": "rust-read-allocations",
-                "fixture": {"version": 1, "rows": messages.rows},
+                "fixture": {"version": reads::FIXTURE_VERSION, "rows": messages.rows},
                 "instrumentation": "dhat; fixture and warmup excluded; preexisting/native/mapped memory excluded",
                 "debugAssertions": cfg!(debug_assertions),
                 "workloads": measurements,
