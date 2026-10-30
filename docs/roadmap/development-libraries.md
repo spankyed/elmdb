@@ -1,7 +1,8 @@
 # Libraries for safer implementation and easier development
 
 Status: partial implementation. Criterion maintenance benchmarks are implemented (2026-10-27); stage 1 is built and
-stage 3 was evaluated and declined (2026-10-30), each with its record below; stages 4 and 5 remain planned.
+stage 3 was evaluated and declined (2026-10-30), each with its record below; stage 4's first model is built and kept
+(2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 remains planned.
 The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
@@ -124,6 +125,13 @@ Acceptance:
   a bounded CI job; existing real-process and deterministic barrier tests remain required.
 - Expand to watch teardown or close coordination only if the first model is maintainable and catches useful failures.
   If production abstraction costs exceed the benefit, document the experiment and defer adoption.
+
+Built (2026-10-30): the slot is `store/unit_slot.rs`, its primitives `crate::sync`, and its model beside it; the
+command, bounds and what the model leaves out are in `../architecture/testing.md`, Concurrency models. Kept: the
+historical race and a release that wakes no waiter each failed the model on a disposable copy, and the production change
+is one small type the store calls instead of a lock and a condition variable
+([record](../evidence/loom-unit-reservation.md)). Watch teardown and close coordination are modelled by stage 8 of
+[verification tooling](verification-tooling.md#8-randomized-concurrency-testing), on the same primitives.
 
 ## 5. Structured operational diagnostics
 

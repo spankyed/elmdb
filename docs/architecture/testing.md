@@ -127,6 +127,28 @@ caused it. `engine/tests/derived.rs` corrupts derived keys directly and checks t
 removals and written keys; `engine/tests/tracked.rs` checks that a commit names exactly the tokens it wrote into,
 that a stopped scan is tracked as far as it went, the commit sequence, and `Database::watch`.
 
+## Concurrency models
+
+Loom runs a model in every interleaving of its threads within a bound, so a race that a real-thread test reaches only
+by luck fails on every run. A model exercises the production code itself: the primitives it synchronizes with come
+from `crate::sync` (`src/sync.rs`), which is `std`'s in every build and Loom's in one built with `--cfg loom`.
+
+`store/unit_slot.rs` is the one model: whether a unit holds the environment's one write transaction. It holds that a
+plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
+waiter returns when the unit ends or once woken after its stop is set. LMDB's writer lock is a Loom mutex in the model:
+LMDB, the operating system's locks and other processes are outside it, and the real-process and barrier tests in
+`store/tests.rs` still cover them.
+
+```sh
+RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
+  cargo test -p elmdb --release --lib store::unit_slot::model
+```
+
+Its own target directory keeps the flag from rebuilding the everyday one. In that build every other test would run on
+Loom's primitives outside a model, so only the models are run. `LOOM_MAX_PREEMPTIONS=3` bounds how many times a thread
+is preempted in one interleaving. CI's `loom` job runs the same command. What a mutation of the slot showed:
+[`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md).
+
 ## The binding
 
 `crates/elmdb-node/test/`: each operation through JavaScript, and fuzzing (`fuzz.test.mjs`): random bytes and random

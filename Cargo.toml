@@ -29,6 +29,7 @@ proptest = "1.12.0"
 proptest-state-machine = "0.9.0"
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 gungraun = "=0.20.0"
+loom = "0.7.2"
 dhat = "0.3.3"
 thiserror = "2.0.21"
 ts-rs = "12.0.1"
@@ -52,6 +53,8 @@ rand = "0.10.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+# The concurrency models' builds (`docs/architecture/testing.md`, Concurrency models)
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"
