@@ -27,3 +27,9 @@ The Linux runner initially refused a later invocation below its 8 GiB free-space
 this session's disposable incremental compilation cache restored the floor; subsequent compilation
 used `CARGO_INCREMENTAL=0`. The floor and assertions were unchanged. Cross-platform acceptance is
 owned by the PR's existing CI matrix; local Linux results do not establish Windows/macOS behavior.
+
+Windows CI's unmutated mutation-test baseline initially refused recovery in both process cases.
+The parent still owned its `Child` process handle after kill/wait. Windows retains the process object
+until its handles close, and this LMDB build's conservative PID check continued to report it as live.
+The harness now drops that handle before recovery. This changes no production liveness/retry policy;
+focused Windows verification and the new-tip CI results must establish the correction.

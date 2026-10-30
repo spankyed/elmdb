@@ -882,7 +882,7 @@ fn child_holds_every_reader_slot() {
     panic!("reader-recovery parent did not terminate its child");
 }
 
-struct SaturatedReaders(std::process::Child);
+struct SaturatedReaders(Option<std::process::Child>);
 
 impl SaturatedReaders {
     fn start(path: &Path) -> Self {
@@ -892,8 +892,8 @@ impl SaturatedReaders {
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
-        let mut child = Self(child);
-        let stdout = BufReader::new(child.0.stdout.take().unwrap());
+        let mut child = Self(Some(child));
+        let stdout = BufReader::new(child.0.as_mut().unwrap().stdout.take().unwrap());
         assert!(
             stdout.lines().any(|line| line.unwrap() == "ELMDB_READERS_FULL_READY"),
             "child must fill the reader table"
@@ -902,15 +902,21 @@ impl SaturatedReaders {
     }
 
     fn kill_and_wait(&mut self) {
-        self.0.kill().unwrap();
-        self.0.wait().unwrap();
+        let mut child = self.0.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        // Windows keeps a process object alive while a Child handle remains open. Close our handle
+        // before asking LMDB to prove that the reader process no longer exists.
+        drop(child);
     }
 }
 
 impl Drop for SaturatedReaders {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
