@@ -804,4 +804,6 @@ fn check_stamp(env: &Env<WithoutTls>, db: heed::Database<'_, Bytes, Bytes>, path
 }
 
 #[cfg(test)]
+mod retention_tests;
+#[cfg(test)]
 mod tests;
