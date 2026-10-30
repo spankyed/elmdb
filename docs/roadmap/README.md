@@ -1,8 +1,10 @@
 # Roadmap: where elmdb could go
 
-Directions past the planned work (`../roadmap.md`). Five are designed, each with the measurements it rests on and the
-reading that would trigger it (`../evidence/next-phase-10.md`). Each file says which. Directions that were built are in
-`../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`).
+Directions past the planned work (`../roadmap.md`). Six are designed, each with the measurements it rests on and the
+reading that would trigger it (`../evidence/next-phase-10.md`), and one, graph algorithms, is planned. Each file says
+which. Directions that were built are in `../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`).
+What graph query languages answer that a plan doesn't, and the order to add it, is in
+[`deferred/graph-traversal.md`](deferred/graph-traversal.md).
 
 What they share: LMDB already is an ordered B-tree with cheap snapshots and one writer. The best answer to most of these
 uses those directly, rather than rebuilding what Lucene or a server database needs because it lacks them.
@@ -15,6 +17,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [One plan algebra](plan-algebra.md) | The planner's three fixes and EXPLAIN built; designed: the smaller filter first, then value indexes as bitmaps and filters as operations on them |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
+| [Graph algorithms](graph-algorithms.md) | Planned: connected components, PageRank and personalized PageRank, Leiden communities, as plan steps over the plan's set |
 
 ## Development improvements
 

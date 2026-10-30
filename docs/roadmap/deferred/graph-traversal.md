@@ -46,8 +46,8 @@ covers it.
    protocol. This is the line between elmdb and a graph database, and nothing apack does needs it: several reads in one
    snapshot answer the same questions.
 6. **Every path a match took**, not only its ends.
-7. **Graph algorithms** (PageRank, connected components, community detection). These belong in a library over the
-   engine's reads, not in plans.
+7. **Graph algorithms** (PageRank, connected components, community detection). Planned in the engine, as plan steps
+   and answers over the plan's set: `../graph-algorithms.md`.
 
 ## When to take it up
 

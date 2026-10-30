@@ -77,6 +77,14 @@ reading it names calls for it:
 - **Per-type dictionaries** (`roadmap/value-dictionaries.md`): when a type's small text values are a tenth of the file.
 - **Block-max scores** (`roadmap/text-index-at-scale.md`): when a common word's search is measured slow.
 
+## Planned
+
+- **Graph algorithms in the engine** (`roadmap/graph-algorithms.md`): connected components, PageRank and personalized
+  PageRank, and Leiden communities, as plan steps and answers over the set a plan has built, deterministic, bounded,
+  tracked and explained. Its first callers are apack's related notes, prompt context ranking and a graph view. The
+  traversal it builds on (`both`, `depth`, `pathTo`, `degrees`) is built; what graph query languages answer beyond it
+  is deferred, each until a caller needs it (`roadmap/deferred/graph-traversal.md`).
+
 ## Later, each its own decision
 
 Directions past these, each a design to argue for before it is built, are in `roadmap/` (`roadmap/README.md`).
