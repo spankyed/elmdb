@@ -7,6 +7,7 @@
 //! never waits on a growth that waits on the unit.
 
 mod backup;
+mod idle_reads;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
@@ -17,7 +18,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use heed::types::Bytes;
 use heed::{CommitOrAbort, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
@@ -26,6 +27,7 @@ use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard}
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
+use idle_reads::IdleReads;
 use sync::{Durable, GroupCommit, Policy, Syncer, SystemClock};
 use unit_slot::UnitSlot;
 
@@ -129,7 +131,7 @@ pub struct Store {
     /// Whether a unit is open, holding the environment's one write transaction
     unit: UnitSlot,
     /// Read transactions a read finished with, for the next read to take while it is still current
-    idle: Mutex<Vec<RoTxn<'static, WithoutTls>>>,
+    idle: IdleReads,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
 }
@@ -272,6 +274,7 @@ impl Store {
             let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
             held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
         };
+        let idle = IdleReads::new()?;
         registration.0 = None;
         Ok(Self {
             path: canonical,
@@ -281,7 +284,7 @@ impl Store {
             gate: Arc::new(RecursiveRwLock::new(())),
             commit,
             unit: UnitSlot::new(),
-            idle: Mutex::new(Vec::new()),
+            idle,
             sequence: AtomicU64::new(sequence),
         })
     }
@@ -384,12 +387,13 @@ impl Store {
 
     /// Runs `f` in a read transaction, a snapshot of the last commit. An idle one is taken while it still is that
     /// snapshot — its id the environment's last committed one, which a commit in any process moves — and opening one
-    /// is what a read saves; a read transaction otherwise outlives its read only until the next commit here
+    /// is what a read saves. Completed snapshots expire after 100 ms idle even without further database calls.
     pub fn read<T>(&self, f: impl FnOnce(&RoTxn<'_, WithoutTls>, Db) -> Result<T>) -> Result<T> {
         let mut f = Some(f);
         loop {
             let guard = self.gate();
-            let txn = match self.current_idle() {
+            let (cached, generation) = self.idle.take(&self.env);
+            let txn = match cached {
                 Some(txn) => txn,
                 None => match with_reader_recovery(&self.env, || self.env.clone().static_read_txn()) {
                     Ok(txn) => txn,
@@ -402,35 +406,16 @@ impl Store {
                 },
             };
             let result = (f.take().expect("a read runs once"))(&txn, self.db);
-            let mut idle = self.idle.lock().expect("the idle transactions' lock is never poisoned");
-            if idle.len() < MAX_IDLE {
-                idle.push(txn);
-            }
-            drop(idle);
+            self.idle.put(txn, generation);
             drop(guard);
             return result;
         }
     }
 
-    /// An idle read transaction that is still the last commit's snapshot, the stale ones dropped
-    fn current_idle(&self) -> Option<RoTxn<'static, WithoutTls>> {
-        let mut idle = self.idle.lock().expect("the idle transactions' lock is never poisoned");
-        if idle.is_empty() {
-            return None;
-        }
-        let last = self.env.info().last_txn_id;
-        while let Some(txn) = idle.pop() {
-            if txn.id() == last {
-                return Some(txn);
-            }
-        }
-        None
-    }
-
     /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized
     /// or the environment closed, which no open transaction may outlast
     fn drop_idle(&self) {
-        self.idle.lock().expect("the idle transactions' lock is never poisoned").clear();
+        self.idle.clear();
     }
 
     /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
@@ -686,7 +671,7 @@ impl Store {
         };
         // LMDB closes the environment once its last handle goes, which dropping the store and its idle read
         // transactions is
-        self.drop_idle();
+        self.idle.close();
         let closed = self.env.clone().prepare_for_closing();
         drop(self);
         closed.wait();
@@ -708,11 +693,12 @@ impl Store {
     /// commit without its worker (`GroupCommit::stop_at_exit`), and releases the environment without waiting for it
     /// to close, which a handle a gone thread held would keep open
     pub fn close_at_exit(mut self, wait: Duration) -> Result<()> {
+        let deadline = Instant::now() + wait;
         let synced = self.sync_owed();
         if let Some(commit) = self.commit.take() {
-            commit.stop_at_exit(wait);
+            commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));
         }
-        self.drop_idle();
+        self.idle.stop_at_exit(deadline);
         drop(self);
         synced
     }
@@ -744,6 +730,7 @@ impl Drop for Store {
         if let Some(mut commit) = self.commit.take() {
             let _ = commit.close();
         }
+        self.idle.close();
         open_paths().lock().expect("the open-paths lock is never poisoned").remove(&self.path);
     }
 }

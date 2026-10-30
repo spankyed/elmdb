@@ -149,8 +149,13 @@ nothing of its own: the stage reading the index does its filtering. EXPLAIN time
 `ms` is the explained read's, a little above the plain one's.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last
-committed one, which a commit in any process moves), and opens one otherwise; a commit here drops the idle ones, so none
-pins the pages it freed. `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
+committed one, which a commit in any process moves), and opens one otherwise. At most eight completed
+transactions are cached, each for 100 ms after its read completes. A worker releases expired transactions even if
+the process makes no further database calls; expiration depends on the operating system scheduling that worker.
+A commit here clears the cache, and an older read finishing after that clear cannot return its snapshot to it.
+Active reads and open units keep their snapshots until they finish. The worker owns only the cache, cannot keep
+the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
+The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
 own, and resolves with the same answer, so a large read doesn't block the event loop.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.

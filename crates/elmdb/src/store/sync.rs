@@ -237,7 +237,7 @@ impl GroupCommit {
 }
 
 /// The lock, unless another thread holds it past `deadline`
-fn lock_before<T>(mutex: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
+pub(super) fn lock_before<T>(mutex: &Mutex<T>, deadline: Instant) -> Option<MutexGuard<'_, T>> {
     loop {
         match mutex.try_lock() {
             Ok(guard) => return Some(guard),

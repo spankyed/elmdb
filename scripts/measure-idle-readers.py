@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import subprocess
 import sys
 
@@ -20,9 +21,10 @@ def run(command, **kwargs):
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--output', type=Path, required=True)
-parser.add_argument('--source', required=True, help='source commit; dirty source file digests are recorded separately')
+parser.add_argument('--source', required=True, help='full base commit; dirty source file digests are recorded separately')
 parser.add_argument('--debug', action='store_true', help='execution smoke only, not performance evidence')
 args = parser.parse_args()
+assert re.fullmatch(r'[0-9a-f]{40}', args.source), 'source must be the full base commit SHA'
 if platform.system() != 'Linux':
     sys.exit('Run on Linux; on a Mac use python3 scripts/linux.py -- python3 scripts/measure-idle-readers.py ...')
 assert not args.output.exists(), 'use a new output directory to preserve earlier evidence'
@@ -68,7 +70,9 @@ manifest = {
     'lmdbVersion': lmdb[0]['version'],
     'binarySha256': hashlib.sha256(Path(binary).read_bytes()).hexdigest(),
     'files': {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in
-              ['Cargo.lock', 'crates/elmdb/src/store/mod.rs', 'crates/elmdb/src/store/retention_tests.rs']},
+              ['Cargo.lock', 'crates/elmdb/src/store/mod.rs', 'crates/elmdb/src/store/retention_tests.rs',
+               'crates/elmdb/src/store/sync.rs', *(['crates/elmdb/src/store/idle_reads.rs']
+               if (root / 'crates/elmdb/src/store/idle_reads.rs').exists() else [])]},
     'limitations': ['synthetic raw store overwrites, not application throughput',
                     'syncs disabled in disposable databases',
                     'release timing control includes an additional cache mutex acquisition',

@@ -35,3 +35,31 @@ The evidence warrants bounded idle release while preserving useful burst reuse.
 Validation of this measurement checkpoint: workspace clippy with all targets and warnings denied,
 and formatting passed. Production behavior is unchanged. Candidate policy, semantic regressions,
 mutation proof, matched binding measurements and full landing gates remain to be completed.
+
+## Bounded-cache candidate: 2026-10-30
+
+Under the same release measurement conditions, completed snapshots expire 100 ms after their read
+returns. One and four read-once processes now match the explicit-release control at every sampled
+frontier: 1,167 allocated pages / 4,780,032 file bytes after warmup, with 385 live primary-tree pages.
+[Raw candidate results](idle-snapshot-retention/candidate-release.json) include source and binary hashes;
+the report transparently corrects a mistyped caller-supplied parent label. This measured snapshot
+precedes additional lifetime tests; its runtime implementation is the candidate being validated.
+
+Cached raw reads measured 99.4 and 101.6 ns/read, about 50 ns above the baseline and below the
+predeclared 100 ns additional-cost budget. Explicit release measured 199.9 and 204.0 ns/read, including
+its extra lock. These separate runs establish a useful scale, not precise application latency.
+The matched binding comparisons are still pending.
+
+The 100 ms window preserves reuse within typical 16 ms view bursts and matches the existing default
+sync idle interval. It is an internal policy, with no public API, dependency or file-format change.
+Pinned heed exposes destruction but no supported read reset/renew API. The candidate adds one worker
+thread per open database, two clock observations on a cached read and fixed per-entry metadata for
+at most eight entries. The worker sleeps when empty, does not own the database or map gate, and
+releases only completed transactions. Operating-system scheduling may delay expiry; active reads
+and open units intentionally retain their snapshots for their existing lifetimes.
+
+A disposable mutation renews expired entries indefinitely instead of releasing them. The idle-child
+regression failed in 3.41 seconds with `completed snapshots were not released without another read`,
+then its parent failed its barrier; compilation succeeded and the selected test executed. The normal
+implementation passes. Run `python3 scripts/linux.py -- python3 scripts/check-idle-reader-mutation.py`
+to repeat the proof. The working source was never mutated.

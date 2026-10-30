@@ -1,0 +1,410 @@
+{
+  "manifest": {
+    "sourceBaseCommit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+    "profile": "release",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)\nbinary: rustc\ncommit-hash: 58cf8f9c35b355199727627d07ae34a4e2846d67\ncommit-date: 2026-10-13\nhost: aarch64-unknown-linux-gnu\nrelease: 1.99.1\nLLVM version: 23.1.1\n",
+    "host": {
+      "system": "Linux",
+      "node": "cded6a918648",
+      "release": "6.17.8-orbstack-00308-g8f9c941121b1",
+      "version": "#1 SMP PREEMPT Thu Nov 20 09:34:02 UTC 2025",
+      "machine": "aarch64",
+      "processor": ""
+    },
+    "cpuLimit": "200000 100000",
+    "memoryLimitBytes": "6442450944",
+    "lmdbVersion": "0.2.6",
+    "binarySha256": "73d504abbbd8011abec770b559e9e41eb57a5efc67f19a5e4231a6a87edb7037",
+    "files": {
+      "Cargo.lock": "0cdf78b9c66c7ebedd7ad3f185552e1fce42e5ae2a899561d49a8fcf20b85605",
+      "crates/elmdb/src/store/mod.rs": "20fe51917bb79b73348e606526eeec6539d99ab59d25108bc94440fda13e9b5b",
+      "crates/elmdb/src/store/retention_tests.rs": "41114084a500af7cdf04d5dcf9827c06d30aefeeef75cbae4df992e418102e54",
+      "crates/elmdb/src/store/idle_reads.rs": "8b02ce140f0dc56483de8dc33593ac177b04830c47856304fd250756eaa2f671",
+      "crates/elmdb/src/store/sync.rs": "3c22a0638faed2ed3a05f32adefe8e90398d9444c4c83026596fc5ff590ae8cf"
+    },
+    "limitations": [
+      "synthetic raw store overwrites, not application throughput",
+      "syncs disabled in disposable databases",
+      "release timing control includes an additional cache mutex acquisition",
+      "free-list pages include pages that older readers still protect"
+    ],
+    "suppliedSourceLabel": "551311f0",
+    "provenanceCorrection": "The supplied abbreviated label had a typo; the full parent is corrected here. Source hashes below were captured from the untouched measured container snapshot."
+  },
+  "retention": [
+    {
+      "mode": "cached",
+      "readers": 1,
+      "keys": 128,
+      "valueBytes": 8192,
+      "syncs": false,
+      "idleBeforeWritesMs": 200,
+      "samples": [
+        {
+          "phase": "before",
+          "round": 0,
+          "lastTxnId": 3,
+          "allocatedPages": 393,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 1609728,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 393\n  Last transaction ID: 3\n  Max readers: 126\n  Number of readers used: 1\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 3\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 2\n  Free pages: 4\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 8,
+          "lastTxnId": 11,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 11\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 11\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 16,
+          "lastTxnId": 19,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 19\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 19\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 24,
+          "lastTxnId": 27,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 27\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 27\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 32,
+          "lastTxnId": 35,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 35\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 35\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 40,
+          "lastTxnId": 43,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 43\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 43\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 48,
+          "lastTxnId": 51,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 51\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 51\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        }
+      ]
+    },
+    {
+      "mode": "released",
+      "readers": 1,
+      "keys": 128,
+      "valueBytes": 8192,
+      "syncs": false,
+      "idleBeforeWritesMs": 200,
+      "samples": [
+        {
+          "phase": "before",
+          "round": 0,
+          "lastTxnId": 3,
+          "allocatedPages": 393,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 1609728,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 393\n  Last transaction ID: 3\n  Max readers: 126\n  Number of readers used: 1\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 3\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 2\n  Free pages: 4\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 8,
+          "lastTxnId": 11,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 11\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 11\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 16,
+          "lastTxnId": 19,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 19\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 19\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 24,
+          "lastTxnId": 27,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 27\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 27\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 32,
+          "lastTxnId": 35,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 35\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 35\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 40,
+          "lastTxnId": 43,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 43\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 43\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 48,
+          "lastTxnId": 51,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 51\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 51\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        }
+      ]
+    },
+    {
+      "mode": "cached",
+      "readers": 4,
+      "keys": 128,
+      "valueBytes": 8192,
+      "syncs": false,
+      "idleBeforeWritesMs": 200,
+      "samples": [
+        {
+          "phase": "before",
+          "round": 0,
+          "lastTxnId": 3,
+          "allocatedPages": 393,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 1609728,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 393\n  Last transaction ID: 3\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 3\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 2\n  Free pages: 4\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 8,
+          "lastTxnId": 11,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 11\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 11\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 16,
+          "lastTxnId": 19,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 19\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 19\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 24,
+          "lastTxnId": 27,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 27\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 27\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 32,
+          "lastTxnId": 35,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 35\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 35\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 40,
+          "lastTxnId": 43,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 43\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 43\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 48,
+          "lastTxnId": 51,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 51\n  Max readers: 126\n  Number of readers used: 4\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 51\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        }
+      ]
+    },
+    {
+      "mode": "released",
+      "readers": 4,
+      "keys": 128,
+      "valueBytes": 8192,
+      "syncs": false,
+      "idleBeforeWritesMs": 200,
+      "samples": [
+        {
+          "phase": "before",
+          "round": 0,
+          "lastTxnId": 3,
+          "allocatedPages": 393,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 1609728,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 393\n  Last transaction ID: 3\n  Max readers: 126\n  Number of readers used: 1\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 3\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 2\n  Free pages: 4\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 8,
+          "lastTxnId": 11,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 11\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 11\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 16,
+          "lastTxnId": 19,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 19\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 19\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 24,
+          "lastTxnId": 27,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 27\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 27\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "readers-alive",
+          "round": 32,
+          "lastTxnId": 35,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 35\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 35\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 40,
+          "lastTxnId": 43,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 43\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 43\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        },
+        {
+          "phase": "after-readers-close",
+          "round": 48,
+          "lastTxnId": 51,
+          "allocatedPages": 1167,
+          "pageSizeBytes": 4096,
+          "liveTreePages": 385,
+          "fileBytes": 4780032,
+          "mapBytes": 67108864,
+          "lmdbStat": "Environment Info\n  Map address: (nil)\n  Map size: 67108864\n  Page size: 4096\n  Max pages: 16384\n  Number of pages used: 1167\n  Last transaction ID: 51\n  Max readers: 126\n  Number of readers used: 2\nReader Table Status\n    pid     thread     txnid\n        46 ffffb9e8ee60 51\nFreelist Status\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 2\n  Entries: 2\n  Free pages: 776\nStatus of Main DB\n  Tree depth: 1\n  Branch pages: 0\n  Leaf pages: 1\n  Overflow pages: 0\n  Entries: 3\n"
+        }
+      ]
+    }
+  ],
+  "readOverhead": [
+    {
+      "mode": "cached",
+      "iterations": 100000,
+      "elapsedNs": 9943921,
+      "controlIncludesExtraCacheLock": false
+    },
+    {
+      "mode": "released",
+      "iterations": 100000,
+      "elapsedNs": 19986342,
+      "controlIncludesExtraCacheLock": true
+    },
+    {
+      "mode": "released",
+      "iterations": 100000,
+      "elapsedNs": 20403510,
+      "controlIncludesExtraCacheLock": true
+    },
+    {
+      "mode": "cached",
+      "iterations": 100000,
+      "elapsedNs": 10156213,
+      "controlIncludesExtraCacheLock": false
+    }
+  ]
+}

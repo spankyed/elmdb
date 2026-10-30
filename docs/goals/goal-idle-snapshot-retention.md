@@ -44,11 +44,20 @@ acceptance tradeoff before evaluating production candidates; do not select a fav
 
 ## Current handoff
 
-- Release reproduction confirms the smoke result; raw source-hashed evidence is committed under
-  `docs/evidence/idle-snapshot-retention/`. Workspace clippy and formatting passed.
-- Production behavior is unchanged at the measurement checkpoint. A draft `idle_reads.rs` is
-  intentionally excluded from that checkpoint until integrated and validated.
-- Next: integrate the 100 ms idle cache, prove resource/lifetime behavior and mutation sensitivity,
-  measure matched overhead and run required landing gates.
-- No PR exists yet. The graph-planning commit on local main belongs to another agent; preserve
-  it and recheck remote main before publishing. No merge, release or dependency-pin update.
+- Measurement checkpoint `551311f` records baseline release retention (50 MiB cached versus 4.6 MiB
+  explicit release) and raw timings. The candidate now matches the 4.6 MiB control for one/four live
+  idle processes; cached raw reads add about 50 ns, within the predeclared 100 ns budget.
+- `IdleReads` implements a per-entry 100 ms window, generation invalidation on local commits,
+  background expiry, joined normal shutdown and bounded detached process-exit shutdown. Runtime,
+  new tests, docs and CI mutation integration form the validated runtime checkpoint.
+- Disposable mutation proof passed: indefinite renewal makes the idle-child regression fail on
+  retained snapshots. Full Rust checks passed (369 tests, including the model harness; clippy,
+  formatting, doc tests, generated protocol and one-LMDB checks). Two additional lifetime tests
+  were added afterwards; all six lifetime tests passed the focused run. Binding build, typecheck
+  and tests passed (34 passed, four platform-specific skips).
+- Running: balanced baseline/candidate binding reads,
+  with an exact baseline source archive preserved in this checkout's owned Docker target volume.
+  Revalidate actual process state before continuing; do not restart a live run.
+- Next: preserve binding reports, assess the declared overhead budget, finish source review,
+  commit validated runtime work, exclude the other agent's unpublished graph-doc parent from the
+  PR ancestry if necessary, push and open a PR. Fix applicable CI; no merge/release/pin update.

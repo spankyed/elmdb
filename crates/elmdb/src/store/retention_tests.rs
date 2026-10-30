@@ -59,7 +59,7 @@ impl Drop for Reader {
 fn child_idle_reader() {
     let path = std::env::var("ELMDB_RETENTION_DB").expect("measurement parent supplies database");
     let mode = std::env::var("ELMDB_RETENTION_MODE").unwrap();
-    assert!(mode == "cached" || mode == "released");
+    assert!(mode == "cached" || mode == "released" || mode == "expired");
     // The watchdog bounds an orphan if its parent is killed before sending stop.
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(60));
@@ -74,6 +74,9 @@ fn child_idle_reader() {
         .unwrap();
     if mode == "released" {
         store.drop_idle();
+    }
+    if mode == "expired" {
+        wait_until_empty(&store);
     }
     println!("ELMDB_IDLE_READER_READY mode={mode} snapshot={snapshot}");
     std::io::stdout().flush().unwrap();
@@ -182,4 +185,139 @@ fn measure_idle_reader_read_overhead() {
             "elapsedNs":start.elapsed().as_nanos(),"controlIncludesExtraCacheLock":mode=="released"})
         );
     }
+}
+
+// Observing the private cache does not acquire a database snapshot or trigger expiration.
+fn wait_until_empty(store: &Store) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while store.idle.len() != 0 {
+        assert!(Instant::now() < deadline, "completed snapshots were not released without another read");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn idle_process_releases_pages_without_another_database_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let writer = Store::open(directory.path(), quiet()).unwrap();
+    overwrite(&writer, 0);
+    let mut reader = Reader::start(directory.path(), "expired");
+    for round in 1..=8 {
+        overwrite(&writer, round);
+    }
+    let plateau = writer.env.info().last_page_number;
+    for round in 9..=ROUNDS {
+        overwrite(&writer, round);
+    }
+    assert_eq!(
+        writer.env.info().last_page_number,
+        plateau,
+        "fixed-size overwrites must reuse pages while the read-once process is still alive"
+    );
+    reader.finish();
+    writer.close().unwrap();
+}
+
+#[test]
+fn active_snapshot_outlives_expiry_and_cannot_return_after_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path(), quiet()).unwrap();
+    overwrite(&store, 0);
+    let (started, wait_started) = std::sync::mpsc::channel();
+    let (resume, wait_resume) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        let store = &store;
+        scope.spawn(move || {
+            store
+                .read(|txn, db| {
+                    let id = txn.id();
+                    started.send(()).unwrap();
+                    wait_resume.recv_timeout(Duration::from_secs(3)).unwrap();
+                    assert_eq!(txn.id(), id);
+                    assert_eq!(db.get(txn, b"block0000")?, Some(vec![0; VALUE_BYTES].as_slice()));
+                    Ok(())
+                })
+                .unwrap();
+        });
+        wait_started.recv_timeout(Duration::from_secs(3)).unwrap();
+        // A separate completed read expires while the first snapshot remains actively borrowed.
+        store.read(|_, _| Ok(())).unwrap();
+        wait_until_empty(store);
+        overwrite(store, 1);
+        resume.send(()).unwrap();
+    });
+    assert_eq!(store.idle.len(), 0, "a pre-commit active read must not repopulate the cache");
+    store
+        .read(|txn, db| {
+            assert_eq!(db.get(txn, b"block0000")?, Some(vec![1; VALUE_BYTES].as_slice()));
+            Ok(())
+        })
+        .unwrap();
+    store.close().unwrap();
+}
+
+#[test]
+fn closing_joins_idle_expiry_before_reopening() {
+    let directory = tempfile::tempdir().unwrap();
+    for _ in 0..8 {
+        let store = Store::open(directory.path(), quiet()).unwrap();
+        store.read(|_, _| Ok(())).unwrap();
+        store.close().unwrap();
+    }
+}
+
+#[test]
+fn unit_keeps_its_uncommitted_view_across_idle_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path(), quiet()).unwrap();
+    overwrite(&store, 0);
+    let (mut unit, gate) = store.begin().unwrap();
+    store.db.put(&mut unit, b"block0000", b"uncommitted").unwrap();
+    store
+        .read(|txn, db| {
+            assert_eq!(db.get(txn, b"block0000")?, Some(vec![0; VALUE_BYTES].as_slice()));
+            Ok(())
+        })
+        .unwrap();
+    wait_until_empty(&store);
+    assert_eq!(store.db.get(&unit, b"block0000").unwrap(), Some(b"uncommitted".as_slice()));
+    unit.abort();
+    drop(gate);
+    store.end_unit();
+    store
+        .read(|txn, db| {
+            assert_eq!(db.get(txn, b"block0000")?, Some(vec![0; VALUE_BYTES].as_slice()));
+            Ok(())
+        })
+        .unwrap();
+    store.close().unwrap();
+}
+
+#[test]
+fn hot_reads_do_not_extend_other_cached_snapshots() {
+    fn nested(store: &Store, depth: usize) {
+        if depth != 0 {
+            store
+                .read(|_, _| {
+                    nested(store, depth - 1);
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(directory.path(), quiet()).unwrap();
+    nested(&store, MAX_IDLE);
+    assert_eq!(store.idle.len(), MAX_IDLE);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        store.read(|_, _| Ok(())).unwrap();
+        if store.idle.len() <= 1 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "hot reads extended other idle entries indefinitely");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    wait_until_empty(&store);
+    store.close().unwrap();
 }
