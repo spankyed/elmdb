@@ -1,4 +1,9 @@
-# elmdb
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+    <img src="docs/assets/banner-light.svg" width="600" alt="elmdb">
+  </picture>
+</h1>
 
 Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
 
