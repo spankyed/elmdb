@@ -83,6 +83,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p elmdb --release --lib store::unit_slot::model
 
+  # The same slot and watch delivery under random schedules (docs/architecture/testing.md, Concurrency models)
+  shuttle:
+    name: concurrency models (Shuttle)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: --cfg shuttle
+      CARGO_TARGET_DIR: target/shuttle
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
+
   # Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and
   # in the summary, not failed on (docs/architecture/testing.md, Mutation testing). On Linux and on Windows, since each
   # compiles code the other doesn't

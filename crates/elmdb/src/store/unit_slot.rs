@@ -1,7 +1,7 @@
 //! Whether a unit holds the environment's one write transaction, and who may claim it. A unit reserves the slot before
 //! it takes the writer; a plain write claims the writer while holding the slot's lock, so a unit can't reserve between
-//! the write's check and its claim (Loom explores this: the model below, `docs/architecture/testing.md`, Concurrency
-//! models).
+//! the write's check and its claim (Loom and Shuttle explore this: the model below, `docs/architecture/testing.md`,
+//! Concurrency models).
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::sync::{Condvar, Mutex};
@@ -63,27 +63,26 @@ impl UnitSlot {
     }
 }
 
-/// The slot under Loom, which runs each model in every interleaving its bound allows. LMDB's writer lock is a Loom
-/// mutex here: the model is the slot's decisions, not LMDB's or the operating system's locks
-#[cfg(all(test, loom))]
+/// The slot under a model's threads (`crate::sync::model`). LMDB's writer lock is the model's mutex here: the model is
+/// the slot's decisions, not LMDB's or the operating system's locks
+#[cfg(all(test, any(loom, shuttle)))]
 mod model {
-    use loom::sync::Arc;
-    use loom::sync::atomic::{AtomicBool, Ordering};
-
     use super::UnitSlot;
+    use crate::sync::Mutex;
+    use crate::sync::model::{Arc, AtomicBool, Ordering, explore, thread};
 
     /// A plain write and a unit race for the writer. A write that goes on to take the writer must find no unit
     /// reserved: one that was would have the write wait on the unit's writer, which it holds across calls
     #[test]
     fn a_write_never_waits_for_the_writer_while_a_unit_is_reserved() {
-        loom::model(|| {
+        explore(|| {
             let slot = Arc::new(UnitSlot::new());
-            let writer = Arc::new(loom::sync::Mutex::new(()));
+            let writer = Arc::new(Mutex::new(()));
             let reserved = Arc::new(AtomicBool::new(false));
 
             let write = {
                 let (slot, writer, reserved) = (slot.clone(), writer.clone(), reserved.clone());
-                loom::thread::spawn(move || {
+                thread::spawn(move || {
                     let claimed = slot.claim_writer(|| {
                         assert!(!reserved.load(Ordering::SeqCst), "a write began taking the writer of a reserved unit");
                         writer.lock().unwrap()
@@ -106,11 +105,11 @@ mod model {
     /// Two units: exactly one reserves
     #[test]
     fn of_two_units_one_reserves() {
-        loom::model(|| {
+        explore(|| {
             let slot = Arc::new(UnitSlot::new());
             let other = {
                 let slot = slot.clone();
-                loom::thread::spawn(move || slot.reserve().is_ok())
+                thread::spawn(move || slot.reserve().is_ok())
             };
             let mine = slot.reserve().is_ok();
             let theirs = other.join().unwrap();
@@ -121,23 +120,23 @@ mod model {
     /// A waiter returns once the unit ends, and once woken after its stop is set, whichever interleaving
     #[test]
     fn a_waiter_returns_when_the_unit_ends_or_it_is_stopped() {
-        loom::model(|| {
+        explore(|| {
             let slot = Arc::new(UnitSlot::new());
             slot.reserve().unwrap();
             let waiter = {
                 let slot = slot.clone();
-                loom::thread::spawn(move || slot.wait_while_open(|| false))
+                thread::spawn(move || slot.wait_while_open(|| false))
             };
             slot.release();
             waiter.join().unwrap();
         });
-        loom::model(|| {
+        explore(|| {
             let slot = Arc::new(UnitSlot::new());
             slot.reserve().unwrap();
             let stop = Arc::new(AtomicBool::new(false));
             let waiter = {
                 let (slot, stop) = (slot.clone(), stop.clone());
-                loom::thread::spawn(move || slot.wait_while_open(|| stop.load(Ordering::SeqCst)))
+                thread::spawn(move || slot.wait_while_open(|| stop.load(Ordering::SeqCst)))
             };
             stop.store(true, Ordering::SeqCst);
             slot.wake();
