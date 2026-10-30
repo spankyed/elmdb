@@ -150,12 +150,18 @@ pub fn claim() -> Result<(), Code> {
 /// `claim`, answering a refusal as its error code and message
 fn claim_process() -> std::result::Result<(), (&'static str, String)> {
     static CLAIMED: Mutex<Option<Claim>> = Mutex::new(None);
-    match claim_once(&CLAIMED, || {
+    refusal(claim_once(&CLAIMED, || {
         let claim = acquire_claim()?;
         #[cfg(windows)]
         pin_module()?;
         Ok::<_, io::Error>(claim)
-    }) {
+    }))
+}
+
+/// A claim's outcome as its error code and message: one held elsewhere is `ALREADY_LOADED`, and any other failure the
+/// operating system answers is `IO`
+fn refusal(claimed: io::Result<()>) -> std::result::Result<(), (&'static str, String)> {
+    match claimed {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
             let mine = process_path::get_dylib_path()
@@ -200,6 +206,16 @@ mod tests {
         assert!(claim_once(&slot, || Err(io::Error::other("transient failure"))).is_err());
         claim_once(&slot, || Ok(())).unwrap();
         claim_once(&slot, || panic!("a successful claim must not be reacquired")).unwrap();
+    }
+
+    #[test]
+    fn a_claim_refused_for_any_other_reason_is_an_io_error_not_another_binary() {
+        assert_eq!(refusal(Ok(())), Ok(()));
+        let (code, message) = refusal(Err(io::Error::new(io::ErrorKind::WouldBlock, "taken"))).unwrap_err();
+        assert_eq!(code, "ALREADY_LOADED", "{message}");
+        let (code, message) = refusal(Err(io::Error::from(io::ErrorKind::PermissionDenied))).unwrap_err();
+        assert_eq!(code, "IO", "{message}");
+        assert!(message.contains("Cannot claim this process"), "{message}");
     }
 
     /// The claimer half of the next test, run as a child of this test binary: a claim is the process's once made
