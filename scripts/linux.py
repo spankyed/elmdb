@@ -1,4 +1,4 @@
-"""Run a command in a Linux container over a copy of this checkout, its builds kept in a Docker volume the checkout owns.
+"""Run a command in a Linux container over a copy of this checkout, its builds kept in a volume the checkout owns.
 
 `python3 scripts/linux.py [--apt PACKAGE]... [--unconfined] -- COMMAND [ARG]...`: Valgrind, the Linux-only mutants and
 anything else a Mac can't run (`docs/architecture/testing.md`). The tree is copied into the volume at each run, without
@@ -58,7 +58,9 @@ if docker("info", check=False).returncode != 0:
 listed = docker("volume", "ls", "--filter", f"label={LABEL}", "--format", f'{{{{.Name}}}}\t{{{{.Label "{LABEL}"}}}}')
 for line in listed.stdout.splitlines():
     name, _, owner = line.partition("\t")
-    if name != work and owner and not Path(owner).exists() and docker("volume", "rm", name, check=False).returncode == 0:
+    if name == work or not owner or Path(owner).exists():
+        continue
+    if docker("volume", "rm", name, check=False).returncode == 0:
         print(f"Removed {name}, the Linux build volume of {owner}, which no longer exists.", file=sys.stderr)
 
 df = docker("run", "--rm", *LIMITS, IMAGE, "df", "-Pk", "/").stdout.strip().splitlines()[-1].split()
@@ -80,7 +82,8 @@ setup.append("(cd /src && tar cf - --exclude=./target --exclude=./node_modules -
 script = " && ".join(setup) + ' && exec "$@"'
 os.execvp("docker", [
     "docker", "run", "--rm", "--init", *LIMITS, *(["--security-opt", "seccomp=unconfined"] if args.unconfined else []),
-    "-v", f"{checkout}:/src:ro", "-v", f"{work}:/w", *(f for name, at in SHARED.items() for f in ("-v", f"{name}:{at}")),
+    "-v", f"{checkout}:/src:ro", "-v", f"{work}:/w",
+    *(flag for name, at in SHARED.items() for flag in ("-v", f"{name}:{at}")),
     "-w", "/w",
     IMAGE, "sh", "-euc", script, "linux.py", *command,
 ])

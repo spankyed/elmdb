@@ -88,8 +88,8 @@ cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip m
 ```
 
 Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
-the Linux ones are read in a Linux container (`rust:1-bookworm`, cargo-mutants installed in it, against a copy of the
-tree), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
+the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c 'cargo install --locked
+cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
 (`docs/evidence/mutation-baseline.md`, The Windows reading).
 
 CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into, on Linux
@@ -183,6 +183,13 @@ commits. Unchanged code has varied substantially between runs here, so a differe
 before it is acted on. `scripts/measure-recovery.mjs` stays the measure of RSS, populated replacement, disk and scratch,
 which Criterion doesn't see.
 
+**A Linux container from a Mac.** `scripts/linux.py` runs a command over a copy of the checkout in `rust:1-bookworm`,
+with two CPUs and 6 GiB. Its builds stay in a Docker volume labelled with the checkout's path, so a second run builds
+only what changed; the toolchain, Cargo's crates and installed tools are in volumes every checkout shares. A volume whose
+checkout is gone is removed at the start of the next run, and a run refuses when Docker has less than 8 GB free. A
+container started by hand with `docker run` and a named volume leaves that volume behind for good, which is why the
+script is the way in.
+
 **Instruction counts.** `benches/instructions.rs` counts the instructions of the same operations under Valgrind's
 Callgrind, through [gungraun](https://github.com/gungraun/gungraun) (the renamed iai-callgrind): each run once, its
 setup, fixture and answer check outside the count, the maintenance ones at 1k entities and the reads over the same
@@ -193,14 +200,12 @@ work is the exception: the tokenizer, charabia, looks words up in a hash map see
 runs in a Linux container, with Valgrind and the runner at the dependency's version installed:
 
 ```sh
-docker run --rm --security-opt seccomp=unconfined -v "$COPY:/w" -w /w rust:1-bookworm sh -euc '
-  apt-get update -qq && apt-get install -y -qq valgrind
-  cargo install --locked gungraun-runner --version 0.20.0
-  cargo bench -p elmdb --bench instructions'
+python3 scripts/linux.py --apt valgrind --unconfined -- sh -c '
+  cargo install --locked gungraun-runner --version 0.20.0 && cargo bench -p elmdb --bench instructions'
 ```
 
-`$COPY` is a copy of the tree. The runner turns off address randomization for each count, a call Docker's default
-seccomp profile refuses, hence `unconfined`. A run compares itself with the one before it in `target/gungraun`;
+The runner turns off address randomization for each count, a call Docker's default seccomp profile refuses, hence
+`--unconfined`. A run compares itself with the one before it in `target/gungraun`;
 `-- --save-baseline=<name>` and `-- --baseline=<name>` keep and compare named ones. On every pull request CI's
 `instructions` job runs `scripts/instruction-counts.py`: the base it merges into, then the change against it, each
 operation's count and change written to the job's summary. A count is reported and never fails the job, until the
