@@ -16,8 +16,12 @@ Computing that in JavaScript over one read of the edges works on a small graph a
 
 - **Every caller writes its own.** A graph view, a related-notes panel and a prompt builder each implement PageRank,
   each untested, each with its own convergence rule, dangling-node rule and tie order. Their answers disagree.
-- **The edges cross the binding.** Every relation row is encoded in msgpack, copied through N-API and decoded, to be
-  reduced to a few dozen scores. The engine already holds them in a memory map.
+- **The edges cross the binding, every time it runs.** Every relation row is encoded in msgpack, copied through N-API
+  and decoded, to be reduced to a few dozen scores. The engine already holds them in a memory map. The power iteration
+  is cheap; reading its input across the boundary is the cost, and it is paid per run: prompt context ranks on every
+  prompt, and a live view ranks again after every commit into its set. A graph of threads, messages and flow runs
+  grows without a ceiling, so that cost grows with the user's history. How large it is has not been measured; stage 2
+  measures it (Verification, Cost).
 - **Several reads are several snapshots.** A computation that reads the nodes, then the edges, then the rows to show
   can see three different commits. A plan reads one.
 - **A live view re-runs it correctly only by accident.** A watch over a plan is written into exactly by the commits that
@@ -43,6 +47,11 @@ already built:
   (`Direction`, as `pathTo` and `degrees` take it), so an undirected algorithm reads `both`;
 - **scope:** the plan's, so a trashed entity is in the projection only under `withTrashed`.
 
+`kinds` is required and has no default. Which relations an algorithm follows decides its answer more than the
+algorithm does: a containment kind (`parent_of`, `contains`) joins every member of a folder through the folder, so a
+rank over it calls everything in a large folder related to everything else in it. Each caller names the kinds whose
+edges mean what it is asking; related notes follows `references` alone.
+
 There are no named, stored projections. A plan builds its projection from the snapshot it reads and drops it when it
 answers, so it can never be stale. A cache keyed by commit sequence waits for a measurement showing projection
 building costs.
@@ -53,16 +62,18 @@ edges whose far end is in the set. Its memory is about `8 × nodes + 4 × edges`
 
 ### Steps and answers
 
-- **`rank` step:** orders the set by score, highest first, keeping the top `k` when given. The algorithm is one of:
-  - `pagerank`: damping `0.85` by default, uniform teleport;
-  - `personalized`: PageRank whose teleport goes to the **seeds**, a second set named by ids or by a nested plan's
-    answer. Its score answers "how much does this matter from there".
+- **`rank` step:** orders the set by score, highest first, keeping the top `k` when given, with damping `0.85` by
+  default. It is one algorithm, personalized PageRank, whose teleport goes to the **seeds**:
+  - `personalized`: the seeds are a second set, named by ids or by a nested plan's answer. Its score answers "how much
+    does this matter from there", which is what apack's callers ask, so this is the case built and tested first;
+  - `pagerank`: every node of the projection is a seed, so the teleport is uniform. It answers "what is central
+    overall", and is the same code with a different seed set rather than a second implementation.
 
   The scores go where a search's do, so `hits` answers them beside the ids, and a `rank` after a `hybrid` or `search`
   re-ranks its results. `hits()` is refused today without a search step; `rank` counts as one.
 - **`components` terminal:** the weakly connected components of the projection, as `groupBy` answers groups: each
   group's ids, or with `counts` its size, largest first, ties by first member's place in the set.
-- **`communities` terminal:** Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, with
+- **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, with
   `resolution` (default `1.0`) and a `seed`. Leiden rather than Louvain, because Louvain can return communities that
   are not connected, and Leiden guarantees they are.
 
@@ -93,15 +104,15 @@ evaluation in `development-libraries.md`, as that roadmap's stages record theirs
 requirements:
 
 - personalized PageRank with explicit seeds, dangling-node handling as above, and convergence reported;
-- Leiden with a seed and resolution, deterministic for a given seed;
 - building from our CSR without copying the graph into the library's own structure, or a measured cost for copying;
 - deterministic output and no parallelism we can't turn off;
 - licence compatible with MIT OR Apache-2.0, maintenance, and the dependencies it brings.
 
 Candidates include `petgraph`, which has connected components and a PageRank without personalization, and the Rust
 crates that implement Leiden. Weakly connected components is a union-find of about thirty lines, and power-iteration
-PageRank over CSR is about sixty; if no library meets the requirements, those two are written here and Leiden is the
-one to look hardest for.
+PageRank over CSR is about sixty; if no library meets the requirements, those two are written here. Leiden is not
+part of this evaluation: it has its own when its stage starts, and is the one to look hardest for a library for, being
+much the largest of the three to write and to verify.
 
 ## Stages
 
@@ -109,14 +120,15 @@ one to look hardest for.
 1. **Projection and `components`.** CSR from the set, the `components` terminal, EXPLAIN, tracked reads, the protocol
    and its TypeScript declarations. Components first, because it is exact and its reference is trivial, so it proves
    the projection.
-2. **`rank`: PageRank and personalized PageRank**, with scores through `hits`, seeds by ids or a nested plan, and
-   `converged`/`iterations` in the answer.
-3. **`communities`: Leiden.**
-4. **apack.** `@apackdev/ears` exposes `.rank(...)`, `.components(...)` and `.communities(...)` on the typed query
-   builder and `untypedQuery`, with its API report updated. The first callers are the ones that justified this:
-   related notes ranked by personalized PageRank from the open note over `references` both ways, prompt context
-   ranked by personalized PageRank from the entities the user mentions and fused with hybrid search, and a graph view
-   coloured by community and sized by rank.
+2. **`rank`: personalized PageRank**, with scores through `hits`, seeds by ids or a nested plan, and
+   `converged`/`iterations` in the answer; `pagerank` as every node seeded.
+3. **apack.** `@apackdev/ears` exposes `.rank(...)` and `.components(...)` on the typed query builder and
+   `untypedQuery`, with its API report updated. The first callers are the ones that justified this: related notes
+   ranked by personalized PageRank from the open note over `references` both ways, and prompt context ranked by
+   personalized PageRank from the entities the user mentions and fused with hybrid search.
+4. **`communities`: Leiden**, off the critical path: its one caller is a graph view coloured by community, which
+   stages 1 to 3 do not wait on. It starts when that view is being built, with its own library evaluation, and
+   `@apackdev/ears` gains `.communities(...)` then.
 
 Later, each when a caller needs it: node similarity (Jaccard over neighbours, "notes linked like this one"), k-core,
 betweenness centrality (Brandes), label propagation, and weights once relations declare fields.
@@ -140,6 +152,10 @@ Each stage, beside the usual `cargo fmt`, clippy with warnings denied, `cargo ne
 - **Mutation testing:** the `mutants in the change` CI jobs, every mutant in the new code caught or explained.
 - **Cost:** the Criterion benches and instruction counts (`docs/architecture/testing.md`) gain a projection and each
   algorithm at 1,000 and 10,000 entities, and a heap bound like `maintenance_heap` holds the projection to its formula.
+  Stage 2 also records the route this plan replaces, beside the engine's, in `docs/evidence/`: every edge of the kinds
+  read through the binding and personalized PageRank computed in JavaScript, against `rank` through the binding, at
+  1,000, 10,000 and 100,000 entities, each with its date and conditions. The reading sizes the speed reason above,
+  which until then is an expectation and not a figure.
 
 ## Not in this plan
 
