@@ -917,7 +917,11 @@ impl<R: Read> Query<'_, R> {
                 }
             };
             // The trash, the scope and `except` are left out after the graph answers, so it is asked for more than `k`,
-            // and asked again for more while what it gave was not enough and it held more
+            // and asked again for more while what it gave was not enough and it held more. Asked for as many items as
+            // the graph has ever numbered, it has answered all it holds whatever it says, so a wrong `exhausted` ends
+            // the asking rather than repeating it forever
+            let numbered =
+                super::vector::graph_of(self.r, entity_type, &def.name)?.map_or(0, |(_, next)| next as usize);
             let mut ask = k + 8;
             loop {
                 let (nearest, exhausted) =
@@ -931,7 +935,7 @@ impl<R: Read> Query<'_, R> {
                     let score = 1.0 / (1.0 + f64::from(distance));
                     admitted.push((distance, Hit { id, seq: 0, score, terms: Vec::new(), fields: Vec::new() }));
                 }
-                if admitted.len() >= k || exhausted {
+                if admitted.len() >= k || exhausted || ask >= numbered {
                     found.extend(admitted.into_iter().map(|(distance, hit)| (distance, hit, def.name.clone())));
                     break;
                 }
