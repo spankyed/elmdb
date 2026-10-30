@@ -62,14 +62,15 @@ exactly half the map.
   64 MB — 2 TB of address space, and on Windows, where LMDB extends the file to the map, as much disk. Left as survivors.
 - **An acquisition error other than an occupied claim** (`process.rs`, `claim_process`): the guard that tells them
   apart is mutated to treat every error as occupied, and nothing a test can do makes the kernel refuse a claim
-  otherwise. Left as a survivor.
+  otherwise. Caught since 2026-10-30: the guard is `refusal`'s, which a test hands an error of any kind, and its four
+  mutants are caught.
 - **`pin_module`** (`process.rs`, 1): replaced with `Ok(())`, the Rust suite passes, and the binding's
   `test/process.test.mjs` fails "a claim outlives its first worker" with `ALREADY_LOADED`; a suite cargo-mutants doesn't
-  run, as for `claim`'s mapping. Left as a survivor.
+  run, as for `claim`'s mapping. Excluded in `.cargo/mutants.toml` since 2026-10-30, with that suite named.
 - **The claim for any other platform** (`process.rs`, 1): compiled by no target elmdb builds, so no reading reaches it.
 - **`claim`'s mapping** (`process.rs`, 1): its napi error links only in Node, so the Rust suite can't call it, and the
   binding's suite that does (`test/process.test.mjs`, refused as `ALREADY_LOADED`, run by CI in every target's binding
-  job) isn't one cargo-mutants runs. Left as a survivor.
+  job) isn't one cargo-mutants runs. Excluded in `.cargo/mutants.toml` since 2026-10-30, with that suite named.
 
 ## `process.rs`
 
