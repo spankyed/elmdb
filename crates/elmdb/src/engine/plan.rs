@@ -131,6 +131,28 @@ pub enum Scope {
     Trashed,
 }
 
+/// Which of an entity's edges a walk follows: those out of it, those into it, or both
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    #[default]
+    Out,
+    In,
+    Both,
+}
+
+impl Direction {
+    /// The `outward` of each side of the edges it follows
+    pub fn sides(self) -> &'static [bool] {
+        match self {
+            Direction::Out => &[true],
+            Direction::In => &[false],
+            Direction::Both => &[true, false],
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "from", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -212,18 +234,45 @@ pub enum Step {
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
-    /// Every entity the set reaches through the kinds, any number of edges deep: nearest first, each once
+    /// The far ends of the set's edges of the kinds, out and in, each once, of the types when given
+    Both {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        types: Option<Vec<String>>,
+    },
+    /// Every entity the set reaches through the kinds, any number of edges deep or at most `depth`: nearest first, each
+    /// once
     Descendants {
         kinds: Vec<String>,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        depth: Option<u32>,
     },
     Ancestors {
         kinds: Vec<String>,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        depth: Option<u32>,
+    },
+    /// A shortest path through the kinds from an entity of the set to `to`, at most `depth` edges long when given: its
+    /// entities from start to `to`, both included, or none. Of paths as short, the one found first: from the set's
+    /// earliest entity, then along each entity's edges kind by kind, out before in, each in place order
+    PathTo {
+        to: String,
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        depth: Option<u32>,
     },
     /// By the field's value: booleans, numbers, timestamps, strings (by the schema's collation), anything else by its
     /// JSON, then a missing or null value; ties keep the query's order
@@ -392,6 +441,16 @@ pub enum Terminal {
     Edges {
         kinds: Vec<String>,
         outward: bool,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        types: Option<Vec<String>>,
+    },
+    /// Each entity with how many edges of the kinds it has, counting those `edges` would answer
+    Degrees {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,

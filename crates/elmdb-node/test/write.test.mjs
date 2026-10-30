@@ -38,6 +38,22 @@ test('a batch creates and links, and answers each operation and the change set',
   assert.equal(answer.changes.entities['Note-1'].created, true);
 });
 
+test('a path and each entity\'s degree cross the binding', (t) => {
+  const db = open(t);
+  write(db, [
+    ...[1, 2, 3].map((n) => ({ op: 'create', type: 'Note', id: `Note-${n}`, fields: { title: `${n}` } })),
+    { op: 'link', source: 'Note-1', kind: 'refs', target: 'Note-2' },
+    { op: 'link', source: 'Note-2', kind: 'refs', target: 'Note-3' },
+  ]);
+  const start = { from: 'ids', ids: ['Note-1'] };
+  const [path, degrees] = packr.unpack(db.readSync(packr.pack({ reads: [
+    { read: 'query', plan: { start, steps: [{ step: 'pathTo', to: 'Note-3', kinds: ['refs'] }], terminal: { answer: 'ids' } } },
+    { read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'degrees', kinds: ['refs'], direction: 'both' } } },
+  ] })));
+  assert.deepEqual(path.ids, ['Note-1', 'Note-2', 'Note-3']);
+  assert.deepEqual(degrees.degrees, [['Note-1', 1], ['Note-2', 2], ['Note-3', 1]]);
+});
+
 test('a refused batch throws its code and writes nothing', (t) => {
   const db = open(t);
   assert.throws(() => db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', fields: {} }] })), { code: 'REQUIRED_FIELD' });

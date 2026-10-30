@@ -22,5 +22,10 @@ slow-timeout = { period = "10s", terminate-after = 1 }
 filter = "test(/^store::tests::(a_read_refuses_live_reader|a_read_only_open_recovers|reader_recovery_)/)"
 slow-timeout = { period = "10s", terminate-after = 2 }
 
+# A graph walk that stops expanding or revisits entities never ends: each of these tests takes under a second
+[[profile.default.overrides]]
+filter = "test(/^engine::tests::graph::/)"
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 [profile.ci]
 fail-fast = false
