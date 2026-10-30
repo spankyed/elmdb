@@ -725,10 +725,10 @@ fn a_read_leaves_its_transaction_for_the_next_and_at_most_max_idle_are_kept() {
     put(&store, "a", b"1").unwrap();
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
-    assert_eq!(store.idle.lock().unwrap().len(), 1, "the second read took the first's transaction");
+    assert_eq!(store.idle.len(), 1, "the second read took the first's transaction");
     // Reads within reads each hold a transaction of their own
     nested(&store, MAX_IDLE + 1).unwrap();
-    assert_eq!(store.idle.lock().unwrap().len(), MAX_IDLE);
+    assert_eq!(store.idle.len(), MAX_IDLE);
 }
 
 /// Creates at `path` an elmdb database, stamped, with only the graph databases named

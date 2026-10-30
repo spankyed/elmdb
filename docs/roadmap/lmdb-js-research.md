@@ -72,6 +72,10 @@ commands, data generators, results and limitations there. This plan remains the 
 
 ### L01: idle snapshots and page retention
 
+Active investigation and any justified production fix are owned by
+[the idle-snapshot goal](../goals/goal-idle-snapshot-retention.md), started 2026-10-30.
+The remaining workstreams retain their own status; this does not start them.
+
 **Question:** can elmdb's cached read transaction pin old pages indefinitely when its process goes idle while another
 process writes, and what policy bounds retention without erasing the read-cache benefit?
 
