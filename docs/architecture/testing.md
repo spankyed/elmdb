@@ -261,7 +261,11 @@ evidence is [measurement tooling evidence](../evidence/maintenance-verification-
 The existing four-workload read fixture is shared by Criterion, the Rust allocation executable and
 native CPU sampling (`docs/evidence/read-allocation-codec.md`). Each workload checks all returned
 values before measuring: rows, order, projected fields, nested objects, bytes, and missing/null values.
-The Node benchmark uses the same deterministic fixture recipe and checks its answers independently.
+The Node benchmark imports the same deterministic rows as Rust and checks its answers independently.
+Earlier Node benchmark seeding used create(), which added timestamps absent from the Rust import fixture;
+new structured reports define fixture version 1 explicitly without those timestamps. Do not treat the
+historical Node measurements as bit-for-bit identical fixtures or compare their sizes without accounting
+for that difference.
 These are engine/binding measurements, not end-to-end application action timings.
 
 `cargo run -p elmdb --profile profiling --example read-allocations -- --json` emits schema version 1
@@ -275,7 +279,9 @@ nanosecond samples, answer sizes/checksums, source commit/dirty state, actual lo
 runtime and host information. The fixture version and cache/measurement policy travel with the samples.
 Use balanced separate baseline/candidate trials on one host; do not combine unlike manifests. Source
 identity plus binary checksum identifies the inputs, but does not independently prove how an arbitrary
-binary was built: establish that with a fresh build from the recorded source.
+binary was built: establish that with a fresh build from the recorded source. A copied source tree
+without `.git` can supply `ELMDB_PROFILE_SOURCE_COMMIT` (full SHA) and `ELMDB_PROFILE_SOURCE_DIRTY`
+(`true` or `false`); the report labels this as caller-provided provenance rather than Git verification.
 
 `--runs 2` is a bounded execution/format smoke check, not performance evidence. Linux CI runs that
 smoke, validates both JSON reports with `scripts/check-read-profile.py`, exercises Criterion's reads
