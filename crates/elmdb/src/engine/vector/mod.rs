@@ -690,6 +690,24 @@ fn check_vector(what: &str, index: &VectorIndex, vector: &[f32]) -> Result<()> {
     Ok(())
 }
 
+/// A journaled addition's embedding is the index's model and size: `embed` and a load add an item only for one, so
+/// another is a store that doesn't hold what it wrote
+fn check_pending(stored: &Stored, model: &str, dims: usize) -> Result<()> {
+    if stored.model != model || stored.vector.len() != dims {
+        return Err(corrupt("pending embedding"));
+    }
+    Ok(())
+}
+
+/// The item a journal entry's key ends with: a whole number a `u32` holds, as `add_item` and `remove_item` write it
+fn journal_item(key: &[u8]) -> Result<u32> {
+    let Some(Part::Number(item)) = decode_key(key)?.pop() else { return Err(corrupt("journal")) };
+    if !(0.0..=f64::from(u32::MAX)).contains(&item) || item.fract() != 0.0 {
+        return Err(corrupt("journal"));
+    }
+    Ok(item as u32)
+}
+
 /// Scores pending additions from their primary values; the graph still holds the pre-unit vectors.
 fn pending_vectors<D: Distance<VectorCodec = f32>>(
     r: &impl Read,
@@ -718,9 +736,7 @@ fn pending_vectors<D: Distance<VectorCodec = f32>>(
         let bytes =
             r.get(&keys::vector(entity_type, &index.name, id, chunk))?.ok_or_else(|| corrupt("pending embedding"))?;
         let stored = decode_vector(&bytes)?;
-        if stored.model != index.model || stored.vector.len() != index.dims {
-            return Err(corrupt("pending embedding"));
-        }
+        check_pending(&stored, &index.model, index.dims)?;
         found.push((item, D::distance(&query, &Item::<D>::new(stored.vector))));
     }
     Ok(())
@@ -758,18 +774,14 @@ pub fn nearest(
     let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok((Vec::new(), true)) };
     let mut pending = Vec::new();
     for (key, value) in r.scan(&keys::vector_index_range(Prefix::VectorJournal, entity_type, &index.name))? {
-        let Some(Part::Number(item)) = decode_key(&key)?.pop() else { return Err(corrupt("journal")) };
-        if !(0.0..=f64::from(u32::MAX)).contains(&item) || item.fract() != 0.0 {
-            return Err(corrupt("journal"));
-        }
-        let item = item as u32;
+        let item = journal_item(&key)?;
         if among.is_none_or(|items| items.contains(item)) {
             pending.push((item, values::decode(&value)?.as_bool().ok_or_else(|| corrupt("journal"))?));
         }
     }
     let changed: RoaringBitmap = pending.iter().map(|(item, _)| *item).collect();
-    let clean = among.filter(|_| !pending.is_empty()).map(|items| items - &changed);
-    let graph_among = clean.as_ref().or(among);
+    // A scoped search asks the graph only among the items this unit left unchanged
+    let graph_among = among.map(|items| items - &changed);
     let (txn, db) = r.raw();
     // Request enough unchanged graph items even when old versions of every pending item rank first.
     let wanted = (k * 4).max(16);
@@ -782,7 +794,7 @@ pub fn nearest(
                     Ok(reader) => {
                         let mut query = reader.nns(graph_wanted);
                         query.ef_search(graph_wanted.max(64));
-                        if let Some(among) = graph_among {
+                        if let Some(among) = &graph_among {
                             query.candidates(among);
                         }
                         query.by_vector(txn, vector).map_err(graph_error)?.nns

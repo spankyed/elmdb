@@ -797,3 +797,29 @@ fn a_unit_s_nearest_read_pages_like_the_committed_read_of_its_changes() {
         }
     }
 }
+
+#[test]
+fn a_journal_entry_names_a_whole_item_number_and_anything_else_is_corrupted() {
+    use crate::format::key::{Part, encode};
+    let key = |n: f64| encode(&[Part::String("Doc".into()), Part::String("meaning".into()), Part::Number(n)]);
+    let written = crate::engine::keys::vector_item_key(crate::format::Prefix::VectorJournal, "Doc", "meaning", 7);
+    assert_eq!(super::journal_item(&written).unwrap(), 7);
+    assert_eq!(super::journal_item(&key(0.0)).unwrap(), 0);
+    assert_eq!(super::journal_item(&key(f64::from(u32::MAX))).unwrap(), u32::MAX);
+    for n in [1.5, -1.0, f64::from(u32::MAX) + 1.0] {
+        assert_eq!(super::journal_item(&key(n)).unwrap_err().code, ErrorCode::Corrupted, "{n}");
+    }
+    let named = encode(&[Part::String("Doc".into()), Part::String("meaning".into())]);
+    assert_eq!(super::journal_item(&named).unwrap_err().code, ErrorCode::Corrupted, "no number");
+}
+
+#[test]
+fn a_pending_embedding_of_another_model_or_size_is_corrupted() {
+    let stored =
+        |model: &str, dims: usize| super::Stored { model: model.into(), hash: "h".into(), vector: vec![0.5; dims] };
+    super::check_pending(&stored("m1", DIMS), "m1", DIMS).unwrap();
+    for (model, dims) in [("m2", DIMS), ("m1", DIMS + 1), ("m2", DIMS + 1)] {
+        let refused = super::check_pending(&stored(model, dims), "m1", DIMS).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Corrupted, "{model} {dims}");
+    }
+}
