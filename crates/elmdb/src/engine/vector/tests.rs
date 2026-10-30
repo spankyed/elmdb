@@ -823,3 +823,42 @@ fn a_pending_embedding_of_another_model_or_size_is_corrupted() {
         assert_eq!(refused.code, ErrorCode::Corrupted, "{model} {dims}");
     }
 }
+
+#[test]
+fn a_near_read_asks_the_graph_again_only_while_it_lacks_k_and_the_graph_holds_more() {
+    const DOCS: usize = 200;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let at = |i: usize| {
+        let angle = i as f32 * 0.007;
+        [angle.cos(), angle.sin(), 0.0]
+    };
+    let mut ops: Vec<Json> = (0..DOCS)
+        .map(|i| json!({"op":"create","type":"Doc","id":format!("Doc-{i}"),"fields":{"body":format!("d{i}")}}))
+        .collect();
+    ops.extend((0..DOCS).map(|i| {
+        json!({"op":"embed","id":format!("Doc-{i}"),"index":"meaning","chunk":0,"hash":super::hash_of(&format!("d{i}")),
+            "model":"m1","vector":at(i)})
+    }));
+    write(&db, ops).unwrap();
+    // What the near stage visited: each entity a graph answer handed it
+    let visited = |start: Json, k: usize| {
+        let answer = read(
+            &db,
+            json!({"read":"query","explain":true,"plan":{"start":start,
+            "steps":[{"step":"near","vector":[1.0,0.0,0.0],"k":k}],"terminal":{"answer":"ids"}}}),
+        )
+        .unwrap();
+        let near = answer["stages"].as_array().unwrap().iter().find(|s| s["stage"] == "near").unwrap().clone();
+        (answer["answer"]["ids"].as_array().unwrap().len(), near["visited"].as_u64().unwrap())
+    };
+    // One ask holds k: it isn't repeated, though the graph holds far more
+    let (found, once) = visited(docs(), 1);
+    assert_eq!(found, 1);
+    assert!(once < 20, "one ask's worth, not the next, four times as many: {once}");
+    // Three in scope and k of ten: the graph's answer is all of them and says so, so it isn't asked again:
+    let scope = || json!({"from":"ids","ids":["Doc-5","Doc-50","Doc-150"]});
+    // k of three is answered by the first ask; k of ten does no more work
+    let (_, asked_once) = visited(scope(), 3);
+    assert_eq!(visited(scope(), 10), (3, asked_once));
+}
