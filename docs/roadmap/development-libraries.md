@@ -65,6 +65,9 @@ Acceptance:
 - Retain the recovery workload harness for populated replacement, peak RSS, scratch space and disk growth. Criterion
   measurements do not substitute for those resource measurements.
 
+The same operations are counted in instructions too, which don't move with the machine's load
+(`verification-tooling.md`, stage 7).
+
 ## 3. Typed Unix filesystem operations
 
 Evaluate [rustix](https://docs.rs/rustix/latest/rustix/fs/index.html) against the actual Linux and macOS operations:
