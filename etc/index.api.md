@@ -165,7 +165,7 @@ export interface Ears {
         info?: unknown;
     }): void;
     upsert: Upsert;
-    watch<T>(read: () => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
+    watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
     wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
     write: Write;
 }
@@ -914,6 +914,14 @@ export interface WatchObserver<T> {
 // @public
 export interface WatchOptions {
     label?: string;
+    recordCauses?: () => boolean;
+}
+
+// @public
+export interface WatchReadContext {
+    readonly dropped: number;
+    // (undocumented)
+    readonly sequences: readonly number[];
 }
 
 // @public
