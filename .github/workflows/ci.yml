@@ -36,6 +36,8 @@ jobs:
           cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture --color never 2>&1 | tee "$RUNNER_TEMP/maintenance-heap.log"
           python3 -c 'import pathlib,sys; assert "test maintenance_heap_bounds ... ok" in pathlib.Path(sys.argv[1]).read_text(), "heap test did not execute"' "$RUNNER_TEMP/maintenance-heap.log"
           cargo bench -p elmdb --bench maintenance -- --test
+          cargo bench -p elmdb --bench reads -- --test
+          cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"
       - name: refuse unregistered readers on an actual read-only mount
         run: python3 scripts/check-read-only-mount.py
       - run: cargo xtask check-generated
@@ -46,6 +48,18 @@ jobs:
           npm run build
           npm run typecheck
           npm test
+          node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
+          python3 -B scripts/test-read-profile.py
+          python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
+      - name: preserve read measurement reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: read-profile-smoke
+          path: |
+            ${{ runner.temp }}/read-allocations.json
+            ${{ runner.temp }}/read-codecs.json
+          if-no-files-found: error
       - name: process claim without an account, home directory or proc mount
         run: python3 scripts/check-process-claim-linux.py
       - name: prove kernel-claim and publication fallback assertions fire

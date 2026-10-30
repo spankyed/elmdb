@@ -13,6 +13,8 @@ use serde_json::json;
 
 /// How many messages a channel holds: a page is the first 50 of one
 pub const PER_CHANNEL: usize = 100;
+/// Version 2 stores integral scores as integers, matching the JavaScript fixture's Number encoding.
+pub const FIXTURE_VERSION: u32 = 2;
 
 pub struct Messages {
     // Close the database before removing its files, also on Windows.
@@ -43,7 +45,10 @@ impl Messages {
     /// nested map, a list, bytes, a number, a boolean, a field that is null on every third and missing on every
     /// fifth. Seeding and initial derivation happen here, outside any measurement
     pub fn new(rows: usize) -> Self {
-        assert!(rows >= PER_CHANNEL && rows.is_multiple_of(PER_CHANNEL), "whole channels of {PER_CHANNEL}");
+        assert!(
+            rows >= 8 * PER_CHANNEL && rows.is_multiple_of(PER_CHANNEL),
+            "fixture v{FIXTURE_VERSION} requires at least eight whole channels of {PER_CHANNEL}"
+        );
         let schema = Schema::from_json(&json!({
             "$schema": SCHEMA_LANGUAGE,
             "types":{"Message":{"fields":{
@@ -91,21 +96,28 @@ impl Messages {
                 name: "page",
                 reads: page(json!({"answer":"rows"})),
                 check: |answer, _| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
-                    assert_eq!(rows[0]["id"], json!(id(7 * PER_CHANNEL)));
-                    assert_eq!(rows[49]["body"].as_str().unwrap().len(), body(7 * PER_CHANNEL + 49).len());
+                    for (offset, row) in rows.iter().enumerate() {
+                        assert_eq!(*row, expected_row(7 * PER_CHANNEL + offset));
+                    }
                 },
             },
             Workload {
                 name: "page_projected",
                 reads: page(json!({"answer":"rows","fields":["title","sender"]})),
                 check: |answer, _| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
-                    let first = 7 * PER_CHANNEL;
-                    let expected = json!({"id":id(first),"title":format!("message {first}"),"sender":format!("sender-{}", first % 13)});
-                    assert_eq!(rows[0], expected);
+                    for (offset, row) in rows.iter().enumerate() {
+                        let i = 7 * PER_CHANNEL + offset;
+                        assert_eq!(
+                            *row,
+                            json!({"id":id(i),"title":format!("message {i}"),"sender":format!("sender-{}", i % 13)})
+                        );
+                    }
                 },
             },
             Workload {
@@ -115,9 +127,12 @@ impl Messages {
                 }}]}))
                 .unwrap(),
                 check: |answer, rows| {
+                    assert_eq!(answer["kind"], json!("rows"));
                     let found = answer["rows"].as_array().unwrap();
                     assert_eq!(found.len(), rows);
-                    assert_eq!(found[rows - 1]["id"], json!(id(rows - 1)));
+                    for (i, row) in found.iter().enumerate() {
+                        assert_eq!(*row, expected_row(i));
+                    }
                 },
             },
         ]
@@ -150,7 +165,7 @@ fn message(i: usize) -> BTreeMap<String, Value> {
         ),
         ("tags".to_owned(), Value::Array((0..3).map(|j| Value::from(format!("tag-{}", (i + j) % 17))).collect())),
         ("attachment".to_owned(), Value::Binary((0..64).map(|j| ((i * 31 + j) % 251) as u8).collect())),
-        ("score".to_owned(), Value::from(i as f64 / 7.0)),
+        ("score".to_owned(), if i.is_multiple_of(7) { Value::from(i / 7) } else { Value::from(i as f64 / 7.0) }),
         ("read".to_owned(), Value::from(i.is_multiple_of(2))),
     ]);
     if !i.is_multiple_of(5) {
@@ -158,4 +173,12 @@ fn message(i: usize) -> BTreeMap<String, Value> {
             .insert("note".to_owned(), if i.is_multiple_of(3) { Value::Nil } else { Value::from(format!("note {i}")) });
     }
     fields
+}
+
+/// All values, including bytes, nested maps, missing and null fields, must survive a measured read.
+fn expected_row(i: usize) -> serde_json::Value {
+    let mut fields = message(i);
+    fields.insert("id".to_owned(), Value::from(id(i)));
+    fields.insert("entityType".to_owned(), Value::from("Message"));
+    serde_json::to_value(Value::Map(fields.into_iter().map(|(k, v)| (Value::from(k), v)).collect())).unwrap()
 }
