@@ -132,7 +132,7 @@ that a stopped scan is tracked as far as it went, the commit sequence, and `Data
 A model runs production code on a scheduler's threads instead of the operating system's, so a race that a
 real-thread test reaches only by luck is reached on purpose. Loom runs every interleaving within a bound; Shuttle runs
 random schedules, as many as asked, and reaches models too large for Loom. The primitives the modelled code
-synchronizes with come from `crate::sync` (`src/sync.rs`): `std`'s and parking_lot's in every build, Loom's in one
+synchronizes with come from `crate::sync` (`src/sync/`): `std`'s and parking_lot's in every build, Loom's in one
 built with `--cfg loom`, Shuttle's in one built with `--cfg shuttle`. A model names its threads and its exploration
 through `crate::sync::model`, so one model runs under either.
 

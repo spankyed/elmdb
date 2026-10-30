@@ -8,6 +8,11 @@ exclude_globs = [
     "crates/elmdb/benches/**",
     "crates/elmdb/examples/**",
     "xtask/**",
+    # Built only with --cfg loom or --cfg shuttle, which no suite cargo-mutants runs is: the models and what they run on
+    # (`docs/architecture/testing.md`, Concurrency models)
+    "crates/elmdb/src/sync/model.rs",
+    "crates/elmdb/src/sync/shuttle_primitives.rs",
+    "crates/elmdb/src/engine/watch/model.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]

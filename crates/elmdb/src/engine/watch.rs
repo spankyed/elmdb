@@ -547,6 +547,56 @@ mod registration_tests {
         assert_eq!(runs, 3);
     }
 
+    /// Real threads: an unwatch from another thread returns once the listener a delivery is running has returned and
+    /// been dropped, and not before
+    #[test]
+    fn an_unwatch_from_another_thread_waits_for_the_running_listener() {
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+        let tracks = SharedTracks::default();
+        let (started, listening) = channel();
+        let (release, released) = channel::<()>();
+        let (dropped, gone) = channel();
+        struct OnDrop(std::sync::mpsc::Sender<()>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.send(()).unwrap();
+            }
+        }
+        let on_drop = OnDrop(dropped);
+        let id = register(
+            &tracks,
+            Reads { reads: Vec::new(), track: None },
+            Box::new(move |_| {
+                let _owned = &on_drop;
+                started.send(()).unwrap();
+                released.recv().unwrap();
+            }),
+        );
+        let delivery = {
+            let tracks = Arc::clone(&tracks);
+            std::thread::spawn(move || {
+                deliver_with(&tracks, &[id], |id| read_watch_with(&tracks, &|| 0, id, |_| (Ok(vec![1]), dependency())))
+            })
+        };
+        listening.recv_timeout(Duration::from_secs(5)).expect("the listener runs");
+        let (ended, unwatched) = channel();
+        let unwatcher = {
+            let tracks = Arc::clone(&tracks);
+            std::thread::spawn(move || {
+                unwatch(&tracks, id);
+                ended.send(()).unwrap();
+            })
+        };
+        assert!(unwatched.recv_timeout(Duration::from_millis(100)).is_err(), "unwatch returned while the listener ran");
+        release.send(()).unwrap();
+        unwatched.recv_timeout(Duration::from_secs(5)).expect("unwatch returns once the listener has");
+        gone.try_recv().expect("the listener was dropped before unwatch returned");
+        assert!(delivery.join().unwrap().is_empty());
+        unwatcher.join().unwrap();
+        assert_eq!(tracks.lock().stats(), (0, 0, 0));
+    }
+
     #[test]
     fn reads_in_flight_together_each_file_their_own_dependencies() {
         let dir = tempfile::tempdir().unwrap();
