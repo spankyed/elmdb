@@ -11,6 +11,7 @@ repository = "https://github.com/spankyed/elmdb"
 
 [workspace.dependencies]
 libc = "0.2.191"
+windows-sys = "0.61.2"
 elmdb = { path = "crates/elmdb" }
 heed = "0.23.0"
 serde = { version = "1.0.229", features = ["derive"] }
