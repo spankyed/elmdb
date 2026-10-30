@@ -5,9 +5,9 @@
   </picture>
 </h1>
 
-Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
-
 Say "LMDB" out loud: that's the name.
+
+Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
 
 elmdb holds typed entities, their attributes and the relations between them. It keeps value, text and vector indexes
 in the same transaction as the data, runs a read as one plan and a write as one batch, and reports what every commit
