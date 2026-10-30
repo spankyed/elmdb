@@ -8,7 +8,14 @@ mod reads;
 static ALLOCATOR: dhat::Alloc = dhat::Alloc;
 
 fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let json = match args.as_slice() {
+        [] => false,
+        [flag] if flag == "--json" => true,
+        _ => panic!("usage: read-allocations [--json]"),
+    };
     let messages = reads::Messages::new(10_000);
+    let mut measurements = Vec::new();
     for workload in messages.workloads() {
         workload.assert_answer(&messages.db, messages.rows);
         let request = rmp_serde::to_vec_named(&workload.reads).unwrap();
@@ -19,12 +26,35 @@ fn main() {
             std::hint::black_box(messages.db.read_bytes(std::hint::black_box(&request)).unwrap());
         }
         let stats = dhat::HeapStats::get();
+        measurements.push(serde_json::json!({
+            "workload": workload.name,
+            "iterations": reads,
+            "answerBytes": answer,
+            "totalAllocations": stats.total_blocks,
+            "totalAllocatedBytes": stats.total_bytes,
+            "peakHeapBytes": stats.max_bytes,
+        }));
+        if !json {
+            println!(
+                "{}: answer_bytes={answer} allocations_per_read={} allocated_bytes_per_read={} peak_heap_bytes={}",
+                workload.name,
+                stats.total_blocks / reads,
+                stats.total_bytes / reads,
+                stats.max_bytes
+            );
+        }
+    }
+    if json {
         println!(
-            "{}: answer_bytes={answer} allocations_per_read={} allocated_bytes_per_read={} peak_heap_bytes={}",
-            workload.name,
-            stats.total_blocks / reads,
-            stats.total_bytes / reads,
-            stats.max_bytes
+            "{}",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "measurement": "rust-read-allocations",
+                "fixture": {"version": 1, "rows": messages.rows},
+                "instrumentation": "dhat; fixture and warmup excluded; preexisting/native/mapped memory excluded",
+                "debugAssertions": cfg!(debug_assertions),
+                "workloads": measurements,
+            })
         );
     }
     std::hint::black_box(&messages.directory);

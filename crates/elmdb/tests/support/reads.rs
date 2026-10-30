@@ -93,8 +93,9 @@ impl Messages {
                 check: |answer, _| {
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
-                    assert_eq!(rows[0]["id"], json!(id(7 * PER_CHANNEL)));
-                    assert_eq!(rows[49]["body"].as_str().unwrap().len(), body(7 * PER_CHANNEL + 49).len());
+                    for (offset, row) in rows.iter().enumerate() {
+                        assert_eq!(*row, expected_row(7 * PER_CHANNEL + offset));
+                    }
                 },
             },
             Workload {
@@ -103,9 +104,13 @@ impl Messages {
                 check: |answer, _| {
                     let rows = answer["rows"].as_array().unwrap();
                     assert_eq!(rows.len(), 50);
-                    let first = 7 * PER_CHANNEL;
-                    let expected = json!({"id":id(first),"title":format!("message {first}"),"sender":format!("sender-{}", first % 13)});
-                    assert_eq!(rows[0], expected);
+                    for (offset, row) in rows.iter().enumerate() {
+                        let i = 7 * PER_CHANNEL + offset;
+                        assert_eq!(
+                            *row,
+                            json!({"id":id(i),"title":format!("message {i}"),"sender":format!("sender-{}", i % 13)})
+                        );
+                    }
                 },
             },
             Workload {
@@ -117,7 +122,9 @@ impl Messages {
                 check: |answer, rows| {
                     let found = answer["rows"].as_array().unwrap();
                     assert_eq!(found.len(), rows);
-                    assert_eq!(found[rows - 1]["id"], json!(id(rows - 1)));
+                    for (i, row) in found.iter().enumerate() {
+                        assert_eq!(*row, expected_row(i));
+                    }
                 },
             },
         ]
@@ -158,4 +165,12 @@ fn message(i: usize) -> BTreeMap<String, Value> {
             .insert("note".to_owned(), if i.is_multiple_of(3) { Value::Nil } else { Value::from(format!("note {i}")) });
     }
     fields
+}
+
+/// All values, including bytes, nested maps, missing and null fields, must survive a measured read.
+fn expected_row(i: usize) -> serde_json::Value {
+    let mut fields = message(i);
+    fields.insert("id".to_owned(), Value::from(id(i)));
+    fields.insert("entityType".to_owned(), Value::from("Message"));
+    serde_json::to_value(Value::Map(fields.into_iter().map(|(k, v)| (Value::from(k), v)).collect())).unwrap()
 }

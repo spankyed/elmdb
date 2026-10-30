@@ -255,3 +255,30 @@ buffers text memberships, and slows the timed key encoding by a millisecond: eac
 assertion and the slowdown must be reported as a regression. Run it serially, in a full history, after
 `cargo bench -p elmdb --bench maintenance -- --save-baseline <name>`; it reuses `target`, so rebuild afterwards. The
 evidence is [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).
+
+## Read allocation and codec reports
+
+The existing four-workload read fixture is shared by Criterion, the Rust allocation executable and
+native CPU sampling (`docs/evidence/read-allocation-codec.md`). Each workload checks all returned
+values before measuring: rows, order, projected fields, nested objects, bytes, and missing/null values.
+The Node benchmark uses the same deterministic fixture recipe and checks its answers independently.
+These are engine/binding measurements, not end-to-end application action timings.
+
+`cargo run -p elmdb --profile profiling --example read-allocations -- --json` emits schema version 1
+JSON with each workload's answer size, iteration denominator, total allocations, allocated bytes and
+peak heap. It reports whether debug assertions are enabled. Fixture creation and warmup precede dhat;
+preexisting/native allocations, mappings and RSS are outside that measurement. Keep CPU timing apart
+from dhat instrumentation. Normalize totals by the recorded iterations rather than truncated text ratios.
+
+After building the binding, `node crates/elmdb-node/bench/reads.mjs --json` emits raw readSync and decode
+nanosecond samples, answer sizes/checksums, source commit/dirty state, actual loaded binary checksum,
+runtime and host information. The fixture version and cache/measurement policy travel with the samples.
+Use balanced separate baseline/candidate trials on one host; do not combine unlike manifests. Source
+identity plus binary checksum identifies the inputs, but does not independently prove how an arbitrary
+binary was built: establish that with a fresh build from the recorded source.
+
+`--runs 2` is a bounded execution/format smoke check, not performance evidence. Linux CI runs that
+smoke, validates both JSON reports with `scripts/check-read-profile.py`, exercises Criterion's reads
+once with `--test`, and preserves the reports. Its allocation smoke uses the development profile, marked
+in its output, to avoid a second production-profile build. No timing or allocation threshold is inferred
+from these smoke reports; comparable production-profile runs remain necessary for optimization claims.

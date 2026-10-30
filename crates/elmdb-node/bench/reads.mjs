@@ -2,9 +2,12 @@
 // crates/elmdb-node/bench/reads.mjs` after `npm run build`. It builds the message store `tests/support/reads.rs`
 // describes, checks each answer, then times `readSync` and the decoding of its answer apart, as medians of many runs.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { tmpdir, cpus, totalmem, loadavg } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { Packr } from 'msgpackr';
 
@@ -12,6 +15,16 @@ const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
 const packr = new Packr({ useRecords: false, mapsAsObjects: true });
 
+const args = process.argv.slice(2);
+const json = args[0] === '--json';
+if (json) args.shift();
+let requestedRuns;
+if (args.length) {
+  assert.equal(args.shift(), '--runs', 'usage: reads.mjs [--json] [--runs N]');
+  requestedRuns = Number(args.shift());
+  assert.ok(Number.isSafeInteger(requestedRuns) && requestedRuns >= 1 && requestedRuns <= 100_000, 'runs must be 1..100000');
+  assert.equal(args.length, 0, 'unexpected arguments');
+}
 const ROWS = 10_000;
 const PER_CHANNEL = 100;
 const WORDS = ['status', 'update', 'deploy', 'review', 'merge', 'branch', 'build', 'release'];
@@ -49,7 +62,9 @@ const schema = {
 };
 
 const dir = mkdtempSync(join(tmpdir(), 'elmdb-read-bench-'));
-const db = Database.open(join(dir, 'db'), { schema, syncs: false });
+let db;
+try {
+db = Database.open(join(dir, 'db'), { schema, syncs: false });
 for (let start = 0; start < ROWS; start += 1000) {
   const ops = [];
   for (let i = start; i < start + 1000; i++) ops.push({ op: 'create', type: 'Message', id: id(i), fields: message(i) });
@@ -63,18 +78,32 @@ const page = (terminal) => ({ reads: [{ read: 'query', plan: {
 } }] });
 const workloads = [
   ['field', { reads: [{ read: 'field', id: id(742), field: 'title' }] }, (a) => assert.equal(a.value, 'message 742')],
-  ['page', page({ answer: 'rows' }), (a) => assert.equal(a.rows.length, 50)],
-  ['page_projected', page({ answer: 'rows', fields: ['title', 'sender'] }), (a) => assert.deepEqual(Object.keys(a.rows[0]), ['id', 'title', 'sender'])],
+  ['page', page({ answer: 'rows' }), (a) => {
+    assert.equal(a.rows.length, 50);
+    a.rows.forEach((row, offset) => assert.deepEqual(row, { id: id(700 + offset), entityType: 'Message', ...message(700 + offset) }));
+  }],
+  ['page_projected', page({ answer: 'rows', fields: ['title', 'sender'] }), (a) => {
+    assert.equal(a.rows.length, 50);
+    a.rows.forEach((row, offset) => {
+      const i = 700 + offset;
+      assert.deepEqual(row, { id: id(i), title: `message ${i}`, sender: `sender-${i % 13}` });
+    });
+  }],
   ['all_rows', { reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Message'] }, terminal: { answer: 'rows' } } }] },
-    (a) => assert.equal(a.rows.length, ROWS)],
+    (a) => {
+      assert.equal(a.rows.length, ROWS);
+      a.rows.forEach((row, i) => assert.deepEqual(row, { id: id(i), entityType: 'Message', ...message(i) }));
+    }],
 ];
 
 const median = (xs) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)];
+const measurements = [];
 for (const [name, reads, check] of workloads) {
   const request = packr.pack(reads);
-  check(packr.unpack(db.readSync(request))[0]);
+  const checkedAnswer = db.readSync(request);
+  check(packr.unpack(checkedAnswer)[0]);
   // Enough runs for a stable median at each size: the read of every row takes tens of milliseconds
-  const runs = name === 'all_rows' ? 30 : 2000;
+  const runs = requestedRuns ?? (name === 'all_rows' ? 30 : 2000);
   const read = [], decode = [];
   for (let n = 0; n < runs; n++) {
     let t = process.hrtime.bigint();
@@ -84,7 +113,26 @@ for (const [name, reads, check] of workloads) {
     packr.unpack(answer);
     decode.push(Number(process.hrtime.bigint() - t));
   }
-  console.log(`${name}: readSync_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
+  measurements.push({ workload: name, answerBytes: checkedAnswer.length, answerSha256: createHash('sha256').update(checkedAnswer).digest('hex'), readSyncNs: read, decodeNs: decode });
+  if (!json) console.log(`${name}: readSync_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
 }
-db.close();
-rmSync(dir, { recursive: true, force: true });
+if (json) {
+  const root = fileURLToPath(new URL('../../../', import.meta.url));
+  const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
+  const binaries = Object.keys(require.cache).filter((path) => path.endsWith('.node') && path.startsWith(fileURLToPath(new URL('../', import.meta.url))));
+  assert.equal(binaries.length, 1, 'identify the actual loaded elmdb binary');
+  console.log(JSON.stringify({
+    schemaVersion: 1,
+    measurement: 'node-read-and-decode',
+    source: { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=normal')) },
+    binary: { name: binaries[0].split(/[\\/]/).at(-1), sha256: createHash('sha256').update(readFileSync(binaries[0])).digest('hex') },
+    runtime: { node: process.versions.node, napi: process.versions.napi, v8: process.versions.v8, platform: process.platform, arch: process.arch },
+    host: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryBytes: totalmem(), loadAverage: loadavg() },
+    fixture: { version: 1, rows: ROWS, perChannel: PER_CHANNEL, syncs: false },
+    policy: 'fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate',
+    workloads: measurements,
+  }));
+}
+} finally {
+  try { db?.close(); } finally { rmSync(dir, { recursive: true, force: true }); }
+}
