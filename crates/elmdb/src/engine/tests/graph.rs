@@ -102,6 +102,20 @@ fn both_follows_edges_out_and_in_each_far_end_once() {
         json!(["Task-a"]),
         "an end two of the set reach is visited once"
     );
+    assert_eq!(
+        ids(
+            &db,
+            &["Task-a"],
+            json!([{ "step": "both", "kinds": ["refs"] }, { "step": "reverse" }, { "step": "limit", "n": 2 }])
+        ),
+        json!(["Task-c", "Note-n"]),
+        "a reverse after it reverses the whole walk"
+    );
+    let plan = |step: Json| json!({ "start": { "from": "ids", "ids": ["Task-a"] }, "steps": [step], "terminal": { "answer": "ids" } });
+    let refused = try_query(&db, plan(json!({ "step": "both", "kinds": ["follows"] }))).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRelationKind);
+    let refused = try_query(&db, plan(json!({ "step": "descendants", "kinds": ["follows"], "depth": 1 }))).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRelationKind);
 }
 
 #[test]
@@ -130,6 +144,7 @@ fn path_to_answers_a_shortest_path_from_the_set_or_nothing() {
     assert_eq!(path(&["Task-a"], "Task-c", json!({})), json!(["Task-a", "Task-b", "Task-c"]));
     assert_eq!(path(&["Task-a"], "Task-a", json!({})), json!(["Task-a"]), "a start is its own path");
     assert_eq!(path(&["Task-a"], "Task-x", json!({})), json!([]), "nothing links to it");
+    assert_eq!(path(&["Task-a"], "Task-gone", json!({})), json!([]), "no such entity");
     assert_eq!(path(&["Task-a"], "Task-f", json!({})), json!([]), "edges in aren't followed out");
     assert_eq!(path(&["Task-a"], "Task-f", json!({ "direction": "in" })), json!(["Task-a", "Task-f"]));
     assert_eq!(
@@ -161,6 +176,12 @@ fn path_to_answers_a_shortest_path_from_the_set_or_nothing() {
         "around a trashed entity"
     );
     assert_eq!(path(&["Task-a"], "Task-c", json!({})), json!([]), "only through it");
+    assert_eq!(path(&["Task-a"], "Task-b", json!({})), json!([]), "to it");
+    assert_eq!(
+        ids_in(&db, "withTrashed", &["Task-a"], json!([{ "step": "pathTo", "to": "Task-b", "kinds": ["refs"] }])),
+        json!(["Task-a", "Task-b"]),
+        "with the trash"
+    );
 
     let rows = query(
         &db,
@@ -223,6 +244,37 @@ fn degrees_count_each_entity_s_edges_as_edges_would_answer_them() {
     );
     write(&db, vec![json!({ "op": "trash", "id": "Task-c" })]).unwrap();
     assert_eq!(of("out", json!(["refs"]), json!(["Task"])), json!([["Task-a", 1], ["Task-b", 1], ["Task-d", 0]]));
+    let refused = try_query(
+        &db,
+        json!({ "start": { "from": "ids", "ids": ["Task-a"] }, "terminal": { "answer": "degrees", "kinds": ["follows"] } }),
+    )
+    .unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnknownRelationKind);
+}
+
+#[test]
+fn explain_names_the_new_stages() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-a", "Task-b"]);
+    link(&db, &[("Task-a", "refs", "Task-b")]);
+    let explained = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "ids", "ids": ["Task-a"] },
+                "steps": [
+                    { "step": "both", "kinds": ["refs"] },
+                    { "step": "pathTo", "to": "Task-a", "kinds": ["refs"], "direction": "both" }
+                ],
+                "terminal": { "answer": "degrees", "kinds": ["refs"] }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let stages: Vec<&Json> = explained[0]["stages"].as_array().unwrap().iter().map(|s| &s["stage"]).collect();
+    assert_eq!(stages, [&json!("ids"), &json!("both"), &json!("pathTo"), &json!("degrees")]);
+    assert_eq!(explained[0]["answer"]["degrees"], json!([["Task-b", 0], ["Task-a", 1]]));
 }
 
 #[test]

@@ -1370,6 +1370,10 @@ impl<R: Read> Query<'_, R> {
         if frontier.iter().any(|id| id == to) {
             return visit(to);
         }
+        // No path ends at an entity the scope doesn't reach, so nothing is walked looking for one
+        if !self.alive(to)? {
+            return Ok(true);
+        }
         let mut seen: HashSet<String> = frontier.iter().cloned().collect();
         let mut parent: HashMap<String, String> = HashMap::new();
         let mut levels = 0;
@@ -1387,8 +1391,8 @@ impl<R: Read> Query<'_, R> {
                             parent.insert(far.clone(), from.clone());
                             if far == to {
                                 let mut path = vec![far];
-                                while let Some(before) = parent.get(path.last().expect("a path holds `to`")) {
-                                    path.push(before.clone());
+                                while let Some(previous) = parent.get(path.last().expect("a path holds `to`")) {
+                                    path.push(previous.clone());
                                 }
                                 path.reverse();
                                 return each(path, visit);
