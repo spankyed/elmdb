@@ -666,3 +666,134 @@ fn each_of_two_vector_indexes_declared_or_rebuilt_over_existing_data_queues_its_
         each_waits_for_its_own(&db, &format!("after {index} is rebuilt"));
     }
 }
+
+#[test]
+fn unit_vector_reads_overlay_pending_graph_changes_and_savepoint_rollback() {
+    use crate::engine::tests::batch;
+    for metric in ["cosine", "l2"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut definitions = indexes();
+        definitions["meaning"]["metric"] = metric.into();
+        let db = Database::open(
+            dir.path(),
+            OpenOptions { schema: Some(schema_with(definitions)), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        let reads = |start: Json| {
+            Reads { reads: vec![serde_json::from_value::<ReadOp>(json!({
+            "read":"query","plan":{"start":start,"steps":[{"step":"near","vector":[1.0,0.0,0.0],"k":1}],"terminal":{"answer":"ids"}}
+        })).unwrap()], track: None }
+        };
+        let nearest = |unit: &mut crate::engine::Unit| decode(&unit.read(&reads(docs())).unwrap())[0]["ids"].clone();
+        let embed = |id: &str, text: &str, vector: [f32; 3]| {
+            json!({
+                "op":"embed","id":id,"index":"meaning","chunk":0,"hash":super::hash_of(text),"model":"m1","vector":vector
+            })
+        };
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![
+            json!({"op":"create","type":"Doc","id":"Doc-a","fields":{"body":"cat"}}),
+            json!({"op":"create","type":"Doc","id":"Doc-b","fields":{"body":"car"}}),
+            embed("Doc-a", "cat", [1.0, 0.0, 0.0]),
+            embed("Doc-b", "car", [0.0, 1.0, 0.0]),
+        ]))
+        .unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-a"]));
+        assert_eq!(
+            decode(&unit.read(&reads(json!({"from":"ids","ids":["Doc-b"]}))).unwrap())[0]["ids"],
+            json!(["Doc-b"])
+        );
+        let outer = unit.savepoint().unwrap();
+        unit.write(&batch(vec![embed("Doc-a", "cat", [0.0, 0.0, 1.0]), embed("Doc-b", "car", [1.0, 0.0, 0.0])]))
+            .unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-b"]));
+        let nested = unit.savepoint().unwrap();
+        unit.write(&batch(vec![embed("Doc-a", "cat", [1.0, 0.0, 0.0]), embed("Doc-b", "car", [0.0, 1.0, 0.0])]))
+            .unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-a"]));
+        unit.rollback_to(nested).unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-b"]));
+        unit.rollback_to(outer).unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-a"]));
+        unit.commit(false).unwrap();
+        assert_eq!(decode(&db.read(&reads(docs())).unwrap())[0]["ids"], json!(["Doc-a"]));
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![embed("Doc-a", "cat", [0.0, 0.0, 1.0]), embed("Doc-b", "car", [1.0, 0.0, 0.0])]))
+            .unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-b"]));
+        unit.write(&batch(vec![
+            json!({"op":"create","type":"Doc","id":"Doc-c","fields":{"body":"sea"}}),
+            embed("Doc-c", "sea", [1.0, 0.0, 0.0]),
+        ]))
+        .unwrap();
+        assert_eq!(
+            decode(&unit.read(&reads(json!({"from":"ids","ids":["Doc-c"]}))).unwrap())[0]["ids"],
+            json!(["Doc-c"])
+        );
+        unit.abort();
+        assert_eq!(decode(&db.read(&reads(docs())).unwrap())[0]["ids"], json!(["Doc-a"]));
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![json!({"op":"destroy","id":"Doc-a"})])).unwrap();
+        assert_eq!(nearest(&mut unit), json!(["Doc-b"]));
+        unit.abort();
+        assert_eq!(decode(&db.read(&reads(docs())).unwrap())[0]["ids"], json!(["Doc-a"]));
+    }
+}
+
+#[test]
+fn a_unit_s_nearest_read_pages_like_the_committed_read_of_its_changes() {
+    use crate::engine::tests::batch;
+    const DOCS: usize = 40;
+    for metric in ["cosine", "l2"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut definitions = indexes();
+        definitions["meaning"]["metric"] = metric.into();
+        let db = Database::open(
+            dir.path(),
+            OpenOptions { schema: Some(schema_with(definitions)), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        // Each document at its own angle from the query, so no two are as near
+        let at = |i: usize| {
+            let angle = i as f32 * 0.07;
+            [angle.cos(), angle.sin(), 0.0]
+        };
+        let embed = |i: usize, vector: [f32; 3]| {
+            let text = format!("d{i}");
+            json!({"op":"embed","id":format!("Doc-{i}"),"index":"meaning","chunk":0,"hash":super::hash_of(&text),
+                "model":"m1","vector":vector})
+        };
+        let create =
+            |i: usize| json!({"op":"create","type":"Doc","id":format!("Doc-{i}"),"fields":{"body":format!("d{i}")}});
+        let mut ops: Vec<Json> = (0..DOCS).map(create).collect();
+        ops.extend((0..DOCS).map(|i| embed(i, at(i))));
+        write(&db, ops).unwrap();
+        let reads = |k: usize| Reads {
+            reads: vec![
+                serde_json::from_value::<ReadOp>(json!({"read":"query","plan":{"start":docs(),
+                "steps":[{"step":"near","vector":[1.0,0.0,0.0],"k":k}],"terminal":{"answer":"ids"}}}))
+                .unwrap(),
+            ],
+            track: None,
+        };
+        // The unit's changes: the nearest moved far, far ones moved near, new ones among them, two destroyed
+        let mut changes = vec![embed(0, at(39)), embed(1, at(38)), embed(30, at(0)), embed(31, at(1))];
+        for i in DOCS..DOCS + 6 {
+            changes.push(create(i));
+            changes.push(embed(i, at(2 * (i - DOCS) + 3)));
+        }
+        changes.push(json!({"op":"destroy","id":"Doc-2"}));
+        changes.push(json!({"op":"destroy","id":"Doc-35"}));
+        let sizes = [5, 20, DOCS - 2, DOCS + 10];
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(changes)).unwrap();
+        let within: Vec<Json> =
+            sizes.iter().map(|&k| decode(&unit.read(&reads(k)).unwrap())[0]["ids"].clone()).collect();
+        unit.commit(false).unwrap();
+        for (k, within) in sizes.iter().zip(within) {
+            let committed = decode(&db.read(&reads(*k)).unwrap())[0]["ids"].clone();
+            assert_eq!(within, committed, "{metric}, k {k}: the unit's read pages as its commit does");
+            assert_eq!(within.as_array().unwrap().len(), (*k).min(DOCS + 6 - 2), "{metric}, k {k}");
+        }
+    }
+}
