@@ -110,11 +110,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: macos-14, target: aarch64-apple-darwin, node: 23 }
-          - { runner: macos-15-intel, target: x86_64-apple-darwin, node: 23 }
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, node: 22 }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: 23 }
-          - { runner: windows-latest, target: x86_64-pc-windows-msvc, node: 23 }
+          - { runner: macos-14, target: aarch64-apple-darwin, node: '22.17.0' }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin, node: '22.17.0' }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-gnu, node: '22.17.0' }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, node: '22.17.0' }
+          - { runner: windows-latest, target: x86_64-pc-windows-msvc, node: '22.17.0' }
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +140,29 @@ jobs:
             npm run build
           fi
           npm test
+      # Reuse the exact same .node file: an ABI-stable binding must load without recompiling for another runtime.
+      - name: record the built binding identity
+        shell: bash
+        run: |
+          node scripts/runtime-binding.cjs record node-floor
+          node scripts/check-runtime-binding.cjs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Node 24 loads the existing binding and runs the binding suite
+        shell: bash
+        run: |
+          node scripts/runtime-binding.cjs verify node24
+          npm test
+      # The app currently pins Electron 37.2.4. This runs Node's test runner inside that Electron executable,
+      # not Electron's npm launcher under the setup-node runtime. No app windows or developer profiles are used.
+      - name: Electron 37.2.4 loads the existing binding and runs the binding suite
+        shell: bash
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: |
+          npm exec --yes --package=electron@37.2.4 -- electron scripts/runtime-binding.cjs verify electron
+          npm exec --yes --package=electron@37.2.4 -- electron --test "crates/elmdb-node/test/**/*.test.mjs"
 
   # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
   # and run every suite in a node:23-alpine container of the runner's own architecture
