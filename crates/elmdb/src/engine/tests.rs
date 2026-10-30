@@ -5,6 +5,7 @@ mod commits;
 mod compression;
 mod derived;
 mod field_writes;
+mod graph;
 mod lifecycle;
 mod maintenance;
 mod model;

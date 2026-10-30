@@ -16,7 +16,7 @@ use crate::format::value::TIMESTAMP_EXTENSION;
 
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
-use super::plan::{Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
+use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
 use super::text::{self, search::Hit};
 use super::trigram::{self, Matcher};
 use super::unit::Read;
@@ -584,8 +584,29 @@ impl<R: Read> Query<'_, R> {
             Step::UnlinkedFrom { kind, other } => self.by_link(before, kind, other.as_deref(), false, false, visit),
             Step::Out { kinds, types } => self.hop(before, kinds, types.as_deref(), true, visit),
             Step::In { kinds, types } => self.hop(before, kinds, types.as_deref(), false, visit),
-            Step::Descendants { kinds, types } => self.reach(before, kinds, types.as_deref(), true, visit),
-            Step::Ancestors { kinds, types } => self.reach(before, kinds, types.as_deref(), false, visit),
+            Step::Both { kinds, types } => {
+                for kind in kinds {
+                    relations::definition(self.r, kind)?;
+                }
+                let mut reached = HashSet::new();
+                self.pull(before, &mut |from| {
+                    for kind in kinds {
+                        for outward in [true, false] {
+                            if !self.walk_edges(from, kind, types.as_deref(), outward, None, &mut reached, visit)? {
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    Ok(true)
+                })
+            }
+            Step::Descendants { kinds, types, depth } => {
+                self.reach(before, kinds, types.as_deref(), true, *depth, visit)
+            }
+            Step::Ancestors { kinds, types, depth } => {
+                self.reach(before, kinds, types.as_deref(), false, *depth, visit)
+            }
+            Step::PathTo { to, kinds, direction, depth } => self.path_to(before, to, kinds, *direction, *depth, visit),
             Step::OrderBy { field: name, descending } => {
                 let ids = self.collect(before)?;
                 let collator = collator(&self.r.schema().collation)?;
@@ -1301,6 +1322,7 @@ impl<R: Read> Query<'_, R> {
         kinds: &[String],
         types: Option<&[String]>,
         outward: bool,
+        depth: Option<u32>,
         visit: &mut Visit<'_>,
     ) -> Result<bool> {
         for kind in kinds {
@@ -1309,7 +1331,9 @@ impl<R: Read> Query<'_, R> {
         let mut frontier = self.collect(before)?;
         let mut seen: HashSet<String> = frontier.iter().cloned().collect();
         let mut reached = Vec::new();
-        while !frontier.is_empty() {
+        let mut levels = 0;
+        while !frontier.is_empty() && depth.is_none_or(|most| levels < most) {
+            levels += 1;
             let mut next = Vec::new();
             for from in &frontier {
                 for kind in kinds {
@@ -1326,6 +1350,61 @@ impl<R: Read> Query<'_, R> {
             frontier = next;
         }
         each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
+    }
+
+    /// A shortest path from an entity of the set to `to`, walked level by level as `reach` walks; nothing visited when
+    /// there is none within `depth`
+    fn path_to(
+        &self,
+        before: usize,
+        to: &str,
+        kinds: &[String],
+        direction: Direction,
+        depth: Option<u32>,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
+        for kind in kinds {
+            relations::definition(self.r, kind)?;
+        }
+        let mut frontier = self.collect(before)?;
+        if frontier.iter().any(|id| id == to) {
+            return visit(to);
+        }
+        // No path ends at an entity the scope doesn't reach, so nothing is walked looking for one
+        if !self.alive(to)? {
+            return Ok(true);
+        }
+        let mut seen: HashSet<String> = frontier.iter().cloned().collect();
+        let mut parent: HashMap<String, String> = HashMap::new();
+        let mut levels = 0;
+        while !frontier.is_empty() && depth.is_none_or(|most| levels < most) {
+            levels += 1;
+            let mut next = Vec::new();
+            for from in &frontier {
+                for kind in kinds {
+                    for &outward in direction.sides() {
+                        for (_, far) in relations::edges(self.r, from, outward, Some(kind))? {
+                            if seen.contains(&far) || !self.alive(&far)? {
+                                continue;
+                            }
+                            seen.insert(far.clone());
+                            parent.insert(far.clone(), from.clone());
+                            if far == to {
+                                let mut path = vec![far];
+                                while let Some(previous) = parent.get(path.last().expect("a path holds `to`")) {
+                                    path.push(previous.clone());
+                                }
+                                path.reverse();
+                                return each(path, visit);
+                            }
+                            next.push(far);
+                        }
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(true)
     }
 }
 
@@ -1464,8 +1543,10 @@ fn step_name(step: &Step) -> &'static str {
         Step::UnlinkedFrom { .. } => "unlinkedFrom",
         Step::Out { .. } => "out",
         Step::In { .. } => "in",
+        Step::Both { .. } => "both",
         Step::Descendants { .. } => "descendants",
         Step::Ancestors { .. } => "ancestors",
+        Step::PathTo { .. } => "pathTo",
         Step::OrderBy { .. } => "orderBy",
         Step::Reverse => "reverse",
         Step::Limit { .. } => "limit",
@@ -1490,6 +1571,7 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::Rows { .. } => "rows",
         Terminal::FirstRow { .. } => "firstRow",
         Terminal::Edges { .. } => "edges",
+        Terminal::Degrees { .. } => "degrees",
         Terminal::GroupBy { .. } => "groupBy",
         Terminal::Hits { .. } => "hits",
     }
@@ -1806,6 +1888,31 @@ fn query_with(
             w.array(rows.len() as u32);
             for (id, stored) in &rows {
                 write_relation(id, stored, &mut w);
+            }
+        }
+        Terminal::Degrees { kinds, direction, types } => {
+            for kind in kinds {
+                relations::definition(r, kind)?;
+            }
+            let ids = q.collect(last)?;
+            w.map(2);
+            w.kind("degrees");
+            w.str("degrees");
+            w.array(ids.len() as u32);
+            for from in &ids {
+                let mut n = 0u64;
+                for kind in kinds {
+                    for &outward in direction.sides() {
+                        for (_, far) in relations::edges(r, from, outward, Some(kind))? {
+                            if of_types(&far, types.as_deref()) && q.alive(&far)? {
+                                n += 1;
+                            }
+                        }
+                    }
+                }
+                w.array(2);
+                w.str(from);
+                w.uint(n);
             }
         }
         Terminal::GroupBy { field: name, counts } => {
