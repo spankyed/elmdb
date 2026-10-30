@@ -48,7 +48,9 @@ mutant that keeps one growing fails its test instead of filling the disk.
 The crash harness (`engine/tests/model.rs`, `mod crash`): a child process, the test binary run again, applies a seeded
 workload with syncs on and acknowledges each step; the parent kills it with SIGKILL mid-workload, reopens the files and
 compares them with the model after the acknowledged steps, or one more. The child waits to be killed by reading its
-stdin, which the parent holds, so it ends with the parent however the parent ends, rather than outliving it. The
+stdin, which the parent holds, so it ends with the parent however the parent ends, rather than outliving it. Its
+temporary directories are inside the parent's: a child killed in the middle of a rebuild leaves its scratch there, and
+the parent's cleanup removes it. The
 failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock
 advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
 waited on failed.
