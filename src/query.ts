@@ -213,9 +213,9 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       names.relationKinds(kind, step);
       return next({ step, kind, ...(other !== undefined && { other }) });
     };
-    const edges = (via: string, kinds: MaybeArr<string>, type: MaybeArr<string> | undefined, outward: boolean) => {
+    const edges = (via: string, kinds: MaybeArr<string>, type: MaybeArr<string> | undefined, direction: 'out' | 'in') => {
       names.relationKinds(kinds, via);
-      const answer = run(recipe, { answer: 'edges', kinds: asArr(kinds), outward, ...(type !== undefined && { types: asArr(type) }) });
+      const answer = run(recipe, { answer: 'edges', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
       return (answer.relations as Record<string, unknown>[]).map(relationRow);
     };
 
@@ -256,8 +256,8 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'pathTo');
         return next({ step: 'pathTo', to, kinds: asArr(kinds), direction, ...edgeCount('depth', depth) });
       },
-      outEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('outEdges', kinds, type, true),
-      inEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('inEdges', kinds, type, false),
+      outEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('outEdges', kinds, type, 'out'),
+      inEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('inEdges', kinds, type, 'in'),
       degrees: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { direction = 'out' }: { direction?: EdgeDirection } = {}) => {
         names.relationKinds(kinds, 'degrees');
         const answer = run(recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
