@@ -1,11 +1,11 @@
-<h1 align="center">
+<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
     <img src="docs/assets/banner-light.svg" width="600" alt="elmdb">
   </picture>
-</h1>
-
-Say "LMDB" out loud: that's the name.
+  <br>
+  <em>Say "LMDB" out loud: that's the name.</em>
+</p>
 
 Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
 
