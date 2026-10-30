@@ -273,9 +273,11 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     if (observers.size === 0 || notifying) return fn();
     const operation: EarsOperation = { kind, ops, watch: tracking !== undefined, inUnit: levels.length > 0, sequence: observedSequence() };
     const finishes: Array<ReturnType<EarsOperationObserver['start']>> = [];
+    // Registration changes inside a callback affect the next operation, not this delivery.
+    const participants = Array.from(observers);
     notifying = true;
     try {
-      for (const observer of [...observers]) {
+      for (const observer of participants) {
         try { finishes.push(observer.start(Object.freeze({ ...operation }))); } catch { /* Diagnostics cannot refuse an operation. */ }
       }
     } finally { notifying = false; }

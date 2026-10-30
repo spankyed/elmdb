@@ -90,4 +90,23 @@ describe('operation observation', () => {
     expect(e.query('Task').ids()).toEqual([]);
     expect({ starts, finishes }).toEqual({ starts: 1, finishes: 1 });
   });
+
+  it('snapshots observers so a callback can replace its registration without reentering delivery', () => {
+    const e = engine();
+    const heard: string[] = [];
+    let detach = () => {};
+    detach = e.admin.observe({ start() {
+      heard.push('first');
+      detach();
+      e.admin.observe({ start() { heard.push('replacement'); return () => {}; } });
+      return () => {};
+    } });
+    e.admin.observe({ start() { heard.push('other'); return () => {}; } });
+    e.query('Task').ids();
+    expect(heard).toEqual(['first', 'other']);
+    heard.length = 0;
+    e.query('Task').ids();
+    expect(heard).toEqual(['other', 'replacement']);
+  });
+
 });
