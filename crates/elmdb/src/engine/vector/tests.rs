@@ -797,3 +797,68 @@ fn a_unit_s_nearest_read_pages_like_the_committed_read_of_its_changes() {
         }
     }
 }
+
+#[test]
+fn a_journal_entry_names_a_whole_item_number_and_anything_else_is_corrupted() {
+    use crate::format::key::{Part, encode};
+    let key = |n: f64| encode(&[Part::String("Doc".into()), Part::String("meaning".into()), Part::Number(n)]);
+    let written = crate::engine::keys::vector_item_key(crate::format::Prefix::VectorJournal, "Doc", "meaning", 7);
+    assert_eq!(super::journal_item(&written).unwrap(), 7);
+    assert_eq!(super::journal_item(&key(0.0)).unwrap(), 0);
+    assert_eq!(super::journal_item(&key(f64::from(u32::MAX))).unwrap(), u32::MAX);
+    for n in [1.5, -1.0, f64::from(u32::MAX) + 1.0] {
+        assert_eq!(super::journal_item(&key(n)).unwrap_err().code, ErrorCode::Corrupted, "{n}");
+    }
+    let named = encode(&[Part::String("Doc".into()), Part::String("meaning".into())]);
+    assert_eq!(super::journal_item(&named).unwrap_err().code, ErrorCode::Corrupted, "no number");
+}
+
+#[test]
+fn a_pending_embedding_of_another_model_or_size_is_corrupted() {
+    let stored =
+        |model: &str, dims: usize| super::Stored { model: model.into(), hash: "h".into(), vector: vec![0.5; dims] };
+    super::check_pending(&stored("m1", DIMS), "m1", DIMS).unwrap();
+    for (model, dims) in [("m2", DIMS), ("m1", DIMS + 1), ("m2", DIMS + 1)] {
+        let refused = super::check_pending(&stored(model, dims), "m1", DIMS).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Corrupted, "{model} {dims}");
+    }
+}
+
+#[test]
+fn a_near_read_asks_the_graph_again_only_while_it_lacks_k_and_the_graph_holds_more() {
+    const DOCS: usize = 200;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let at = |i: usize| {
+        let angle = i as f32 * 0.007;
+        [angle.cos(), angle.sin(), 0.0]
+    };
+    let mut ops: Vec<Json> = (0..DOCS)
+        .map(|i| json!({"op":"create","type":"Doc","id":format!("Doc-{i}"),"fields":{"body":format!("d{i}")}}))
+        .collect();
+    ops.extend((0..DOCS).map(|i| {
+        json!({"op":"embed","id":format!("Doc-{i}"),"index":"meaning","chunk":0,"hash":super::hash_of(&format!("d{i}")),
+            "model":"m1","vector":at(i)})
+    }));
+    write(&db, ops).unwrap();
+    // What the near stage visited: each entity a graph answer handed it
+    let visited = |start: Json, k: usize| {
+        let answer = read(
+            &db,
+            json!({"read":"query","explain":true,"plan":{"start":start,
+            "steps":[{"step":"near","vector":[1.0,0.0,0.0],"k":k}],"terminal":{"answer":"ids"}}}),
+        )
+        .unwrap();
+        let near = answer["stages"].as_array().unwrap().iter().find(|s| s["stage"] == "near").unwrap().clone();
+        (answer["answer"]["ids"].as_array().unwrap().len(), near["visited"].as_u64().unwrap())
+    };
+    // One ask holds k: it isn't repeated, though the graph holds far more
+    let (found, once) = visited(docs(), 1);
+    assert_eq!(found, 1);
+    assert!(once < 20, "one ask's worth, not the next, four times as many: {once}");
+    // Three in scope and k of ten: the graph's answer is all of them and says so, so it isn't asked again:
+    let scope = || json!({"from":"ids","ids":["Doc-5","Doc-50","Doc-150"]});
+    // k of three is answered by the first ask; k of ten does no more work
+    let (_, asked_once) = visited(scope(), 3);
+    assert_eq!(visited(scope(), 10), (3, asked_once));
+}

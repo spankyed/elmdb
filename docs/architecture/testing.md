@@ -33,14 +33,25 @@ It runs in two places:
   op; and during the move to elmdb it drove apack's JavaScript engine with the same workloads and compared the two
   (`docs/evidence/phase-9.md`).
 
+## Where a test's files go
+
+`.cargo/config.toml` points `TMPDIR`, and on Windows `TMP` and `TEMP`, at the checkout's `tmp/`, so every temporary
+directory a test makes lands there, through cargo and nextest alike. A test killed at a deadline leaves its directory
+behind, which `git clean -fdX tmp` removes; a mutation job's land in its own copy of the tree, which cargo-mutants
+deletes. `tmp/` is committed, holding only its `.gitignore`, because the compiler and the linker read these variables
+too: the directory has to exist before anything is built, in a fresh clone, a worktree building into another target
+and a mutation copy alike. A unit test's database is refused growth past 1 GiB (`TEST_MAP_LIMIT`, `MAP_FULL`), which no test nears, so a
+mutant that keeps one growing fails its test instead of filling the disk.
+
 ## Crashes and failed syncs
 
 The crash harness (`engine/tests/model.rs`, `mod crash`): a child process, the test binary run again, applies a seeded
 workload with syncs on and acknowledges each step; the parent kills it with SIGKILL mid-workload, reopens the files and
-compares them with the model after the acknowledged steps, or one more. The failed-sync harness
-(`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock advances, and
-checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it waited on
-failed.
+compares them with the model after the acknowledged steps, or one more. The child waits to be killed by reading its
+stdin, which the parent holds, so it ends with the parent however the parent ends, rather than outliving it. The
+failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock
+advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
+waited on failed.
 
 ## Failpoints
 

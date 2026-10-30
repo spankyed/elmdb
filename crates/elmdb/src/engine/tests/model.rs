@@ -1402,9 +1402,9 @@ mod crash {
         }
         writeln!(out, "done").unwrap();
         out.flush().unwrap();
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-        }
+        // Waits to be killed, and ends with the test that started it if that ends first, however it ends: its handle
+        // to this stdin closes with it
+        let _ = std::io::Read::read_to_end(&mut std::io::stdin(), &mut Vec::new());
     }
 
     #[test]
@@ -1424,6 +1424,7 @@ mod crash {
                 ])
                 .env("ELMDB_CRASH_DB", dir.path())
                 .env("ELMDB_CRASH_SEED", seed.to_string())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()

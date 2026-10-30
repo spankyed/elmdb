@@ -74,6 +74,11 @@ impl Default for StoreOptions {
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
 pub const MAP_STEP: usize = 64 << 20;
 
+/// The largest map a unit test's database grows to. No test needs near it, so a change that keeps a database growing
+/// fails the test at it, as `MAP_FULL`, rather than filling the disk
+#[cfg(test)]
+const TEST_MAP_LIMIT: usize = 1 << 30;
+
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
 
@@ -629,6 +634,10 @@ impl Store {
         self.drop_idle();
         let size = self.env.info().map_size;
         let grown = size.saturating_mul(2).div_ceil(MAP_STEP) * MAP_STEP;
+        #[cfg(test)]
+        if grown > TEST_MAP_LIMIT {
+            return Err(Error::new(ErrorCode::MapFull, format!("A test's database grew past {TEST_MAP_LIMIT} bytes")));
+        }
         // SAFETY: the gate held for writing means no read or write runs in this process, and the idle read
         // transactions are dropped: no transaction is open, which LMDB requires
         unsafe { self.env.resize(grown) }?;
