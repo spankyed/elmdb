@@ -60,6 +60,10 @@ proptest-state-machine.workspace = true
 criterion.workspace = true
 dhat.workspace = true
 
+# Instruction counts run under Valgrind, which runs on Linux (`benches/instructions.rs`)
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun.workspace = true
+
 [lints]
 workspace = true
 
@@ -69,4 +73,8 @@ harness = false
 
 [[bench]]
 name = "reads"
+harness = false
+
+[[bench]]
+name = "instructions"
 harness = false
