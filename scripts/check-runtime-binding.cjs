@@ -18,8 +18,8 @@ try {
 } finally {
   writeFileSync(identityPath, original);
 }
-const wrongRuntime = verify('node24');
+const wrongRuntime = verify('electron');
 assert.notEqual(wrongRuntime.status, 0);
-assert.match(wrongRuntime.stderr, /AssertionError/);
+assert.match(wrongRuntime.stderr, /Electron executable must run this check/);
 assert.equal(verify('node-floor').status, 0, 'the reference must be restored');
 console.log('Runtime identity checks reject a different binary hash and the wrong Node runtime');

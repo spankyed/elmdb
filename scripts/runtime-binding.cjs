@@ -9,7 +9,9 @@ const mode = process.argv[2];
 const expectedRuntime = process.argv[3];
 assert.equal(process.argv.length, 4, 'usage: runtime-binding.cjs record|verify node-floor|node24|electron');
 if (expectedRuntime === 'node-floor') {
-  assert.equal(process.versions.node, '22.17.0');
+  const declared = require('../crates/elmdb-node/package.json').engines.node;
+  assert.match(declared, /^>=\d+\.\d+\.\d+$/, 'update the runtime-floor check for a different engines contract');
+  assert.equal(process.versions.node, declared.slice(2), 'CI must exercise the exact supported minimum from engines.node');
   assert.equal(process.versions.electron, undefined);
 } else if (expectedRuntime === 'node24') {
   assert.equal(process.versions.node.split('.')[0], '24');

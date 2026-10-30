@@ -147,7 +147,8 @@ The latter two reuse the same binary: `scripts/runtime-binding.cjs` loads throug
 and checks its SHA-256 against the original, so a silent rebuild or selection of another binary fails.
 Electron executes with `ELECTRON_RUN_AS_NODE=1`; its own executable runs the test runner and child
 processes, without opening an app window. The standalone Node floor comes from the binding manifest;
-the Electron version is an explicit integration fixture, to update when apack changes its pinned runtime.
+the verifier reads that manifest and refuses a stale CI floor. The Electron version is an explicit
+integration fixture, to update when apack changes its pinned runtime.
 Musl jobs retain their existing architecture coverage; this does not claim every Node version on every libc.
 These are required checks configured by the workflow, not a claim that a particular run has passed.
 
