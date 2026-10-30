@@ -1,0 +1,120 @@
+[
+  {
+    "label": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--check"
+    ],
+    "exitCode": 0,
+    "seconds": 0.34219936598674394
+  },
+  {
+    "label": "clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exitCode": 0,
+    "seconds": 35.224176439020084
+  },
+  {
+    "label": "install-nextest",
+    "command": [
+      "cargo",
+      "install",
+      "--locked",
+      "cargo-nextest@0.9.148"
+    ],
+    "exitCode": 0,
+    "seconds": 192.28049109500716
+  },
+  {
+    "label": "nextest",
+    "command": [
+      "cargo",
+      "nextest",
+      "run",
+      "--workspace",
+      "--profile",
+      "ci"
+    ],
+    "exitCode": 0,
+    "seconds": 158.61842348400387
+  },
+  {
+    "label": "doctests",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--doc"
+    ],
+    "exitCode": 0,
+    "seconds": 1.6150146549916826
+  },
+  {
+    "label": "generated",
+    "command": [
+      "cargo",
+      "xtask",
+      "check-generated"
+    ],
+    "exitCode": 0,
+    "seconds": 25.38106083299499
+  },
+  {
+    "label": "one-lmdb",
+    "command": [
+      "cargo",
+      "xtask",
+      "check-one-lmdb"
+    ],
+    "exitCode": 0,
+    "seconds": 0.17872968898154795
+  },
+  {
+    "label": "npm-ci",
+    "command": [
+      "npm",
+      "ci"
+    ],
+    "exitCode": 0,
+    "seconds": 25.079814399010502
+  },
+  {
+    "label": "binding-build",
+    "command": [
+      "npm",
+      "run",
+      "build"
+    ],
+    "exitCode": 0,
+    "seconds": 108.75516434700694
+  },
+  {
+    "label": "typecheck",
+    "command": [
+      "npm",
+      "run",
+      "typecheck"
+    ],
+    "exitCode": 0,
+    "seconds": 3.920049028994981
+  },
+  {
+    "label": "binding-tests",
+    "command": [
+      "npm",
+      "test"
+    ],
+    "exitCode": 0,
+    "seconds": 1.0551787839794997
+  }
+]

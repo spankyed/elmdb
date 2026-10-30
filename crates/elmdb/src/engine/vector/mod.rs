@@ -13,12 +13,13 @@
 //!
 //! hannoy writes to its own databases, which a savepoint's undo doesn't reach, so a unit changes its graphs only as it
 //! commits (`flush`), from the journal its writes left, which a rolled-back savepoint takes back with them. A read
-//! inside a unit sees the graphs as they were when the unit began.
+//! inside a unit overlays its journaled embeddings on that graph without writing outside the undo log.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use hannoy::distances::{Cosine, Euclidean};
-use hannoy::{Reader, Writer};
+use hannoy::internals::Item;
+use hannoy::{Distance, Reader, Writer};
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rmpv::Value;
@@ -689,6 +690,42 @@ fn check_vector(what: &str, index: &VectorIndex, vector: &[f32]) -> Result<()> {
     Ok(())
 }
 
+/// Scores pending additions from their primary values; the graph still holds the pre-unit vectors.
+fn pending_vectors<D: Distance<VectorCodec = f32>>(
+    r: &impl Read,
+    entity_type: &str,
+    index: &VectorIndex,
+    vector: &[f32],
+    pending: &[(u32, bool)],
+    found: &mut Vec<(u32, f32)>,
+) -> Result<()> {
+    let query = Item::<D>::new(vector.to_vec());
+    for &(item, added) in pending {
+        if !added {
+            continue;
+        }
+        let stored = r
+            .get(&keys::vector_item_key(Prefix::VectorItem, entity_type, &index.name, item))?
+            .ok_or_else(|| corrupt("pending item"))?;
+        let stored = values::decode(&stored)?;
+        let parts = stored.as_array().ok_or_else(|| corrupt("pending item"))?;
+        let id = parts.first().and_then(Value::as_str).ok_or_else(|| corrupt("pending item"))?;
+        let chunk = parts
+            .get(1)
+            .and_then(Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| corrupt("pending item"))?;
+        let bytes =
+            r.get(&keys::vector(entity_type, &index.name, id, chunk))?.ok_or_else(|| corrupt("pending embedding"))?;
+        let stored = decode_vector(&bytes)?;
+        if stored.model != index.model || stored.vector.len() != index.dims {
+            return Err(corrupt("pending embedding"));
+        }
+        found.push((item, D::distance(&query, &Item::<D>::new(stored.vector))));
+    }
+    Ok(())
+}
+
 /// The nearest chunks to `vector` in an index's graph, among `among`'s items when given, best `k` entities first, each
 /// once with its nearest chunk's distance; and whether the graph held nothing more to ask for, which it did not when it
 /// answered fewer items than it was asked for. Several chunks of one entity collapse into one answer, so fewer than `k`
@@ -719,32 +756,60 @@ pub fn nearest(
     r.note(&keys::vector_index_range(Prefix::VectorItem, entity_type, &index.name));
     r.note(&keys::vector_index_range(Prefix::Vector, entity_type, &index.name));
     let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok((Vec::new(), true)) };
+    let mut pending = Vec::new();
+    for (key, value) in r.scan(&keys::vector_index_range(Prefix::VectorJournal, entity_type, &index.name))? {
+        let Some(Part::Number(item)) = decode_key(&key)?.pop() else { return Err(corrupt("journal")) };
+        if !(0.0..=f64::from(u32::MAX)).contains(&item) || item.fract() != 0.0 {
+            return Err(corrupt("journal"));
+        }
+        let item = item as u32;
+        if among.is_none_or(|items| items.contains(item)) {
+            pending.push((item, values::decode(&value)?.as_bool().ok_or_else(|| corrupt("journal"))?));
+        }
+    }
+    let changed: RoaringBitmap = pending.iter().map(|(item, _)| *item).collect();
+    let clean = among.filter(|_| !pending.is_empty()).map(|items| items - &changed);
+    let graph_among = clean.as_ref().or(among);
     let (txn, db) = r.raw();
-    // Several chunks of one entity may come first: asking for more items than entities finds the k entities
+    // Request enough unchanged graph items even when old versions of every pending item rank first.
     let wanted = (k * 4).max(16);
+    let graph_wanted = if among.is_some() { wanted } else { wanted.saturating_add(pending.len()) };
     macro_rules! search {
         ($db:expr, $d:ty) => {{
-            let Some(db) = $db else { return Ok((Vec::new(), true)) };
-            let reader = match Reader::<$d>::open(txn, number, db) {
-                Ok(reader) => reader,
-                Err(hannoy::Error::MissingMetadata(_)) => return Ok((Vec::new(), true)),
-                Err(e) => return Err(graph_error(e)),
-            };
-            let mut query = reader.nns(wanted);
-            query.ef_search(wanted.max(64));
-            if let Some(among) = among {
-                query.candidates(among);
+            match $db {
+                None => Vec::new(),
+                Some(db) => match Reader::<$d>::open(txn, number, db) {
+                    Ok(reader) => {
+                        let mut query = reader.nns(graph_wanted);
+                        query.ef_search(graph_wanted.max(64));
+                        if let Some(among) = graph_among {
+                            query.candidates(among);
+                        }
+                        query.by_vector(txn, vector).map_err(graph_error)?.nns
+                    }
+                    Err(hannoy::Error::MissingMetadata(_)) => Vec::new(),
+                    Err(e) => return Err(graph_error(e)),
+                },
             }
-            query.by_vector(txn, vector).map_err(graph_error)?.nns
         }};
     }
-    let found = match index.metric {
+    let mut found = match index.metric {
         Metric::L2 => search!(db.euclidean, Euclidean),
         _ => search!(db.cosine, Cosine),
     };
+    let graph_exhausted = found.len() < graph_wanted;
+    if !pending.is_empty() {
+        found.retain(|(item, _)| !changed.contains(*item));
+        match index.metric {
+            Metric::L2 => pending_vectors::<Euclidean>(r, entity_type, index, vector, &pending, &mut found)?,
+            _ => pending_vectors::<Cosine>(r, entity_type, index, vector, &pending, &mut found)?,
+        }
+        found.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    }
+    let exhausted = graph_exhausted && found.len() < wanted;
+    found.truncate(wanted);
     // The graph held nothing past what it answered when it answered fewer items than asked, and only then is the
     // answer the last there is: unless `k` entities were found first, which leaves what it answered after unread
-    let exhausted = found.len() < wanted;
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (item, distance) in found {

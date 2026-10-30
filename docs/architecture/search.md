@@ -136,6 +136,11 @@ snapshot as a search when it needs to say that search is incomplete.
   graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
 - **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
   everything else; `check()` and `rebuild()` treat them as derived from the stored embeddings.
+  Reads within a unit omit journaled items from the committed graph results and merge the current primary
+  embeddings for those items, using the graph's distance metric. New embeddings are visible even before the
+  first graph is built. Savepoint rollback restores this read view with the journal and primary data; a read
+  never flushes graph writes outside the savepoint undo log. Additional scoring is proportional to that
+  index's pending changes in the query scope, rather than every stored embedding.
 - **Reads**: `near` (score `1 / (1 + distance)`, an entity once by its nearest chunk), `like` (an entity's own
   embedding), `hybrid` (reciprocal rank fusion of the text ranking and the vector ranking, k = 60), each among what
   the steps before it reached and ended by `hits`; `pendingEmbeddings`.

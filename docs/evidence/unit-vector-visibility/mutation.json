@@ -1,0 +1,21 @@
+{
+  "base": "4d558a27543a74e2ea4c131aff1cb32455708994",
+  "patchSha256": "a6c663442b58e3d04e436ecb485f823813fe4ab8ae6f6d2a23d3e863dc50a91d",
+  "mutation": "restore committed nearest-vector implementation in a disposable source copy, retaining new regression",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "--profile",
+    "mutants",
+    "-p",
+    "elmdb",
+    "engine::vector::tests::unit_vector_reads_overlay_pending_graph_changes_and_savepoint_rollback",
+    "--",
+    "--exact"
+  ],
+  "exitCode": 101,
+  "seconds": 164.53421991501818,
+  "intendedAssertionFailed": true,
+  "originalSourceUnchanged": true
+}
