@@ -9,6 +9,7 @@ mod error;
 pub mod format;
 pub mod schema;
 mod store;
+mod sync;
 
 pub use database::{Database, OpenOptions, OpenReport};
 pub use engine::Unit;

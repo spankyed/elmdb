@@ -69,6 +69,20 @@ jobs:
       - name: the generated loader and declarations are committed
         run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts
 
+  # The concurrency models, in every interleaving within the bound (docs/architecture/testing.md, Concurrency models)
+  loom:
+    name: concurrency models (Loom)
+    runs-on: ubuntu-24.04
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_MAX_PREEMPTIONS: 3
+      CARGO_TARGET_DIR: target/loom
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p elmdb --release --lib store::unit_slot::model
+
   # Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and
   # in the summary, not failed on (docs/architecture/testing.md, Mutation testing). On Linux and on Windows, since each
   # compiles code the other doesn't

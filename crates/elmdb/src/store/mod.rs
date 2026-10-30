@@ -11,11 +11,12 @@ mod backup;
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
 pub mod sync;
+mod unit_slot;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use heed::types::Bytes;
@@ -26,6 +27,7 @@ use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard}
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
 use sync::{Durable, GroupCommit, Policy, Syncer, SystemClock};
+use unit_slot::UnitSlot;
 
 /// A vector index's graph database, by its distance
 pub type CosineGraphs = hannoy::Database<'static, hannoy::distances::Cosine>;
@@ -124,9 +126,8 @@ pub struct Store {
     db: Db,
     gate: Arc<RecursiveRwLock<()>>,
     commit: Option<GroupCommit>,
-    /// Whether a unit is open, holding the environment's one write transaction, and the signal that one ended
-    unit: Mutex<bool>,
-    unit_ended: Condvar,
+    /// Whether a unit is open, holding the environment's one write transaction
+    unit: UnitSlot,
     /// Read transactions a read finished with, for the next read to take while it is still current
     idle: Mutex<Vec<RoTxn<'static, WithoutTls>>>,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
@@ -279,8 +280,7 @@ impl Store {
             db,
             gate: Arc::new(RecursiveRwLock::new(())),
             commit,
-            unit: Mutex::new(false),
-            unit_ended: Condvar::new(),
+            unit: UnitSlot::new(),
             idle: Mutex::new(Vec::new()),
             sequence: AtomicU64::new(sequence),
         })
@@ -467,24 +467,20 @@ impl Store {
         let mut growths = 0;
         loop {
             run_point!(WRITE_RESERVATION);
-            // Serialize claiming the native writer with begin's unit reservation. Otherwise a unit can slip
-            // between the earlier check and write_txn, leaving a caller waiting while it holds a schema guard.
-            let open = self.unit.lock().expect("the unit's lock is never poisoned");
-            if *open {
-                return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: write through it or end it first"));
-            }
-            let guard = self.gate();
-            let mut txn = match self.env.write_txn() {
-                Ok(txn) => txn,
-                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                    drop(guard);
-                    drop(open);
-                    self.adopt_map_size()?;
-                    continue;
+            // Claimed under the unit's lock: a unit that slipped between the earlier check and write_txn would leave
+            // this caller waiting on the unit's writer while it holds a schema guard
+            let claimed = self.unit.claim_writer(|| {
+                let guard = self.gate();
+                match self.env.write_txn() {
+                    Ok(txn) => Ok(Some((txn, guard))),
+                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => Ok(None),
+                    Err(e) => Err(Error::from(e)),
                 }
-                Err(e) => return Err(e.into()),
+            })??;
+            let Some((mut txn, guard)) = claimed else {
+                self.adopt_map_size()?;
+                continue;
             };
-            drop(open);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -581,13 +577,7 @@ impl Store {
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
     pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
         self.check_writable()?;
-        {
-            let mut open = self.unit.lock().expect("the unit's lock is never poisoned");
-            if *open {
-                return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
-            }
-            *open = true;
-        }
+        self.unit.reserve()?;
         let begun = (|| {
             let info = self.env.info();
             let page = self.env.unnamed_database_stat().page_size as usize;
@@ -616,27 +606,22 @@ impl Store {
 
     /// The open unit ended, committed or not: whoever waits for the write transaction hears of it
     pub fn end_unit(&self) {
-        *self.unit.lock().expect("the unit's lock is never poisoned") = false;
-        self.unit_ended.notify_all();
+        self.unit.release();
     }
 
     pub fn unit_is_open(&self) -> bool {
-        *self.unit.lock().expect("the unit's lock is never poisoned")
+        self.unit.is_open()
     }
 
     /// Blocks while a unit is open, until it ends or `stop` answers true; a caller that makes `stop` true wakes it
     /// with `wake_unit_waiters`
     pub fn wait_while_unit_open(&self, stop: impl Fn() -> bool) {
-        let mut open = self.unit.lock().expect("the unit's lock is never poisoned");
-        while *open && !stop() {
-            open = self.unit_ended.wait(open).expect("the unit's lock is never poisoned");
-        }
+        self.unit.wait_while_open(stop);
     }
 
     /// Wakes every `wait_while_unit_open`, to check its `stop` again
     pub fn wake_unit_waiters(&self) {
-        let _open = self.unit.lock().expect("the unit's lock is never poisoned");
-        self.unit_ended.notify_all();
+        self.unit.wake();
     }
 
     pub fn db(&self) -> Db {
