@@ -1,7 +1,7 @@
 # Libraries for safer implementation and easier development
 
-Status: partial implementation, 2026-10-27. Criterion maintenance benchmarks are implemented;
-stages 1 and 3–5 remain planned.
+Status: partial implementation. Criterion maintenance benchmarks are implemented (2026-10-27); stage 1 is built and
+stage 3 was evaluated and declined (2026-10-30), each with its record below; stages 4 and 5 remain planned.
 The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
@@ -48,6 +48,14 @@ Acceptance:
 - Windows CI passes the existing positive tests and disposable negative proofs, including backup metadata and
   process-claim behavior. Review dependency features and lockfile changes for unnecessary additions.
 
+Built. The six hand-declared kernel32 functions are windows-sys's: `CreateEventW`, `GetLastError` and
+`GetModuleHandleExW` in the binding's process claim (`elmdb-node/src/process.rs`), and `MoveFileExW`,
+`GetFileAttributesW` and `SetFileAttributesW` in backup publication (`store/backup.rs`), with their numeric flags,
+attributes and `ERROR_ALREADY_EXISTS` named by it. windows-sys 0.61.2 was already in the lockfile through other
+dependencies, so no crate was added; the features are the four the binding's calls need and the one backup's do.
+`GetLastError` still follows `CreateEventW` immediately, the claim's handle is still owned by `OwnedHandle`, and the
+pinned module and the attribute clearing are unchanged.
+
 ## 2. Repeatable performance benchmarks
 
 Add [Criterion](https://github.com/bheisler/criterion.rs) as a development dependency. Start with key encoding,
@@ -84,6 +92,21 @@ Acceptance:
 - Run affected platform tests, including the real Linux read-only-mount refusal. Keep explicit filesystem limitations
   documented: a wrapper does not certify exFAT or SMB behavior or durability.
 - If coverage offers little improvement, record the decision and retain the existing code without adding rustix.
+
+Declined, 2026-10-30, against rustix 1.1.5 (already in the lockfile, through tempfile). The Unix calls elmdb makes
+itself, and what rustix offers each:
+
+| Operation | Where | Today | rustix | Decision |
+|---|---|---|---|---|
+| No-replace rename (Linux `RENAME_NOREPLACE`, macOS `RENAME_EXCL`) | `store/backup.rs` `publish_new` | tempfile's `persist_noclobber`, which calls rustix | the same call, by hand | keep tempfile |
+| Link fallback where the rename is refused | `exclusive_rename_or_link` | `std::fs::hard_link`, matched on `libc` errno constants | `Errno` constants | keep: no unsafe code to remove |
+| Process randomness for the Linux claim (`AT_RANDOM`) | `elmdb-node/src/process.rs` | `libc::getauxval` and a 16-byte read | `runtime::random`, a hidden experimental module "for libc-like users", still a raw pointer | keep libc |
+| The macOS claim's Mach receive right | `elmdb-node/src/process.rs` | the task port and two Mach calls, declared | none: Mach isn't POSIX | keep |
+| `atexit` | `elmdb-node/src/exit.rs` | a declared C function | none | keep |
+
+Descriptor-relative opens, ownership checks, no-follow handling and file locking are LMDB's and tempfile's, not code
+of elmdb's own, and the read-only mount refusal is LMDB's error with elmdb's reader registration. Nothing here would
+lose unsafe code or gain clearer ownership by moving, so rustix isn't a dependency of elmdb's own.
 
 ## 4. Concurrency model checking
 
