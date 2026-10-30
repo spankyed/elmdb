@@ -10,6 +10,15 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use elmdb::format::key::{Part, encode};
 use support::Fixture;
 
+/// The entity counts the maintenance cases run at: 1,000 unless `ELMDB_BENCH_ROWS` lists others, comma-separated, as
+/// `1000,10000` does to see how each cost grows with the data. A size not asked for builds no fixture
+fn sizes() -> Vec<usize> {
+    std::env::var("ELMDB_BENCH_ROWS").map_or_else(
+        |_| vec![1000],
+        |sizes| sizes.split(',').map(|n| n.trim().parse().expect("ELMDB_BENCH_ROWS lists entity counts")).collect(),
+    )
+}
+
 fn maintenance(c: &mut Criterion) {
     let mut keys = c.benchmark_group("key_encode");
     for size in [16, 128, 1024] {
@@ -21,7 +30,7 @@ fn maintenance(c: &mut Criterion) {
     }
     keys.finish();
 
-    for rows in [1000, 10_000] {
+    for rows in sizes() {
         let fixture = Fixture::new(rows, true, false);
         fixture.assert_limited_query();
         let reads = fixture.limited_query();

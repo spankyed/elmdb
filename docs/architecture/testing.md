@@ -165,7 +165,8 @@ Criterion takes 20 samples, a one-second warmup and a three-second window. Fixtu
 derivation are outside the timing; a selected rebuild replaces the same contents again, so it is steady-state
 maintenance, not a first build or a recovery. Syncs are off, an export drops its loads without writing a dump, and an
 indexed query answers at most 50 ids. The fixture holds eight 96-byte indexed tags per entity and 16 distinct words per
-text document, at 1k and 10k entities, and key encoding uses 16, 128 and 1,024-byte strings. Report input sizes,
+text document, at 1k entities, or at the counts `ELMDB_BENCH_ROWS` lists (`ELMDB_BENCH_ROWS=1000,10000` to see how a
+cost grows with the data), and key encoding uses 16, 128 and 1,024-byte strings. Report input sizes,
 hardware, toolchain, commit and load with a result, and keep `target/criterion` outside the worktree when comparing
 commits. Unchanged code has varied substantially between runs here, so a difference is checked against that variation
 before it is acted on. `scripts/measure-recovery.mjs` stays the measure of RSS, populated replacement, disk and scratch,
