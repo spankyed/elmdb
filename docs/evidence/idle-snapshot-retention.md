@@ -48,7 +48,7 @@ precedes additional lifetime tests; its runtime implementation is the candidate 
 Cached raw reads measured 99.4 and 101.6 ns/read, about 50 ns above the baseline and below the
 predeclared 100 ns additional-cost budget. Explicit release measured 199.9 and 204.0 ns/read, including
 its extra lock. These separate runs establish a useful scale, not precise application latency.
-The matched binding comparisons are still pending.
+Matched binding comparisons are recorded below.
 
 The 100 ms window preserves reuse within typical 16 ms view bursts and matches the existing default
 sync idle interval. It is an internal policy, with no public API, dependency or file-format change.
@@ -63,3 +63,53 @@ regression failed in 3.41 seconds with `completed snapshots were not released wi
 then its parent failed its barrier; compilation succeeded and the selected test executed. The normal
 implementation passes. Run `python3 scripts/linux.py -- python3 scripts/check-idle-reader-mutation.py`
 to repeat the proof. The working source was never mutated.
+
+## Matched binding and allocations: 2026-10-30
+
+Linux aarch64 on OrbStack, two CPUs, 6 GiB RAM, no additional swap, Node 24.10.0. Build the
+baseline and candidate binding in release mode, preserve each generated binary, then run the
+existing `crates/elmdb-node/bench/reads.mjs --json` in eight fresh processes, ABBAABBA.
+Each process checks answers and measures 2,000 reads per small workload and 30 full-row reads.
+The table is the median of the four process medians per version; these are observations, not CI gates.
+
+| Workload | Baseline | Bounded cache | Change |
+|---|---:|---:|---:|
+| Field | 2.209 µs | 2.292 µs | +3.8% |
+| Page | 187.834 µs | 185.334 µs | −1.3% |
+| Projected page | 53.230 µs | 54.042 µs | +1.5% |
+| Full rows | 37.205 ms | 36.082 ms | −3.0% |
+
+All are within the predeclared 10% budget. The small apparent improvements are not evidence of
+an application speedup. [Per-process summaries](idle-snapshot-retention/binding-comparison.json)
+record binary/answer hashes, runtime, fixture, raw-report hashes and source identities. Both binaries
+were independently inspected: the candidate contains the expiry worker and the baseline does not;
+each loaded binary's hash matches its report. Answer hashes match across all eight processes.
+Raw reports are retained in `/private/tmp/elmdb-idle-reader-evidence/idle-binding-comparison` on
+the measurement host; the committed summaries are sufficient to inspect the reported medians but
+do not contain every timing sample.
+
+Reproduce using the baseline/candidate public checkpoints in that summary, in isolated checkouts:
+run `npm ci && npm run build`, preserve each binding directory and its benchmark, then execute
+`node crates/elmdb-node/bench/reads.mjs --json` in ABBAABBA order. In a copied Linux snapshot
+without `.git`, supply `ELMDB_PROFILE_SOURCE_COMMIT` and `ELMDB_PROFILE_SOURCE_DIRTY` together
+as documented by the benchmark. Keep the same fixture and default iteration counts. A fresh
+process does not imply cold filesystem caches. These workloads represent the existing read fixture,
+not a trace of apack actions or a deployment-wide performance guarantee.
+
+[Heap comparison](idle-snapshot-retention/allocation-comparison.json): the established DHAT example
+reports identical allocation counts, allocated bytes and peak heap for all four reads. The source-matched
+debug executables were run directly by distinct hashed filenames and checked for worker identity,
+avoiding ambiguity in Cargo's shared convenience executable path. Fixture/warmup and preexisting,
+native and mapped memory are excluded. This confirms no additional measured per-read allocations;
+it does not measure the additional worker's stack or operating-system resources.
+
+The original measurement commits inherited an unrelated unpublished graph-planning document from
+local main. Rebase excluded that parent from the PR. Baseline checkpoint `cecc01b` and candidate
+`59040f2` preserve the measured runtime/fixture source; the summary maps original and public commits.
+No other agent's checkout was edited.
+
+Local validation: all required Rust gates passed (369 workspace tests, one ignored doc example);
+the six final lifetime regressions also passed after the last test additions. Binding build, strict
+typecheck and tests passed (34 passed, four platform-specific skips). Generated loader/declarations
+match committed source. Full platform CI is tracked on PR #32; local Linux evidence does not certify
+other operating systems or filesystems.

@@ -1,0 +1,518 @@
+{
+  "date": "2026-10-30",
+  "conditions": {
+    "platform": "Linux aarch64 on OrbStack",
+    "cpuLimit": 2,
+    "memoryLimitBytes": 6442450944,
+    "extraSwap": false,
+    "node": "24.10.0",
+    "order": "ABBAABBA (A baseline, B candidate)",
+    "iterations": "2000 per small workload and 30 all_rows, per process",
+    "summary": "median of each process, then median across four process medians"
+  },
+  "sourceMapping": {
+    "baselineOriginalCommit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+    "baselinePublicCheckpoint": "cecc01b19a12997fab502b1f9a5568194a4f77a3",
+    "candidateOriginalCommit": "b71ca05759efd659a0cae9040914227f1d689678",
+    "candidatePublicCheckpoint": "59040f28e1ce820a0bb6ba5aedfa9c0612c7ee11",
+    "explanation": "Rebase excluded an unrelated unpublished documentation parent; runtime/source and fixture content are unchanged."
+  },
+  "runs": [
+    {
+      "order": 1,
+      "mode": "baseline",
+      "rawReportSha256": "1cd258647da1b4f8fe00bf61e69e9a357296fe34b3bd57d0963ffb82f71d23dc",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": false,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "f09eb6c681f57c696491e3dc53d2ce6bf86b9e0a9907a905c39215e0d9a786e3"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2333.0,
+          "decodeMedianNs": 750.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 191354.5,
+          "decodeMedianNs": 69167.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 53375.0,
+          "decodeMedianNs": 13417.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 38235614.5,
+          "decodeMedianNs": 16898610.5
+        }
+      ]
+    },
+    {
+      "order": 2,
+      "mode": "candidate",
+      "rawReportSha256": "6a9cfe7ef50a1836b773be7d3dcfdd72f777593ba5d8e92ef8472204eef54155",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": true,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "ec17fa7056a71753d4905a18559e205915b024ed29d4af4fef58090d68bf0d49"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2334.0,
+          "decodeMedianNs": 750.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 182917.0,
+          "decodeMedianNs": 68583.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 53542.0,
+          "decodeMedianNs": 13459.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 35874960.0,
+          "decodeMedianNs": 14987436.5
+        }
+      ]
+    },
+    {
+      "order": 3,
+      "mode": "candidate",
+      "rawReportSha256": "12d4a3f3cef3767dd9ed738e08a2a3e4dec82a4bc272716be564ae80cbb3013c",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": true,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "ec17fa7056a71753d4905a18559e205915b024ed29d4af4fef58090d68bf0d49"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2250.0,
+          "decodeMedianNs": 791.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 185979.5,
+          "decodeMedianNs": 70209.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 52833.0,
+          "decodeMedianNs": 13583.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 36288899.0,
+          "decodeMedianNs": 15864523.5
+        }
+      ]
+    },
+    {
+      "order": 4,
+      "mode": "baseline",
+      "rawReportSha256": "ec998e3ba6a9c3b3a51f1ee07d3dac31cac87b21ae506b7194f715dbab36dda9",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": false,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "f09eb6c681f57c696491e3dc53d2ce6bf86b9e0a9907a905c39215e0d9a786e3"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2166.0,
+          "decodeMedianNs": 667.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 184313.5,
+          "decodeMedianNs": 68937.5
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 53084.0,
+          "decodeMedianNs": 13542.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 36174023.5,
+          "decodeMedianNs": 15498813.0
+        }
+      ]
+    },
+    {
+      "order": 5,
+      "mode": "baseline",
+      "rawReportSha256": "c340328d5a864f0a7b5dd0d5c84b94415cf28fa5c08a4ed3d68450a9c95b5f55",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": false,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "f09eb6c681f57c696491e3dc53d2ce6bf86b9e0a9907a905c39215e0d9a786e3"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2250.0,
+          "decodeMedianNs": 667.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 220000.5,
+          "decodeMedianNs": 69208.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 54000.0,
+          "decodeMedianNs": 13791.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 43119676.0,
+          "decodeMedianNs": 15715043.5
+        }
+      ]
+    },
+    {
+      "order": 6,
+      "mode": "candidate",
+      "rawReportSha256": "bc3da55eaf875b7ac04cabc90f485f78351cb4540a0a4904483186735c8f2e3b",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": true,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "ec17fa7056a71753d4905a18559e205915b024ed29d4af4fef58090d68bf0d49"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2375.0,
+          "decodeMedianNs": 750.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 184688.5,
+          "decodeMedianNs": 68834.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 54917.0,
+          "decodeMedianNs": 13875.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 36475816.0,
+          "decodeMedianNs": 16483401.0
+        }
+      ]
+    },
+    {
+      "order": 7,
+      "mode": "candidate",
+      "rawReportSha256": "7a99a94383507828a14cd6638528f3803e931bef547555410dac1132b46e275a",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": true,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "ec17fa7056a71753d4905a18559e205915b024ed29d4af4fef58090d68bf0d49"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2250.0,
+          "decodeMedianNs": 750.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 189042.0,
+          "decodeMedianNs": 69000.0
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 54542.0,
+          "decodeMedianNs": 13708.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 35788980.0,
+          "decodeMedianNs": 15113249.0
+        }
+      ]
+    },
+    {
+      "order": 8,
+      "mode": "baseline",
+      "rawReportSha256": "9cc20150c7be3bbc64e5c016e8b97d0b6d8c70402bbd931eeb6d45e68ee6ee51",
+      "source": {
+        "commit": "551311f2b6ff6f977e3bcf816c5a918da70c61e6",
+        "dirty": false,
+        "provenance": "caller-provided snapshot"
+      },
+      "binary": {
+        "name": "elmdb.linux-arm64-gnu.node",
+        "sha256": "f09eb6c681f57c696491e3dc53d2ce6bf86b9e0a9907a905c39215e0d9a786e3"
+      },
+      "runtime": {
+        "node": "24.10.0",
+        "napi": "10",
+        "v8": "13.6.233.10-node.28",
+        "platform": "linux",
+        "arch": "arm64"
+      },
+      "fixture": {
+        "version": 2,
+        "rows": 10000,
+        "perChannel": 100,
+        "syncs": false
+      },
+      "policy": "fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate",
+      "workloads": [
+        {
+          "workload": "field",
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "iterations": 2000,
+          "readSyncMedianNs": 2167.0,
+          "decodeMedianNs": 667.0
+        },
+        {
+          "workload": "page",
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "iterations": 2000,
+          "readSyncMedianNs": 183751.0,
+          "decodeMedianNs": 69208.5
+        },
+        {
+          "workload": "page_projected",
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "iterations": 2000,
+          "readSyncMedianNs": 53042.0,
+          "decodeMedianNs": 13667.0
+        },
+        {
+          "workload": "all_rows",
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "iterations": 30,
+          "readSyncMedianNs": 35670313.0,
+          "decodeMedianNs": 15387437.5
+        }
+      ]
+    }
+  ]
+}

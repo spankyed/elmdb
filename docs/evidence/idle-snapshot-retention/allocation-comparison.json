@@ -1,0 +1,118 @@
+{
+  "date": "2026-10-30",
+  "conditions": {
+    "profile": "debug",
+    "instrumentation": "dhat",
+    "excluded": "fixture, warmup, preexisting/native/mapped memory; thread stack and OS resources are not measured"
+  },
+  "binaryIdentity": {
+    "candidate": {
+      "executable": "read_allocations-7ceae0dc770bde12",
+      "sha256": "431661da025cc89e07fd97a7a53fdcf1d386be64eb1b707fa0b14b6708520083",
+      "containsExpiryWorker": true
+    },
+    "baseline": {
+      "executable": "read_allocations-025b531611b3478d",
+      "sha256": "a8ca7fcfd1132fc6b0e88a7e6bb2719b1b92fb71b232f12bd6746e2964479c37",
+      "containsExpiryWorker": false
+    }
+  },
+  "reports": {
+    "baseline": {
+      "schemaVersion": 1,
+      "measurement": "rust-read-allocations",
+      "fixture": {
+        "version": 2,
+        "rows": 10000
+      },
+      "instrumentation": "dhat; fixture and warmup excluded; preexisting/native/mapped memory excluded",
+      "debugAssertions": true,
+      "workloads": [
+        {
+          "workload": "field",
+          "iterations": 100,
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "totalAllocations": 1300,
+          "totalAllocatedBytes": 55900,
+          "peakHeapBytes": 341
+        },
+        {
+          "workload": "page",
+          "iterations": 100,
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "totalAllocations": 468400,
+          "totalAllocatedBytes": 41310200,
+          "peakHeapBytes": 80296
+        },
+        {
+          "workload": "page_projected",
+          "iterations": 100,
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "totalAllocations": 105500,
+          "totalAllocatedBytes": 4485500,
+          "peakHeapBytes": 7240
+        },
+        {
+          "workload": "all_rows",
+          "iterations": 3,
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "totalAllocations": 2688159,
+          "totalAllocatedBytes": 269390475,
+          "peakHeapBytes": 19806730
+        }
+      ]
+    },
+    "candidate": {
+      "schemaVersion": 1,
+      "measurement": "rust-read-allocations",
+      "fixture": {
+        "version": 2,
+        "rows": 10000
+      },
+      "instrumentation": "dhat; fixture and warmup excluded; preexisting/native/mapped memory excluded",
+      "debugAssertions": true,
+      "workloads": [
+        {
+          "workload": "field",
+          "iterations": 100,
+          "answerBytes": 40,
+          "answerSha256": "cbd09d8f670750300b2cb044cd83f57dce6dd9210cc1db40e1559dd206687df5",
+          "totalAllocations": 1300,
+          "totalAllocatedBytes": 55900,
+          "peakHeapBytes": 341
+        },
+        {
+          "workload": "page",
+          "iterations": 100,
+          "answerBytes": 65613,
+          "answerSha256": "72f3ee37380dfb203b22aadec211e9c6121d4ff90bcf0f69d63462f6342b715d",
+          "totalAllocations": 468400,
+          "totalAllocatedBytes": 41310200,
+          "peakHeapBytes": 80296
+        },
+        {
+          "workload": "page_projected",
+          "iterations": 100,
+          "answerBytes": 2795,
+          "answerSha256": "6595d3a4de5f217e5e3b039a7202b850241273646846c6b8310a28c5ba11c148",
+          "totalAllocations": 105500,
+          "totalAllocatedBytes": 4485500,
+          "peakHeapBytes": 7240
+        },
+        {
+          "workload": "all_rows",
+          "iterations": 3,
+          "answerBytes": 13141427,
+          "answerSha256": "eae54673089b5e9d75259654c5f81fbd27266152939f47f2d0235a7fcaca4857",
+          "totalAllocations": 2688159,
+          "totalAllocatedBytes": 269390475,
+          "peakHeapBytes": 19806730
+        }
+      ]
+    }
+  }
+}
