@@ -1412,6 +1412,12 @@ mod crash {
         for seed in 0..48u64 {
             let steps = seeded(seed);
             let dir = tempfile::tempdir().unwrap();
+            // The child's own temporary directories, a rebuild's scratch among them, inside this test's: killed in the
+            // middle of one, it can't remove it, and this directory's removal takes it
+            let scratch = dir.path().join("scratch");
+            std::fs::create_dir(&scratch).unwrap();
+            let path = dir.path().join("db");
+            std::fs::create_dir(&path).unwrap();
             // Somewhere past the prelude, and sometimes the whole workload
             let kill_at = 6 + (seed as usize * 7) % steps.len().max(7);
             let mut child = Command::new(std::env::current_exe().unwrap())
@@ -1422,7 +1428,10 @@ mod crash {
                     "--nocapture",
                     "--test-threads=1",
                 ])
-                .env("ELMDB_CRASH_DB", dir.path())
+                .env("ELMDB_CRASH_DB", &path)
+                .env("TMPDIR", &scratch)
+                .env("TMP", &scratch)
+                .env("TEMP", &scratch)
                 .env("ELMDB_CRASH_SEED", seed.to_string())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1453,7 +1462,7 @@ mod crash {
             }
             // A child that never ran its workload leaves no files, which the model's empty state would match
             assert!(acked > 0, "seed {seed}: the child acknowledged no step");
-            let db = Database::open(dir.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
+            let db = Database::open(&path, crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
             let mut model = Model::default();
             for step in &steps[..acked] {
                 let _ = model.step(step);
