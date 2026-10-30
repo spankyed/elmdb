@@ -25,6 +25,14 @@ fn get(store: &Store, key: &str) -> Option<Vec<u8>> {
 }
 
 #[test]
+fn a_test_s_database_refuses_to_grow_past_the_test_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(TEST_MAP_LIMIT / 2), ..quiet() }).unwrap();
+    store.grow().unwrap();
+    assert_eq!(store.grow().unwrap_err().code, ErrorCode::MapFull);
+}
+
+#[test]
 fn keeps_what_was_committed_across_a_close_and_an_open() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
