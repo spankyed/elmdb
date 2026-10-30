@@ -254,6 +254,7 @@ describe('hierarchy walks', () => {
     expect(e.query.ids(a).descendants('child', undefined, { depth: 2.9 }).ids()).toEqual([b, c]);
     expect(e.query.ids(a).descendants('child', undefined, { depth: 0 }).ids()).toEqual([]);
     expect(e.query.ids(a).descendants('child', undefined, { depth: -1 }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: NaN }).ids()).toEqual([]);
     expect(e.query.ids(a).descendants('child', undefined, { depth: Infinity }).ids()).toEqual([b, c, d]);
     expect(e.query.ids(d).ancestors('child', 'Task', { depth: 2 }).ids()).toEqual([c, b]);
   });

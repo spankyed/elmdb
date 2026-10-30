@@ -206,6 +206,7 @@ describe('terminals', () => {
     expect(reads(() => counted().limit(2).ids())).toBe(2);
     e.write(t.a).link('contains', t.c);
     expect(reads(() => counted().out('contains').first())).toBe(1);
+    expect(reads(() => counted().both('contains').first())).toBe(1);
     expect(reads(() => counted().count())).toBe(4);
   });
 
