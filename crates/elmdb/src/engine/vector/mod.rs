@@ -797,7 +797,6 @@ pub fn nearest(
         Metric::L2 => search!(db.euclidean, Euclidean),
         _ => search!(db.cosine, Cosine),
     };
-    let graph_exhausted = found.len() < graph_wanted;
     if !pending.is_empty() {
         found.retain(|(item, _)| !changed.contains(*item));
         match index.metric {
@@ -806,10 +805,12 @@ pub fn nearest(
         }
         found.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
     }
-    let exhausted = graph_exhausted && found.len() < wanted;
-    found.truncate(wanted);
     // The graph held nothing past what it answered when it answered fewer items than asked, and only then is the
-    // answer the last there is: unless `k` entities were found first, which leaves what it answered after unread
+    // answer the last there is: unless `k` entities were found first, which leaves what it answered after unread.
+    // Fewer than `wanted` after the merge says the same of the graph: it was asked for one more item for each changed
+    // one it might drop, or was kept from the changed ones
+    let exhausted = found.len() < wanted;
+    found.truncate(wanted);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for (item, distance) in found {
