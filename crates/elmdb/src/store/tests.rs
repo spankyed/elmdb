@@ -903,11 +903,44 @@ impl SaturatedReaders {
 
     fn kill_and_wait(&mut self) {
         let mut child = self.0.take().unwrap();
+        #[cfg(windows)]
+        let pid = child.id();
         child.kill().unwrap();
         child.wait().unwrap();
         // Windows keeps a process object alive while a Child handle remains open. Close our handle
         // before asking LMDB to prove that the reader process no longer exists.
         drop(child);
+        #[cfg(windows)]
+        wait_until_reader_process_is_absent(pid);
+    }
+}
+
+#[cfg(windows)]
+fn wait_until_reader_process_is_absent(pid: u32) {
+    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        // SAFETY: OpenProcess returns a handle owned here; all output pointers are valid for the call,
+        // and every successful open is closed before retrying. No other process is modified.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                assert_eq!(GetLastError(), ERROR_INVALID_PARAMETER, "only an absent PID establishes this precondition");
+                break;
+            }
+            let mut exit_code = 0;
+            let queried = GetExitCodeProcess(process, &mut exit_code);
+            let query_error = if queried == 0 { Some(GetLastError()) } else { None };
+            CloseHandle(process);
+            assert!(query_error.is_none(), "reader exit-code query failed: {query_error:?}");
+            assert_ne!(exit_code, STILL_ACTIVE as u32, "the killed reader must have exited");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "reader PID {pid} still exists after exit (code {exit_code})"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
