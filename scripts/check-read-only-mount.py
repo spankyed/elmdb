@@ -31,17 +31,24 @@ def mounted(binary):
 positive = mounted(executable(Path.cwd(), os.environ))
 print(positive.stdout)
 assert positive.returncode == 0 and "ELMDB_READ_ONLY_MOUNT_REFUSED" in positive.stdout
-with tempfile.TemporaryDirectory(prefix="elmdb-erofs-mutation-") as temporary:
-    root = Path(temporary)
-    with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["git", "archive", "HEAD"]))) as archive:
-        archive.extractall(root)
-    source = root / "crates/elmdb/src/store/mod.rs"
-    code = source.read_text()
-    assert code.count("require_registered_reader(&env, &canonical)?;") == 1
-    source.write_text(code.replace("require_registered_reader(&env, &canonical)?;", "// deliberately omit the post-open lock-table check"))
-    negative = mounted(executable(root, {**os.environ, "CARGO_TARGET_DIR": str(root / "target")}))
-    if not (negative.returncode != 0 and "running 1 test" in negative.stdout
-            and "a read-only mount must not open without a lock table" in negative.stdout and "FAILED" in negative.stdout):
-        print(negative.stdout)
-        raise SystemExit("the EROFS mutation did not fire the selected regression")
-    print("Actual EROFS regression fails on the disposable mutation as expected")
+mutations = [
+    ("crates/elmdb/src/store/mod.rs", "require_registered_reader(&env, &canonical)?;",
+     "a read-only mount must not open without a lock table"),
+    ("crates/elmdb/src/engine/maintenance.rs", "crate::store::require_registered_reader(&env, source)?;",
+     "a replacement source must register its reader"),
+]
+for filename, omitted, assertion in mutations:
+    with tempfile.TemporaryDirectory(prefix="elmdb-erofs-mutation-") as temporary:
+        root = Path(temporary)
+        with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["git", "archive", "HEAD"]))) as archive:
+            archive.extractall(root)
+        source = root / filename
+        code = source.read_text()
+        assert code.count(omitted) == 1
+        source.write_text(code.replace(omitted, "// deliberately omit reader registration"))
+        negative = mounted(executable(root, {**os.environ, "CARGO_TARGET_DIR": str(root / "target")}))
+        if not (negative.returncode != 0 and "running 1 test" in negative.stdout
+                and assertion in negative.stdout and "FAILED" in negative.stdout):
+            print(negative.stdout)
+            raise SystemExit(f"the EROFS mutation did not fire its regression: {filename}")
+        print(f"Actual EROFS regression rejects omitted registration: {filename}")

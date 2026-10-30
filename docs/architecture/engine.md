@@ -25,6 +25,15 @@ synced, before anything else is written to it.
 A database is one directory. A program that needs data with its own life cycle opens a second one: apack opens `main`
 and `runs` (its flow run history), which reset and back up independently.
 
+A read transaction refused with `READERS_FULL` asks LMDB to clear stale reader slots, then retries
+acquisition once. LMDB checks process liveness; live readers are never evicted. A second exhaustion
+or any unrelated acquisition error remains a refusal. This applies to opening/validating a database
+and to ordinary reads and replacement-source snapshots; it does not change snapshot lifetimes or the
+configured reader capacity. Replacement sources require the same writable lock-file registration as a
+normal read-only open, even when their data files are read-only. On Windows, a terminated process can
+remain visible to the conservative LMDB liveness check until its OS process object disappears; such
+slots remain protected rather than being evicted on an unproven assumption.
+
 Several processes may open one database: one writes at a time, LMDB's lock serializing them, and a read-only open
 reads while the app writes (apack's `apack db`). Read-only access still requires writable reader registration in
 LMDB's lock file. A permission failure or LMDB's implicit unregistered EROFS fallback is refused. After opening,

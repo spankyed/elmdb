@@ -301,7 +301,8 @@ impl Database {
         // SAFETY: the source is another directory than this database's, opened read-only for this call alone
         unsafe { options.flags(EnvFlags::READ_ONLY) };
         let env = unsafe { options.open(source) }?;
-        let rtxn = env.read_txn()?;
+        crate::store::require_registered_reader(&env, source)?;
+        let rtxn = crate::store::read_txn(&env)?;
         let from = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
                 Ok(CommitOrAbort::<_, ()>::Commit(opener.open_database::<Bytes, Bytes>(rtxn, Some(format::DB_NAME))?))
@@ -310,7 +311,7 @@ impl Database {
             .ok_or_else(|| {
                 Error::new(ErrorCode::NotADatabase, format!("{} holds no elmdb database", source.display()))
             })?;
-        let rtxn = env.read_txn()?;
+        let rtxn = crate::store::read_txn(&env)?;
         let stamped = from.get(&rtxn, &crate::store::meta_key(meta::FORMAT))?.map(<[u8]>::to_vec);
         if stamped.as_deref() != Some(&format::FORMAT_VERSION.to_be_bytes()[..]) {
             return Err(Error::new(

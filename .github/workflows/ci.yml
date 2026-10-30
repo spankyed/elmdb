@@ -40,6 +40,8 @@ jobs:
           cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"
       - name: refuse unregistered readers on an actual read-only mount
         run: python3 scripts/check-read-only-mount.py
+      - name: prove reader recovery assertions reject broken implementations
+        run: python3 scripts/check-reader-recovery.py
       - run: cargo xtask check-generated
       - run: cargo xtask check-one-lmdb
       - name: binding
