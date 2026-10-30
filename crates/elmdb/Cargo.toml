@@ -53,6 +53,9 @@ heed = { workspace = true, features = ["posix-sem"] }
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 fail = { workspace = true, features = ["failpoints"] }
 proptest.workspace = true

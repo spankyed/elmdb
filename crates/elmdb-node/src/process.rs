@@ -95,13 +95,9 @@ fn acquire_claim() -> io::Result<Claim> {
 
 #[cfg(windows)]
 fn acquire_event(name: &str) -> io::Result<Claim> {
-    use std::ffi::c_void;
     use std::os::windows::io::FromRawHandle;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn CreateEventW(attributes: *const c_void, manual: i32, initial: i32, name: *const u16) -> *mut c_void;
-        fn GetLastError() -> u32;
-    }
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::System::Threading::CreateEventW;
     let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     // SAFETY: name is a terminated wide string alive for the call. Null attributes create a non-inheritable
     // handle; the event is never waited on or signalled, so only its atomic named-object creation matters.
@@ -113,7 +109,7 @@ fn acquire_event(name: &str) -> io::Result<Claim> {
     }
     // SAFETY: CreateEventW returned an owned valid handle, transferred exactly once to OwnedHandle.
     let handle = unsafe { Claim::from_raw_handle(raw) };
-    if error == 183 {
+    if error == ERROR_ALREADY_EXISTS {
         return Err(io::Error::new(io::ErrorKind::WouldBlock, "the process is already claimed"));
     }
     Ok(handle)
@@ -128,18 +124,20 @@ fn acquire_claim() -> io::Result<Claim> {
 /// handle alone survives DLL unloading, but a reloaded image would lose the static and reject its own old claim.
 #[cfg(windows)]
 fn pin_module() -> io::Result<()> {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn GetModuleHandleExW(flags: u32, address: *const u16, module: *mut *mut c_void) -> i32;
-    }
-    const FROM_ADDRESS: u32 = 0x0000_0004;
-    const PIN: u32 = 0x0000_0001;
+    use windows_sys::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
+    };
     let mut module = std::ptr::null_mut();
-    // SAFETY: FROM_ADDRESS interprets the second argument as an address, not a wide string. This function's
+    // SAFETY: the from-address flag interprets the second argument as an address, not a wide string. This function's
     // address belongs to the currently executing binding image; module points to valid output storage. PIN retains
     // that image until process termination, so no FreeLibrary call is required or appropriate for this handle.
-    let success = unsafe { GetModuleHandleExW(FROM_ADDRESS | PIN, pin_module as *const () as *const u16, &mut module) };
+    let success = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            pin_module as *const () as *const u16,
+            &mut module,
+        )
+    };
     if success == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
