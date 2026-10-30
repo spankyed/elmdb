@@ -52,7 +52,15 @@ acceptance tradeoff before evaluating production candidates; do not select a fav
 - Required local Rust/binding gates and six final lifetime regressions passed. Disposable mutation
   proof fails on retained snapshots as intended. Source-hashed evidence is under
   `docs/evidence/idle-snapshot-retention/`; the narrative records limitations and provenance.
-- Draft PR: https://github.com/spankyed/elmdb/pull/32. CI run 41033109391 is in progress for the
-  runtime checkpoint. Final measurement documentation must be committed/pushed, then CI must be
-  checked on the final tip. Revalidate live job state, fix failures within scope, mark ready when
-  appropriate and audit the entire objective before completion. Do not merge, release or change pins.
+- PR: https://github.com/spankyed/elmdb/pull/32, ready for review. The first final-tip CI pass
+  cleared every functional/platform/runtime/concurrency/instruction job. Linux mutations completed;
+  Windows mutations were still live when this handoff was written. Inspect their actual state.
+- Linux mutation survivors justified two more focused tests: hot-cache reuse and worker-state
+  release on explicit close/Drop. Three targeted disposable mutations fail their intended
+  assertions. Runtime code and performance measurements are unchanged. Commit/push the validated
+  test checkpoint, inspect CI on its actual tip and fix in-scope failures before completion.
+  Mutation build outputs are now isolated after detecting shared-target executable contamination;
+  the affected normal package outputs were cleaned. All four isolated proofs and the freshly
+  rebuilt unmodified workspace passed (374 tests plus required Rust gates). Binding build,
+  typecheck and tests also passed (34 passed, four platform-specific skips); generated files match.
+  Do not merge, release or change pins.

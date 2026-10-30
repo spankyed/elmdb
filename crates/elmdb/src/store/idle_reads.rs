@@ -146,6 +146,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn close_and_drop_release_the_worker_state() {
+        for explicit_close in [true, false] {
+            let mut idle = IdleReads::new().unwrap();
+            let weak = Arc::downgrade(&idle.shared);
+            if explicit_close {
+                idle.close();
+                // Closing twice is safe and the joined worker owns no remaining state.
+                idle.close();
+                assert_eq!(Arc::strong_count(&idle.shared), 1, "the cache worker survived explicit close");
+            }
+            drop(idle);
+            assert!(weak.upgrade().is_none(), "the cache worker survived close/drop");
+        }
+    }
+
+    #[test]
+    fn a_hot_read_takes_its_cached_transaction() {
+        use crate::store::{Store, StoreOptions};
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(directory.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+        let idle = IdleReads::new().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            idle.clear();
+            let (_, generation) = idle.take(&store.env);
+            let txn = store.env.clone().static_read_txn().unwrap();
+            let before = Instant::now();
+            idle.put(txn, generation);
+            let (cached, _) = idle.take(&store.env);
+            // A scheduler pause may legitimately exhaust the whole retention window. Retry that
+            // case; within the window, cache reuse is behavior, not a timing performance budget.
+            if before.elapsed() < RETAIN_FOR {
+                assert!(cached.is_some(), "a completed hot snapshot was not reused");
+                break;
+            }
+            assert!(Instant::now() < deadline, "no scheduling window to check hot-cache reuse");
+        }
+        drop(idle);
+        store.close().unwrap();
+    }
+
+    #[test]
     fn exit_detaches_without_waiting_for_another_threads_cache_lock() {
         let mut idle = IdleReads::new().unwrap();
         let shared = Arc::clone(&idle.shared);

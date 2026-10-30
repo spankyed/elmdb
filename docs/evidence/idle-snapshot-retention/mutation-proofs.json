@@ -1,0 +1,32 @@
+{
+  "date": "2026-10-30",
+  "source": "3eb949e plus the test-only checkpoint containing this report",
+  "buildIsolation": "target/idle-reader-mutations, distinct from normal validation outputs",
+  "workingSourceMutated": false,
+  "proofs": [
+    {
+      "case": "expiry",
+      "expectedAssertion": "completed snapshots were not released without another read",
+      "logSha256": "a2710d4f5f2e9d0765290f8b76382173c744ec3ec9c2512f0ec2bd83dbfedf74",
+      "result": "compiled; selected regression failed on its intended assertion"
+    },
+    {
+      "case": "close",
+      "expectedAssertion": "the cache worker survived explicit close",
+      "logSha256": "37ee44a9aeb7092a8548b720edcad9f4f05e90bc84189e43a93a6fae48ba3532",
+      "result": "compiled; selected regression failed on its intended assertion"
+    },
+    {
+      "case": "drop",
+      "expectedAssertion": "the cache worker survived close/drop",
+      "logSha256": "cb46213341e4199c302692709147a80960e0caa4216439caa427e03b1bc3b526",
+      "result": "compiled; selected regression failed on its intended assertion"
+    },
+    {
+      "case": "reuse",
+      "expectedAssertion": "a completed hot snapshot was not reused",
+      "logSha256": "5b73b431be9609ccdef64fdc97bf58da2737b758b3333a4f52982bf17295938f",
+      "result": "compiled; selected regression failed on its intended assertion"
+    }
+  ]
+}

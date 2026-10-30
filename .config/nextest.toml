@@ -29,7 +29,7 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 
 # Idle-reader child barriers and expiry must fail promptly if the cache worker stops releasing snapshots.
 [[profile.default.overrides]]
-filter = "test(/^store::retention_tests::/)"
+filter = "test(/^store::(retention_tests|idle_reads)::/)"
 slow-timeout = { period = "10s", terminate-after = 2 }
 
 [profile.ci]

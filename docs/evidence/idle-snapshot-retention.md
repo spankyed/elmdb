@@ -113,3 +113,36 @@ the six final lifetime regressions also passed after the last test additions. Bi
 typecheck and tests passed (34 passed, four platform-specific skips). Generated loader/declarations
 match committed source. Full platform CI is tracked on PR #32; local Linux evidence does not certify
 other operating systems or filesystems.
+
+## Mutation review: 2026-10-30
+
+The first Linux CI mutation pass tested 43 mutations: 17 caught, 14 unviable, 11 missed and one
+timeout. Inspecting survivors exposed coverage gaps even though functional CI was green: a cache
+could stop reusing hot transactions, or a worker could outlive explicit close/Drop, while the
+existing database-answer and reopen tests still passed. Runtime code was already correct.
+
+Two focused tests now require actual hot-cache reuse within the retention window and complete
+worker-state release on both explicit close and Drop. Targeted disposable mutations of reuse,
+close and Drop each compiled and failed their intended assertion; the original source passes.
+[Proof summaries and raw-log hashes](idle-snapshot-retention/mutation-proofs.json) record each case.
+Reproduce through `scripts/linux.py -- python3 scripts/check-idle-reader-mutation.py --case CASE`,
+where CASE is `reuse`, `close` or `drop`. The default remains the cross-process expiry proof.
+All idle-cache tests have a 20-second nextest deadline. Remaining timing-comparison survivors must
+be interpreted as boundary or performance-policy mutations, not as proof of a retained active snapshot;
+the independent expiry and page-reuse regressions are the correctness evidence. CI will repeat on
+the final test checkpoint. The added code is test-only; the measured runtime source is unchanged.
+
+During the post-mutation check, reusing the normal Cargo target exposed executable-cache
+contamination: Cargo reused the disposable hot-cache mutant's executable for the unmodified source.
+The source was untouched. The mutation driver now uses `target/idle-reader-mutations`, separate
+from normal validation. The affected normal package outputs were removed before repeating the
+proofs and unmodified-source checks. This also explains why the allocation comparison above runs
+verified hashed executables directly instead of trusting a shared convenience path.
+
+After isolation, all four proofs passed and the freshly rebuilt unmodified workspace passed all
+374 tests, clippy, formatting, doc tests, generated-contract and one-LMDB checks on the same bounded
+Linux host. This is the final test checkpoint's local Rust validation; the earlier counts describe
+the earlier runtime checkpoint.
+Binding build/typecheck/tests were repeated successfully (34 passed, four platform-specific skips),
+and generated loader/declarations match the committed files. The runtime portion of `idle_reads.rs`
+and the remaining runtime files match `59040f2`; only test/harness/documentation code changed.

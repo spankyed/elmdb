@@ -346,6 +346,10 @@ fixed-size overwrites reuse pages. It also holds an active snapshot across expir
 commit, verifies a late completion cannot repopulate a cleared cache, holds an uncommitted unit across
 expiration, and closes/reopens with cached snapshots. Expiration waits inspect only the private cache,
 not a new database read that could hide a missing background release. Nextest bounds these tests at
-20 seconds. `scripts/check-idle-reader-mutation.py` runs the idle-child regression on a disposable copy
-whose expiry operation renews entries indefinitely; the expected retained-snapshot assertion must fire.
+20 seconds, including the cache worker's tests. Hot reads must actually take the cached transaction,
+and both explicit close and Drop must release the worker's shared state. These tests distinguish
+useful caching and resource cleanup from merely returning correct database answers.
+`scripts/check-idle-reader-mutation.py` runs the idle-child regression on a disposable copy
+whose expiry operation renews entries indefinitely; the expected retained-snapshot assertion must fire. Its `--case reuse`, `--case close` and `--case drop`
+variants prove the hot-cache and worker-cleanup assertions fire too.
 Manual release measurements and their controls are in [the evidence](../evidence/idle-snapshot-retention.md).
