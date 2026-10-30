@@ -183,6 +183,7 @@ export interface EarsAdmin {
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
+    observe(observer: EarsOperationObserver): () => void;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
@@ -309,6 +310,38 @@ export type EarsErrorCode =
 | 'FIELD_TYPE'
 /** `matching` was given a pattern Rust's `regex` syntax doesn't hold, look-around and backreferences among them: the message says why */
 | 'PATTERN_INVALID';
+
+// @public
+export interface EarsOperation {
+    // (undocumented)
+    inUnit: boolean;
+    // (undocumented)
+    kind: 'read' | 'write' | 'unit' | 'load';
+    // (undocumented)
+    ops: number;
+    sequence?: number;
+    // (undocumented)
+    watch: boolean;
+}
+
+// @public
+export interface EarsOperationObserver {
+    // (undocumented)
+    start(operation: Readonly<EarsOperation>): (result: Readonly<EarsOperationResult>) => void;
+}
+
+// @public
+export interface EarsOperationResult {
+    // (undocumented)
+    errorCode?: string;
+    // (undocumented)
+    outcome: 'ok' | 'error' | 'committed-not-durable';
+    // (undocumented)
+    requestBytes: number;
+    // (undocumented)
+    responseBytes: number;
+    sequence?: number;
+}
 
 // @public
 export interface EARSRuntimeDeps {

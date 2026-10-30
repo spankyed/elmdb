@@ -5,6 +5,7 @@
 import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
+import type { EarsOperationObserver } from './observation.ts';
 import { createConnection, runCommitted, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
@@ -165,6 +166,8 @@ export interface EarsAdmin {
    * code that made each, off until started: what a measurement of the app's work reads
    */
   readonly calls: CallCounting;
+  /** Observe operation boundaries without stack capture; unregister to restore the disabled path. */
+  observe(observer: EarsOperationObserver): () => void;
 }
 
 /** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
@@ -366,6 +369,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     watchesSettled: watches.settled,
     watchStats: watches.stats,
     calls: connection.calls,
+    observe: connection.observe,
   };
 
   return { ...operations, admin };

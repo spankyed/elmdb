@@ -8,6 +8,7 @@ import { Packr, Unpackr } from 'msgpackr';
 import { callSite, createCallTally, type CallCounting, type CallReport, type CallTally } from './calls.ts';
 import { EarsError, type EarsErrorCode } from './errors.ts';
 import { setField } from './ids.ts';
+import type { EarsOperation, EarsOperationObserver, EarsOperationResult } from './observation.ts';
 
 /** How `transact` commits */
 export interface UnitOptions {
@@ -233,6 +234,7 @@ export interface Connection {
   readonly calls: CallCounting;
   /** The count being kept, while counting runs: what the watch scheduler records each watch's runs into */
   tally(): CallTally | undefined;
+  observe(observer: EarsOperationObserver): () => void;
 }
 
 export function createConnection(database: EarsDatabase, { freeze = false }: { freeze?: boolean } = {}): Connection {
@@ -260,6 +262,58 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) committed({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
+
+  const observers = new Set<EarsOperationObserver>();
+  let notifying = false;
+  const frames: Array<{ requestBytes: number; responseBytes: number }> = [];
+  const observedSequence = (): number | undefined => {
+    try { return database.sequence; } catch { return undefined; }
+  };
+  function observed<T>(kind: EarsOperation['kind'], ops: number, fn: () => T): T {
+    if (observers.size === 0 || notifying) return fn();
+    const operation: EarsOperation = { kind, ops, watch: tracking !== undefined, inUnit: levels.length > 0, sequence: observedSequence() };
+    const finishes: Array<ReturnType<EarsOperationObserver['start']>> = [];
+    notifying = true;
+    try {
+      for (const observer of [...observers]) {
+        try { finishes.push(observer.start(Object.freeze({ ...operation }))); } catch { /* Diagnostics cannot refuse an operation. */ }
+      }
+    } finally { notifying = false; }
+    const frame = { requestBytes: 0, responseBytes: 0 };
+    frames.push(frame);
+    let outcome: EarsOperationResult['outcome'] = 'ok';
+    let errorCode: string | undefined;
+    try { return fn(); }
+    catch (error) {
+      // Codes are engine-owned; never record a user-supplied error message or payload.
+      try {
+        errorCode = error instanceof EarsError ? error.code
+          : (error as { code?: unknown } | null)?.code === 'NOT_DURABLE' ? 'NOT_DURABLE' : undefined;
+      } catch { /* Error metadata may have throwing getters; preserve the original error. */ }
+      const sequence = observedSequence();
+      outcome = errorCode === 'NOT_DURABLE' && sequence !== undefined && operation.sequence !== undefined && sequence > operation.sequence ? 'committed-not-durable' : 'error';
+      throw error;
+    } finally {
+      frames.pop();
+      const result = Object.freeze({ ...frame, outcome, errorCode, sequence: observedSequence() });
+      notifying = true;
+      try {
+        for (const finish of finishes) {
+          try { finish(result); } catch { /* Preserve the original return value or error. */ }
+        }
+      } finally { notifying = false; }
+    }
+  }
+  function request(bytes: Uint8Array): Uint8Array {
+    const frame = notifying ? undefined : frames.at(-1);
+    if (frame) frame.requestBytes += bytes.byteLength;
+    return bytes;
+  }
+  function response(bytes: Uint8Array): Uint8Array {
+    const frame = notifying ? undefined : frames.at(-1);
+    if (frame) frame.responseBytes += bytes.byteLength;
+    return bytes;
+  }
 
   /** The count being kept while counting runs, and the unit it is counting until that commits or aborts */
   let tally: CallTally | undefined;
@@ -291,6 +345,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   };
 
   function transact<T>(fn: () => T, options?: UnitOptions): T {
+    return observed('unit', 0, () => transactUnit(fn, options));
+  }
+
+  function transactUnit<T>(fn: () => T, options?: UnitOptions): T {
     const level: { savepoint?: number; kept?: boolean } = {};
     const outermost = levels.length === 0;
     if (outermost && tally) counted = { site: callSite(), writes: 0, ops: 0, ms: 0 };
@@ -357,6 +415,11 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
 
   /** A read's or a write's call, counted when counting runs */
   function counting<T>(kind: 'read' | 'write', ops: number, fn: () => T): T {
+    if (observers.size === 0 || notifying) return countedCall(kind, ops, fn);
+    return observed(kind, ops, () => countedCall(kind, ops, fn));
+  }
+
+  function countedCall<T>(kind: 'read' | 'write', ops: number, fn: () => T): T {
     if (!tally) return fn();
     // A write inside a unit is the unit's, counted with it; one inside a unit begun before counting is not counted
     const inUnit = kind === 'write' && levels.length > 0;
@@ -396,17 +459,17 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   return {
     read(reads) {
       return counting('read', reads.length, () => {
-        const bytes = pack(tracking === undefined ? { reads } : { reads, track: tracking });
+        const bytes = request(pack(tracking === undefined ? { reads } : { reads, track: tracking }));
         const held = unit;
-        const answers = unpackAnswers(crossing(() => (held ? held.read(bytes) : database.readSync(bytes))));
+        const answers = unpackAnswers(response(crossing(() => (held ? held.read(bytes) : database.readSync(bytes)))));
         return freeze ? answers.map(freezeValues) : answers;
       });
     },
     write(ops, now = Date.now()) {
       const written = counting('write', ops.length, () => {
-        const bytes = pack({ ops, now });
+        const bytes = request(pack({ ops, now }));
         const target = levels.length ? writable() : undefined;
-        const answer = crossing(() => (target ? target.write(bytes) : database.write(bytes, false)));
+        const answer = response(crossing(() => (target ? target.write(bytes) : database.write(bytes, false))));
         if (target) levels.at(-1)!.kept = true;
         return unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
       });
@@ -415,7 +478,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
     load(loads) {
       runCommitted(
-        () => crossing(() => database.bulkLoad(pack(loads))),
+        () => observed('load', loads.length, () => crossing(() => database.bulkLoad(request(pack(loads))))),
         () => committed({ sequence: database.sequence, touched: 'all' }),
       );
     },
@@ -444,5 +507,9 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     lastCommit: () => database.sequence,
     calls,
     tally: () => tally,
+    observe(observer) {
+      observers.add(observer);
+      return () => { observers.delete(observer); };
+    },
   };
 }
