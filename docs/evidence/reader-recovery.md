@@ -28,22 +28,27 @@ this session's disposable incremental compilation cache restored the floor; subs
 used `CARGO_INCREMENTAL=0`. The floor and assertions were unchanged. Cross-platform acceptance is
 owned by the PR's existing CI matrix; local Linux results do not establish Windows/macOS behavior.
 
-Windows CI's unmutated mutation-test baseline initially refused recovery in both process cases.
-The parent still owned its `Child` process handle after kill/wait. Windows retains the process object
-until its handles close, and this LMDB build's conservative PID check continued to report it as live.
-The harness now drops that handle before recovery. This changes no production liveness/retry policy;
-focused Windows verification and the new-tip CI results must establish the correction.
+## Windows process liveness
 
-## Review corrections (2026-10-30)
+LMDB's Windows liveness check (`mdb_reader_pid` in lmdb-master-sys 0.2.6's `mdb.c`) opens the reader's PID
+with `PROCESS_QUERY_LIMITED_INFORMATION` and then waits on the handle. That access right does not include
+`SYNCHRONIZE`, so the wait fails and the failure counts as live. A reader slot is therefore reclaimed on
+Windows only once `OpenProcess` reports `ERROR_INVALID_PARAMETER`: the process object is gone, which needs
+every handle to it in any process closed and can lag the termination. Until then the slot stays protected,
+and a read still refuses with `READERS_FULL`.
 
-Closing the parent's process handle alone (`902c2e3`) corrected the separate opener but did not
-establish absence soon enough for the immediate read case. The Windows test now uses an explicit
-OS precondition: after kill/wait/handle close, OpenProcess must report ERROR_INVALID_PARAMETER for
-the PID. A bounded wait checks that condition, reports exit/query details on failure, and never clears
-slots itself. Production code still performs one LMDB cleanup and one retry, without polling.
-Windows platform tests and the Windows mutation job passed on `6493c96` (run 41014051098).
+Windows CI's first run refused recovery in both process cases. Closing the parent's `Child` handle
+(`902c2e3`) was not sufficient: the separate-opener case most likely passed because spawning its opener took
+long enough for the process object to go, and the immediate read case still failed. The Windows test now
+establishes the precondition LMDB actually checks: after kill, wait and handle close, it waits, bounded
+at ten seconds, until `OpenProcess` reports `ERROR_INVALID_PARAMETER` for the PID, reporting the exit
+code and any query error on failure. It never clears slots itself; production code still performs one
+LMDB cleanup and one retry, without polling. Windows platform tests and the Windows mutation job passed on
+`6493c96` (run 41014051098), with the wait then bounded at two seconds.
 
-Review also found that `replace_with` opened its source outside Store and bypassed both recovery and
+## Replacement sources
+
+`replace_with` opened its source outside Store and bypassed both recovery and
 reader registration. Its source now uses the shared helpers. The actual Linux read-only-mount case
 also attempts replacement, requires IO before committing, and checks the destination sequence is
 unchanged. The mount verification script independently removes each registration check on disposable

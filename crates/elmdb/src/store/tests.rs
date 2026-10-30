@@ -927,7 +927,7 @@ impl SaturatedReaders {
 fn wait_until_reader_process_is_absent(pid: u32) {
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, STILL_ACTIVE};
     use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         // SAFETY: OpenProcess returns a handle owned here; all output pointers are valid for the call,
         // and every successful open is closed before retrying. No other process is modified.
