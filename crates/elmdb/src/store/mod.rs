@@ -177,13 +177,13 @@ fn with_reader_recovery<T>(env: &Env<WithoutTls>, mut begin: impl FnMut() -> hee
     }
 }
 
-fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutTls>> {
+pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutTls>> {
     with_reader_recovery(env, || env.read_txn())
 }
 
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
-fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
+pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
     let _reader = read_txn(env)?;
     if env.info().number_of_readers == 0 {
         return Err(Error::new(

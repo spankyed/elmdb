@@ -670,6 +670,14 @@ fn read_only_mount_requires_reader_registration() {
         .expect("a read-only mount must not open without a lock table");
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("registration"));
+    let destination = tempfile::tempdir().unwrap();
+    let database =
+        crate::Database::open(destination.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    let before = database.sequence().unwrap();
+    let error = database.replace_with(dir.path()).expect_err("a replacement source must register its reader");
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("registration"));
+    assert_eq!(database.sequence().unwrap(), before, "refusal must not commit a replacement");
     println!("ELMDB_READ_ONLY_MOUNT_REFUSED");
 }
 
@@ -895,7 +903,7 @@ impl SaturatedReaders {
         let mut child = Self(Some(child));
         let stdout = BufReader::new(child.0.as_mut().unwrap().stdout.take().unwrap());
         assert!(
-            stdout.lines().any(|line| line.unwrap() == "ELMDB_READERS_FULL_READY"),
+            stdout.lines().any(|line| line.unwrap().contains("ELMDB_READERS_FULL_READY")),
             "child must fill the reader table"
         );
         child

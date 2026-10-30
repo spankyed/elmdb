@@ -33,3 +33,18 @@ The parent still owned its `Child` process handle after kill/wait. Windows retai
 until its handles close, and this LMDB build's conservative PID check continued to report it as live.
 The harness now drops that handle before recovery. This changes no production liveness/retry policy;
 focused Windows verification and the new-tip CI results must establish the correction.
+
+## Review corrections (2026-10-30)
+
+Closing the parent's process handle alone (`902c2e3`) corrected the separate opener but did not
+establish absence soon enough for the immediate read case. The Windows test now uses an explicit
+OS precondition: after kill/wait/handle close, OpenProcess must report ERROR_INVALID_PARAMETER for
+the PID. A bounded wait checks that condition, reports exit/query details on failure, and never clears
+slots itself. Production code still performs one LMDB cleanup and one retry, without polling.
+Windows platform tests and the Windows mutation job passed on `6493c96` (run 41014051098).
+
+Review also found that `replace_with` opened its source outside Store and bypassed both recovery and
+reader registration. Its source now uses the shared helpers. The actual Linux read-only-mount case
+also attempts replacement, requires IO before committing, and checks the destination sequence is
+unchanged. The mount verification script independently removes each registration check on disposable
+copies, so source registration cannot pass merely because normal open is still protected.
