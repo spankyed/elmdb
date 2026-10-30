@@ -163,6 +163,9 @@ mod tests {
                 drop(held);
             });
             assert_eq!(spans(&collector), [json!({"span":"inner","parent":"outer","durable":false,"rows":3})]);
+            // Left, the outer span is no longer the parent of what starts next, though it is still open
+            drop(tracing::info_span!(target: "elmdb", "after"));
+            assert_eq!(spans(&collector), [json!({"span":"after"})]);
             drop(outer);
             tracing::info_span!(target: "another", "ignored").in_scope(|| {});
         });
