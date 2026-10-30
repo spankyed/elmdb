@@ -6,8 +6,8 @@ Say "LMDB" out loud: that's the name.
 
 elmdb holds typed entities, their attributes and the relations between them. It keeps value, text and vector indexes
 in the same transaction as the data, runs a read as one plan and a write as one batch, and reports what every commit
-changed, so a view can stay current. It knows no application: types, relation kinds and rules arrive as a schema. Its
-first user is apack, whose EARS engine it replaces underneath an unchanged API.
+changed, so a view can stay current. It assumes nothing about your application: your schema defines the types,
+relation kinds and rules.
 
 ## Docs
 
