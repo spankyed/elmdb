@@ -6,6 +6,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
+use crate::diagnostics::{Op, names};
 use crate::error::Result;
 
 const MEMORY_BYTES: usize = 8 * 1024 * 1024;
@@ -54,6 +55,7 @@ pub(in crate::engine) struct Scratch {
     next_order: u64,
     next_file: u64,
     budget: usize,
+    op: Op,
 }
 
 impl Scratch {
@@ -66,6 +68,7 @@ impl Scratch {
             bytes: 0,
             next_order: 0,
             next_file: 0,
+            op: Op::sort(),
             budget: {
                 #[cfg(test)]
                 {
@@ -128,7 +131,19 @@ impl Scratch {
         Ok(())
     }
     pub(in crate::engine) fn finish(mut self) -> Result<Sorted> {
+        let op = std::mem::replace(&mut self.op, Op::none());
+        let rows = self.next_order;
+        let sorted = self.sorted(&op);
+        op.record(names::ROWS, || rows);
+        op.ended(sorted, "sorted")
+    }
+
+    fn sorted(mut self, op: &Op) -> Result<Sorted> {
         self.flush()?;
+        op.record(names::RUNS, || self.next_file);
+        op.record(names::SPILLED_BYTES, || {
+            self.runs.iter().map(|(path, _)| std::fs::metadata(path).map_or(0, |m| m.len())).sum()
+        });
         if self.runs.is_empty() {
             let path = self.path();
             writer(&path)?.flush()?;

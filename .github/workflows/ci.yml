@@ -25,10 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p elmdb -p elmdb-node --all-targets --features elmdb/diagnostics,elmdb-node/diagnostics -- -D warnings
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.148
       - run: cargo nextest run --workspace --profile ci
+      # The engine's suite with its diagnostics compiled in, and the test of what a collector hears
+      - run: cargo nextest run -p elmdb --features diagnostics --profile ci
       - run: cargo test --workspace --doc
       - name: maintenance heap assertions and benchmark smoke
         run: |
@@ -46,6 +49,7 @@ jobs:
         run: python3 scripts/check-reader-recovery.py
       - run: cargo xtask check-generated
       - run: cargo xtask check-one-lmdb
+      - run: cargo xtask check-diagnostics-off
       - name: binding
         run: |
           npm ci
@@ -147,6 +151,22 @@ jobs:
         with:
           tool: gungraun-runner@0.20.0
       - run: python3 scripts/instruction-counts.py HEAD^1
+
+  # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
+  # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
+  diagnostics:
+    name: diagnostics overhead (Linux)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@0.20.0
+      - run: python3 scripts/diagnostics-overhead.py
 
   platforms:
     name: ${{ matrix.target }} on Node ${{ matrix.node }}

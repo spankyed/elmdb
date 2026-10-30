@@ -15,6 +15,8 @@ mod reads;
 use std::hint::black_box;
 
 #[cfg(target_os = "linux")]
+use elmdb::engine::batch::Batch;
+#[cfg(target_os = "linux")]
 use elmdb::engine::plan::Reads;
 #[cfg(target_os = "linux")]
 use elmdb::format::key::{Part, encode};
@@ -124,10 +126,28 @@ library_benchmark_group!(name = keys, benchmarks = [key_encode]);
 library_benchmark_group!(name = maintenance, benchmarks = [value_rebuild, text_rebuild, export, indexed_limit]);
 
 #[cfg(target_os = "linux")]
+fn one_write() -> (support::Fixture, Batch) {
+    let set = serde_json::json!({"op":"set", "id":"Doc-00000000", "fields":{"body":"changed"}});
+    (support::Fixture::new(ROWS, false, false), Batch { ops: vec![serde_json::from_value(set).unwrap()], now: None })
+}
+
+// One plain write: asking for the writer, the change and its commit, not synced
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+#[bench::one(setup = one_write)]
+fn small_write((fixture, batch): (support::Fixture, Batch)) -> support::Fixture {
+    black_box(fixture.db.write(black_box(&batch), false).unwrap());
+    fixture
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(name = write, benchmarks = [small_write]);
+
+#[cfg(target_os = "linux")]
 library_benchmark_group!(name = read, benchmarks = [read_bytes]);
 
 #[cfg(target_os = "linux")]
-main!(library_benchmark_groups = keys, maintenance, read);
+main!(library_benchmark_groups = keys, maintenance, read, write);
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

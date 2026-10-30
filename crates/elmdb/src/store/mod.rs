@@ -25,6 +25,7 @@ use heed::{CommitOrAbort, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTl
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
 
+use crate::diagnostics::{Op, names};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
 use idle_reads::IdleReads;
@@ -439,8 +440,28 @@ impl Store {
     /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
     pub(crate) fn write_committed<T>(
         &self,
+        f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
+        durable: bool,
+    ) -> Result<(T, Commit)> {
+        let op = Op::write(durable);
+        let result = self.write_reported(f, durable, &op);
+        match &result {
+            Ok((_, commit)) => op.end(Ok(match (&commit.synced, durable) {
+                (Err(_), _) => "not_durable",
+                (Ok(()), true) => "durable",
+                (Ok(()), false) => "committed",
+            })),
+            Err(error) => op.end(Err(error)),
+        }
+        result
+    }
+
+    /// `write_committed`'s work, recording on `op` what it waited for and retried
+    fn write_reported<T>(
+        &self,
         mut f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
         durable: bool,
+        op: &Op,
     ) -> Result<(T, Commit)> {
         self.check_writable()?;
         if self.unit_is_open() {
@@ -450,6 +471,7 @@ impl Store {
             ));
         }
         let mut growths = 0;
+        let mut resizes = 0;
         loop {
             run_point!(WRITE_RESERVATION);
             // Claimed under the unit's lock: a unit that slipped between the earlier check and write_txn would leave
@@ -463,9 +485,12 @@ impl Store {
                 }
             })??;
             let Some((mut txn, guard)) = claimed else {
+                resizes += 1;
+                op.record(names::RESIZES, || resizes);
                 self.adopt_map_size()?;
                 continue;
             };
+            op.record_elapsed(names::WAITED_US);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -475,6 +500,7 @@ impl Store {
                 }
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
                     growths += 1;
+                    op.record(names::GROWTHS, || growths as u64);
                     self.grow()?;
                 }
                 Err(e) => return Err(e),
@@ -561,6 +587,13 @@ impl Store {
     /// The environment's write transaction for a unit held open across calls, with the gate held for it. Refuses a
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
     pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
+        let op = Op::begin();
+        let result = self.begin_reported(&op);
+        op.ended(result, "begun")
+    }
+
+    /// `begin`'s work, recording on `op` what it waited for and retried
+    fn begin_reported(&self, op: &Op) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
         self.check_writable()?;
         self.unit.reserve()?;
         let begun = (|| {
@@ -569,13 +602,19 @@ impl Store {
             if (info.last_page_number + 1) * page * 2 > info.map_size {
                 self.grow()?;
             }
+            let mut resizes = 0;
             loop {
                 let guard = self.gate.read_arc();
                 match self.env.write_txn() {
-                    Ok(txn) => return Ok((txn, guard)),
+                    Ok(txn) => {
+                        op.record_elapsed(names::WAITED_US);
+                        return Ok((txn, guard));
+                    }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
                     // transaction's hold on it goes first
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                        resizes += 1;
+                        op.record(names::RESIZES, || resizes);
                         drop(guard);
                         self.adopt_map_size()?;
                     }
@@ -601,7 +640,10 @@ impl Store {
     /// Blocks while a unit is open, until it ends or `stop` answers true; a caller that makes `stop` true wakes it
     /// with `wake_unit_waiters`
     pub fn wait_while_unit_open(&self, stop: impl Fn() -> bool) {
+        let op = Op::unit_wait();
         self.unit.wait_while_open(stop);
+        op.record_elapsed(names::WAITED_US);
+        op.end(Ok("returned"));
     }
 
     /// Wakes every `wait_while_unit_open`, to check its `stop` again
