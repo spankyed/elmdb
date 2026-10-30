@@ -72,9 +72,12 @@ dhat.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gungraun.workspace = true
 
-# The concurrency models, built with `--cfg loom` (`src/sync.rs`)
+# The concurrency models, built with `--cfg loom` or `--cfg shuttle` (`src/sync.rs`)
 [target.'cfg(loom)'.dependencies]
 loom.workspace = true
+
+[target.'cfg(shuttle)'.dependencies]
+shuttle.workspace = true
 
 [lints]
 workspace = true

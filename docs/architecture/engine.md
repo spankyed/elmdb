@@ -255,6 +255,9 @@ in either order. `db.sequence` is the last commit's.
   A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does
   not strand other watches. An initial read panic returns `WATCH_PANICKED`, distinct from a listener panic.
   The callback guard also covers destruction of listener captures, including their last database reference.
+  `Database::unwatch` ends a watch: once it returns, the listener isn't called again and has been dropped, a delivery
+  running it on another thread waited for. Called from inside a listener of the same database's watches it doesn't
+  wait, so a listener may end its own watch or another's; its caller mustn't hold anything the listener needs.
   This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
 

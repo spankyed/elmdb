@@ -2,24 +2,26 @@
 //! caller's tokens and under the database's own watches, and the watches, each a set of reads run again after every
 //! commit that wrote into what it read last, its listener handed each answer that differs from the one before.
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 
 use crate::database::EngineSchema;
 use crate::error::{Error, ErrorCode, Result};
 use crate::store::Store;
+use crate::sync::{PlainCondvar, PlainMutex};
 
 use super::plan::Reads;
 use super::tracking::{ReadSet, Recording, TrackIndex};
 use super::unit::Snapshot;
 
-thread_local! {
+crate::sync::thread_local! {
     // A destructor-free TLS cell remains usable while other TLS destructors deliver watches. Nodes live on the
     // synchronous delivery stack, so this needs neither heap allocation nor a destructor to free per-thread state.
-    static CALLBACKS: std::cell::Cell<*const CallbackScope> = const { std::cell::Cell::new(std::ptr::null()) };
+    static CALLBACKS: Cell<*const CallbackScope> = const { Cell::new(std::ptr::null()) };
 }
 
 /// A pinned node in this thread's stack of nested deliveries.
@@ -30,21 +32,21 @@ struct CallbackScope {
 
 impl CallbackScope {
     fn run<R>(tracks: &SharedTracks, run: impl FnOnce() -> R) -> R {
-        let scope = std::pin::pin!(Self { tracks: Arc::as_ptr(tracks) as usize, previous: CALLBACKS.get() });
-        CALLBACKS.set(&*scope);
+        let scope = std::pin::pin!(Self { tracks: Arc::as_ptr(tracks) as usize, previous: CALLBACKS.with(Cell::get) });
+        CALLBACKS.with(|callbacks| callbacks.set(&*scope));
         run()
     }
 }
 
 impl Drop for CallbackScope {
     fn drop(&mut self) {
-        CALLBACKS.set(self.previous);
+        CALLBACKS.with(|callbacks| callbacks.set(self.previous));
     }
 }
 
 pub(crate) fn in_callback(tracks: &SharedTracks) -> bool {
     let identity = Arc::as_ptr(tracks) as usize;
-    let mut node = CALLBACKS.get();
+    let mut node = CALLBACKS.with(Cell::get);
     while !node.is_null() {
         // SAFETY: every published node is pinned on this thread's synchronous CallbackScope::run stack. Its Drop
         // restores the previous pointer before its storage expires, including during unwinding. No pointer crosses
@@ -86,9 +88,35 @@ pub struct Tracks {
     next: u64,
     pending_reads: BTreeMap<u64, u32>,
     next_read: u64,
+    /// The watches whose listener a delivery holds, ended or not: one at a time per watch
+    delivering: BTreeSet<u64>,
 }
 
-pub type SharedTracks = Arc<Mutex<Tracks>>;
+/// The tracks behind their lock, and the signal that a delivery let go of a listener
+#[derive(Default)]
+pub struct TracksLock {
+    tracks: PlainMutex<Tracks>,
+    delivered: PlainCondvar,
+}
+
+impl TracksLock {
+    pub fn lock(&self) -> impl std::ops::DerefMut<Target = Tracks> + '_ {
+        self.tracks.lock()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_lock(&self) -> Option<impl std::ops::DerefMut<Target = Tracks> + '_> {
+        self.tracks.try_lock()
+    }
+
+    /// A delivery let go of `id`'s listener, put back or dropped
+    fn delivered(&self, id: u64) {
+        self.tracks.lock().delivering.remove(&id);
+        self.delivered.notify_all();
+    }
+}
+
+pub type SharedTracks = Arc<TracksLock>;
 
 /// What a commit touched: the callers' tokens, and the watches to run again
 #[derive(Debug, Default)]
@@ -158,24 +186,38 @@ pub(crate) fn watch(
     reads: Reads,
     listener: Listener,
 ) -> Result<u64> {
-    let id = {
-        let mut held = tracks.lock();
-        let id = held.next;
-        held.next += 1;
-        held.watches.insert(id, Watching { reads, last: None, listener: Some(listener), again: false });
-        id
-    };
+    let id = register(tracks, reads, listener);
     if let Some((_, code)) = deliver(tracks, store, schema, &[id]).into_iter().find(|(removed, _)| *removed == id) {
         return Err(Error::new(code, "The initial watch execution panicked; the watch was removed"));
     }
     Ok(id)
 }
 
-/// Ends a watch: nothing is delivered to it after
-pub fn unwatch(tracks: &SharedTracks, id: u64) {
+/// Files a watch, which nothing has been delivered to yet, answering its id
+fn register(tracks: &SharedTracks, reads: Reads, listener: Listener) -> u64 {
     let mut held = tracks.lock();
-    held.watches.remove(&id);
+    let id = held.next;
+    held.next += 1;
+    held.watches.insert(id, Watching { reads, last: None, listener: Some(listener), again: false });
+    id
+}
+
+/// Ends a watch: once this returns, its listener isn't called again and has been dropped. A delivery running its
+/// listener on another thread is waited for, so whatever the listener uses may be released after. Called from inside a
+/// listener of this database's watches, its own or another's, it doesn't wait: a delivery running on this thread
+/// can't end while it does, and two listeners ending each other's watch would wait on each other. Nor may the caller
+/// hold anything the listener needs, which the wait would never get
+pub fn unwatch(tracks: &SharedTracks, id: u64) {
+    let mut held = tracks.tracks.lock();
+    let removed = held.watches.remove(&id);
     held.index.remove(&Owner::Watch(id));
+    if !in_callback(tracks) {
+        while held.delivering.contains(&id) {
+            held = tracks.delivered.wait(held);
+        }
+    }
+    drop(held);
+    drop(removed);
 }
 
 /// Runs each watch again and hands its listener the answer when it differs from the last. Sequence validation and
@@ -189,6 +231,15 @@ pub(crate) fn deliver(
     schema: &RwLock<Arc<EngineSchema>>,
     ids: &[u64],
 ) -> Vec<(u64, ErrorCode)> {
+    deliver_with(tracks, ids, |id| read_watch(tracks, store, schema, id))
+}
+
+/// `deliver`, each watch's reads run by `read`
+fn deliver_with(
+    tracks: &SharedTracks,
+    ids: &[u64],
+    mut read: impl FnMut(u64) -> Option<(Result<Vec<u8>>, bool)>,
+) -> Vec<(u64, ErrorCode)> {
     let mut panicked = Vec::new();
     for &id in ids {
         // The scope also covers listener destruction: its captures may own the last database reference while
@@ -198,7 +249,10 @@ pub(crate) fn deliver(
                 let mut held = tracks.lock();
                 let Some(watching) = held.watches.get_mut(&id) else { return };
                 match watching.listener.take() {
-                    Some(listener) => Some(listener),
+                    Some(listener) => {
+                        held.delivering.insert(id);
+                        Some(listener)
+                    }
                     None => {
                         watching.again = true;
                         return;
@@ -206,8 +260,9 @@ pub(crate) fn deliver(
                 }
             };
             let mut calling_listener = false;
+            let mut restored = false;
             let outcome = catch_unwind(AssertUnwindSafe(|| {
-                while let Some((answer, changed)) = read_watch(tracks, store, schema, id) {
+                while let Some((answer, changed)) = read(id) {
                     if changed {
                         calling_listener = true;
                         listener.as_mut().expect("listener remains local until restored")(&answer);
@@ -220,11 +275,17 @@ pub(crate) fn deliver(
                     };
                     if !watching.again {
                         watching.listener = listener.take();
+                        held.delivering.remove(&id);
+                        restored = true;
                         break;
                     }
                 }
             }));
             let dropped = catch_unwind(AssertUnwindSafe(|| drop(listener.take())));
+            if !restored {
+                // Ended while delivered: an unwatch waiting on it may return now
+                tracks.delivered(id);
+            }
             if outcome.is_err() || dropped.is_err() {
                 unwatch(tracks, id);
                 panicked.push((
@@ -251,12 +312,13 @@ fn read_watch(
 ) -> Option<(Result<Vec<u8>>, bool)> {
     // Acquire schema before tracking: writes take the same order. Drop this guard before any listener runs.
     let held = schema.read();
-    read_watch_with(tracks, store, id, |reads| run_tracked(store, &held, reads))
+    read_watch_with(tracks, &|| store.sequence(), id, |reads| run_tracked(store, &held, reads))
 }
 
+/// `read_watch`, its reads run by `run` and validated against the last commit's `sequence`
 fn read_watch_with(
     tracks: &SharedTracks,
-    store: &Store,
+    sequence: &impl Fn() -> u64,
     id: u64,
     mut run: impl FnMut(&Reads) -> (Result<Vec<u8>>, ReadSet),
 ) -> Option<(Result<Vec<u8>>, bool)> {
@@ -267,10 +329,10 @@ fn read_watch_with(
         let reads = watching.reads.clone();
         let (answer, read) = if attempt < 2 {
             drop(held);
-            let before = store.sequence();
+            let before = sequence();
             let ran = run(&reads);
             held = tracks.lock();
-            if before != store.sequence() {
+            if before != sequence() {
                 continue;
             }
             ran
@@ -313,12 +375,13 @@ pub(crate) fn read_tracked(
     reads: &Reads,
     token: u32,
 ) -> Result<Vec<u8>> {
-    read_registered(tracks, store, token, || run_tracked(store, schema, reads))
+    read_registered(tracks, &|| store.sequence(), token, || run_tracked(store, schema, reads))
 }
 
+/// `read_tracked`, its reads run by `run` and validated against the last commit's `sequence`
 fn read_registered(
     tracks: &SharedTracks,
-    store: &Store,
+    sequence: &impl Fn() -> u64,
     token: u32,
     mut run: impl FnMut() -> (Result<Vec<u8>>, ReadSet),
 ) -> Result<Vec<u8>> {
@@ -330,13 +393,13 @@ fn read_registered(
         PendingRead { tracks: Arc::clone(tracks), id }
     };
     for _ in 0..2 {
-        let before = store.sequence();
+        let before = sequence();
         let (answer, read) = run();
         let mut held = tracks.lock();
         if !held.pending_reads.contains_key(&pending.id) {
             return answer;
         }
-        if before == store.sequence() {
+        if before == sequence() {
             held.file(token, read);
             return answer;
         }
@@ -367,7 +430,7 @@ mod registration_tests {
         let tracks = SharedTracks::default();
         assert!(
             catch_unwind(AssertUnwindSafe(|| {
-                let _ = read_registered(&tracks, &store, 7, || panic!("read execution"));
+                let _ = read_registered(&tracks, &|| store.sequence(), 7, || panic!("read execution"));
             }))
             .is_err()
         );
@@ -385,7 +448,7 @@ mod registration_tests {
             Watching { reads: Reads { reads: Vec::new(), track: None }, last: None, listener: None, again: false },
         );
         let mut runs = 0;
-        let (answer, changed) = read_watch_with(&tracks, &store, 1, |_| {
+        let (answer, changed) = read_watch_with(&tracks, &|| store.sequence(), 1, |_| {
             assert!(tracks.try_lock().is_some());
             runs += 1;
             if runs == 1 {
@@ -398,7 +461,7 @@ mod registration_tests {
         assert!(changed);
         assert_eq!(runs, 2);
         assert!(
-            read_watch_with(&tracks, &store, 1, |_| {
+            read_watch_with(&tracks, &|| store.sequence(), 1, |_| {
                 unwatch(&tracks, 1);
                 (Ok(Vec::new()), dependency())
             })
@@ -413,7 +476,7 @@ mod registration_tests {
         let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
         let tracks = SharedTracks::default();
         let mut runs = 0;
-        let answer = read_registered(&tracks, &store, 7, || {
+        let answer = read_registered(&tracks, &|| store.sequence(), 7, || {
             runs += 1;
             assert!(tracks.try_lock().is_some(), "ordinary execution releases the tracking lock");
             if runs == 1 {
@@ -435,7 +498,7 @@ mod registration_tests {
         let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
         let tracks = SharedTracks::default();
         let mut runs = 0;
-        read_registered(&tracks, &store, 7, || {
+        read_registered(&tracks, &|| store.sequence(), 7, || {
             runs += 1;
             if runs < 3 {
                 assert!(tracks.try_lock().is_some());
@@ -448,7 +511,7 @@ mod registration_tests {
         .unwrap();
         assert_eq!(runs, 3);
         tracks.lock().untrack(7);
-        read_registered(&tracks, &store, 7, || {
+        read_registered(&tracks, &|| store.sequence(), 7, || {
             tracks.lock().untrack(7);
             (Ok(Vec::new()), dependency())
         })
@@ -467,7 +530,7 @@ mod registration_tests {
             Watching { reads: Reads { reads: Vec::new(), track: None }, last: None, listener: None, again: false },
         );
         let mut runs = 0;
-        let (answer, _) = read_watch_with(&tracks, &store, 1, |_| {
+        let (answer, _) = read_watch_with(&tracks, &|| store.sequence(), 1, |_| {
             runs += 1;
             if runs < 3 {
                 store.write(|_, _| Ok(()), false).unwrap();
@@ -486,8 +549,8 @@ mod registration_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
         let tracks = SharedTracks::default();
-        read_registered(&tracks, &store, 7, || {
-            read_registered(&tracks, &store, 8, || (Ok(Vec::new()), dependency())).unwrap();
+        read_registered(&tracks, &|| store.sequence(), 7, || {
+            read_registered(&tracks, &|| store.sequence(), 8, || (Ok(Vec::new()), dependency())).unwrap();
             (Ok(Vec::new()), dependency())
         })
         .unwrap();
