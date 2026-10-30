@@ -1,11 +1,13 @@
 [alias]
 xtask = "run --quiet --package xtask --"
 
-# Every temporary directory a test makes lands in this checkout's target/, which `cargo clean` empties: a test killed
-# at a deadline leaves its directory behind, and in the system's shared temp directory nothing removes it. A mutation
-# run's land in its own copy of the tree, which cargo-mutants deletes. `force`, since macOS sets TMPDIR for every
-# session; Windows' temp directory is TMP's, then TEMP's
+# Every temporary directory a test makes lands in this checkout's tmp/, which `git clean -fdX tmp` empties: a test
+# killed at a deadline leaves its directory behind, and in the system's shared temp directory nothing removes it. A
+# mutation run's land in its own copy of the tree, which cargo-mutants deletes. tmp/ is committed, holding its own
+# .gitignore, so it exists in every checkout, worktree and copy before anything runs: the compiler and the linker use
+# these variables too, and target/ isn't there before a first build, nor in a worktree building into another target.
+# `force`, since macOS sets TMPDIR for every session; Windows' temp directory is TMP's, then TEMP's
 [env]
-TMPDIR = { value = "target/tmp", relative = true, force = true }
-TMP = { value = "target/tmp", relative = true, force = true }
-TEMP = { value = "target/tmp", relative = true, force = true }
+TMPDIR = { value = "tmp", relative = true, force = true }
+TMP = { value = "tmp", relative = true, force = true }
+TEMP = { value = "tmp", relative = true, force = true }

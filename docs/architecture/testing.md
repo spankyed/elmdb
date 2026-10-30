@@ -35,10 +35,12 @@ It runs in two places:
 
 ## Where a test's files go
 
-`.cargo/config.toml` points `TMPDIR`, and on Windows `TMP` and `TEMP`, at the checkout's `target/tmp`, so every
-temporary directory a test makes lands there, through cargo and nextest alike. A test killed at a deadline leaves its
-directory behind, which `cargo clean` removes; a mutation job's land in its own copy of the tree, which cargo-mutants
-deletes. A unit test's database is refused growth past 1 GiB (`TEST_MAP_LIMIT`, `MAP_FULL`), which no test nears, so a
+`.cargo/config.toml` points `TMPDIR`, and on Windows `TMP` and `TEMP`, at the checkout's `tmp/`, so every temporary
+directory a test makes lands there, through cargo and nextest alike. A test killed at a deadline leaves its directory
+behind, which `git clean -fdX tmp` removes; a mutation job's land in its own copy of the tree, which cargo-mutants
+deletes. `tmp/` is committed, holding only its `.gitignore`, because the compiler and the linker read these variables
+too: the directory has to exist before anything is built, in a fresh clone, a worktree building into another target
+and a mutation copy alike. A unit test's database is refused growth past 1 GiB (`TEST_MAP_LIMIT`, `MAP_FULL`), which no test nears, so a
 mutant that keeps one growing fails its test instead of filling the disk.
 
 ## Crashes and failed syncs
