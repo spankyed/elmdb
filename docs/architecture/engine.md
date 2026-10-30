@@ -110,8 +110,9 @@ A plan is a scope, a start, steps and a terminal:
   and `matching` (a trigram index's substring and pattern matches, in the set's order; `search.md`, Substrings and
   patterns as built), a pattern the syntax doesn't hold refused (`PATTERN_INVALID`).
 - **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
-  `edges` (relation rows), `degrees` (each entity with how many edges of the kinds it has, out, in or both ways, counting
-  those `edges` would answer), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
+  `edges` (the relation rows of the set's edges, `out`, `in` or `both` ways, each relation once), `degrees` (each
+  entity with how many edges of the kinds it has, out, in or both ways, counting those `edges` from it alone would
+  answer), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search found in each
   entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have

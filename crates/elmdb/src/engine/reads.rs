@@ -1866,18 +1866,21 @@ fn query_with(
             w.str("plainObjects");
             w.bool(plain);
         }
-        Terminal::Edges { kinds, outward, types } => {
+        Terminal::Edges { kinds, direction, types } => {
             for kind in kinds {
                 relations::definition(r, kind)?;
             }
             let ids = q.collect(last)?;
             let mut rows = Vec::new();
+            let mut answered = HashSet::new();
             for from in &ids {
                 for kind in kinds {
-                    for (relation, far) in relations::edges(r, from, *outward, Some(kind))? {
-                        if of_types(&far, types.as_deref()) && q.alive(&far)? {
-                            let stored = relations::get(r, &relation)?.expect("an edge's relation exists");
-                            rows.push((relation, stored));
+                    for &outward in direction.sides() {
+                        for (relation, far) in relations::edges(r, from, outward, Some(kind))? {
+                            if of_types(&far, types.as_deref()) && q.alive(&far)? && answered.insert(relation.clone()) {
+                                let stored = relations::get(r, &relation)?.expect("an edge's relation exists");
+                                rows.push((relation, stored));
+                            }
                         }
                     }
                 }

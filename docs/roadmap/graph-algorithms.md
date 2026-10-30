@@ -80,7 +80,7 @@ All three take `kinds` and `direction`. `rank` and `communities` also take `iter
   targets, all nodes for `pagerank` and the seeds for `personalized`. An empty set answers nothing. A seed outside the
   projection is ignored; no seed inside it answers nothing, rather than falling back to plain PageRank.
 - **Unweighted.** Every edge counts once. Weights wait for relation fields declared in the schema
-  (`deferred/graph-traversal.md`, item 3); `info` is undeclared and unindexed, and an algorithm must not guess a
+  (`deferred/graph-traversal.md`, item 2); `info` is undeclared and unindexed, and an algorithm must not guess a
   number out of it.
 - **Tracked and explained.** The projection is built through the read that tracked reads record, so a watch over a
   `rank` is written into by a commit that adds, removes or moves an edge between two of its entities, or changes the
