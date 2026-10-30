@@ -141,6 +141,16 @@ CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linu
 full matrix — macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding
 and running every suite, the model and crash harnesses included, on it.
 
+Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
+then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
+The latter two reuse the same binary: `scripts/runtime-binding.cjs` loads through the generated loader
+and checks its SHA-256 against the original, so a silent rebuild or selection of another binary fails.
+Electron executes with `ELECTRON_RUN_AS_NODE=1`; its own executable runs the test runner and child
+processes, without opening an app window. The standalone Node floor comes from the binding manifest;
+the Electron version is an explicit integration fixture, to update when apack changes its pinned runtime.
+Musl jobs retain their existing architecture coverage; this does not claim every Node version on every libc.
+These are required checks configured by the workflow, not a claim that a particular run has passed.
+
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
 
 ## Maintenance memory paths
