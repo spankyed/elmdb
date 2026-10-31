@@ -196,6 +196,7 @@ describe('relation kinds', () => {
       ['degrees', () => e.query.ids(a).degrees('blokcs')],
       ['rank', () => e.query.ids(a).rank('blokcs')],
       ['weakComponents', () => e.query.ids(a).weakComponents('blokcs')],
+      ['strongComponents', () => e.query.ids(a).strongComponents('blokcs')],
       ['communities', () => e.query.ids(a).communities('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
@@ -338,6 +339,18 @@ describe('graph algorithms', () => {
     expect(e.query('Task').weakComponents('refs')).toEqual([[c, d, x], [a, b]]);
     expect(e.query('Task').weakComponents(['refs', 'blocks'])).toEqual([[a, b, c, d, x]]);
     expect(e.query.ids([c, x]).weakComponents('refs')).toEqual([[c], [x]]);
+  });
+
+  it('strongComponents groups the query by the cycles its edges make, following each its way, the largest first', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    // a → b → c → a, a cycle; c → d, out of it; x alone
+    for (const [s, t] of [[a, b], [b, c], [c, a], [c, d]] as const) e.write(s!).link('refs', t!);
+    expect(e.query('Task').strongComponents('refs')).toEqual([[a, b, c], [d], [x]]);
+    // d → x → d closes a second cycle; and only edges inside the query count, so without c there is none through a
+    e.write(d).link('refs', x);
+    e.write(x).link('refs', d);
+    expect(e.query('Task').strongComponents('refs')).toEqual([[a, b, c], [d, x]]);
+    expect(e.query.ids([a, b]).strongComponents('refs')).toEqual([[a], [b]]);
   });
 
   it('communities splits the query where its edges thin, the same each time', () => {

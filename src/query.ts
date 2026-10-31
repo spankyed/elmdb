@@ -271,6 +271,10 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'weakComponents');
         return run(recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
       },
+      strongComponents: (kinds: MaybeArr<string>) => {
+        names.relationKinds(kinds, 'strongComponents');
+        return run(recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
+      },
       communities: (kinds: MaybeArr<string>, { resolution, seed }: { resolution?: number; seed?: number } = {}) => {
         names.relationKinds(kinds, 'communities');
         const answer = run(recipe, {

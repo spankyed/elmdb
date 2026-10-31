@@ -348,6 +348,13 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    */
   weakComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
   /**
+   * The query's strong components: its entities in groups whose members each reach every other following the edges of
+   * the kinds between two of them in their direction, so an entity on no cycle is a group of its own and a larger group
+   * is a cycle. Each group's ids in query order, the largest group first, of two as large the one whose first entity
+   * comes first
+   */
+  strongComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
+  /**
    * The query's entities in Leiden communities by modularity over the edges of the kinds between two of them, whichever
    * way each points: groups more densely linked inside than out, each connected, the largest first. A higher
    * `resolution` (1 when not given) finds smaller communities, and 0 keeps each connected group whole. Leiden's order
