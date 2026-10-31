@@ -63,6 +63,20 @@ fn maintenance(c: &mut Criterion) {
         });
         assert!(fixture.db.check().unwrap().is_clean());
         black_box(&fixture.directory);
+
+        // Five edges a document: building the graph and running each algorithm over it
+        let graph = Fixture::graph(rows, 5);
+        let mut group = c.benchmark_group("graph");
+        group.throughput(Throughput::Elements(rows as u64));
+        for read in ["components", "rank", "personalized"] {
+            graph.assert_graph_read(read);
+            let request = graph.graph_read(read);
+            group.bench_function(BenchmarkId::new(read, rows), |b| {
+                b.iter(|| black_box(graph.db.read(black_box(&request)).unwrap()))
+            });
+        }
+        group.finish();
+        black_box(&graph.directory);
     }
 }
 

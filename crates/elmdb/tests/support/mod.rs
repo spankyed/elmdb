@@ -135,6 +135,79 @@ impl Fixture {
         Self { db, directory, rows }
     }
 
+    /// Documents each linked to `degree` others by `refs`, chosen by arithmetic so every run builds the same graph: the
+    /// graph algorithms' workload (`docs/roadmap/graph-algorithms.md`). Seeding is outside all measurement windows
+    // The benchmarks' and the heap test's, where the profiling example shares this module
+    #[allow(dead_code)]
+    pub fn graph(rows: usize, degree: usize) -> Self {
+        let schema = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types":{"Doc":{"fields":{"body":{"type":"string"}}}},
+            "relations":{"refs":{"cardinality":"many-to-many"}}
+        }))
+        .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let db =
+            Database::open(directory.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+                .unwrap();
+        let mut loads: Vec<Load> = (0..rows)
+            .map(|i| Load::Entity {
+                id: format!("Doc-{i:08}"),
+                fields: BTreeMap::from([("body".to_owned(), Value::from("d"))]),
+                trashed: false,
+            })
+            .collect();
+        for i in 0..rows {
+            let mut targets: Vec<usize> = (1..=degree).map(|j| (i * 31 + j * 977) % rows).filter(|&t| t != i).collect();
+            targets.sort_unstable();
+            targets.dedup();
+            for t in targets {
+                loads.push(Load::Relation {
+                    id: format!("relation-{i:08}-{t:08}"),
+                    kind: "refs".into(),
+                    source: format!("Doc-{i:08}"),
+                    target: format!("Doc-{t:08}"),
+                    info: None,
+                });
+            }
+        }
+        db.bulk_load(&loads).unwrap();
+        Self { db, directory, rows }
+    }
+
+    /// A graph read over every document: `rank` (PageRank, or personalized from the first document), the ten
+    /// highest as hits, or the `components` answer
+    #[allow(dead_code)]
+    pub fn graph_read(&self, read: &str) -> Reads {
+        let (steps, terminal) = match read {
+            "rank" => (json!([{"step":"rank","kinds":["refs"]},{"step":"limit","n":10}]), json!({"answer":"hits"})),
+            "personalized" => (
+                json!([{"step":"rank","kinds":["refs"],"direction":"both","seeds":["Doc-00000000"]},{"step":"limit","n":10}]),
+                json!({"answer":"hits"}),
+            ),
+            _ => (json!([]), json!({"answer":"components","kinds":["refs"],"counts":true})),
+        };
+        serde_json::from_value(json!({"reads":[{"read":"query","plan":{
+            "start":{"from":"types","types":["Doc"]}, "steps":steps, "terminal":terminal
+        }}]}))
+        .unwrap()
+    }
+
+    /// The graph read's answer, checked: ten hits, settled, for a rank, and every document in the components
+    #[allow(dead_code)]
+    pub fn assert_graph_read(&self, read: &str) {
+        let bytes = self.db.read(&self.graph_read(read)).unwrap();
+        let answers: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+        let answer = &answers[0];
+        if read == "components" {
+            let total: u64 = answer["components"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
+            assert_eq!(total as usize, self.rows);
+        } else {
+            assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
+            assert_eq!(answer["rank"]["converged"], json!(true));
+        }
+    }
+
     pub fn assert_limited_query(&self) {
         let bytes = self.db.read(&self.limited_query()).unwrap();
         let answers: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
