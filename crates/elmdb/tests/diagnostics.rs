@@ -90,7 +90,7 @@ fn the_engine_never_installs_a_collector_and_one_installed_hears_every_operation
     assert_eq!((rebuilds[0].field("entity_type"), rebuilds[0].field("index")), ("Doc".into(), "tags".into()));
     assert_eq!(rebuilds[0].field(names::OUTCOME), "durable");
     assert_eq!(rebuilds[1].field(names::OUTCOME), "failed");
-    assert_eq!(rebuilds[1].field(names::ERROR), "UnknownIndex");
+    assert_eq!(rebuilds[1].field(names::ERROR), "UNKNOWN_INDEX", "named as JavaScript's error.code names it");
     assert_eq!(rebuilds[2].field(names::OUTCOME), "durable");
     // A full rebuild of 200 entities' tags and text takes far longer than a microsecond
     let elapsed = rebuilds[2].field(names::ELAPSED_US).parse::<u64>().unwrap();
