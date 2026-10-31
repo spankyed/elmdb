@@ -1,6 +1,6 @@
 # Graph algorithms: what they answer and what they cost
 
-The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2. 2026-10-31, on
+The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2 and 4. 2026-10-31, on
 `session/graph-algorithms` from `f613add`, on an Apple M1 Pro (macOS), Rust 1.99.1, Node 23.11.1.
 
 ## Correct
@@ -57,3 +57,23 @@ edges, measured between 5,000 and 10,000 documents, against an allowance of 256.
 pull request and `scripts/diagnostics-overhead.py` gates. Their maps hash with fixed keys: with the standard library's
 per-process keys, one build's personalized rank counted 2.9% fewer instructions than another's in one run and 0.0085%
 in the next, which no comparison of two counts can gate on; with fixed keys the two builds agree to 3 instructions.
+
+## Communities (stage 4)
+
+Leiden through leiden-rs 0.8.1, no default features (`development-libraries.md`, stage 6).
+
+- **Invariants** (`crates/elmdb/src/engine/algorithms/tests.rs`): over 128 random graphs and four seeds, every node is
+  in exactly one community, every community is connected (Leiden's guarantee), the partition's modularity is never
+  below every node alone, and a seed answers the same partition twice.
+- **Known answer:** the karate club at resolution 1, seed 0: four communities of 12, 11, 6 and 5 members, modularity
+  0.4197896, the club's best known (Brandes et al., 2008), with the two leaders, members 0 and 33, apart. The
+  partition is recorded exactly and asserted on Linux, macOS and Windows.
+- **Resolution:** 0.25 finds fewer communities than 2; at 0, every edge only adds, so each component is one community.
+- **Through the store** (`crates/elmdb/src/engine/tests/ranks.rs`): over 64 random graphs, the engine's answer equals
+  the communities of the graph built by hand from the same edges; two four-cliques joined by one edge answer as the
+  two cliques, at seeds 0 and 7.
+- **Time** (Criterion, the same graph as the other reads): 3.66 ms at 1,000 documents and 54.6 ms at 10,000, about
+  four times `weakComponents`' 1.30 and 14.14: Leiden's rounds of moves, refinement and aggregation over the graph it
+  copied, beside the reads every graph costs.
+- **Heap:** about 764 bytes an entity at five edges, measured between 5,000 and 10,000 documents: leiden-rs copies
+  the graph into its builder's edge list and a CSR holding each edge both ways. The heap test holds it to 1,024.

@@ -3,8 +3,8 @@
 Status: partial implementation. Criterion maintenance benchmarks are implemented (2026-10-27); stage 1 is built and
 stage 3 was evaluated and declined (2026-10-30), each with its record below; stage 4's first model is built and kept
 (2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 is built and kept behind a feature that is off
-by default (2026-10-30, [its record](../evidence/diagnostics.md)); stage 6, the graph algorithms, was evaluated and
-declined (2026-10-31).
+by default (2026-10-30, [its record](../evidence/diagnostics.md)); stage 6, the graph algorithms, was evaluated:
+PageRank and components declined and written in elmdb, Leiden through leiden-rs (2026-10-31).
 The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
@@ -31,7 +31,7 @@ or change public error meanings as part of this work.
 | 3 | rustix | Evaluate Unix API coverage; migrate only operations that become clearer and safer |
 | 4 | Loom | Model one production concurrency state machine, then decide whether to expand |
 | 5 | tracing | Prove useful diagnostics and collection through the binding before broader instrumentation |
-| 6 | petgraph, graph, rustworkx-core | Evaluate for the graph algorithms; declined, written in elmdb (`graph-algorithms.md`) |
+| 6 | petgraph, graph, rustworkx-core; leiden-rs | Evaluate for the graph algorithms: the first three declined, written in elmdb; leiden-rs kept for Leiden (`graph-algorithms.md`) |
 
 Each stage is a separate reviewable change. Stages 1 and 2 can proceed independently; stage 3 follows the platform API
 inventory from stage 1. Stages 4 and 5 have explicit evaluation gates rather than unconditional adoption.
@@ -164,7 +164,7 @@ Acceptance:
 
 ## 6. Graph algorithms
 
-Status: evaluated and declined, 2026-10-31. `graph-algorithms.md`'s stage 0, against its requirements: personalized
+Status: evaluated, 2026-10-31: PageRank and components declined, Leiden kept. `graph-algorithms.md`'s stage 0, against its requirements: personalized
 PageRank with explicit seeds, its dangling-node rule and a convergence report; deterministic output with no
 parallelism that can't be turned off; building from the plan's CSR without copying the graph into the library's.
 
@@ -178,7 +178,23 @@ parallelism that can't be turned off; building from the plan's CSR without copyi
 
 None meets the requirements, so `crates/elmdb/src/engine/algorithms.rs` holds the two the roadmap sized: union-find
 components and power-iteration personalized PageRank over its own CSR, about a hundred lines, checked against a dense
-reference over random graphs and networkx's karate-club scores. Leiden is evaluated on its own, with its stage.
+reference over random graphs and networkx's karate-club scores.
+
+**Leiden** (`graph-algorithms.md`'s stage 4), evaluated on its own, against: seeded and deterministic, a resolution,
+modularity, parallelism that can be turned off, a compatible licence, and what it brings.
+
+- **leiden-rs 0.8.1** (MIT OR Apache-2.0, 2026-05-15): Leiden with modularity, CPM and two Reichardt–Bornholdt
+  functions, a `resolution`, a `seed` into a `StdRng`, and rayon behind a default feature, whose parallel moves are
+  compiled out without it. Kept, at `=0.8.1` with no default features (no CLI, rayon or graph adapters). It brings
+  rand 0.9 (beside elmdb's 0.10), rand_chacha, getrandom 0.3 and rustc-hash 2, and copies the graph into its own
+  CSR: about 764 bytes an entity at five edges, measured, which the heap test holds to 1,024.
+- **fa-leiden-cd 0.1.0** and **single-clustering 0.7.0**: non-standard licences. **clust-libreville-rs 0.1.1**:
+  days old, below the two-week floor.
+
+Written here instead, Leiden's local moving, refinement and aggregation would be the largest of the three algorithms
+to write and to verify. leiden-rs is held to the same checks: every community connected, the karate club's best
+known partition (modularity 0.41979, Brandes et al. 2008) found and recorded exactly, and the same partition for a
+seed on Linux, macOS and Windows.
 
 ## Delivery and validation
 

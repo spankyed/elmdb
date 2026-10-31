@@ -52,6 +52,7 @@ rust-stemmers = "1.2.0"
 hannoy = "0.3.0"
 rand = "0.10.2"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+leiden-rs = { version = "=0.8.1", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -5,6 +5,8 @@
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-diagnostics-off`: fails when a default build of the workspace has `elmdb` depend on `tracing` itself,
 //!   which only its `diagnostics` feature may make it do.
+//! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
+//!   parallel moves would make a partition depend on the threads' timing rather than on its seed alone.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -18,7 +20,11 @@ fn main() -> ExitCode {
         Some("check-generated") => check_generated(),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
-        _ => Err("usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off>".to_owned()),
+        Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
+        _ => Err(
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial>"
+                .to_owned(),
+        ),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -103,6 +109,29 @@ fn check_diagnostics_off(root: &Path) -> Result<(), String> {
         Some(_) => Err("A default build has elmdb depend on tracing, which only its `diagnostics` feature may: a \
                         workspace crate enables that feature by default"
             .to_owned()),
+    }
+}
+
+fn check_leiden_serial(root: &Path) -> Result<(), String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["tree", "--workspace", "--edges", "features", "--invert", "leiden-rs", "--depth", "0"])
+        .args(["--prefix", "none", "--format", "{p}|{f}"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo tree didn't run: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("cargo tree failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let tree = String::from_utf8_lossy(&output.stdout);
+    let Some(features) = tree.lines().find_map(|line| line.strip_prefix("leiden-rs ")) else {
+        return Err(format!("cargo tree listed no leiden-rs, so this checked nothing:\n{tree}"));
+    };
+    match features.split_once('|').map(|(_, f)| f.trim()) {
+        Some("") => Ok(()),
+        enabled => Err(format!(
+            "The workspace builds leiden-rs with features {enabled:?}; communities need it with none, its rayon \
+             feature making a partition depend on thread timing"
+        )),
     }
 }
 

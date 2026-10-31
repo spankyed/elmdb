@@ -134,5 +134,45 @@ pub fn rank(graph: &Projection, seeds: &[u32], damping: f64, iterations: u32, to
     Some(Ranked { scores, converged: false, iterations })
 }
 
+/// Leiden communities (Traag, Waltman and van Eck, 2019) by modularity at `resolution`, through leiden-rs: each edge
+/// joins its ends whichever way it points, and counts once. Each community is connected, which Leiden guarantees and
+/// Louvain doesn't. Each a list of nodes in their numbering, largest first, ties by first member. Leiden's random
+/// order comes from `seed`, so a seed and a graph answer the same partition on every platform; it runs on one thread,
+/// leiden-rs's parallel moves being compiled out, and stops after `iterations` rounds or when a round no longer
+/// improves the partition
+pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u32) -> Vec<Vec<u32>> {
+    let n = graph.nodes();
+    if n == 0 {
+        return Vec::new();
+    }
+    let mut data = leiden_rs::GraphDataBuilder::new(n);
+    for v in 0..n {
+        for &w in graph.out(v) {
+            data.add_edge(v, w as usize, 1.0).expect("a node of the graph, and a finite weight");
+        }
+    }
+    let data = data.build().expect("a graph of its own nodes");
+    let config = leiden_rs::LeidenConfig {
+        max_iterations: iterations as usize,
+        resolution,
+        seed: Some(seed),
+        ..leiden_rs::LeidenConfig::default()
+    };
+    let found = leiden_rs::Leiden::new(config).run(&data).expect("leiden-rs runs over a built graph");
+    // leiden-rs numbers communities from 0 and has no more of them than nodes
+    let mut group_of: Vec<Option<usize>> = vec![None; n];
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    for v in 0..n {
+        let community = found.partition.community_of(v);
+        let at = *group_of[community].get_or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[at].push(v as u32);
+    }
+    groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
+    groups
+}
+
 #[cfg(test)]
 mod tests;

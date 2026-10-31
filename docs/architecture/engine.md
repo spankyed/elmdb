@@ -124,7 +124,11 @@ A plan is a scope, a start, steps and a terminal:
   entity with how many edges of the kinds it has, out, in or both ways, counting those `edges` from it alone would
   answer), `weakComponents` (the set's weak components over the kinds, each edge joining its ends whichever way it
   points: each one's ids in the set's order, largest first, ties by the earlier first member, or with `counts` how
-  many), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search or a rank found in each entity).
+  many), `communities` (the set's Leiden communities by modularity over the kinds, each edge joining its ends
+  whichever way: groups more densely linked inside than out, each connected, largest first; a higher `resolution`
+  (1.0) finds smaller ones and 0 leaves each component whole; Leiden's order is drawn from `seed` (0), so a seed answers
+  the same for the same data on every platform; at most `iterations` (100) rounds; a negative resolution or no
+  iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search or a rank found in each entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. The planner makes four choices, none of which changes
@@ -153,7 +157,7 @@ included, which is what says whether a filter walked rows an index could have an
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
-`weakComponents`) with its `nodes` and `edges`, and a rank's `iterations` and whether it `converged`. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+`weakComponents`, `communities`) with its `nodes` and `edges`, and a rank's `iterations` and whether it `converged`. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so

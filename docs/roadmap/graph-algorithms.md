@@ -1,7 +1,7 @@
 # Graph algorithms
 
-Status: stages 0 to 2 built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)); stage 3 is apack's: the
-query builder's methods, with no app caller yet; stage 4 is planned. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
+Status: built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)): stages 0 to 2 and 4 in elmdb, stage 3
+in apack. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
 caller to read every edge and compute over them in JavaScript. `../architecture/engine.md`, Reads, has them as built.
 
 ## Why in the engine
@@ -79,14 +79,15 @@ heap test bounds.
 - **`weakComponents` terminal:** the weak components of the projection, the groups its edges join whichever way they
   point, as `groupBy` answers groups: each
   group's ids, or with `counts` its size, largest first, ties by first member's place in the set.
-- **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, with
+- **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, without `counts`, with
   `resolution` (default `1.0`) and a `seed`. Leiden rather than Louvain, because Louvain can return communities that
   are not connected, and Leiden guarantees they are.
 
-All three take `kinds`. `rank` and `communities` take `direction` too; `weakComponents` doesn't, an edge joining its ends
+All three take `kinds`. `rank` takes `direction` too; `weakComponents` and `communities` don't, an edge joining its ends
 whichever way it points, so a direction would change nothing. `rank` and `communities` also take `iterations`
-(default `100`) and `tolerance` (default `1e-6`, L1 change in scores between rounds): at damping 0.85 the change after
-`n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 90th, so the defaults always settle.
+(default `100`), and `rank` a `tolerance` (default `1e-6`, L1 change in scores between rounds): at damping 0.85 the
+change after `n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 90th, so the defaults always settle. Leiden stops
+early when a round no longer improves the partition.
 
 ### Rules every algorithm keeps
 
@@ -139,8 +140,9 @@ much the largest of the three to write and to verify.
    withdrawn: a notes graph this small and sparse ranks about as a two-step walk does, and the prompt context sent
    notes the user had not chosen. A caller comes with a need, such as ranking across every entity type.
 4. **`communities`: Leiden**, off the critical path: its one caller is a graph view coloured by community, which
-   stages 1 to 3 do not wait on. It starts when that view is being built, with its own library evaluation, and
-   `@apackdev/ears` gains `.communities(...)` then.
+   stages 1 to 3 do not wait on. Built through leiden-rs after its own evaluation (`development-libraries.md`, stage
+   6), with `@apackdev/ears`'s `.communities(...)`; the graph view isn't built. Like `weakComponents`, it takes no
+   `direction`: modularity is of the undirected graph, an edge joining its ends whichever way it points.
 
 Later, each when a caller needs it: node similarity (Jaccard over neighbours, "notes linked like this one"), k-core,
 betweenness centrality (Brandes), label propagation, and weights once relations declare fields.

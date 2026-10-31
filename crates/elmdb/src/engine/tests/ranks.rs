@@ -222,6 +222,22 @@ fn explain_reports_the_graph_each_built() {
         ))
         .unwrap(),
     );
+    let communities = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "types", "types": ["Task"] },
+                "terminal": { "answer": "communities", "kinds": ["refs"] }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let terminal = &communities[0]["stages"][1];
+    assert_eq!(
+        (&terminal["stage"], &terminal["nodes"], &terminal["edges"]),
+        (&json!("communities"), &json!(4), &json!(3))
+    );
+    assert!(communities[0]["stages"][0].get("nodes").is_none(), "the start built no graph");
     let stages = explained[0]["stages"].as_array().unwrap();
     assert_eq!(stages[1]["stage"], json!("rank"));
     assert_eq!(
@@ -294,6 +310,48 @@ fn a_tracked_weak_components_read_is_written_into_by_an_edge_between_two_of_its_
     assert_eq!(touched(("Task-c", "Task-a")), [1], "an edge inside its set");
 }
 
+#[test]
+fn communities_answer_the_densely_linked_groups_the_same_each_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let names: Vec<String> = (0..8).map(|n| format!("Task-{n}")).collect();
+    tasks(&db, &names.iter().map(String::as_str).collect::<Vec<_>>());
+    // Two tight squares, 0-3 and 4-7, joined by one edge, 3 → 4
+    let mut edges = Vec::new();
+    for base in [0, 4] {
+        for a in base..base + 4 {
+            for b in a + 1..base + 4 {
+                edges.push((names[a].clone(), names[b].clone()));
+            }
+        }
+    }
+    edges.push((names[3].clone(), names[4].clone()));
+    let refs: Vec<(&str, &str, &str)> = edges.iter().map(|(s, t)| (s.as_str(), "refs", t.as_str())).collect();
+    link(&db, &refs);
+    let answer =
+        |terminal: Json| query(&db, json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": terminal }));
+    let found = answer(json!({ "answer": "communities", "kinds": ["refs"] }));
+    assert_eq!(
+        found["communities"],
+        json!([["Task-0", "Task-1", "Task-2", "Task-3"], ["Task-4", "Task-5", "Task-6", "Task-7"]])
+    );
+    assert_eq!(
+        answer(json!({ "answer": "communities", "kinds": ["refs"], "seed": 7 }))["communities"],
+        found["communities"]
+    );
+    // At resolution 0 every edge only adds, so the one component is one community
+    let whole = answer(json!({ "answer": "communities", "kinds": ["refs"], "resolution": 0.0 }));
+    assert_eq!(whole["communities"].as_array().unwrap().len(), 1);
+    for bad in [json!({ "resolution": -1.0 }), json!({ "iterations": 0 })] {
+        let mut terminal = json!({ "answer": "communities", "kinds": ["refs"] });
+        terminal.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+        let plan = json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": terminal });
+        assert_eq!(try_query(&db, plan).unwrap_err().code, ErrorCode::BatchInvalid, "{bad}");
+    }
+    let unknown = json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": { "answer": "communities", "kinds": ["nope"] } });
+    assert_eq!(try_query(&db, unknown).unwrap_err().code, ErrorCode::UnknownRelationKind);
+}
+
 const NODES: usize = 7;
 const KINDS: [&str; 2] = ["refs", "blocks"];
 
@@ -363,5 +421,11 @@ proptest! {
             "terminal": { "answer": "weakComponents", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = groups.drain(..).map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
         prop_assert_eq!(&answer["weakComponents"], &json!(named));
+
+        let communities = algorithms::communities(&by_hand(&edges, &kinds, "out"), 1.0, 0, 100);
+        let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
+            "terminal": { "answer": "communities", "kinds": kind_names } }));
+        let named: Vec<Vec<String>> = communities.into_iter().map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
+        prop_assert_eq!(&answer["communities"], &json!(named));
     }
 }
