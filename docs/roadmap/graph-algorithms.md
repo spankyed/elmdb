@@ -152,8 +152,14 @@ much the largest of the three to write and to verify.
    import-cycle check would be the first; a check of one new link, such as the thread link form's, needs only
    `wouldCreateCycle`.
 
-Later, each when a caller needs it: node similarity (Jaccard over neighbours, "notes linked like this one"), k-core,
-betweenness centrality (Brandes), label propagation, and weights once relations declare fields.
+6. **`topological` and `similar` steps**, written in elmdb. `topological` is Kahn's algorithm over the strong
+   components, each time taking the ready one whose first member is earliest in the set, so a cycle stays together
+   and the answer is the order the edges allow nearest the set's; EXPLAIN counts its `cycles`. `similar` scores the set
+   by Jaccard or Adamic–Adar over neighbours, read two edges out from `to` rather than across the set, its neighbours
+   counted wherever they are, so files can be alike by the symbols they use. `@apackdev/ears` exposes both on the query
+   builder, with no app caller.
+
+Later: k-core, betweenness centrality (Brandes), label propagation, and weights (`rank-weights.md`).
 
 ## Verification
 
