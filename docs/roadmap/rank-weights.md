@@ -1,6 +1,20 @@
 # Rank weights
 
-Status: designed, 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35). Edges that carry a weight,
+Status: built in elmdb, 2026-10-31 (`docs/evidence/graph-algorithms.md`, Weights); apack's side follows in its own PR.
+Where the build differs from the design below:
+
+- **The weight is stored only when it isn't 1**, on the row and in the edge entries, so an unweighted kind's rows and
+  entries, and a weighted kind's edges of weight 1, are the bytes they were. Adding or removing `weighted` rewrites
+  nothing.
+- **A weight is part of the edge's identity**, as its info is: linking a pair again with another weight adds a parallel
+  edge, or on a `unique` kind replaces the weight in place; no weight given matches any edge between the ends.
+- **An id named twice among the seeds adds its weights.**
+- **The hits answer's `rank` record gains no `weighted` flag**: EXPLAIN's `weight`, the total weight read, says whether
+  weights were read.
+- **The heap allowance for a weighted `rank` is 256 bytes an entity**, the reads' 192 leaving too little room over the
+  184 it holds.
+
+Designed 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35). Edges that carry a weight,
 and seeds that carry one, so `rank` can say a strong link matters more than a weak one and one starting point more than
 another. One PR: both change `rank`'s sums, its references and its benches.
 

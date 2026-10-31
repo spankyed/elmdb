@@ -170,6 +170,10 @@ violations identify the element path. Strings inside `object` and `any` remain o
 - `unique: true`: at most one edge of this kind between two entities, so linking a pair again updates the edge's info,
   and moving an edge onto a pair another edge joins is refused (`DUPLICATE_EDGE`).
   Today's per-call `replace` becomes this.
+- `weighted: true`: each edge of this kind has a weight, a finite number of at least 0, 1 when a link gives none. A
+  weight that isn't one, or a weight on a kind not declared weighted, is refused (`VALUE_INVALID`). The weight is part
+  of the edge as its info is: linking a pair again with another weight adds a parallel edge, or on a `unique` kind
+  replaces the weight. `rank` and `communities` read it (`engine.md`, Reads: plans).
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.
 
@@ -249,6 +253,7 @@ stored one.
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
+| `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic`, `unique` added) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
 | A short code prefix changed, a type declared again with another prefix than its stored codes hold, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
 | Anything renamed | not inferred. `admin.renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |

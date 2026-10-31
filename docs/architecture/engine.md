@@ -85,7 +85,8 @@ callbacks. Coordinate writes in one process when observers must hear every commi
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
 envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
-whether it is present), a relation's row, `findRelations` by kind and ends, `wouldCreateCycle` (the walk a link's
+whether it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind
+and ends, `wouldCreateCycle` (the walk a link's
 `CYCLE` check makes, a trashed entity's edges included), and search's
 `suggest` and `findLabels`. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`).
@@ -106,6 +107,12 @@ A plan is a scope, a start, steps and a terminal:
   edges of the kinds named between two of them the edges. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
   `damping` (0.85) and otherwise jumps back to a `seeds` entity, every entity when none are given, which is PageRank.
+  Over a kind declared weighted it follows an edge in proportion to its weight among its entity's edges, an edge of a
+  kind not weighted weighing 1 and parallel edges adding; an entity whose edges weigh nothing in all sends the walker
+  back to the seeds, as one without edges does. `weights: false` ranks as if every edge weighed 1. A seed is an id, of
+  weight 1, or `{ id, weight }`, and the walker jumps back to each in proportion to its weight, an id named twice adding
+  its weights; a seed weight that isn't a finite number above 0 is refused (`BATCH_INVALID`). With every weight 1 the
+  scores are the unweighted ones, bit for bit.
   Each score is a hit's, so `hits` answers it, and a `limit` after keeps the highest. Rounds stop when the scores move
   by less than `tolerance` (1e-6, their L1 distance) or after `iterations` (100, enough to settle at the default
   damping from any start), and the `hits` answer's `rank` says whether they settled and in how many. A seed outside
@@ -139,8 +146,8 @@ A plan is a scope, a start, steps and a terminal:
   `counts`), `communities` (the set's Leiden communities by modularity over the kinds, each edge joining its ends
   whichever way: groups more densely linked inside than out, each connected, largest first; a higher `resolution`
   (1.0) finds smaller ones and 0 leaves each component whole; Leiden's order is drawn from `seed` (0), so a seed answers
-  the same for the same data on every platform; at most `iterations` (100) rounds; a negative resolution or no
-  iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search, a rank or a `similar` found in each entity).
+  the same for the same data on every platform; at most `iterations` (100) rounds; an edge of a kind declared weighted
+  counts by its weight unless `weights` is false; a negative resolution or no iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search, a rank or a `similar` found in each entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. The planner makes four choices, none of which changes
@@ -169,7 +176,8 @@ included, which is what says whether a filter walked rows an index could have an
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
-`topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+`topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, the `weight` of its
+edges added up when it read weights, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
@@ -210,8 +218,9 @@ The operations:
 
 - **Operations:** create (a whole row; the engine assigns the id unless an import brings one, the code, `createdAt`
   and `updatedAt`), upsert, set, set many, append to a list, merge into an object, delete a field, remove from a list,
-  trash, restore, grant and revoke a role, grant exclusively among entities, link (with info, replace, and refusing a
-  cycle in a kind), unlink, unlink all, update and remove a relation, destroy.
+  trash, restore, grant and revoke a role, grant exclusively among entities, link (with info and, for a kind declared
+  weighted, a weight; replace, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
+  info, its weight) and remove one, destroy.
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
   it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
   is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
@@ -222,7 +231,8 @@ The operations:
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
-  (`UNKNOWN_FIELD`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
+  (`UNKNOWN_FIELD`), a weight that isn't a finite number of at least 0 or on a kind not declared weighted
+  (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
   moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later.
