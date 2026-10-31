@@ -111,7 +111,7 @@ A plan is a scope, a start, steps and a terminal:
   kind not weighted weighing 1 and parallel edges adding; an entity whose edges weigh nothing in all sends the walker
   back to the seeds, as one without edges does. `weights: false` ranks as if every edge weighed 1. A seed is an id, of
   weight 1, or `{ id, weight }`, and the walker jumps back to each in proportion to its weight, an id named twice adding
-  its weights; a seed weight that isn't a finite number above 0 is refused (`BATCH_INVALID`). With every weight 1 the
+  its weights; a seed weight that isn't above 0 and at most 2^960 is refused (`BATCH_INVALID`). With every weight 1 the
   scores are the unweighted ones, bit for bit.
   Each score is a hit's, so `hits` answers it, and a `limit` after keeps the highest. Rounds stop when the scores move
   by less than `tolerance` (1e-6, their L1 distance) or after `iterations` (100, enough to settle at the default
@@ -231,7 +231,7 @@ The operations:
   in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
-  (`UNKNOWN_FIELD`), a weight that isn't a finite number of at least 0 or on a kind not declared weighted
+  (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
   moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link

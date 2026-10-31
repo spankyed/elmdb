@@ -117,7 +117,8 @@ fn a_weight_that_isnt_a_finite_number_of_at_least_0_or_on_a_kind_not_weighted_is
         info: None,
         weight: Some(weight),
     };
-    for weight in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+    let above = relations::MAX_WEIGHT * 2.0;
+    for weight in [-0.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, above, f64::MAX] {
         let e = db.write(&Batch { ops: vec![op(weight)], now: Some(1000.0) }, false).unwrap_err();
         assert_eq!(e.code, ErrorCode::ValueInvalid, "{weight}: {e:?}");
         let update = Op::UpdateRelation {
@@ -133,8 +134,10 @@ fn a_weight_that_isnt_a_finite_number_of_at_least_0_or_on_a_kind_not_weighted_is
     let e = refused(&db, vec![link("Task-a", "refs", "Task-b", Some(2.0))]);
     assert_eq!(e.code, ErrorCode::ValueInvalid);
     assert!(e.message.contains("refs"), "the message names the kind: {}", e.message);
-    // 0 is a weight: an edge the walker never follows
-    write(&db, vec![link("Task-b", "weighs", "Task-a", Some(0.0))]).unwrap();
+    // 0 is a weight: an edge the walker never follows; -0 is held as 0, so equal weights are the same bytes
+    let (zero, _) = linked(&write(&db, vec![link("Task-b", "weighs", "Task-a", Some(-0.0))]).unwrap());
+    assert_eq!(stored(&db, &zero).weight.map(f64::to_bits), Some(0.0f64.to_bits()));
+    assert_eq!(linked(&write(&db, vec![link("Task-b", "weighs", "Task-a", Some(0.0))]).unwrap()), (zero, false));
     assert_eq!(super::edges(&db), ["Task-a|weighs|Task-b", "Task-b|weighs|Task-a"]);
     assert_eq!(stored(&db, &relation).weight, Some(2.0), "nothing a refused batch held was written");
 }
@@ -211,7 +214,7 @@ fn rank_walks_and_teleports_by_weight_unless_told_not_to() {
     assert!((score(&seeded, "Task-b") - 3.0 * score(&seeded, "Task-c")).abs() < 1e-12, "{seeded:?}");
     let twice = scores(&db, &["weighs"], json!({ "seeds": ["Task-b", "Task-b", "Task-b", "Task-c"] }));
     assert_eq!(seeded, twice, "a seed named again adds its weight");
-    for bad in [json!(0), json!(-1)] {
+    for bad in [json!(0), json!(-1), json!(relations::MAX_WEIGHT * 2.0)] {
         let e = query(
             &db,
             json!({ "start": { "from": "types", "types": ["Task"] },
@@ -225,6 +228,22 @@ fn rank_walks_and_teleports_by_weight_unless_told_not_to() {
     write(&db, vec![link("Task-a", "refs", "Task-c", None)]).unwrap();
     let mixed = scores(&db, &["weighs", "refs"], json!({ "seeds": ["Task-a"] }));
     assert!((score(&mixed, "Task-b") / score(&mixed, "Task-c") - 9.0 / 2.0).abs() < 1e-9, "{mixed:?}");
+}
+
+#[test]
+fn the_largest_weights_add_up_without_losing_a_walker() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-a", "Task-b", "Task-c"]);
+    let most = relations::MAX_WEIGHT;
+    write(&db, vec![link("Task-a", "weighs", "Task-b", Some(most)), link("Task-a", "weighs", "Task-c", Some(most))])
+        .unwrap();
+    let seeds = json!([{ "id": "Task-a", "weight": most }, { "id": "Task-b", "weight": most }]);
+    let found = scores(&db, &["weighs"], json!({ "seeds": seeds }));
+    let total: f64 = found.iter().map(|(_, s)| s).sum();
+    assert!((total - 1.0).abs() < 1e-12, "{found:?}");
+    // b is a seed besides a target, so it holds more than c
+    assert!(score(&found, "Task-b") > score(&found, "Task-c"), "{found:?}");
 }
 
 #[test]

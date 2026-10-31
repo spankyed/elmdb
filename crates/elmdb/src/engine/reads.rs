@@ -646,12 +646,12 @@ impl<R: Read> Query<'_, R> {
                     ));
                 }
                 if let Some(bad) =
-                    seeds.iter().flatten().find(|seed| !(seed.weight().is_finite() && seed.weight() > 0.0))
+                    seeds.iter().flatten().find(|seed| !(seed.weight() > 0.0 && seed.weight() <= relations::MAX_WEIGHT))
                 {
                     return Err(Error::new(
                         ErrorCode::BatchInvalid,
                         format!(
-                            "rank takes a seed's weight above 0, and was given {} for {:?}",
+                            "rank takes a seed's weight above 0 and at most 2^960, and was given {} for {:?}",
                             bad.weight(),
                             bad.id()
                         ),

@@ -16,7 +16,7 @@ acyclic?: boolean,
  */
 unique?: boolean, 
 /**
- * Each edge carries a weight, a finite number of at least 0 and 1 when a link gives none, which `rank` and
+ * Each edge carries a weight, a number from 0 to 2^960 and 1 when a link gives none, which `rank` and
  * `communities` read
  */
 weighted?: boolean, 

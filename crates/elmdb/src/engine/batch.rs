@@ -147,7 +147,7 @@ pub enum Op {
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
-        /// The edge's weight, for a kind declared `weighted`: a finite number of at least 0, 1 when none is given
+        /// The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         weight: Option<f64>,
@@ -174,7 +174,7 @@ pub enum Op {
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
-        /// The edge's weight, for a kind declared `weighted`: a finite number of at least 0, 1 when none is given
+        /// The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         weight: Option<f64>,

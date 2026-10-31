@@ -64,7 +64,7 @@ pub struct RelationDef {
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub unique: bool,
-    /// Each edge carries a weight, a finite number of at least 0 and 1 when a link gives none, which `rank` and
+    /// Each edge carries a weight, a number from 0 to 2^960 and 1 when a link gives none, which `rank` and
     /// `communities` read
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]

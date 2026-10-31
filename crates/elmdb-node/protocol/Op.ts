@@ -5,10 +5,10 @@
  */
 export type Op = { "op": "create", type: string, id?: string, fields?: Record<string, unknown> | undefined, shortCode?: string, createdAt?: number, updatedAt?: number, } | { "op": "upsert", type: string, id: string, fields?: Record<string, unknown> | undefined, shortCode?: string, } | { "op": "set", id: string, fields: Record<string, unknown>, touch?: boolean, } | { "op": "append", id: string, field: string, value: unknown, touch?: boolean, } | { "op": "merge", id: string, field: string, value: unknown, touch?: boolean, } | { "op": "delete", id: string, field: string, touch?: boolean, } | { "op": "removeAt", id: string, field: string, index: number, touch?: boolean, } | { "op": "removeValue", id: string, field: string, value: unknown, touch?: boolean, } | { "op": "trash", id: string, at?: number, } | { "op": "restore", id: string, } | { "op": "grant", id: string, role: string, } | { "op": "revoke", id: string, role: string, } | { "op": "grantExclusive", id: string, role: string, among: Array<string>, } | { "op": "link", source: string, kind: string, target: string, info?: unknown, 
 /**
- * The edge's weight, for a kind declared `weighted`: a finite number of at least 0, 1 when none is given
+ * The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
  */
 weight?: number, } | { "op": "unlink", source: string, kind?: string, target?: string, } | { "op": "updateRelation", relation: string, source?: string, target?: string, info?: unknown, 
 /**
- * The edge's weight, for a kind declared `weighted`: a finite number of at least 0, 1 when none is given
+ * The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
  */
 weight?: number, } | { "op": "removeRelation", relation: string, } | { "op": "destroy", id: string, } | { "op": "takeLabel", type: string, base: string, } | { "op": "embed", id: string, index?: string, chunk: number, hash: string, model: string, vector: Array<number>, };

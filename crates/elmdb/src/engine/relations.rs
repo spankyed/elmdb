@@ -54,9 +54,19 @@ pub fn edge_value(relation: &str, far: &str, weight: Option<f64>) -> Vec<u8> {
     values::encode(&Value::Array(parts))
 }
 
-fn file(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
+/// The largest weight an edge or a seed takes, 2^960: a graph holds fewer than 2^32 edges and a plan fewer than 2^32
+/// seeds, so no sum of weights a rank adds up can reach infinity, which would lose the walkers it holds
+pub const MAX_WEIGHT: f64 = f64::from_bits((1023 + 960) << 52);
+
+/// The edge entries out and in, which hold the weight; the entry between the ends doesn't, so a new weight on edges
+/// that stay where they are is written here alone
+fn file_edges(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
     t.put(&keys::edge(true, &s.source, &s.kind, s.seq), &edge_value(relation, &s.target, s.weight))?;
-    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge_value(relation, &s.source, s.weight))?;
+    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge_value(relation, &s.source, s.weight))
+}
+
+fn file(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
+    file_edges(t, relation, s)?;
     t.put(&keys::between(&s.source, &s.kind, &s.target, s.seq), &values::encode(&relation.into()))
 }
 
@@ -232,7 +242,8 @@ fn check_rules(
 }
 
 /// A weight given to an edge of `def`, as the row holds it: refused unless the kind is declared weighted and the weight
-/// is a finite number of at least 0; 1, every edge's weight unless given another, held as none
+/// is a number from 0 to `MAX_WEIGHT`; 1, every edge's weight unless given another, held as none, and -0 held as 0, so
+/// equal weights are the same bytes
 fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
     let Some(weight) = weight else { return Ok(None) };
     if !def.weighted {
@@ -241,13 +252,13 @@ fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Optio
             format!("A {kind} relation carries no weight: its kind isn't declared weighted"),
         ));
     }
-    if !(weight.is_finite() && weight >= 0.0) {
+    if !(0.0..=MAX_WEIGHT).contains(&weight) {
         return Err(Error::new(
             ErrorCode::ValueInvalid,
-            format!("A {kind} relation's weight is a finite number of at least 0, and was given {weight}"),
+            format!("A {kind} relation's weight is a number from 0 to 2^960, and was given {weight}"),
         ));
     }
-    Ok((weight != 1.0).then_some(weight))
+    Ok((weight != 1.0).then_some(weight.abs()))
 }
 
 fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
@@ -291,8 +302,7 @@ pub fn link(
         }
         if stored != before {
             if stored.weight != before.weight {
-                unfile(t, &before)?;
-                file(t, relation, &stored)?;
+                file_edges(t, relation, &stored)?;
             }
             put(t, relation, &stored)?;
             t.event(Event::RelationChanged {
@@ -437,8 +447,7 @@ pub fn update(
         file(t, relation, &next)?;
         t.defer(Check::Ends { relation: relation.to_owned(), via: "updateRelation" });
     } else if next.weight != before.weight {
-        unfile(t, &before)?;
-        file(t, relation, &next)?;
+        file_edges(t, relation, &next)?;
     }
     put(t, relation, &next)?;
     t.event(Event::RelationChanged {

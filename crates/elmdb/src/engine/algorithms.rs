@@ -339,8 +339,11 @@ pub fn rank(graph: &Projection, seeds: &[(u32, f64)], damping: f64, iterations: 
                     if totals[v] == 0.0 {
                         dangling += score;
                     } else {
+                        // One division a node: with every weight 1 the share is `score / degree`, the unweighted
+                        // loop's, so unit weights rank to its bits
+                        let share = score / totals[v];
                         for (&w, &weight) in out.iter().zip(weights) {
-                            next[w as usize] += score * weight / totals[v];
+                            next[w as usize] += share * weight;
                         }
                     }
                 }

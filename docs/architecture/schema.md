@@ -170,10 +170,12 @@ violations identify the element path. Strings inside `object` and `any` remain o
 - `unique: true`: at most one edge of this kind between two entities, so linking a pair again updates the edge's info,
   and moving an edge onto a pair another edge joins is refused (`DUPLICATE_EDGE`).
   Today's per-call `replace` becomes this.
-- `weighted: true`: each edge of this kind has a weight, a finite number of at least 0, 1 when a link gives none. A
-  weight that isn't one, or a weight on a kind not declared weighted, is refused (`VALUE_INVALID`). The weight is part
-  of the edge as its info is: linking a pair again with another weight adds a parallel edge, or on a `unique` kind
-  replaces the weight. `rank` and `communities` read it (`engine.md`, Reads: plans).
+- `weighted: true`: each edge of this kind has a weight, a number from 0 to 2^960 (so no sum of weights reaches
+  infinity), 1 when a link gives none. A weight that isn't one, or a weight on a kind not declared weighted, is refused
+  (`VALUE_INVALID`). The weight is part of the edge as its info is: linking a pair again with another weight adds a
+  parallel edge, whose weight adds to the first's in a rank, or on a `unique` kind replaces the weight. A kind whose
+  weights are replaced, a confidence measured again, is declared `unique` too. `rank` and `communities` read it
+  (`engine.md`, Reads: plans).
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.
 
