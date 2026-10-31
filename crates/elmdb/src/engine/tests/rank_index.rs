@@ -544,3 +544,94 @@ const KARATE_HISTORY_BITS: [u64; 34] = [
     4613413487410362999,
     4615005999349841167,
 ];
+
+#[test]
+fn a_savepoint_rolled_back_takes_the_index_changes_it_made_with_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..6).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&super::batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-0" })]))
+        .unwrap();
+    let depth = unit.savepoint().unwrap();
+    unit.write(&super::batch(vec![
+        json!({ "op": "link", "source": "Task-2", "kind": "weighs", "target": "Task-0", "weight": 4 }),
+        json!({ "op": "create", "type": "Task", "id": "Task-9" }),
+        json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-1" }),
+        json!({ "op": "trash", "id": "Task-3" }),
+    ]))
+    .unwrap();
+    unit.rollback_to(depth).unwrap();
+    unit.commit(false).unwrap();
+    assert_within_bound(&db, "out", true);
+    let (found, _) = indexed(&db);
+    assert_eq!(found.len(), 6, "Task-9's creation and Task-3's trash rolled back with the savepoint: {found:?}");
+}
+
+/// The child of `a_drain_killed_part_way_resumes_when_the_database_opens_again`: a long chain linked so its drain has
+/// much to do, a line said once that commit is durable, then nothing until it is killed
+#[test]
+fn child_links_a_long_chain_and_waits_to_be_killed() {
+    let Some(path) = std::env::var_os("ELMDB_RANK_CHILD") else { return };
+    let db = Database::open(path, OpenOptions { schema: Some(schema("out", true)), syncs: true, ..Default::default() })
+        .unwrap();
+    let mut ops: Vec<Json> =
+        (0..6_000).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..6_000).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    db.write(&super::batch(ops), true).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.write(
+        &super::batch(vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-5999" })]),
+        true,
+    )
+    .unwrap();
+    println!("linked");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn a_drain_killed_part_way_resumes_when_the_database_opens_again() {
+    use std::io::BufRead;
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "engine::tests::rank_index::child_links_a_long_chain_and_waits_to_be_killed", "--nocapture"])
+        .env("ELMDB_RANK_CHILD", dir.path())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    assert!(lines.any(|line| line.unwrap().contains("linked")), "the child linked the chain");
+    // Killed while its drain still has pushes waiting, most likely part way through a chunk
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let waiting = |db: &Database| {
+        db.snapshot(|s| {
+            let mut n = 0;
+            crate::engine::unit::Read::visit(s, &keys::rank_queue("taskRank"), |_, _| {
+                n += 1;
+                true
+            })?;
+            Ok(n)
+        })
+        .unwrap()
+    };
+    // Read-only, which starts no drain: the kill left pushes waiting
+    let looked = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    assert!(waiting(&looked) > 0, "the child was killed before its drain finished");
+    looked.close().unwrap();
+    let db = Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(schema("out", true)), syncs: false, ..Default::default() },
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(waiting(&db), 0, "the drain resumed on open and finished");
+    assert!(db.snapshot(|s| ranks::is_built(s, "taskRank")).unwrap());
+}
