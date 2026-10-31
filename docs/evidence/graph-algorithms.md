@@ -164,7 +164,7 @@ members array and its offsets built from a label per node, and `counts` reads th
 - **Heap:** 131 bytes an entity for `rank` and `weakComponents`, from 184, and 126 for `strongComponents` and
   `topological`. The heap test holds them to 192.
 
-## Weights (`roadmap/rank-weights.md`)
+## Weights (`archive/roadmap/rank-weights.md`)
 
 A kind declared weighted carries each edge's weight on its row and in its edge entries, so building the graph reads the
 weight where it reads the far end. A read that takes no weights builds the graph it built before, and `rank` runs the
