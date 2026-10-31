@@ -51,6 +51,7 @@ jobs:
       - run: cargo xtask check-one-lmdb
       - run: cargo xtask check-diagnostics-off
       - run: cargo xtask check-leiden-serial
+      - run: cargo xtask check-sync
       - name: binding
         run: |
           npm ci

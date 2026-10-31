@@ -185,10 +185,18 @@ that a stopped scan is tracked as far as it went, the commit sequence, and `Data
 
 A model runs production code on a scheduler's threads instead of the operating system's, so a race that a
 real-thread test reaches only by luck is reached on purpose. Loom runs every interleaving within a bound; Shuttle runs
-random schedules, as many as asked, and reaches models too large for Loom. The primitives the modelled code
+schedules, as many as asked, and reaches models too large for Loom: a third of them random, and a third each under PCT
+(probabilistic concurrency testing) at depths 2 and 3, which finds a bug needing that many orderings in a row with a
+probability it bounds from below, where random schedules give no such bound. The primitives the modelled code
 synchronizes with come from `crate::sync` (`src/sync/`): `std`'s and parking_lot's in every build, Loom's in one
 built with `--cfg loom`, Shuttle's in one built with `--cfg shuttle`. A model names its threads and its exploration
 through `crate::sync::model`, so one model runs under either.
+
+**Every lock goes through `crate::sync`, or says why not.** `cargo xtask check-sync` fails when engine code outside
+`src/sync/` locks, waits or keeps per-thread state through `std` or parking_lot directly, unless its file is listed in
+xtask's `UNMODELLED` with the reason (a lock no model provides, state no model covers yet, a test-only failure point),
+and fails on a listed file that no longer does. So new shared state is modelable by default, and the list says what
+isn't modelled yet: a model of one is how its file leaves the list.
 
 `store/unit_slot.rs`'s model is whether a unit holds the environment's one write transaction. It holds that a
 plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
@@ -214,7 +222,8 @@ Each has its own target directory, which keeps its flag from rebuilding the ever
 test would run on the model's primitives outside a model, so only the models are run. `LOOM_MAX_PREEMPTIONS=3` bounds
 how many times a thread is preempted in one interleaving; `ELMDB_SHUTTLE_ITERATIONS` sets Shuttle's schedules per
 model, 100,000 by default, and a failure prints its schedule for `shuttle::replay` and its seed for
-`SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands. What mutations showed:
+`SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands on every pull request; `models.yml` runs them
+every night, and on a dispatch, with deeper bounds (`LOOM_MAX_PREEMPTIONS=4`, ten million Shuttle schedules a model). What mutations showed:
 [`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md) and
 [`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md).
 
