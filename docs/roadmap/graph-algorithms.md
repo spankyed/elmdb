@@ -191,3 +191,13 @@ Each stage, beside the usual `cargo fmt`, clippy with warnings denied, `cargo ne
 A graph query language, stored or named projections, parallel or distributed execution, weighted algorithms before
 relation fields exist, and incremental maintenance of a rank across commits (`incremental-views.md` is where that would
 go, when a measured re-run says it should).
+
+Measured and not taken: handing leiden-rs each edge from its lower end, so its builder merges A → B with B → A. On a
+graph of 10,000 nodes whose 100,000 edges each have their reverse, `communities` took 14.2 ms either way and found the
+same partition (2026-10-31, Apple M1 Pro, release build), and on the bench graph, whose edges rarely have one, its heap
+stayed at 764 bytes an entity. Merging can't lower that peak anyway: leiden-rs keeps every edge added (24 bytes each),
+and its `build()` sorts them and copies them into a second list of the same length before building its CSR, so the
+peak holds every edge twice whatever order they come in. Cutting it for real means handing leiden-rs fewer edges or
+none: a graph built from our CSR directly, which leiden-rs 0.8.1 has no constructor for (an upstream change), or
+Leiden written over our own CSR. Dropping duplicate edges ourselves first would cost a hash set per edge and still pass
+the rest through both lists.
