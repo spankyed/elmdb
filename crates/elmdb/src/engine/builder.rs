@@ -7,9 +7,10 @@
 //! pushes at a time until none waits, which is also how the pushes a commit leaves over its budget are drained. A
 //! drain's chunks commit like any other write, telling the watches whose reads they wrote into.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::database::EngineSchema;
 use crate::error::ErrorCode;
@@ -20,6 +21,14 @@ use super::unit::{Txn, UnitState};
 
 /// How many entities one unit of a build covers
 const CHUNK: usize = 1000;
+
+/// How long a rank index's drain waits after the last commit that left it pushes, so that a burst of commits shares
+/// one drain: each drain reads the whole graph and writes back every node it moved, whatever the commits before it
+/// changed. Reads go on meanwhile, reporting the bound on their scores as it stands
+const QUIET: Duration = Duration::from_millis(5);
+
+/// The longest a drain waits for commits to pause, so a steady stream of them is still drained
+const PATIENCE: Duration = Duration::from_millis(100);
 
 /// How many pushes one unit of a rank index's drain makes in memory, about 10 ms a million (2026-10-31, Apple M1 Pro,
 /// release), so a drain finishes in one unit, writing each node it moved once, rather than in several each writing
@@ -47,6 +56,8 @@ struct State {
     active: Option<Work>,
     stopping: bool,
     failures: Vec<IndexFailure>,
+    /// When work was last queued for each rank index: the commit its drain waits to be the last of a burst
+    queued_at: HashMap<String, Instant>,
 }
 
 /// How a drain's chunk commits: the database's own commit, which delivers to the watches it wrote into
@@ -78,6 +89,9 @@ impl Builder {
         let (lock, changed) = &*self.shared;
         let mut state = lock.lock().expect("the builder's lock is never poisoned");
         for index in indexes {
+            if let Work::Rank { name } = &index {
+                state.queued_at.insert(name.clone(), Instant::now());
+            }
             if !state.queue.contains(&index) {
                 state.queue.push_back(index);
             }
@@ -169,6 +183,9 @@ fn run(store: &Store, schema: &EngineSchema, commits: &Commits, shared: &(Mutex<
             }
         };
         let stopping = || lock.lock().expect("the builder's lock is never poisoned").stopping;
+        if let Work::Rank { name } = &work {
+            await_quiet(lock, changed, name);
+        }
         let outcome = match &work {
             Work::Index { entity_type, index } => build_index(store, schema, entity_type, index, &stopping),
             Work::Rank { name } => build_rank(store, schema, commits, name, &stopping),
@@ -273,4 +290,20 @@ fn build_rank(
             Ok(true)
         })
     })
+}
+
+/// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops
+fn await_quiet(lock: &Mutex<State>, changed: &Condvar, name: &str) {
+    let started = Instant::now();
+    let mut state = lock.lock().expect("the builder's lock is never poisoned");
+    loop {
+        if state.stopping || started.elapsed() >= PATIENCE {
+            return;
+        }
+        let since = state.queued_at.get(name).map_or(QUIET, Instant::elapsed);
+        if since >= QUIET {
+            return;
+        }
+        state = changed.wait_timeout(state, QUIET - since).expect("the builder's lock is never poisoned").0;
+    }
 }
