@@ -1,6 +1,6 @@
 # Query work efficiency: readings
 
-The evidence for [Query work efficiency](../roadmap/query-work-efficiency.md). 2026-10-29, on `session/bounded-walk`
+The evidence for [Query work efficiency](../archive/roadmap/query-work-efficiency.md). 2026-10-29, on `session/bounded-walk`
 from `5f65c43`. Machine: Apple M1 Pro, 10 cores, 32 GiB, macOS 26.3.1, Node 23.11.1, the binding built in release.
 Load averages 9 to 15 throughout, so the times are readings, and the work counts are the evidence.
 

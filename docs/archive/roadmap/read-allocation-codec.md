@@ -1,6 +1,6 @@
 # Read allocations, copies and codecs
 
-Status: done, 2026-10-29: [the readings](../evidence/read-allocation-codec.md).
+Status: done, 2026-10-29: [the readings](../../evidence/read-allocation-codec.md).
 
 ## Outcome and relationship to existing plans
 
@@ -8,10 +8,10 @@ Identify where representative reads allocate, copy or repeat codec work, then re
 waste with simple internal changes. Preserve storage bytes, generated protocol, public API, validation,
 errors, snapshot behavior and owned results. No gain is assumed; retaining current code is a valid outcome.
 
-This is the focused implementation path for [lmdb-js research L02](lmdb-js-research.md#l02-allocations-copies-and-repeated-codec-work).
+This is the focused implementation path for [lmdb-js research L02](../../roadmap/lmdb-js-research.md#l02-allocations-copies-and-repeated-codec-work).
 That document retains the broader survey and write-path research. This plan owns read profiling and
 any selected read fixes; do not create another independent L02 investigation. It does not activate other
-research streams or the lazy-row/optimistic-unit designs in [the JavaScript boundary](javascript-boundary.md).
+research streams or the lazy-row/optimistic-unit designs in [the JavaScript boundary](../../roadmap/javascript-boundary.md).
 [Query work efficiency](query-work-efficiency.md) owns reducing how much work the plan requests.
 apack's companion `docs/plans/ears-query-efficiency.md` owns application recipes and JavaScript handling.
 
@@ -81,7 +81,7 @@ tracking, and reads surviving subsequent commits/database close without borrowed
 reentrancy/concurrency and oversized/error cases if reusable state changes. Reuse existing model and
 protocol tests where they cover the invariant; add focused gaps rather than duplicating the suite.
 For each new meaningful regression check, demonstrate its failure on a mutated disposable copy as
-required by [repository guidance](../../CLAUDE.md).
+required by [repository guidance](../../../CLAUDE.md).
 
 Run focused checks while developing and the complete engine-change gates in CLAUDE.md before landing
 engine changes. Timing evidence is a controlled comparison, not a noisy ordinary-test assertion.
@@ -94,7 +94,7 @@ Create `docs/evidence/read-allocation-codec.md` when measurements begin. Record 
 commands, fixture generator, environment, raw samples/profiles, allocation definitions, semantic checks,
 failed trials, candidate dispositions and limits. Keep historical evidence separate from this plan.
 
-Done, 2026-10-29: [the readings](../evidence/read-allocation-codec.md). Both candidates kept: a stored value
+Done, 2026-10-29: [the readings](../../evidence/read-allocation-codec.md). Both candidates kept: a stored value
 decompresses in one call into the size its frame records, with a context reused per thread, and an uncompressed
 value's bytes aren't copied again; a page of whole rows and a read of every row are each about 30% faster in Rust and
 26 to 28% through `readSync`. The field scan, its key decoding and vector growth lead the profile after, and reopen

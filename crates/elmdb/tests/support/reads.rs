@@ -1,5 +1,5 @@
 //! A deterministic message store and the four reads the read benchmark, the read profile and the allocation count
-//! share (`docs/roadmap/read-allocation-codec.md`): one field of one entity, a 50-message page, the same page
+//! share (`docs/archive/roadmap/read-allocation-codec.md`): one field of one entity, a 50-message page, the same page
 //! projected to two fields, and every message's row.
 
 use std::collections::BTreeMap;

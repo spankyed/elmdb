@@ -1,4 +1,4 @@
-// What `rank` saves a caller (`docs/roadmap/graph-algorithms.md`, Verification, Cost): `node
+// What `rank` saves a caller (`docs/archive/roadmap/graph-algorithms.md`, Verification, Cost): `node
 // crates/elmdb-node/bench/rank.mjs [ROWS...]` after `npm run build`. For each size it builds documents of five `refs`
 // edges each, as `tests/support/mod.rs`'s `Fixture::graph` does, then times personalized PageRank from the first
 // document, its ten highest answered, two ways: every edge read through the binding and ranked in JavaScript, and

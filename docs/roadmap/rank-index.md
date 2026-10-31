@@ -8,7 +8,7 @@ them.
 ## Where it starts
 
 `rank` computes at query time: it builds the projection from the plan's set, runs power iteration from nothing, and
-drops both when it answers ([graph-algorithms.md](graph-algorithms.md), The projection is the plan's set). Every run
+drops both when it answers ([graph-algorithms.md](../archive/roadmap/graph-algorithms.md), The projection is the plan's set). Every run
 reads every entity and edge in the set. Through the release binding, from one document over five `refs` edges a
 document, both ways, ten answered: 2.60 ms at 1,000 documents, 28.08 ms at 10,000 and 352.93 ms at 100,000 (2026-10-31,
 Apple M1 Pro, macOS, Rust 1.99.1, Node 23.11.1; #35's `docs/evidence/graph-algorithms.md`, Cost). A live view over a

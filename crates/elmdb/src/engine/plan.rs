@@ -294,7 +294,7 @@ pub enum Step {
     /// which is PageRank. A seed outside the set is ignored, and none inside it answers nothing. Over a kind declared
     /// `weighted` the walker follows an edge in proportion to its weight, unless `weights` is false; an edge of a kind
     /// that isn't weighs 1. Rounds stop when the scores move by less than `tolerance` (their L1 distance) or after
-    /// `iterations`, and a `hits` answer says which (`docs/roadmap/graph-algorithms.md`)
+    /// `iterations`, and a `hits` answer says which (`docs/archive/roadmap/graph-algorithms.md`)
     Rank {
         kinds: Vec<String>,
         #[serde(default)]

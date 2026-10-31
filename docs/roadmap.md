@@ -79,7 +79,7 @@ reading it names calls for it:
 
 ## Planned
 
-- **Graph algorithms in the engine** (`roadmap/graph-algorithms.md`): connected components, PageRank and personalized
+- **Graph algorithms in the engine** (`archive/roadmap/graph-algorithms.md`): connected components, PageRank and personalized
   PageRank, and Leiden communities, as plan steps and answers over the set a plan has built, deterministic, bounded,
   tracked and explained. Its first callers are apack's related notes, prompt context ranking and a graph view. The
   traversal it builds on (`both`, `depth`, `pathTo`, `degrees`) is built; what graph query languages answer beyond it

@@ -1,8 +1,10 @@
 # Roadmap: where elmdb could go
 
-Directions past the planned work (`../roadmap.md`). Six are designed, each with the measurements it rests on and the
-reading that would trigger it (`../evidence/next-phase-10.md`), and one, graph algorithms, is planned. Each file says
-which. Directions that were built are in `../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`).
+Directions past the planned work (`../roadmap.md`), each with the measurements it rests on and the reading that would
+trigger it (`../evidence/next-phase-10.md`); each file says how far it is built. Directions that were built are in
+`../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`), graph algorithms (`graph-algorithms.md`),
+read allocations, copies and codecs (`read-allocation-codec.md`) and query work efficiency
+(`query-work-efficiency.md`), and the maintenance verification (`maintenance-verification.md`).
 What graph query languages answer that a plan doesn't, and the order to add it, is in
 [`deferred/graph-traversal.md`](deferred/graph-traversal.md).
 
@@ -17,8 +19,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [One plan algebra](plan-algebra.md) | The planner's three fixes and EXPLAIN built; designed: the smaller filter first, then value indexes as bitmaps and filters as operations on them |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
-| [Graph algorithms](graph-algorithms.md) | Planned: connected components, PageRank and personalized PageRank, Leiden communities, as plan steps over the plan's set |
-| [Rank weights](rank-weights.md) | Designed: relation kinds declared weighted, and `rank` over weighted edges and weighted seeds |
+| [Rank weights](rank-weights.md) | Built in elmdb: relation kinds declared weighted, and `rank` and `communities` over weighted edges and seeds |
 | [Rank index](rank-index.md) | Designed: PageRank scores declared as an index and kept current by each commit, read instead of computed |
 
 ## Development improvements
@@ -28,11 +29,3 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 - [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
   failpoints, heap assertions, per-process tests, model-based properties, profiling; initial heap gates implemented,
   other stages planned.
-
-
-## Focused read efficiency
-
-- [Read allocations, copies and codecs](read-allocation-codec.md): bounded profiling and only
-  evidence-backed internal fixes; owns the focused read implementation path from lmdb-js research L02.
-- [Query work efficiency](query-work-efficiency.md): retain existing filter/limit/projection behavior
-  and admit extensions only for demonstrated costly queries; larger designs remain in plan algebra.

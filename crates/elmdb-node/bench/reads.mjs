@@ -1,4 +1,4 @@
-// The read benchmark's four reads through the binding (`docs/roadmap/read-allocation-codec.md`): `node
+// The read benchmark's four reads through the binding (`docs/archive/roadmap/read-allocation-codec.md`): `node
 // crates/elmdb-node/bench/reads.mjs` after `npm run build`. It builds the message store `tests/support/reads.rs`
 // describes, checks each answer, then times `readSync` and the decoding of its answer apart, as medians of many runs.
 import assert from 'node:assert/strict';
