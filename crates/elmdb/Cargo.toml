@@ -29,6 +29,9 @@ parking_lot.workspace = true
 tracing = { workspace = true, optional = true }
 # Leiden communities (`src/engine/algorithms.rs`), without its CLI, rayon or graph adapters
 leiden-rs.workspace = true
+# A logarithm the same to the bit on every platform, for `similar`'s Adamic-Adar (`src/engine/algorithms.rs`), where
+# std's calls the platform's maths library
+libm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

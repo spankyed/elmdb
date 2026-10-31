@@ -111,7 +111,17 @@ A plan is a scope, a start, steps and a terminal:
   damping from any start), and the `hits` answer's `rank` says whether they settled and in how many. A seed outside
   the set is ignored, and none inside answers nothing. A damping outside (0, 1), no iterations or a tolerance not above
   0 is refused (`BATCH_INVALID`). The answer is the same, bit for bit, on every platform: nodes are numbered in the
-  set's order and summed in that order, on one thread.
+  set's order and summed in that order, on one thread. `topological` orders the set so each edge of the kinds,
+  followed `out` (or `in`, which reverses it), leads from an entity to a later one: `A blocks B` puts A first. The
+  members of a cycle stay together in the set's order where the cycle falls, and what the edges leave free keeps the
+  set's order, so of every order the edges allow it is the one nearest the set's; `both` is refused (`BATCH_INVALID`),
+  an edge followed both ways ordering nothing. `similar` answers the set's entities that share a neighbour with `to`,
+  most alike first, ties in the set's order: an entity's neighbours are the far ends of its edges of the kinds,
+  followed `out`, `in` or `both` ways, in the set or not and in the scope; `measure` is `jaccard` (the default, shared
+  over either's) or `adamicAdar` (each shared neighbour counting 1 / ln of its degree, so a rarely linked one counts
+  more). `to` itself and an entity sharing nothing aren't answered, and a `to` the scope doesn't reach answers
+  nothing. Each score is a hit's, as a rank's is. It reads from `to` two edges out, not the whole set: straight after a type start an entity's membership is its type and the scope, read per candidate, so it costs what `to`'s neighbourhood holds; after other steps it collects the set. Adamic–Adar's logarithm is libm's, so its scores are the same bits on every platform. Unlike `like`,
+  which ranks by embedding, it ranks by links.
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
   then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
   after an id, a page's cursor; an id no longer in the answer answers nothing, so a caller pages again from the
@@ -130,7 +140,7 @@ A plan is a scope, a start, steps and a terminal:
   whichever way: groups more densely linked inside than out, each connected, largest first; a higher `resolution`
   (1.0) finds smaller ones and 0 leaves each component whole; Leiden's order is drawn from `seed` (0), so a seed answers
   the same for the same data on every platform; at most `iterations` (100) rounds; a negative resolution or no
-  iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search or a rank found in each entity).
+  iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search, a rank or a `similar` found in each entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. The planner makes four choices, none of which changes
@@ -159,7 +169,7 @@ included, which is what says whether a filter walked rows an index could have an
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
-`weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, and a rank's `iterations` and whether it `converged`. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+`topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so

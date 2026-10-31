@@ -435,6 +435,283 @@ fn communities_answer_the_densely_linked_groups_the_same_each_time() {
 const NODES: usize = 7;
 const KINDS: [&str; 2] = ["refs", "blocks"];
 
+/// Every task in a topological order of these options
+fn topological(db: &Database, step: Json) -> crate::Result<Vec<String>> {
+    let mut full = json!({ "step": "topological", "kinds": ["blocks"] });
+    full.as_object_mut().unwrap().extend(step.as_object().unwrap().clone());
+    let ids = try_query(
+        db,
+        json!({ "start": { "from": "types", "types": ["Task"] }, "steps": [full], "terminal": { "answer": "ids" } }),
+    )?;
+    Ok(ids["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect())
+}
+
+#[test]
+fn topological_puts_what_blocks_before_what_it_blocks_and_keeps_a_cycle_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-a", "Task-b", "Task-c", "Task-d", "Task-e"]);
+    // e blocks a; b, c and d block each other in a cycle, and a blocks c
+    link(
+        &db,
+        &[
+            ("Task-e", "blocks", "Task-a"),
+            ("Task-a", "blocks", "Task-c"),
+            ("Task-b", "blocks", "Task-c"),
+            ("Task-c", "blocks", "Task-d"),
+            ("Task-d", "blocks", "Task-b"),
+        ],
+    );
+    assert_eq!(topological(&db, json!({})).unwrap(), ["Task-e", "Task-a", "Task-b", "Task-c", "Task-d"]);
+    assert_eq!(
+        topological(&db, json!({ "direction": "in" })).unwrap(),
+        ["Task-b", "Task-c", "Task-d", "Task-a", "Task-e"],
+        "in follows each edge backwards"
+    );
+    let both = topological(&db, json!({ "direction": "both" })).unwrap_err();
+    assert_eq!(both.code, ErrorCode::BatchInvalid);
+    let unknown = topological(&db, json!({ "kinds": ["nope"] })).unwrap_err();
+    assert_eq!(unknown.code, ErrorCode::UnknownRelationKind);
+    let first = query(
+        &db,
+        json!({ "start": { "from": "types", "types": ["Task"] },
+            "steps": [{ "step": "topological", "kinds": ["blocks"] }, { "step": "limit", "n": 2 }],
+            "terminal": { "answer": "ids" } }),
+    );
+    assert_eq!(first["ids"], json!(["Task-e", "Task-a"]));
+    let explained = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "types", "types": ["Task"] },
+                "steps": [{ "step": "topological", "kinds": ["blocks"] }],
+                "terminal": { "answer": "ids" }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let stage = &explained[0]["stages"][1];
+    assert_eq!(
+        (&stage["stage"], &stage["nodes"], &stage["edges"], &stage["cycles"]),
+        (&json!("topological"), &json!(5), &json!(5), &json!(1))
+    );
+    // The stage's every field reads, and so does the terminal's after it: a miscounted stage would spill into the next
+    assert_eq!((&stage["kept"], &stage["visited"]), (&json!(5), &json!(5)), "{stage}");
+    assert!(stage["ms"].is_number(), "{stage}");
+    let stages = explained[0]["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 3, "{explained}");
+    assert_eq!(stages[2]["stage"], json!("ids"));
+}
+
+#[test]
+fn a_tracked_topological_order_is_written_into_by_an_edge_between_two_of_its_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    chain(&db);
+    tasks(&db, &["Task-y", "Task-z"]);
+    let ordered = json!({ "read": "query", "plan": {
+        "start": { "from": "ids", "ids": ["Task-a", "Task-b", "Task-c"] },
+        "steps": [{ "step": "topological", "kinds": ["refs"] }],
+        "terminal": { "answer": "ids" }
+    } });
+    db.read(&reads(vec![ordered], Some(1))).unwrap();
+    let touched = |edge: (&str, &str)| {
+        db.write(&batch(vec![json!({ "op": "link", "source": edge.0, "kind": "refs", "target": edge.1 })]), false)
+            .unwrap()
+            .1
+            .touched
+    };
+    assert!(touched(("Task-y", "Task-z")).is_empty(), "entities outside its set");
+    assert_eq!(touched(("Task-c", "Task-a")), [1], "an edge inside its set");
+}
+
+/// networkx 3.4.2's `jaccard_coefficient` and `adamic_adar_index` on Zachary's karate club, from node 0 to each of 1 to
+/// 33, its friendships followed both ways
+const KARATE_JACCARD: [f64; 33] = [
+    0.3888888888888889,
+    0.23809523809523808,
+    0.29411764705882354,
+    0.11764705882352941,
+    0.1111111111111111,
+    0.1111111111111111,
+    0.17647058823529413,
+    0.05,
+    0.058823529411764705,
+    0.11764705882352941,
+    0.0,
+    0.058823529411764705,
+    0.16666666666666666,
+    0.0,
+    0.0,
+    0.125,
+    0.058823529411764705,
+    0.0,
+    0.05555555555555555,
+    0.0,
+    0.058823529411764705,
+    0.0,
+    0.0,
+    0.05555555555555555,
+    0.05555555555555555,
+    0.0,
+    0.05263157894736842,
+    0.11764705882352941,
+    0.0,
+    0.1111111111111111,
+    0.0,
+    0.12,
+    0.13793103448275862,
+];
+// One score is 1 / ln 2, which networkx printed as clippy's `LOG2_E`; kept as networkx printed it
+#[allow(clippy::approx_constant)]
+const KARATE_ADAMIC_ADAR: [f64; 33] = [
+    6.130716871863356,
+    2.9772476294283714,
+    3.6747915911097273,
+    1.631586747071319,
+    1.631586747071319,
+    1.631586747071319,
+    1.4475247217679177,
+    0.43429448190325176,
+    0.43429448190325176,
+    1.631586747071319,
+    0.0,
+    0.5581106265512472,
+    1.4475247217679177,
+    0.0,
+    0.0,
+    1.4426950408889634,
+    0.45511961331341866,
+    0.0,
+    0.45511961331341866,
+    0.0,
+    0.45511961331341866,
+    0.0,
+    0.0,
+    0.5581106265512472,
+    0.5581106265512472,
+    0.0,
+    0.43429448190325176,
+    0.9924051084544989,
+    0.0,
+    1.0764545478730305,
+    0.0,
+    1.613740043014111,
+    2.7110197222973085,
+];
+
+/// The karate club's members as tasks, each friendship one `refs` edge
+fn karate_club(db: &Database) {
+    let names: Vec<String> = (0..34).map(|v| format!("Task-{v}")).collect();
+    tasks(db, &names.iter().map(String::as_str).collect::<Vec<_>>());
+    let edges: Vec<(String, String)> = crate::engine::algorithms::tests::KARATE_EDGES
+        .iter()
+        .map(|&(a, b)| (format!("Task-{a}"), format!("Task-{b}")))
+        .collect();
+    link(db, &edges.iter().map(|(a, b)| (a.as_str(), "refs", b.as_str())).collect::<Vec<_>>());
+}
+
+fn similar(db: &Database, step: Json) -> Json {
+    let mut full = json!({ "step": "similar", "kinds": ["refs"] });
+    full.as_object_mut().unwrap().extend(step.as_object().unwrap().clone());
+    query(
+        db,
+        json!({ "start": { "from": "types", "types": ["Task"] }, "steps": [full], "terminal": { "answer": "hits" } }),
+    )
+}
+
+#[test]
+fn similar_scores_the_karate_club_as_networkx_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    karate_club(&db);
+    for (measure, expected) in [("jaccard", KARATE_JACCARD), ("adamicAdar", KARATE_ADAMIC_ADAR)] {
+        let hits = similar(&db, json!({ "to": "Task-0", "direction": "both", "measure": measure }));
+        let found: Vec<(String, f64)> = hits["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap()))
+            .collect();
+        let shared: Vec<usize> = (1..34).filter(|&v| expected[v - 1] > 0.0).collect();
+        assert_eq!(found.len(), shared.len(), "{measure}: those sharing nothing aren't answered");
+        for (id, score) in &found {
+            let v: usize = id.strip_prefix("Task-").unwrap().parse().unwrap();
+            assert!((score - expected[v - 1]).abs() < 1e-12, "{measure} {id}: {score} against {}", expected[v - 1]);
+        }
+        assert!(found.windows(2).all(|pair| pair[0].1 >= pair[1].1), "{measure}: most alike first");
+    }
+}
+
+#[test]
+fn similar_answers_what_shares_neighbours_with_to_in_the_set_and_the_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-to", "Task-x", "Task-y", "Task-z", "Task-alone"]);
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1" })]).unwrap();
+    // to and x both point at z and at a note outside the set; y points at z alone; alone points at nothing shared
+    link(
+        &db,
+        &[
+            ("Task-to", "refs", "Task-z"),
+            ("Task-to", "refs", "Note-1"),
+            ("Task-x", "refs", "Task-z"),
+            ("Task-x", "refs", "Note-1"),
+            ("Task-y", "refs", "Task-z"),
+            ("Task-alone", "refs", "Task-y"),
+        ],
+    );
+    let hits = similar(&db, json!({ "to": "Task-to" }));
+    assert_eq!(order(&hits), ["Task-x", "Task-y"], "to and alone left out, x sharing more first: {hits}");
+    let score = |hits: &Json, id: &str| {
+        hits["hits"].as_array().unwrap().iter().find(|h| h["id"] == json!(id)).unwrap()["score"].as_f64().unwrap()
+    };
+    assert_eq!(score(&hits, "Task-x"), 1.0, "a neighbour outside the set is shared all the same");
+    assert_eq!(score(&hits, "Task-y"), 0.5);
+    // A trashed neighbour isn't one
+    write(&db, vec![json!({ "op": "trash", "id": "Note-1" })]).unwrap();
+    let live = similar(&db, json!({ "to": "Task-to" }));
+    assert_eq!((score(&live, "Task-x"), score(&live, "Task-y")), (1.0, 1.0));
+    assert_eq!(order(&live), ["Task-x", "Task-y"], "ties keep the set's order");
+    // A to the scope doesn't reach answers nothing
+    assert_eq!(similar(&db, json!({ "to": "Task-gone" }))["hits"], json!([]));
+    let ids = query(
+        &db,
+        json!({ "start": { "from": "types", "types": ["Task"] },
+            "steps": [{ "step": "similar", "to": "Task-to", "kinds": ["refs"] }], "terminal": { "answer": "ids" } }),
+    );
+    assert_eq!(ids["ids"], json!(["Task-x", "Task-y"]), "the same order without hits");
+    let unknown = try_query(
+        &db,
+        json!({ "start": { "from": "types", "types": ["Task"] },
+            "steps": [{ "step": "similar", "to": "Task-to", "kinds": ["nope"] }], "terminal": { "answer": "ids" } }),
+    )
+    .unwrap_err();
+    assert_eq!(unknown.code, ErrorCode::UnknownRelationKind);
+}
+
+#[test]
+fn a_tracked_similar_read_is_written_into_by_an_edge_at_a_neighbour_of_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-to", "Task-x", "Task-z", "Task-y", "Task-w"]);
+    link(&db, &[("Task-to", "refs", "Task-z"), ("Task-x", "refs", "Task-z")]);
+    let read = json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Task"] },
+        "steps": [{ "step": "similar", "to": "Task-to", "kinds": ["refs"] }],
+        "terminal": { "answer": "ids" }
+    } });
+    db.read(&reads(vec![read], Some(1))).unwrap();
+    let touched = |edge: (&str, &str)| {
+        db.write(&batch(vec![json!({ "op": "link", "source": edge.0, "kind": "refs", "target": edge.1 })]), false)
+            .unwrap()
+            .1
+            .touched
+    };
+    assert!(touched(("Task-y", "Task-w")).is_empty(), "an edge two steps from to's neighbours");
+    assert_eq!(touched(("Task-y", "Task-z")), [1], "a new entity sharing to's neighbour");
+}
+
 fn name(n: usize) -> String {
     format!("Task-{n}")
 }
@@ -467,6 +744,50 @@ fn by_hand(edges: &[(usize, usize, usize)], kinds: &[usize], direction: &str) ->
         graph.node(targets);
     }
     graph
+}
+
+/// `similar` by its definition, from the edge list: each task's neighbours over the kinds in the direction, and for every
+/// other task sharing one with `to`, its Jaccard and Adamic-Adar scores, most alike first, ties by number
+fn similar_by_hand(
+    edges: &[(usize, usize, usize)],
+    kinds: &[usize],
+    direction: &str,
+    to: usize,
+) -> Vec<(usize, f64, f64)> {
+    let neighbours = |n: usize, direction: &str| -> std::collections::BTreeSet<usize> {
+        edges
+            .iter()
+            .filter(|&&(_, k, _)| kinds.contains(&k))
+            .filter_map(|&(s, _, t)| match direction {
+                "out" if s == n => Some(t),
+                "in" if t == n => Some(s),
+                "both" if s == n => Some(t),
+                "both" if t == n => Some(s),
+                _ => None,
+            })
+            .collect()
+    };
+    let back = match direction {
+        "out" => "in",
+        "in" => "out",
+        _ => "both",
+    };
+    let ours = neighbours(to, direction);
+    let mut found: Vec<(usize, f64, f64)> = (0..NODES)
+        .filter(|&n| n != to)
+        .filter_map(|n| {
+            let theirs = neighbours(n, direction);
+            let shared: Vec<usize> = ours.intersection(&theirs).copied().collect();
+            if shared.is_empty() {
+                return None;
+            }
+            let jaccard = shared.len() as f64 / ours.union(&theirs).count() as f64;
+            let adamic_adar = shared.iter().map(|&z| 1.0 / (neighbours(z, back).len() as f64).ln()).sum();
+            Some((n, jaccard, adamic_adar))
+        })
+        .collect();
+    found.sort_by(|a, b| b.1.total_cmp(&a.1));
+    found
 }
 
 proptest! {
@@ -513,5 +834,193 @@ proptest! {
             "terminal": { "answer": "communities", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = communities.into_iter().map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
         prop_assert_eq!(&answer["communities"], &json!(named));
+
+        if direction != "both" {
+            let ordered = algorithms::topological_order(&by_hand(&edges, &kinds, direction));
+            let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
+                "steps": [{ "step": "topological", "kinds": kind_names, "direction": direction }],
+                "terminal": { "answer": "ids" } }));
+            let named: Vec<String> = ordered.order.into_iter().map(|n| name(n as usize)).collect();
+            prop_assert_eq!(&answer["ids"], &json!(named));
+        }
+
+        let expected = similar_by_hand(&edges, &kinds, direction, seed);
+        for (measure, at) in [("jaccard", 1), ("adamicAdar", 2)] {
+            let hits = similar(&db, json!({ "to": name(seed), "kinds": kind_names, "direction": direction, "measure": measure }));
+            let mut want = expected.clone();
+            want.sort_by(|a, b| {
+                let (x, y) = if at == 1 { (a.1, b.1) } else { (a.2, b.2) };
+                y.total_cmp(&x)
+            });
+            let found: Vec<(String, f64)> = hits["hits"].as_array().unwrap().iter()
+                .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap())).collect();
+            prop_assert_eq!(found.len(), want.len(), "{} {}", measure, hits);
+            for ((id, score), w) in found.iter().zip(&want) {
+                let w_score = if at == 1 { w.1 } else { w.2 };
+                prop_assert!((score - w_score).abs() < 1e-12, "{} {}: {} against {}", measure, id, score, w_score);
+            }
+            let mut got_ids: Vec<&String> = found.iter().map(|(id, _)| id).collect();
+            let mut want_ids: Vec<String> = want.iter().map(|w| name(w.0)).collect();
+            got_ids.sort();
+            want_ids.sort();
+            prop_assert_eq!(got_ids.into_iter().cloned().collect::<Vec<_>>(), want_ids);
+
+            // The same set named by its ids, in reverse, answers the same entities and scores, ties now reversed
+            let reversed: Vec<String> = (0..NODES).rev().map(name).collect();
+            let by_ids = query(&db, json!({ "start": { "from": "ids", "ids": reversed },
+                "steps": [{ "step": "similar", "to": name(seed), "kinds": kind_names, "direction": direction, "measure": measure }],
+                "terminal": { "answer": "hits" } }));
+            let mut from_ids: Vec<(String, u64)> = by_ids["hits"].as_array().unwrap().iter()
+                .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap().to_bits())).collect();
+            let mut from_type: Vec<(String, u64)> = found.iter().map(|(id, score)| (id.clone(), score.to_bits())).collect();
+            from_ids.sort();
+            from_type.sort();
+            prop_assert_eq!(from_ids, from_type);
+        }
     }
+}
+
+/// The karate club's Adamic-Adar scores from node 0, both ways, to the bit, in the order answered: libm's logarithm is
+/// the same on every platform, so the CI matrix (Linux, macOS, Windows) holds these alike, ties in creation order
+const KARATE_ADAMIC_ADAR_BITS: [(&str, u64); 23] = [
+    ("Task-1", 0x401885daa4c6c110),
+    ("Task-3", 0x400d65f9223b74e8),
+    ("Task-2", 0x4007d1673483e835),
+    ("Task-33", 0x4005b02b1bb09fa0),
+    ("Task-4", 0x3ffa1afab4742229),
+    ("Task-5", 0x3ffa1afab4742229),
+    ("Task-6", 0x3ffa1afab4742229),
+    ("Task-10", 0x3ffa1afab4742229),
+    ("Task-32", 0x3ff9d1e1144fdc1e),
+    ("Task-7", 0x3ff7290faec250b7),
+    ("Task-13", 0x3ff7290faec250b7),
+    ("Task-16", 0x3ff71547652b82fe),
+    ("Task-30", 0x3ff13928676bec10),
+    ("Task-28", 0x3fefc1c85ba640c4),
+    ("Task-12", 0x3fe1dc0ad112ce3e),
+    ("Task-24", 0x3fe1dc0ad112ce3e),
+    ("Task-25", 0x3fe1dc0ad112ce3e),
+    ("Task-17", 0x3fdd20ae03bcc152),
+    ("Task-19", 0x3fdd20ae03bcc152),
+    ("Task-21", 0x3fdd20ae03bcc152),
+    ("Task-8", 0x3fdbcb7b1526e50d),
+    ("Task-9", 0x3fdbcb7b1526e50d),
+    ("Task-27", 0x3fdbcb7b1526e50d),
+];
+
+#[test]
+fn similar_answers_the_same_bits_on_every_platform() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    karate_club(&db);
+    let hits = similar(&db, json!({ "to": "Task-0", "direction": "both", "measure": "adamicAdar" }));
+    let found: Vec<(String, u64)> = hits["hits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap().to_bits()))
+        .collect();
+    let expected: Vec<(String, u64)> =
+        KARATE_ADAMIC_ADAR_BITS.iter().map(|&(id, bits)| (id.to_owned(), bits)).collect();
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn similar_after_another_step_or_another_scope_answers_that_set_in_its_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-to", "Task-x", "Task-y", "Task-z"]);
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-n" })]).unwrap();
+    // x, y and the note each share z with to, alike
+    link(
+        &db,
+        &[
+            ("Task-to", "refs", "Task-z"),
+            ("Task-x", "refs", "Task-z"),
+            ("Task-y", "refs", "Task-z"),
+            ("Note-n", "refs", "Task-z"),
+        ],
+    );
+    let ids = |plan: Json| query(&db, plan)["ids"].clone();
+    let step = json!({ "step": "similar", "to": "Task-to", "kinds": ["refs"] });
+    // A type start: its types in the order named, each in creation order
+    assert_eq!(
+        ids(
+            json!({ "start": { "from": "types", "types": ["Note", "Task"] }, "steps": [step], "terminal": { "answer": "ids" } })
+        ),
+        json!(["Note-n", "Task-x", "Task-y"])
+    );
+    // Ids in an order of their own, and a repeat answered once
+    assert_eq!(
+        ids(json!({ "start": { "from": "ids", "ids": ["Task-y", "Note-n", "Task-y", "Task-x"] }, "steps": [step],
+            "terminal": { "answer": "ids" } })),
+        json!(["Task-y", "Note-n", "Task-x"])
+    );
+    // After another step, only what it kept
+    assert_eq!(
+        ids(json!({ "start": { "from": "types", "types": ["Task"] },
+            "steps": [{ "step": "within", "ids": ["Task-y", "Task-z"] }, step], "terminal": { "answer": "ids" } })),
+        json!(["Task-y"])
+    );
+    // The trash: out of a live start, in a start with it, and alone in a trashed one
+    write(&db, vec![json!({ "op": "trash", "id": "Task-x" })]).unwrap();
+    let typed = |scope: &str| {
+        ids(json!({ "start": { "from": "types", "types": ["Task"] }, "scope": scope, "steps": [step],
+            "terminal": { "answer": "ids" } }))
+    };
+    assert_eq!(typed("live"), json!(["Task-y"]));
+    assert_eq!(typed("withTrashed"), json!(["Task-x", "Task-y"]));
+    assert_eq!(typed("trashed"), json!(["Task-x"]), "a trashed start answers the trashed alone");
+}
+
+#[test]
+fn explain_reports_what_a_similar_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-to", "Task-x", "Task-y", "Task-z", "Task-w"]);
+    link(
+        &db,
+        &[
+            ("Task-to", "refs", "Task-z"),
+            ("Task-to", "refs", "Task-w"),
+            ("Task-x", "refs", "Task-z"),
+            ("Task-y", "refs", "Task-w"),
+        ],
+    );
+    let explained = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "types", "types": ["Task"] },
+                "steps": [{ "step": "similar", "to": "Task-to", "kinds": ["refs"] }],
+                "terminal": { "answer": "ids" }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let stage = &explained[0]["stages"][1];
+    // to's two edges, each neighbour's two edges in, and x's and y's one edge each for Jaccard
+    assert_eq!(
+        (&stage["stage"], &stage["neighbours"], &stage["candidates"], &stage["edges"]),
+        (&json!("similar"), &json!(2), &json!(2), &json!(8)),
+        "{stage}"
+    );
+    assert_eq!(stage["kept"], json!(2));
+    assert_eq!(explained[0]["stages"].as_array().unwrap().len(), 3, "the stage reads to its end");
+}
+
+#[test]
+fn a_tracked_similar_read_is_written_into_by_a_candidate_trashed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-to", "Task-x", "Task-z"]);
+    link(&db, &[("Task-to", "refs", "Task-z"), ("Task-x", "refs", "Task-z")]);
+    let read = json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Task"] },
+        "steps": [{ "step": "similar", "to": "Task-to", "kinds": ["refs"] }],
+        "terminal": { "answer": "ids" }
+    } });
+    db.read(&reads(vec![read], Some(1))).unwrap();
+    let touched = db.write(&batch(vec![json!({ "op": "trash", "id": "Task-x" })]), false).unwrap().1.touched;
+    assert_eq!(touched, [1]);
 }

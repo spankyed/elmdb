@@ -153,6 +153,19 @@ impl Direction {
     }
 }
 
+/// How `similar` scores two entities' neighbours
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum Similarity {
+    /// The neighbours both have, over those either has
+    #[default]
+    Jaccard,
+    /// Each neighbour both have counts 1 / ln(its degree), so one that few entities link with counts for more than a
+    /// hub (Adamic and Adar, 2003)
+    AdamicAdar,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "from", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -297,6 +310,31 @@ pub enum Step {
         #[serde(default = "rank_tolerance")]
         #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
         tolerance: f64,
+    },
+    /// The set in an order where each edge of the kinds between two of its entities, followed the direction's way,
+    /// leads from an entity to one after it: `A blocks B` puts A first with `out`, and `in` reverses it. The members
+    /// of a cycle can't be ordered so, and stay together in the set's order where the cycle falls (`strongComponents`
+    /// answers which they are). What the edges leave free keeps the set's order, so of every order the edges allow it
+    /// is the one nearest the set's. `both` is refused: an edge followed both ways orders nothing
+    Topological {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
+    },
+    /// The set's entities that share a neighbour with `to`, most alike first, ties in the set's order; each score is
+    /// a hit's, which `hits` answers. An entity's neighbours are the far ends of its edges of the kinds, followed the
+    /// direction's ways, in the set or not. `to` itself, and an entity that shares nothing with it, aren't answered,
+    /// and a `to` the scope doesn't reach answers nothing. Unlike `like`, which ranks by embedding, this ranks by links
+    Similar {
+        to: String,
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Similarity>", optional))]
+        measure: Similarity,
     },
     /// By the field's value: booleans, numbers, timestamps, strings (by the schema's collation), anything else by its
     /// JSON, then a missing or null value; ties keep the query's order
