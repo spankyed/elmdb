@@ -512,6 +512,15 @@ fn the_karate_club_splits_into_its_known_communities() {
 }
 
 #[test]
+fn a_round_moves_refines_and_aggregates_once_and_more_rounds_merge_further() {
+    // One round leaves the club in seven communities; the rounds after merge them into its best four
+    let one = communities(&karate(), 1.0, 0, 1);
+    let many = communities(&karate(), 1.0, 0, 100);
+    assert_eq!((one.len(), many.len()), (7, 4));
+    assert!(modularity(34, &KARATE_EDGES, &one, 1.0) < modularity(34, &KARATE_EDGES, &many, 1.0));
+}
+
+#[test]
 fn a_lower_resolution_merges_and_none_leaves_each_component_whole() {
     let coarse = communities(&karate(), 0.25, 0, 100);
     let fine = communities(&karate(), 2.0, 0, 100);

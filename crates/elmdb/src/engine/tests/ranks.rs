@@ -222,6 +222,22 @@ fn explain_reports_the_graph_each_built() {
         ))
         .unwrap(),
     );
+    let communities = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "types", "types": ["Task"] },
+                "terminal": { "answer": "communities", "kinds": ["refs"] }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let terminal = &communities[0]["stages"][1];
+    assert_eq!(
+        (&terminal["stage"], &terminal["nodes"], &terminal["edges"]),
+        (&json!("communities"), &json!(4), &json!(3))
+    );
+    assert!(communities[0]["stages"][0].get("nodes").is_none(), "the start built no graph");
     let stages = explained[0]["stages"].as_array().unwrap();
     assert_eq!(stages[1]["stage"], json!("rank"));
     assert_eq!(

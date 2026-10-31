@@ -159,13 +159,11 @@ pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u
         ..leiden_rs::LeidenConfig::default()
     };
     let found = leiden_rs::Leiden::new(config).run(&data).expect("leiden-rs runs over a built graph");
+    // leiden-rs numbers communities from 0 and has no more of them than nodes
     let mut group_of: Vec<Option<usize>> = vec![None; n];
     let mut groups: Vec<Vec<u32>> = Vec::new();
     for v in 0..n {
         let community = found.partition.community_of(v);
-        if community >= group_of.len() {
-            group_of.resize(community + 1, None);
-        }
         let at = *group_of[community].get_or_insert_with(|| {
             groups.push(Vec::new());
             groups.len() - 1
