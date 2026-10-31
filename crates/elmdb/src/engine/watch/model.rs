@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use super::{Listener, SharedTracks, deliver_with, read_registered, read_watch_with, register, unwatch};
+use super::{Listener, SharedTracks, Unwatched, deliver_with, read_registered, read_watch_with, register, unwatch};
 use crate::engine::plan::Reads;
 use crate::engine::tracking::ReadSet;
 use crate::error::Result;
@@ -61,6 +61,15 @@ impl Store {
 
 fn number(answer: &Result<Vec<u8>>) -> u64 {
     u64::from_be_bytes(answer.as_ref().unwrap().as_slice().try_into().unwrap())
+}
+
+/// Counts its drop into one of a pair of counters
+struct DroppedAt(Arc<[AtomicU64; 2]>, usize);
+
+impl Drop for DroppedAt {
+    fn drop(&mut self) {
+        self.0[self.1].fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Counts its drops, the listener's captures going with it
@@ -126,7 +135,9 @@ fn a_watch_ended_during_delivery_hears_nothing_after_and_is_dropped_once() {
             let (store, tracks) = (store.clone(), tracks.clone());
             thread::spawn(move || store.commit(&tracks, 1))
         };
-        unwatch(&tracks, id);
+        // Ended from outside any listener: the delivery is waited for, so the listener is already dropped
+        assert_eq!(unwatch(&tracks, id), Unwatched::Ended);
+        assert_eq!(drops.load(Ordering::SeqCst), 1, "Ended answered before the listener was dropped");
         ended.store(true, Ordering::SeqCst);
         committer.join().unwrap();
         assert!(!late.load(Ordering::SeqCst), "the listener was called after unwatch returned");
@@ -149,7 +160,8 @@ fn a_listener_ending_its_own_watch_is_dropped_once() {
             Box::new(move |answer: &Result<Vec<u8>>| {
                 let _owned = &dropped;
                 if number(answer) == 1 {
-                    unwatch(&tracks, own.load(Ordering::SeqCst));
+                    // Its own delivery holds it, so it can't be dropped yet
+                    assert_eq!(unwatch(&tracks, own.load(Ordering::SeqCst)), Unwatched::Ending);
                 }
             })
         };
@@ -182,12 +194,18 @@ fn listeners_ending_each_others_watch_do_not_wait_on_each_other() {
         let store = Store::new();
         let tracks = SharedTracks::default();
         let ids: Arc<[AtomicU64; 2]> = Arc::new([AtomicU64::new(u64::MAX), AtomicU64::new(u64::MAX)]);
+        let drops: Arc<[AtomicU64; 2]> = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
         for (mine, other) in [(0, 1), (1, 0)] {
             let listener = {
-                let (tracks, ids) = (tracks.clone(), ids.clone());
+                let (tracks, ids, drops) = (tracks.clone(), ids.clone(), drops.clone());
+                let counted = DroppedAt(drops.clone(), mine);
                 Box::new(move |answer: &Result<Vec<u8>>| {
+                    let _owned = &counted;
                     if number(answer) != 0 {
-                        unwatch(&tracks, ids[other].load(Ordering::SeqCst));
+                        // Ended means no delivery held the other's listener, which this call then dropped
+                        if unwatch(&tracks, ids[other].load(Ordering::SeqCst)) == Unwatched::Ended {
+                            assert_eq!(drops[other].load(Ordering::SeqCst), 1, "Ended before the other was dropped");
+                        }
                     }
                 })
             };

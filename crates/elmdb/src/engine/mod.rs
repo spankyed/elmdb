@@ -487,9 +487,10 @@ impl Database {
         watch::watch(&self.tracks, &store, &self.observing_schema(), reads, listener)
     }
 
-    /// Ends a watch: once this returns, its listener isn't called again and has been dropped (`watch::unwatch`)
-    pub fn unwatch(&self, id: u64) {
-        watch::unwatch(&self.tracks, id);
+    /// Ends a watch: once this returns, its listener isn't called again, and with `Ended` it has returned and been
+    /// dropped; `Ending`, from inside a listener, says a delivery still holds it (`watch::unwatch`)
+    pub fn unwatch(&self, id: u64) -> watch::Unwatched {
+        watch::unwatch(&self.tracks, id)
     }
 
     /// `read` with the reads as msgpack bytes, as the binding takes them

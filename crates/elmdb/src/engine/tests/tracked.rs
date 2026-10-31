@@ -2,6 +2,7 @@
 //! reads it wrote into and no others, carries a sequence that only increases, and runs the database's watches again
 //! when it writes into what they read, delivering only an answer that changed.
 
+use crate::engine::watch::Unwatched;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value as Json, json};
@@ -144,7 +145,7 @@ fn a_watch_delivers_each_answer_that_changed_after_a_commit_into_what_it_read() 
     write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": 3 } })]).unwrap();
     assert_eq!(heard(), [json!(3)]);
 
-    db.unwatch(id);
+    assert_eq!(db.unwatch(id), Unwatched::Ended);
     write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 4 } })]).unwrap();
     assert!(heard().is_empty());
     assert_eq!(db.track_stats(), (0, 0, 0));
@@ -253,10 +254,10 @@ fn a_panicking_listener_is_removed_without_changing_the_commit_outcome() {
     assert_eq!(db.sequence().unwrap(), before + 1);
     assert_eq!(*heard.lock().unwrap(), 2, "later listeners still run");
     assert_eq!(db.track_stats().0, 1);
-    db.unwatch(bad);
+    assert_eq!(db.unwatch(bad), Unwatched::Ended);
     write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-after-panic"})]).unwrap();
     assert_eq!(*heard.lock().unwrap(), 3);
-    db.unwatch(good);
+    assert_eq!(db.unwatch(good), Unwatched::Ended);
     assert_eq!(db.track_stats(), (0, 0, 0));
     db.close().unwrap();
 }
@@ -287,7 +288,7 @@ fn callback_close_refuses_before_taking_the_store() {
         .unwrap();
     write(&db, vec![json!({"op":"create", "type":"Task", "id":"Task-close"})]).unwrap();
     assert_eq!(*completed.lock().unwrap(), 2, "both callbacks completed without panicking");
-    db.unwatch(id);
+    assert_eq!(db.unwatch(id), Unwatched::Ended);
     db.close().unwrap();
 }
 
@@ -321,7 +322,9 @@ fn callback_schema_unwatch_and_nested_delivery_terminate() {
                             db.set_schema(schema).unwrap();
                             assert!(db.schema().unwrap().types.contains_key("Extra"));
                         }
-                        "unwatch" => db.unwatch(callback_registration.lock().unwrap().unwrap()),
+                        "unwatch" => {
+                            let _ = db.unwatch(callback_registration.lock().unwrap().unwrap());
+                        }
                         "nested" => {
                             let other_dir = tempfile::tempdir().unwrap();
                             let other = Arc::new(open(&other_dir));
@@ -343,7 +346,7 @@ fn callback_schema_unwatch_and_nested_delivery_terminate() {
                         _ => unreachable!(),
                     }
                     // Unregister here also bounds self-induced deliveries: a changed schema and nested write named us again.
-                    db.unwatch(callback_registration.lock().unwrap().unwrap());
+                    let _ = db.unwatch(callback_registration.lock().unwrap().unwrap());
                     *heard.lock().unwrap() += 1;
                 }),
             )
@@ -489,7 +492,7 @@ fn measure_tracking_contention() {
                                 }
                                 "watch" => {
                                     let id = db.watch(scan.clone(), Box::new(|_| {})).unwrap();
-                                    db.unwatch(id);
+                                    assert_eq!(db.unwatch(id), Unwatched::Ended);
                                 }
                                 _ => {
                                     db.read(&scan).unwrap();
@@ -584,7 +587,7 @@ fn watch_delivery_refreshes_schema_after_callbacks_for_initial_batch_and_unit_de
             &[None, Some(crate::error::ErrorCode::UnknownType), None],
             "{trigger}: {heard:?}"
         );
-        db.unwatch(id);
+        assert_eq!(db.unwatch(id), Unwatched::Ended);
         db.close().unwrap();
     }
 }
@@ -651,7 +654,7 @@ fn dropping_a_listeners_last_database_reference_does_not_wait_on_its_unit() {
                     if action == "panic" {
                         panic!("listener panic with last database reference");
                     }
-                    callback_db.unwatch(into.load(std::sync::atomic::Ordering::SeqCst));
+                    let _ = callback_db.unwatch(into.load(std::sync::atomic::Ordering::SeqCst));
                 }),
             )
             .unwrap();
