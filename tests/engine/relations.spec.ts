@@ -509,6 +509,10 @@ describe('weighted kinds', () => {
     expect(e.getRelation(loaded)).toMatchObject({ weight: 3 });
     e.admin.updateRelation(loaded, { target: a });
     expect(e.getRelation(loaded)).toMatchObject({ target: a, weight: 3 });
+    // A loaded weight of 1 is the weight a link leaves out, so linking the same edge again finds it
+    const one = e.admin.addRelation(a, 'mentions', c, undefined, 1);
+    e.write(a).link('mentions', c, { weight: 1 });
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.id)).toEqual([one]);
   });
 
   it('rank walks and teleports by weight unless told not to, and EXPLAIN reports the weight it read', () => {
