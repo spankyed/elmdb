@@ -18,7 +18,7 @@ use crate::format::value::TIMESTAMP_EXTENSION;
 use super::algorithms::{self, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
-use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
+use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal};
 use super::text::{self, search::Hit};
 use super::trigram::{self, Matcher};
 use super::unit::Read;
@@ -663,6 +663,88 @@ impl<R: Read> Query<'_, R> {
                             fields: Vec::new(),
                         };
                         self.hits.borrow_mut().insert(id.clone(), (hit, "rank".to_owned()));
+                    }
+                    if !visit(id)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Step::Topological { kinds, direction } => {
+                if *direction == Direction::Both {
+                    return Err(Error::new(
+                        ErrorCode::BatchInvalid,
+                        "topological follows each edge one way, out or in: an edge followed both ways orders nothing",
+                    ));
+                }
+                let (ids, graph) = self.project(before, upto, kinds, *direction)?;
+                let ordered = algorithms::topological_order(&graph);
+                if let Some(stages) = self.stages {
+                    stages.cycled(upto, ordered.cycles);
+                }
+                for at in ordered.order {
+                    if !visit(&ids[at as usize])? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Step::Similar { to, kinds, direction, measure } => {
+                for kind in kinds {
+                    relations::definition(self.r, kind)?;
+                }
+                if !self.alive(to)? {
+                    return Ok(true);
+                }
+                let ids = self.collect(before)?;
+                // Each entity's first place in the set, so a repeat is answered once
+                let mut place: HashMap<&str, usize, Fixed> = HashMap::default();
+                for (at, id) in ids.iter().enumerate() {
+                    place.entry(id.as_str()).or_insert(at);
+                }
+                let ours = self.neighbours(to, kinds, direction.sides())?;
+                let back: &[bool] = match direction {
+                    Direction::Out => &[false],
+                    Direction::In => &[true],
+                    Direction::Both => &[true, false],
+                };
+                // Each entity that shares a neighbour with `to`: how many it shares, and their Adamic-Adar sum, added
+                // in the order `to`'s neighbours were read so the sum is the same bits every time
+                let mut shared: HashMap<String, (usize, f64), Fixed> = HashMap::default();
+                for neighbour in &ours {
+                    let linked = self.neighbours(neighbour, kinds, back)?;
+                    let term = algorithms::adamic_adar(linked.len());
+                    for other in linked {
+                        if other == *to || !place.contains_key(other.as_str()) {
+                            continue;
+                        }
+                        let entry = shared.entry(other).or_insert((0, 0.0));
+                        entry.0 += 1;
+                        entry.1 += term;
+                    }
+                }
+                let mut scored = Vec::with_capacity(shared.len());
+                for (at, id) in ids.iter().enumerate() {
+                    if place[id.as_str()] != at {
+                        continue;
+                    }
+                    let Some(&(count, sum)) = shared.get(id) else { continue };
+                    let score = match measure {
+                        Similarity::Jaccard => {
+                            let theirs = self.neighbours(id, kinds, direction.sides())?.len();
+                            algorithms::jaccard(count, theirs, ours.len())
+                        }
+                        Similarity::AdamicAdar => sum,
+                    };
+                    scored.push((id, score));
+                }
+                // Stable: equal scores keep the set's order
+                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                let record = matches!(self.plan.terminal, Terminal::Hits { .. });
+                for (id, score) in scored {
+                    if record {
+                        let hit = Hit { id: id.clone(), seq: 0, score, terms: Vec::new(), fields: Vec::new() };
+                        self.hits.borrow_mut().insert(id.clone(), (hit, "similar".to_owned()));
                     }
                     if !visit(id)? {
                         return Ok(false);
@@ -1419,6 +1501,25 @@ impl<R: Read> Query<'_, R> {
         each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
     }
 
+    /// An entity's neighbours: the far ends of its edges of the kinds on the sides given, each once in the order read,
+    /// leaving out itself and any the scope doesn't reach. Read through the plan's reader, so a tracked read is
+    /// written into by a link or an unlink at the entity
+    fn neighbours(&self, id: &str, kinds: &[String], sides: &[bool]) -> Result<Vec<String>> {
+        let mut found = Vec::new();
+        let mut seen: HashSet<String, Fixed> = HashSet::default();
+        for kind in kinds {
+            for &outward in sides {
+                for (_, far) in relations::edges(self.r, id, outward, Some(kind))? {
+                    if far != id && !seen.contains(&far) && self.alive(&far)? {
+                        seen.insert(far.clone());
+                        found.push(far);
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
     /// The set after the first `before` steps as a graph for stage `stage`: its entities once each, in order, numbered
     /// so, and the edges of the kinds between two of them, followed the direction's ways, each entity's kind by kind and
     /// in place order. The edges are read through the plan's reader, so a tracked read is written into by a link or an
@@ -1534,6 +1635,7 @@ struct Graphed {
     nodes: usize,
     edges: usize,
     rounds: Option<(u32, bool)>,
+    cycles: Option<u32>,
 }
 
 /// Puts back the stage that ran before, charging the time since to the one ending
@@ -1598,12 +1700,18 @@ impl Stages {
     }
 
     fn projected(&self, stage: usize, nodes: usize, edges: usize) {
-        self.graph.borrow_mut()[stage] = Some(Graphed { nodes, edges, rounds: None });
+        self.graph.borrow_mut()[stage] = Some(Graphed { nodes, edges, rounds: None, cycles: None });
     }
 
     fn ranked(&self, stage: usize, iterations: u32, converged: bool) {
         if let Some(graphed) = &mut self.graph.borrow_mut()[stage] {
             graphed.rounds = Some((iterations, converged));
+        }
+    }
+
+    fn cycled(&self, stage: usize, cycles: u32) {
+        if let Some(graphed) = &mut self.graph.borrow_mut()[stage] {
+            graphed.cycles = Some(cycles);
         }
     }
 
@@ -1631,8 +1739,9 @@ impl Stages {
             let graphed = graph[at];
             let extra = match graphed {
                 None => 0,
-                Some(Graphed { rounds: None, .. }) => 2,
-                Some(Graphed { rounds: Some(_), .. }) => 4,
+                Some(Graphed { rounds, cycles, .. }) => {
+                    2 + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
+                }
             };
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
@@ -1641,7 +1750,7 @@ impl Stages {
                 w.str("index");
                 w.str(index);
             }
-            if let Some(Graphed { nodes, edges, rounds }) = graphed {
+            if let Some(Graphed { nodes, edges, rounds, cycles }) = graphed {
                 w.str("nodes");
                 w.uint(nodes as u64);
                 w.str("edges");
@@ -1651,6 +1760,10 @@ impl Stages {
                     w.uint(u64::from(iterations));
                     w.str("converged");
                     w.bool(converged);
+                }
+                if let Some(cycles) = cycles {
+                    w.str("cycles");
+                    w.uint(u64::from(cycles));
                 }
             }
             w.str("visited");
@@ -1692,6 +1805,8 @@ fn step_name(step: &Step) -> &'static str {
         Step::Ancestors { .. } => "ancestors",
         Step::PathTo { .. } => "pathTo",
         Step::Rank { .. } => "rank",
+        Step::Topological { .. } => "topological",
+        Step::Similar { .. } => "similar",
         Step::OrderBy { .. } => "orderBy",
         Step::Reverse => "reverse",
         Step::Limit { .. } => "limit",
@@ -2151,12 +2266,13 @@ fn query_with(
                         | Step::Like { .. }
                         | Step::Hybrid { .. }
                         | Step::Rank { .. }
+                        | Step::Similar { .. }
                 )
             };
             if !plan.steps.iter().any(searches) {
                 return Err(Error::new(
                     ErrorCode::BatchInvalid,
-                    "hits() answers a search or a rank, and the plan has neither",
+                    "hits() answers a search, a rank or a similar, and the plan has none",
                 ));
             }
             let ids = q.collect(last)?;

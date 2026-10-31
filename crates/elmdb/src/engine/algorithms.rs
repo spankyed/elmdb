@@ -142,6 +142,79 @@ pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
     groups
 }
 
+/// What `topological_order` found: every node once, and how many cycles kept their members together
+#[derive(Debug, Clone, PartialEq)]
+pub struct Ordered {
+    pub order: Vec<u32>,
+    pub cycles: u32,
+}
+
+/// The nodes in an order where every edge leads from a node to a later one, as far as the edges allow: the members of a
+/// strong component of more than one node, or of one with an edge to itself, can't be ordered so, and stay together in
+/// their numbering where the component falls. What the edges leave free goes lowest first, so the answer is the order
+/// the edges allow that is nearest the numbering. Kahn's algorithm over the strong components, taking each time the
+/// ready component whose first member is lowest
+pub fn topological_order(graph: &Projection) -> Ordered {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+    let n = graph.nodes();
+    let groups = strong_components(graph);
+    let mut group_of = vec![0u32; n];
+    for (at, group) in groups.iter().enumerate() {
+        for &v in group {
+            group_of[v as usize] = at as u32;
+        }
+    }
+    let mut cycles = 0u32;
+    let mut waiting = vec![0u32; groups.len()];
+    for (at, group) in groups.iter().enumerate() {
+        let mut looped = group.len() > 1;
+        for &v in group {
+            for &w in graph.out(v as usize) {
+                let to = group_of[w as usize];
+                if to as usize == at {
+                    looped = true;
+                } else {
+                    waiting[to as usize] += 1;
+                }
+            }
+        }
+        cycles += u32::from(looped);
+    }
+    // A group's members are in their numbering, so its first is its lowest
+    let mut ready: BinaryHeap<Reverse<(u32, u32)>> =
+        (0..groups.len()).filter(|&at| waiting[at] == 0).map(|at| Reverse((groups[at][0], at as u32))).collect();
+    let mut order = Vec::with_capacity(n);
+    while let Some(Reverse((_, at))) = ready.pop() {
+        let group = &groups[at as usize];
+        order.extend_from_slice(group);
+        for &v in group {
+            for &w in graph.out(v as usize) {
+                let to = group_of[w as usize];
+                if to == at {
+                    continue;
+                }
+                waiting[to as usize] -= 1;
+                if waiting[to as usize] == 0 {
+                    ready.push(Reverse((groups[to as usize][0], to)));
+                }
+            }
+        }
+    }
+    Ordered { order, cycles }
+}
+
+/// Jaccard's similarity of two neighbour sets of `a` and `b` members sharing `shared`: the shared over the union
+pub fn jaccard(shared: usize, a: usize, b: usize) -> f64 {
+    shared as f64 / (a + b - shared) as f64
+}
+
+/// What one shared neighbour of `degree` adds to Adamic and Adar's similarity: 1 / ln(degree). A shared neighbour is
+/// linked with both entities, so its degree is at least 2
+pub fn adamic_adar(degree: usize) -> f64 {
+    1.0 / (degree as f64).ln()
+}
+
 /// What `rank` found: each node's score, summing to 1, and whether the scores settled within the rounds allowed
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ranked {
@@ -242,4 +315,4 @@ pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

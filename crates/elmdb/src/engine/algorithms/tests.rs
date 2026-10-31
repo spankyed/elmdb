@@ -4,9 +4,11 @@
 
 use proptest::prelude::*;
 
-use super::{Projection, communities, rank, strong_components, weak_components};
+use super::{
+    Ordered, Projection, adamic_adar, communities, jaccard, rank, strong_components, topological_order, weak_components,
+};
 
-const KARATE_EDGES: [(u32, u32); 78] = [
+pub(crate) const KARATE_EDGES: [(u32, u32); 78] = [
     (0, 1),
     (0, 2),
     (0, 3),
@@ -644,4 +646,86 @@ fn a_lower_resolution_merges_and_none_leaves_each_component_whole() {
     let apart = graph(6, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)]);
     assert_eq!(communities(&apart, 0.0, 0, 100), weak_components(&apart));
     assert_eq!(communities(&Projection::new(), 1.0, 0, 100), Vec::<Vec<u32>>::new());
+}
+
+/// The topological order by its definition: the strong components by brute force, then each time, of the components
+/// no edge from an unplaced one leads into, the one whose first member is lowest; and the cycles, the components of
+/// more than one node or with an edge to themselves
+fn ordered(n: usize, edges: &[(u32, u32)]) -> Ordered {
+    let groups = mutually_reached(n, edges);
+    let group_of = |v: u32| groups.iter().position(|g| g.contains(&v)).unwrap();
+    let mut placed = vec![false; groups.len()];
+    let mut order = Vec::new();
+    while let Some(next) = (0..groups.len())
+        .filter(|&at| !placed[at])
+        .filter(|&at| edges.iter().all(|&(a, b)| group_of(b) != at || group_of(a) == at || placed[group_of(a)]))
+        .min_by_key(|&at| groups[at][0])
+    {
+        placed[next] = true;
+        order.extend_from_slice(&groups[next]);
+    }
+    let cycles = (0..groups.len())
+        .filter(|&at| groups[at].len() > 1 || edges.iter().any(|&(a, b)| a == b && group_of(a) == at))
+        .count() as u32;
+    Ordered { order, cycles }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() })]
+
+    #[test]
+    fn the_topological_order_agrees_with_its_definition((n, edges, _) in graphs()) {
+        let found = topological_order(&graph(n, &edges));
+        let place: Vec<usize> = {
+            let mut place = vec![0; n];
+            found.order.iter().enumerate().for_each(|(at, &v)| place[v as usize] = at);
+            place
+        };
+        let reach = reachable(n, &edges);
+        for &(a, b) in &edges {
+            let together = reach[a as usize][b as usize] && reach[b as usize][a as usize];
+            prop_assert!(together || place[a as usize] < place[b as usize], "{a} → {b} goes forward");
+        }
+        prop_assert_eq!(found, ordered(n, &edges));
+    }
+}
+
+#[test]
+fn the_topological_order_follows_the_edges_and_keeps_the_numbering_where_they_leave_it_free() {
+    // A chain written backwards still runs forwards
+    assert_eq!(topological_order(&graph(3, &[(2, 1), (1, 0)])).order, [2, 1, 0]);
+    // A diamond: 0 first, 3 last, and 1 before 2 as numbered
+    let diamond = topological_order(&graph(4, &[(0, 2), (0, 1), (1, 3), (2, 3)]));
+    assert_eq!(diamond, Ordered { order: vec![0, 1, 2, 3], cycles: 0 });
+    // Nothing between two nodes keeps their numbering
+    assert_eq!(topological_order(&graph(2, &[])).order, [0, 1]);
+    // 3 must come first, then the cycle 0 → 1 → 2 → 0 together in its numbering, then 4 after it
+    let cycle = topological_order(&graph(5, &[(3, 1), (0, 1), (1, 2), (2, 0), (2, 4)]));
+    assert_eq!(cycle, Ordered { order: vec![3, 0, 1, 2, 4], cycles: 1 });
+    // A node linked to itself is a cycle of one, and stays where the numbering puts it
+    assert_eq!(topological_order(&graph(2, &[(1, 1)])), Ordered { order: vec![0, 1], cycles: 1 });
+    // The lowest ready node goes first even when a higher one became ready earlier
+    assert_eq!(topological_order(&graph(3, &[(2, 0)])).order, [1, 2, 0]);
+    assert_eq!(topological_order(&Projection::new()), Ordered { order: Vec::new(), cycles: 0 });
+}
+
+#[test]
+fn a_long_chain_orders_without_overflowing_the_stack() {
+    let n = 200_000u32;
+    let mut chain = Projection::new();
+    chain.node([]);
+    for v in 1..n {
+        chain.node([v - 1]);
+    }
+    let found = topological_order(&chain);
+    assert_eq!(found.order, (0..n).rev().collect::<Vec<_>>());
+    assert_eq!(found.cycles, 0);
+}
+
+#[test]
+fn similarity_scores_as_defined() {
+    assert_eq!(jaccard(2, 3, 4), 2.0 / 5.0);
+    assert_eq!(jaccard(3, 3, 3), 1.0);
+    assert_eq!(adamic_adar(2), 1.0 / 2f64.ln());
+    assert!(adamic_adar(2) > adamic_adar(10), "a rarer shared neighbour counts for more");
 }

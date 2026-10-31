@@ -93,9 +93,13 @@ fn maintenance_heap_bounds() {
     // score vectors at 8 bytes a node fit within what the ids freed. A rank that recorded a hit for every entity, not
     // only those a limit after it keeps, would add some 430 bytes an entity, past the allowance. Strong components hold
     // the same, measured: Tarjan's walk, some 33 bytes a node at its deepest, fits within what building the graph freed
+    // A topological order holds the same, measured, its strong components and ready heap within it too. A similar read
+    // keeps the set's ids and a place for each, and the neighbours two steps from `to`: about 112 bytes an entity
     let graph = |rows| Fixture::graph(rows, 5);
     // A rank whose terminal answers no scores, over every document with no limit, records none
-    for read in ["rank", "rankCounted", "weakComponents", "strongComponents"] {
+    for read in
+        ["rank", "rankCounted", "weakComponents", "strongComponents", "topological", "similar", "similarAdamicAdar"]
+    {
         measure_growth(read, 256, [5_000, 10_000], graph, |fixture| {
             black_box(fixture.db.read(&fixture.graph_read(read)).unwrap());
         });

@@ -188,6 +188,16 @@ impl Fixture {
                 json!({"answer":"hits"}),
             ),
             "communities" => (json!([]), json!({"answer":"communities","kinds":["refs"]})),
+            "topological" => (json!([{"step":"topological","kinds":["refs"]}]), json!({"answer":"count"})),
+            "similar" => (
+                json!([{"step":"similar","to":"Doc-00000000","kinds":["refs"],"direction":"both"},{"step":"limit","n":10}]),
+                json!({"answer":"hits"}),
+            ),
+            "similarAdamicAdar" => (
+                json!([{"step":"similar","to":"Doc-00000000","kinds":["refs"],"direction":"both","measure":"adamicAdar"},
+                       {"step":"limit","n":10}]),
+                json!({"answer":"hits"}),
+            ),
             "strongComponents" => (json!([]), json!({"answer":"strongComponents","kinds":["refs"],"counts":true})),
             _ => (json!([]), json!({"answer":"weakComponents","kinds":["refs"],"counts":true})),
         };
@@ -204,7 +214,7 @@ impl Fixture {
         let bytes = self.db.read(&self.graph_read(read)).unwrap();
         let answers: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
         let answer = &answers[0];
-        if read == "rankCounted" {
+        if read == "rankCounted" || read == "topological" {
             assert_eq!(answer["count"].as_u64().unwrap() as usize, self.rows);
         } else if read == "weakComponents" || read == "strongComponents" {
             let total: u64 = answer[read].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
@@ -213,6 +223,11 @@ impl Fixture {
             let total: usize =
                 answer["communities"].as_array().unwrap().iter().map(|c| c.as_array().unwrap().len()).sum();
             assert_eq!(total, self.rows);
+        } else if read.starts_with("similar") {
+            let scores: Vec<f64> =
+                answer["hits"].as_array().unwrap().iter().map(|h| h["score"].as_f64().unwrap()).collect();
+            assert!(!scores.is_empty() && scores.len() <= 10, "{answer}");
+            assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]) && scores.iter().all(|s| *s > 0.0));
         } else {
             assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
             assert_eq!(answer["rank"]["converged"], json!(true));

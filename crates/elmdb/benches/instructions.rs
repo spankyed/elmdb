@@ -157,7 +157,10 @@ fn graph_read(read: &str) -> (support::Fixture, Reads) {
 // A graph read over 1,000 documents of five edges each: the graph built from the store and the algorithm over it
 #[cfg(target_os = "linux")]
 #[library_benchmark]
-#[benches::read(args = ["weakComponents", "strongComponents", "rank", "personalized", "communities"], setup = graph_read)]
+#[benches::read(
+    args = ["weakComponents", "strongComponents", "rank", "personalized", "communities", "topological", "similar", "similarAdamicAdar"],
+    setup = graph_read
+)]
 fn graph((fixture, reads): (support::Fixture, Reads)) -> (support::Fixture, Vec<u8>) {
     let answer = fixture.db.read(black_box(&reads)).unwrap();
     (fixture, black_box(answer))
