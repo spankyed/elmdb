@@ -24,6 +24,7 @@ cargo nextest run --workspace  # each test in its own process, under .config/nex
 cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
+cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
 ```
 

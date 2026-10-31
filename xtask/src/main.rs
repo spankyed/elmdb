@@ -7,6 +7,9 @@
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
 //!   parallel moves would make a partition depend on the threads' timing rather than on its seed alone.
+//! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
+//!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
+//!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
 //! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
 //!   testing.md`, The build directory).
 
@@ -24,8 +27,9 @@ fn main() -> ExitCode {
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => sweep(&workspace_root()),
+        Some("check-sync") => check_sync(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | sweep>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | sweep>"
                 .to_owned(),
         ),
     };
@@ -68,6 +72,89 @@ fn sweep(root: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The engine's files that lock, wait or keep per-thread state outside `crate::sync`, each with why: what isn't
+/// listed here goes through it, so the models can run it on their own threads. A model of one of these is how it
+/// leaves the list
+const UNMODELLED: &[(&str, &str)] = &[
+    ("database.rs", "the open store, the schema and the index builder behind the handle: no model of opening yet"),
+    ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
+    ("engine/builder.rs", "a background index build and its waiters: no model yet"),
+    ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
+    ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
+    ("engine/values.rs", "a per-thread decompression buffer, no shared state"),
+    ("engine/watch.rs", "the schema read lock; the tracks and their delivery go through crate::sync"),
+    ("failpoints.rs", "test-only failure points, armed per thread"),
+    ("store/idle_reads.rs", "idle read snapshot release and its waiters: no model yet"),
+    (
+        "store/mod.rs",
+        "the writer gate, a parking_lot RecursiveRwLock no model provides, and the paths open in the process",
+    ),
+    ("store/sync.rs", "the group commit sync worker, tested by its own deterministic harness (store/sync/tests.rs)"),
+];
+
+/// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, and on a listed file that no
+/// longer does
+fn check_sync(root: &Path) -> Result<(), String> {
+    let source = root.join("crates/elmdb/src");
+    let found = unmodelled_files(&source)?;
+    let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();
+    let unlisted: Vec<_> = found.difference(&listed).collect();
+    let stale: Vec<_> = listed.difference(&found).collect();
+    if unlisted.is_empty() && stale.is_empty() {
+        return Ok(());
+    }
+    let mut message = String::new();
+    if !unlisted.is_empty() {
+        message += &format!(
+            "these lock, wait or keep per-thread state outside crate::sync, which the concurrency models can't run: \
+             {unlisted:?}; use crate::sync's primitives, or list the file in xtask's UNMODELLED with why\n"
+        );
+    }
+    if !stale.is_empty() {
+        message += &format!("UNMODELLED lists files that no longer lock outside crate::sync: {stale:?}; remove them\n");
+    }
+    Err(message.trim_end().to_owned())
+}
+
+/// The engine files, relative to `source`, holding a lock, a condition variable or a thread-local of `std`'s or
+/// parking_lot's: their tests, `sync/` itself and the models excepted
+fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>, String> {
+    let mut found = std::collections::BTreeSet::new();
+    let mut pending = vec![source.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let relative = path.strip_prefix(source).expect("under source").to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                if relative != "sync" && !relative.ends_with("tests") {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !relative.ends_with(".rs") || relative.ends_with("tests.rs") || relative.ends_with("model.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if text.lines().any(locks_outside_sync) {
+                found.insert(relative);
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Whether a line of code reaches a lock, a condition variable or a thread-local other than `crate::sync`'s
+fn locks_outside_sync(line: &str) -> bool {
+    let code = line.trim_start();
+    if code.starts_with("//") {
+        return false;
+    }
+    let std_lock = code.contains("std::sync::")
+        && ["Mutex", "Condvar", "RwLock", "Barrier"].iter().any(|primitive| code.contains(primitive));
+    let thread_local = code.contains("thread_local!") && !code.contains("crate::sync::thread_local!");
+    std_lock || code.contains("parking_lot::") || thread_local
 }
 
 fn workspace_root() -> PathBuf {
@@ -202,7 +289,43 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{direct_dependencies, lmdb_sys_crates};
+    use super::{UNMODELLED, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files};
+
+    #[test]
+    fn a_lock_outside_crate_sync_is_found_and_one_through_it_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path();
+        std::fs::create_dir_all(src.join("engine/tests")).unwrap();
+        std::fs::create_dir_all(src.join("sync")).unwrap();
+        std::fs::write(src.join("engine/locked.rs"), "use std::sync::{Arc, Mutex};\n").unwrap();
+        std::fs::write(src.join("engine/parked.rs"), "fn f(_: parking_lot::Mutex<()>) {}\n").unwrap();
+        std::fs::write(src.join("engine/local.rs"), "thread_local! { static X: u8 = 0; }\n").unwrap();
+        std::fs::write(
+            src.join("engine/modelled.rs"),
+            "use crate::sync::{Mutex, PlainCondvar};\ncrate::sync::thread_local! {}\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("engine/commented.rs"), "// std::sync::Mutex is not used here\nuse std::sync::Arc;\n")
+            .unwrap();
+        std::fs::write(src.join("engine/tests/uses.rs"), "use std::sync::Mutex;\n").unwrap();
+        std::fs::write(src.join("sync/mod.rs"), "pub(crate) use std::sync::{Condvar, Mutex};\n").unwrap();
+        let found: Vec<String> = unmodelled_files(src).unwrap().into_iter().collect();
+        assert_eq!(found, ["engine/local.rs", "engine/locked.rs", "engine/parked.rs"]);
+        assert!(!locks_outside_sync("    // parking_lot::Mutex"));
+    }
+
+    #[test]
+    fn a_listed_file_that_no_longer_locks_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/elmdb/src")).unwrap();
+        let refused = super::check_sync(dir.path()).unwrap_err();
+        assert!(refused.contains("no longer lock") && refused.contains("store/sync.rs"), "{refused}");
+    }
+
+    #[test]
+    fn every_unmodelled_file_says_why() {
+        assert!(UNMODELLED.iter().all(|(file, why)| file.ends_with(".rs") && !why.is_empty()));
+    }
 
     #[test]
     fn names_only_the_packages_own_direct_dependencies() {
