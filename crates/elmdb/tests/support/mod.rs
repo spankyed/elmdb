@@ -137,7 +137,7 @@ impl Fixture {
     }
 
     /// Documents each linked to `degree` others by `refs`, chosen by arithmetic so every run builds the same graph: the
-    /// graph algorithms' workload (`docs/roadmap/graph-algorithms.md`). Seeding is outside all measurement windows
+    /// graph algorithms' workload (`docs/archive/roadmap/graph-algorithms.md`). Seeding is outside all measurement windows
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {

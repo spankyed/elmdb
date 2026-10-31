@@ -1,6 +1,6 @@
 # Read allocations, copies and codecs: readings
 
-The evidence for [Read allocations, copies and codecs](../roadmap/read-allocation-codec.md). 2026-10-29, on
+The evidence for [Read allocations, copies and codecs](../archive/roadmap/read-allocation-codec.md). 2026-10-29, on
 `session/read-allocation` from `1268f34`. Machine: Apple M1 Pro, 10 cores, 32 GiB, macOS 26.3.1; rustc 1.99.1;
 samply 0.13.1. The machine was running other work throughout: load averages 9 to 15, recorded with each reading,
 so a comparison alternates its two sides rather than trusting one run of each.
@@ -73,7 +73,7 @@ the uncompressed fields' bytes a row. Kept only if `all_rows` is faster by more 
 alternately; otherwise reverted and recorded.
 
 Out of these: the key decoding and the scan's own copies are the field loop's structure (a field's name is its key's),
-and the projected page's cost is the lookups it asks for, which [Query work efficiency](../roadmap/query-work-efficiency.md)
+and the projected page's cost is the lookups it asks for, which [Query work efficiency](../archive/roadmap/query-work-efficiency.md)
 owns.
 
 ## Results

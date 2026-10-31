@@ -103,7 +103,7 @@ A plan is a scope, a start, steps and a terminal:
   (nearest first, each entity once, so a cycle ends the walk; with `depth`, at most that many edges away), and `pathTo`
   (a shortest path from an entity of the set to `to`, following edges `out`, `in` or `both` ways and at most `depth`
   long when given: its entities in order, both ends included, or none; of paths as short, the one found first).
-- **Graph algorithms** (`roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
+- **Graph algorithms** (`archive/roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
   edges of the kinds named between two of them the edges. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
   `damping` (0.85) and otherwise jumps back to a `seeds` entity, every entity when none are given, which is PageRank.

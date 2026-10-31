@@ -1,6 +1,6 @@
 # Graph algorithms: what they answer and what they cost
 
-The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2, 4 and 5. 2026-10-31, on
+The evidence for [the graph algorithms](../archive/roadmap/graph-algorithms.md), stages 0 to 2, 4 and 5. 2026-10-31, on
 `session/graph-algorithms` from `f613add`, on an Apple M1 Pro (macOS), Rust 1.99.1, Node 23.11.1.
 
 ## Correct

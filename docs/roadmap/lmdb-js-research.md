@@ -73,7 +73,7 @@ commands, data generators, results and limitations there. This plan remains the 
 ### L01: idle snapshots and page retention
 
 Active investigation and any justified production fix are owned by
-[the idle-snapshot goal](../goals/goal-idle-snapshot-retention.md), started 2026-10-30.
+[the idle-snapshot goal](../archive/goals/goal-idle-snapshot-retention.md), started 2026-10-30.
 The remaining workstreams retain their own status; this does not start them.
 
 **Question:** can elmdb's cached read transaction pin old pages indefinitely when its process goes idle while another
@@ -101,7 +101,7 @@ and regression criteria. A production fix is a separately owned deliverable, not
 ### L02: allocations, copies and repeated codec work
 
 The focused read investigation and selected internal fixes are owned by
-[Read allocations, copies and codecs](read-allocation-codec.md). Use that plan for execution and
+[Read allocations, copies and codecs](../archive/roadmap/read-allocation-codec.md). Use that plan for execution and
 read-specific evidence; the write-path questions below remain research here. Do not run duplicate read investigations.
 
 **Question:** which redundant operations dominate an actual elmdb read/write, and which can be removed without changing

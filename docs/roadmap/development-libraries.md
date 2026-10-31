@@ -31,7 +31,7 @@ or change public error meanings as part of this work.
 | 3 | rustix | Evaluate Unix API coverage; migrate only operations that become clearer and safer |
 | 4 | Loom | Model one production concurrency state machine, then decide whether to expand |
 | 5 | tracing | Prove useful diagnostics and collection through the binding before broader instrumentation |
-| 6 | petgraph, graph, rustworkx-core; leiden-rs | Evaluate for the graph algorithms: the first three declined, written in elmdb; leiden-rs kept for Leiden (`graph-algorithms.md`) |
+| 6 | petgraph, graph, rustworkx-core; leiden-rs | Evaluate for the graph algorithms: the first three declined, written in elmdb; leiden-rs kept for Leiden (`../archive/roadmap/graph-algorithms.md`) |
 
 Each stage is a separate reviewable change. Stages 1 and 2 can proceed independently; stage 3 follows the platform API
 inventory from stage 1. Stages 4 and 5 have explicit evaluation gates rather than unconditional adoption.
@@ -164,7 +164,7 @@ Acceptance:
 
 ## 6. Graph algorithms
 
-Status: evaluated, 2026-10-31: PageRank and components declined, Leiden kept. `graph-algorithms.md`'s stage 0, against its requirements: personalized
+Status: evaluated, 2026-10-31: PageRank and components declined, Leiden kept. `../archive/roadmap/graph-algorithms.md`'s stage 0, against its requirements: personalized
 PageRank with explicit seeds, its dangling-node rule and a convergence report; deterministic output with no
 parallelism that can't be turned off; building from the plan's CSR without copying the graph into the library's.
 
@@ -180,7 +180,7 @@ None meets the requirements, so `crates/elmdb/src/engine/algorithms.rs` holds th
 components and power-iteration personalized PageRank over its own CSR, about a hundred lines, checked against a dense
 reference over random graphs and networkx's karate-club scores.
 
-**Leiden** (`graph-algorithms.md`'s stage 4), evaluated on its own, against: seeded and deterministic, a resolution,
+**Leiden** (`../archive/roadmap/graph-algorithms.md`'s stage 4), evaluated on its own, against: seeded and deterministic, a resolution,
 modularity, parallelism that can be turned off, a compatible licence, and what it brings.
 
 - **leiden-rs 0.8.1** (MIT OR Apache-2.0, 2026-05-15): Leiden with modularity, CPM and two Reichardt–Bornholdt

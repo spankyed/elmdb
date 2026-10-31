@@ -1,4 +1,4 @@
-//! Read benchmarks over a fixed message store (`docs/roadmap/read-allocation-codec.md`): each read as the binding makes
+//! Read benchmarks over a fixed message store (`docs/archive/roadmap/read-allocation-codec.md`): each read as the binding makes
 //! it, from the request's msgpack bytes to the answer's, its answer checked before it is timed.
 
 #[path = "../tests/support/reads.rs"]

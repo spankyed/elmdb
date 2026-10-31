@@ -1,6 +1,6 @@
 # Query work efficiency
 
-Status: done, 2026-10-29: [the readings](../evidence/query-work-efficiency.md).
+Status: done, 2026-10-29: [the readings](../../evidence/query-work-efficiency.md).
 
 ## Outcome and existing guarantees
 
@@ -8,8 +8,8 @@ Retain indexed filtering, streaming early termination, bounded top-k and project
 only for demonstrated costly queries. Reduce visited entries, materialized rows or returned bytes
 while preserving the exact query contract. No speculative optimizer rewrite is scheduled.
 
-The existing [engine contract](../architecture/engine.md#reads-plans) and
-[plan algebra](plan-algebra.md) document built behavior: an indexed filter among leading filters can
+The existing [engine contract](../../architecture/engine.md#reads-plans) and
+[plan algebra](../../roadmap/plan-algebra.md) document built behavior: an indexed filter among leading filters can
 drive a type start, matching entries stream to early terminals/limits, bounded sorting retains top-k,
 and row projections return requested fields. First prove whether an affected plan already uses these
 capabilities before changing execution. Existing completed work is not reopened by this plan.
@@ -72,8 +72,8 @@ where multiple plans satisfy the same work contract.
 
 A result-preserving optimization must also preserve tracked reads: changes to fields used solely for
 membership/order still invalidate watches. Validate relevant writes, unit rollback and schema/index
-changes where execution dependencies change. Follow [testing guidance](../architecture/testing.md)
-and [required engine checks](../../CLAUDE.md). No ordinary timing gates or storage changes in this plan.
+changes where execution dependencies change. Follow [testing guidance](../../architecture/testing.md)
+and [required engine checks](../../../CLAUDE.md). No ordinary timing gates or storage changes in this plan.
 
 ## Evidence, stopping rules and current handoff
 
@@ -85,7 +85,7 @@ that actually change (candidate count, page size, sort input and returned bytes)
 Stop after the admitted query set. Close non-beneficial candidates with a reopening trigger. New
 queries or larger optimizer mechanisms are additional scope, not an obligation to keep tuning.
 
-Done, 2026-10-29: [the readings](../evidence/query-work-efficiency.md). apack admitted three queries; two were
+Done, 2026-10-29: [the readings](../../evidence/query-work-efficiency.md). apack admitted three queries; two were
 caller-only. The third, a thread's last messages, admitted one engine change: a hop streams its edges, and `reverse`
 straight after a hop from one entity over one kind reads them from the last, so `reverse` then `limit k` costs `k`, not
 the list. Not admitted, each with its reopening trigger there: `orderBy` over a walk, `after`, index entries reading

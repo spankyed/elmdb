@@ -1,6 +1,6 @@
 # Bound idle snapshot retention
 
-Status: active, 2026-10-30. Branch `session/idle-snapshot-retention`, worktree
+Status: done, 2026-10-30: elmdb #32, every commit of its branches on main. Branch `session/idle-snapshot-retention`, worktree
 `/private/tmp/elmdb-idle-snapshot-retention`, based on current local main `717e903`.
 
 ```text
