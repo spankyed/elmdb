@@ -92,6 +92,9 @@ pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
     let mut next = 0u32;
     let mut groups: Vec<Vec<u32>> = Vec::new();
     let mut visit = |v: u32, place: &mut [u32], low: &mut [u32], on_open: &mut [bool], open: &mut Vec<u32>| {
+        // Each node is placed once, so the walk and `open` never outgrow the graph. Checked in test builds, where a
+        // walk that revisited nodes would otherwise grow without bound until the machine ran out of memory
+        debug_assert_eq!(place[v as usize], UNSEEN, "a node is placed once");
         place[v as usize] = next;
         low[v as usize] = next;
         next += 1;
