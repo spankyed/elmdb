@@ -120,7 +120,7 @@ A plan is a scope, a start, steps and a terminal:
   followed `out`, `in` or `both` ways, in the set or not and in the scope; `measure` is `jaccard` (the default, shared
   over either's) or `adamicAdar` (each shared neighbour counting 1 / ln of its degree, so a rarely linked one counts
   more). `to` itself and an entity sharing nothing aren't answered, and a `to` the scope doesn't reach answers
-  nothing. Each score is a hit's, as a rank's is. It reads from `to` two edges out, not the whole set. Unlike `like`,
+  nothing. Each score is a hit's, as a rank's is. It reads from `to` two edges out, not the whole set: straight after a type start an entity's membership is its type and the scope, read per candidate, so it costs what `to`'s neighbourhood holds; after other steps it collects the set. Adamic–Adar's logarithm is libm's, so its scores are the same bits on every platform. Unlike `like`,
   which ranks by embedding, it ranks by links.
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
   then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
@@ -169,7 +169,7 @@ included, which is what says whether a filter walked rows an index could have an
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
-`topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+`topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so

@@ -114,19 +114,25 @@ Tarjan's algorithm in elmdb, walking with its own stack.
   1e-12. Zachary's karate club, both ways, from node 0, against networkx 3.4.2's `jaccard_coefficient` and
   `adamic_adar_index`, within 1e-12. A tracked read is written into by an edge inside its set (`topological`) and by
   an edge at a neighbour of `to` (`similar`), and not by one outside them.
-- **Time** (Criterion, the same graph as the other reads, five edges a document, `ELMDB_BENCH_ROWS=1000,10000 cargo
-  bench -p elmdb --bench maintenance -- 'graph/(weakComponents|topological|similar)'`, 2026-10-31, Apple M1 Pro, with
-  other sessions' builds running, a load average falling from 85 to 17):
+- **Time** (Criterion, the same graph as the other reads, five edges a document, 2026-10-31, Apple M1 Pro).
+  `topological` (`ELMDB_BENCH_ROWS=1000,10000 cargo bench -p elmdb --bench maintenance -- 'graph/(weakComponents|topological)'`,
+  with other sessions' builds running, a load average falling from 85 to 17): 1.32 ms at 1,000 documents and 15.8 ms
+  at 10,000, against `weakComponents`' 1.41 and 14.6 in the same run: it costs what building the graph does.
+  `similar` from one document, both ways, ten kept (`ELMDB_BENCH_ROWS=1000,10000,100000 cargo bench -p elmdb --bench
+  maintenance -- 'graph/(weakComponents|similar)'`, a load average about 7):
 
-  | Read | 1,000 | 10,000 |
-  |---|---:|---:|
-  | `weakComponents` | 1.41 ms | 14.6 ms |
-  | `topological`, every document counted | 1.32 ms | 15.8 ms |
-  | `similar` from one document, both ways, ten kept, Jaccard | 1.00 ms | 4.05 ms |
-  | the same, Adamic–Adar | 0.39 ms | 3.04 ms |
+  | Read | 1,000 | 10,000 | 100,000 |
+  |---|---:|---:|---:|
+  | `weakComponents`, for scale | 1.29 ms | 14.1 ms | 167 ms |
+  | `similar`, Jaccard | 0.57 ms | 0.67 ms | 0.81 ms |
+  | `similar`, Adamic–Adar | 0.12 ms | 0.13 ms | 0.15 ms |
 
-  `topological` costs what building the graph does. `similar` reads two edges out from `to` rather than the whole
-  graph, so most of its time at 10,000 is collecting the set to check membership; Jaccard reads each candidate's own
-  neighbours besides.
-- **Heap:** `topological` 184 bytes an entity, as the other graph reads; `similar` 112, the set's ids and a place for
-  each. The heap test holds both to 256.
+  Straight after a type start, `similar` reads membership per candidate rather than collecting the set, so its cost is
+  what lies two edges from `to`, and barely moves as the type grows a hundredfold. A first version that collected the
+  set took 4.05 and 3.04 ms at 10,000. Jaccard reads each candidate's own neighbours besides.
+- **Heap:** `topological` 184 bytes an entity, as the other graph reads, held to 256. `similar` after a type start
+  doesn't grow with the type: about 13 KB at 5,000 documents and at 10,000.
+- **The same bits everywhere:** `rank` adds, multiplies and divides, which IEEE 754 rounds alike on every platform, but
+  Adamic–Adar takes a logarithm, which std leaves to the platform's maths library. It takes libm's (a port of musl's,
+  pinned `=0.2.16`), and an exact-bits golden of the karate club's scores from node 0 (`ranks.rs`,
+  `KARATE_ADAMIC_ADAR_BITS`) is held identical by the CI matrix.

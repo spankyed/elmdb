@@ -156,7 +156,8 @@ much the largest of the three to write and to verify.
    components, each time taking the ready one whose first member is earliest in the set, so a cycle stays together
    and the answer is the order the edges allow nearest the set's; EXPLAIN counts its `cycles`. `similar` scores the set
    by Jaccard or Adamic–Adar over neighbours, read two edges out from `to` rather than across the set, its neighbours
-   counted wherever they are, so files can be alike by the symbols they use. `@apackdev/ears` exposes both on the query
+   counted wherever they are, so files can be alike by the symbols they use; after a type start it reads membership
+   per candidate, so its cost is the neighbourhood's, and Adamic–Adar's logarithm is libm's, the same on every platform. `@apackdev/ears` exposes both on the query
    builder, with no app caller.
 
 Later: k-core, betweenness centrality (Brandes), label propagation, and weights (`rank-weights.md`).
