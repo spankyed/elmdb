@@ -391,3 +391,156 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_watch_over_the_top_hears_the_drain_as_well_as_the_commit() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    // A chain long enough that one link at its end leaves pushes for the drain
+    let mut ops: Vec<Json> =
+        (0..3000).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..3000).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let top = || Reads {
+        reads: vec![
+            serde_json::from_value::<ReadOp>(json!({ "read": "query", "plan": {
+                "start": { "from": "types", "types": ["Task", "Note"] },
+                "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 3 }],
+                "terminal": { "answer": "hits" } } }))
+            .unwrap(),
+        ],
+        track: None,
+    };
+    let heard: Arc<Mutex<Vec<Json>>> = Arc::default();
+    let into = Arc::clone(&heard);
+    db.watch(
+        top(),
+        Box::new(move |answer| {
+            let bytes = answer.as_ref().unwrap();
+            let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+            into.lock().unwrap().push(answer[0]["hits"].clone());
+        }),
+    )
+    .unwrap();
+    // The chain's head points at its tail: every score moves, more than one commit's pushes
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-2999" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let now = {
+        let bytes = db.read(&top()).unwrap();
+        serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0]["hits"].clone()
+    };
+    let last = heard.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(last, now, "the last delivery is the drained index's top, not the commit's");
+    assert!(heard.lock().unwrap().len() >= 3, "the first read, the commit and at least one drain chunk");
+}
+
+#[test]
+fn a_commit_pushes_its_budget_and_leaves_the_rest_to_the_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..1000).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+        .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let queued = |t: &crate::engine::unit::Txn<'_, '_>| {
+        let mut n = 0;
+        crate::engine::unit::Read::visit(t, &keys::rank_queue("taskRank"), |_, _| {
+            n += 1;
+            true
+        })
+        .unwrap();
+        n
+    };
+    db.admin_unit_with_checkpoint(
+        |t| {
+            // Every node waiting again, none with an arc: each push takes one off the queue and adds none
+            ranks::clear(t, "taskRank")?;
+            assert_eq!(ranks::join_chunk(t, "taskRank", None, 2000)?, None);
+            assert_eq!(queued(t), 1000);
+            let waiting = ranks::push_at_commit(t)?;
+            assert_eq!(waiting, ["taskRank"]);
+            assert_eq!(queued(t), 1000 - ranks::COMMIT_PUSHES);
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean(), "the drain finished what the commit left: {:?}", db.check().unwrap());
+}
+
+/// The karate club's friendships, each one way and then the other, a node trashed and restored, and two edges
+/// reweighted: the index's bits after it, its pushes drained after each commit. The same history makes the same bits on
+/// every platform, which CI's Linux, macOS and Windows runs must each find
+#[test]
+fn the_same_history_makes_the_same_bits_on_every_platform() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    write(&db, (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+        .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let edges = crate::engine::algorithms::tests::KARATE_EDGES;
+    let weights = crate::engine::algorithms::tests::KARATE_WEIGHTS;
+    for (&(a, b), w) in edges.iter().zip(weights) {
+        write(&db, vec![json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": w })]).unwrap();
+        db.wait_for_index_builds().unwrap();
+    }
+    for op in [
+        json!({ "op": "trash", "id": "Task-5" }),
+        json!({ "op": "link", "source": "Task-0", "kind": "rates", "target": "Task-1", "weight": 1.5 }),
+        json!({ "op": "restore", "id": "Task-5" }),
+        json!({ "op": "link", "source": "Task-32", "kind": "rates", "target": "Task-33", "weight": 9.0 }),
+    ] {
+        write(&db, vec![op]).unwrap();
+        db.wait_for_index_builds().unwrap();
+    }
+    assert_within_bound(&db, "both", true);
+    let bits: Vec<u64> = db
+        .snapshot(|s| {
+            (0..34).map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.unwrap().x.to_bits())).collect()
+        })
+        .unwrap();
+    assert_eq!(bits, KARATE_HISTORY_BITS);
+}
+
+/// `the_same_history_makes_the_same_bits_on_every_platform`'s estimates, as this code found them on an Apple M1 Pro on
+/// 2026-10-31
+const KARATE_HISTORY_BITS: [u64; 34] = [
+    4613673579926782254,
+    4610821908507679268,
+    4611997313766654983,
+    4608420309496835819,
+    4604513055727937687,
+    4607900079068323918,
+    4607548093699354791,
+    4606344388540204292,
+    4607739974523240813,
+    4599412107090191155,
+    4604565980820253274,
+    4599726176833251323,
+    4600744756591145578,
+    4607823236193910293,
+    4601446465954465685,
+    4603085726173937314,
+    4603338583676891793,
+    4599653484846277290,
+    4599428786595022239,
+    4601721342182633847,
+    4600423382344164836,
+    4600698258572450612,
+    4601460709885148115,
+    4608865384604963893,
+    4603221709645400933,
+    4606851536761028675,
+    4602772274932736575,
+    4606406259886602508,
+    4602458881637634411,
+    4606674512061367489,
+    4605137304699968546,
+    4609023951793800059,
+    4613413487410362999,
+    4615005999349841167,
+];

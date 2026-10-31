@@ -98,27 +98,39 @@ pub struct Totals {
     /// `R = Σ|r|`
     pub residuals: f64,
     pub stage: Stage,
+    /// Where the sweep of the queue is: the place of the node pushed last, which the next push starts after
+    pub swept: Option<(u32, u64)>,
 }
 
 impl Totals {
     fn empty() -> Self {
-        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, stage: Stage::Joining }
+        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, stage: Stage::Joining, swept: None }
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(25);
+        let mut out = Vec::with_capacity(38);
         out.extend_from_slice(&self.nodes.to_le_bytes());
         out.extend_from_slice(&self.estimates.to_le_bytes());
         out.extend_from_slice(&self.residuals.to_le_bytes());
         out.push(self.stage as u8);
+        if let Some((type_at, seq)) = self.swept {
+            out.extend_from_slice(&type_at.to_le_bytes());
+            out.extend_from_slice(&seq.to_le_bytes());
+        }
         out
     }
 
     fn decode(bytes: &[u8]) -> Result<Self> {
         let corrupt = || Error::new(ErrorCode::Corrupted, "A rank index's totals don't read");
-        if bytes.len() != 25 {
+        if bytes.len() != 25 && bytes.len() != 37 {
             return Err(corrupt());
         }
+        let swept = (bytes.len() == 37).then(|| {
+            (
+                u32::from_le_bytes(bytes[25..29].try_into().expect("four bytes")),
+                u64::from_le_bytes(bytes[29..37].try_into().expect("eight bytes")),
+            )
+        });
         let f = |at: usize| f64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"));
         let stage = match bytes[24] {
             0 => Stage::Joining,
@@ -131,6 +143,7 @@ impl Totals {
             estimates: f(8),
             residuals: f(16),
             stage,
+            swept,
         })
     }
 
@@ -485,21 +498,40 @@ pub fn liveness(t: &mut Txn<'_, '_>, id: &str, live: bool) -> Result<()> {
     Ok(())
 }
 
-/// Pushes the first `limit` nodes waiting in a rank index's queue, in place order; whether any still wait
+/// Pushes up to `limit` of the nodes waiting in a rank index's queue, sweeping it in place order: each push takes the
+/// next waiting node after the one before, from the queue's start again once past its end. Pushing the first waiting
+/// node each time instead lets a hub and the node before it hand residual back and forth while the nodes after wait,
+/// the work growing geometrically with them. Whether any still wait
 pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let schema = t.schema;
     let Some(def) = schema.ranks.get(index) else { return Ok(false) };
     let index = Index::new(index, def, schema);
+    let queue = keys::rank_queue(index.name);
+    let mut after = totals(t, index.name)?.swept.map(|(type_at, seq)| keys::rank_queued(index.name, type_at, seq));
     for _ in 0..limit {
-        let mut first = None;
-        t.visit(&keys::rank_queue(index.name), |_, id| {
-            first = Some(String::from_utf8_lossy(id).into_owned());
+        let mut next = None;
+        let from = after.clone().unwrap_or_else(|| queue.clone());
+        t.visit_from(&queue, &from, |key, id| {
+            if after.as_deref() == Some(key) {
+                return true;
+            }
+            next = Some((key.to_vec(), String::from_utf8_lossy(id).into_owned()));
             false
         })?;
-        let Some(id) = first else { return Ok(false) };
+        if next.is_none() && after.is_some() {
+            // Past the end: the sweep goes on from the start
+            t.visit(&queue, |key, id| {
+                next = Some((key.to_vec(), String::from_utf8_lossy(id).into_owned()));
+                false
+            })?;
+        }
+        let Some((key, id)) = next else { return Ok(false) };
         let mut change = Change::begin(t, &index)?;
         change.push(t, &id)?;
+        let node = change.get(t, &id)?.expect("pushed a node");
+        change.totals.swept = Some((node.type_at, node.seq));
         change.finish(t)?;
+        after = Some(key);
     }
     let mut waiting = false;
     t.visit(&keys::rank_queue(index.name), |_, _| {
@@ -771,7 +803,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let seeds: Vec<(u32, f64)> = (0..nodes.len() as u32).map(|at| (at, 1.0)).collect();
         let truth = algorithms::rank(&graph, &seeds, alpha, 1_000_000, 1e-13).expect("a seed in a graph of its nodes");
         let distance: f64 = nodes.iter().zip(&truth.scores).map(|((_, n), s)| (n.x / estimates - s).abs()).sum();
-        let bound = Totals { nodes: nodes.len() as u64, estimates, residuals, stage: totals.stage }.error(alpha);
+        let bound = Totals { nodes: nodes.len() as u64, estimates, residuals, ..totals }.error(alpha);
         if distance > bound + 1e-9 {
             out.push(violation(format!("its scores are {distance} from PageRank, past the bound {bound} it reports")));
         }
