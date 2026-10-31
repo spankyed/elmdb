@@ -464,6 +464,13 @@ impl<R: Read> Query<'_, R> {
         }
     }
 
+    /// Whether the set after the first `before` steps holds each entity once for certain: a start of distinct types,
+    /// nothing after it. Any other set may repeat one
+    fn holds_each_once(&self, before: usize) -> bool {
+        before == 0
+            && self.start_types().is_some_and(|types| types.iter().enumerate().all(|(at, t)| !types[..at].contains(t)))
+    }
+
     /// Visits the ids after the first `upto` steps; false when `visit` stopped the walk
     fn pull(&self, upto: usize, visit: &mut Visit<'_>) -> Result<bool> {
         let Some(stages) = self.stages else { return self.stage(upto, visit) };
@@ -1589,9 +1596,7 @@ impl<R: Read> Query<'_, R> {
         let mut ids = self.collect(before)?;
         // A start of distinct types, nothing after it, walks each entity once; any other set may repeat one, kept at its
         // first place, its ids marked by reference rather than copied
-        let distinct = before == 0
-            && self.start_types().is_some_and(|types| types.iter().enumerate().all(|(at, t)| !types[..at].contains(t)));
-        if !distinct {
+        if !self.holds_each_once(before) {
             let first: Vec<bool> = {
                 let mut seen: HashSet<&str, Fixed> = HashSet::default();
                 ids.iter().map(|id| seen.insert(id.as_str())).collect()
@@ -2238,13 +2243,23 @@ fn query_with(
             }
             let ids = q.collect(last)?;
             let mut rows = Vec::new();
-            let mut answered = HashSet::new();
+            // A relation is met twice only when the read follows both sides of the set's edges, meeting one between two
+            // of its entities from each, or when the set holds an entity twice: only then are those answered kept, and
+            // a relation met again is passed over before its far end is read
+            let repeats = *direction == Direction::Both || !q.holds_each_once(last);
+            let mut answered: HashSet<String, Fixed> = HashSet::default();
             for from in &ids {
                 for kind in kinds {
                     for &outward in direction.sides() {
                         for (relation, far) in relations::edges(r, from, outward, Some(kind))? {
-                            if of_types(&far, types.as_deref()) && q.alive(&far)? && answered.insert(relation.clone()) {
+                            if repeats && answered.contains(&relation) {
+                                continue;
+                            }
+                            if of_types(&far, types.as_deref()) && q.alive(&far)? {
                                 let stored = relations::get(r, &relation)?.expect("an edge's relation exists");
+                                if repeats {
+                                    answered.insert(relation.clone());
+                                }
                                 rows.push((relation, stored));
                             }
                         }

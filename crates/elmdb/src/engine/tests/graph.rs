@@ -294,6 +294,16 @@ fn edges_answer_each_relation_on_the_direction_s_sides_once() {
         [pair("Task-a", "Task-b"), pair("Task-c", "Task-a"), pair("Task-b", "Task-c")],
         "the edge between two of the set answered once"
     );
+    // A set naming an entity twice answers its edges once, out or in
+    assert_eq!(edges(&["Task-a", "Task-a"], json!("out"), Json::Null), [pair("Task-a", "Task-b")]);
+    assert_eq!(edges(&["Task-a", "Task-a"], json!("in"), json!(["Task"])), [pair("Task-c", "Task-a")]);
+    // A type start answers each of its entities' edges once, a type named twice included
+    let typed = |types: Json| -> usize {
+        let plan = json!({ "start": { "from": "types", "types": types },
+            "terminal": { "answer": "edges", "kinds": ["refs"], "direction": "out" } });
+        query(&db, plan)["relations"].as_array().unwrap().len()
+    };
+    assert_eq!((typed(json!(["Task"])), typed(json!(["Task", "Task"]))), (3, 3));
 }
 
 #[test]
