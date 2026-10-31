@@ -7,17 +7,17 @@ The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 
 
 - **Against references** (`crates/elmdb/src/engine/algorithms/tests.rs`): over 256 random graphs of up to 12 nodes
   and 30 edges, personalized PageRank equals a dense power iteration over an adjacency matrix within 1e-9, scores sum
-  to 1, relabelling the nodes permutes the scores, and components equal a breadth-first search's.
+  to 1, relabelling the nodes permutes the scores, and weak components equal a breadth-first search's.
 - **Invariants:** a cycle and a complete graph score every node alike; a node with no edges sends its walker back to
   the seeds; seeds outside the graph are ignored, and none inside answers nothing; rounds stop at the tolerance or
   the limit and say which.
 - **Known answer:** Zachary's karate club (34 members, 78 friendships, both ways), against networkx 3.4.2's pure-Python
   `pagerank` (alpha 0.85, unweighted, tolerance 1e-15): PageRank and PageRank personalized to member 0 each agree
-  within 1e-9, and the club is one component.
+  within 1e-9, and the club is one weak component.
 - **Deterministic:** the club's scores at the defaults are recorded bit for bit and asserted on every platform CI runs
   (Linux, macOS, Windows): 30 rounds for PageRank and 39 from member 0.
 - **Through the store** (`crates/elmdb/src/engine/tests/ranks.rs`): over 64 random graphs of 7 tasks and two kinds,
-  the scores and components the engine answers equal those of the graph built by hand from the same edges, out, in
+  the scores and weak components the engine answers equal those of the graph built by hand from the same edges, out, in
   and both ways; a rank follows only edges inside the set and the scope; a tracked rank is written into by a link
   between two of its entities and not by one outside it; EXPLAIN reports each graph's nodes, edges and rounds.
 
@@ -42,7 +42,7 @@ medians, the same graph):
 
 | Read | 1,000 | 10,000 |
 |---|---:|---:|
-| `components` | 1.30 ms | 14.14 ms |
+| `weakComponents` | 1.30 ms | 14.14 ms |
 | `rank`, every document a seed, edges out | 1.30 ms | 14.05 ms |
 | `rank` from one document, edges both ways | 2.57 ms | 28.79 ms |
 
@@ -50,7 +50,7 @@ A rank costs what its graph does: one over edges both ways reads each entity's e
 and power iteration's rounds are within the spread. Building the graph is linear in the set, about 1.4 µs an entity
 and direction at five edges.
 
-**Heap** (`tests/maintenance_heap.rs`, release, dhat): a rank or components read holds 184 bytes an entity at five
+**Heap** (`tests/maintenance_heap.rs`, release, dhat): a rank or weak components read holds 184 bytes an entity at five
 edges, measured between 5,000 and 10,000 documents, against an allowance of 256. The graph itself is 24 of them.
 
 **Instruction counts** (`benches/instructions.rs`): `graph` at 1,000 documents for each read, which CI counts on every

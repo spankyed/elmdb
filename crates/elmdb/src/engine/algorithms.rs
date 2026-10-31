@@ -38,8 +38,9 @@ impl Projection {
     }
 }
 
-/// The weakly connected components: each a list of nodes in their numbering, largest first, ties by first member
-pub fn components(graph: &Projection) -> Vec<Vec<u32>> {
+/// The weak components, the groups the edges join whichever way they point: each a list of nodes in their numbering,
+/// largest first, ties by first member
+pub fn weak_components(graph: &Projection) -> Vec<Vec<u32>> {
     let n = graph.nodes();
     // Union-find whose root is always the lowest node of its set, so the answer doesn't depend on the order of unions
     let mut parent: Vec<u32> = (0..n as u32).collect();

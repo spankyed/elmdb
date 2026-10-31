@@ -4,7 +4,7 @@
 
 use proptest::prelude::*;
 
-use super::{Projection, components, rank};
+use super::{Projection, rank, weak_components};
 
 const KARATE_EDGES: [(u32, u32); 78] = [
     (0, 1),
@@ -202,7 +202,7 @@ fn dense(n: usize, edges: &[(u32, u32)], seeds: &[u32], damping: f64) -> Vec<f64
     p
 }
 
-/// The components by breadth-first search over the edges taken both ways, each sorted, in order of first member
+/// The weak components by breadth-first search over the edges taken both ways, each sorted, in order of first member
 fn reached(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
     let mut seen = vec![false; n];
     let mut groups = Vec::new();
@@ -253,7 +253,7 @@ proptest! {
 
     #[test]
     fn components_agree_with_breadth_first_search((n, edges, _) in graphs()) {
-        let mut found = components(&graph(n, &edges));
+        let mut found = weak_components(&graph(n, &edges));
         prop_assert!(found.windows(2).all(|pair| pair[0].len() >= pair[1].len()), "largest first");
         found.sort_by_key(|group| group[0]);
         prop_assert_eq!(found, reached(n, &edges));
@@ -282,7 +282,7 @@ fn the_karate_club_scores_as_networkx_does() {
             assert!((got - want).abs() < 1e-9, "member {v}: {got} against networkx's {want}");
         }
     }
-    assert_eq!(components(&karate()), [all]);
+    assert_eq!(weak_components(&karate()), [all]);
 }
 
 #[test]
@@ -314,7 +314,7 @@ fn seeds_outside_the_graph_are_ignored_and_none_inside_answers_nothing() {
     assert_eq!(rank(&g, &[1, 9], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6));
     assert_eq!(rank(&g, &[1, 1], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6), "a seed named twice counts once");
     assert_eq!(rank(&Projection::new(), &[0], 0.85, 100, 1e-6), None);
-    assert_eq!(components(&Projection::new()), Vec::<Vec<u32>>::new());
+    assert_eq!(weak_components(&Projection::new()), Vec::<Vec<u32>>::new());
 }
 
 #[test]
@@ -333,9 +333,9 @@ fn rounds_stop_at_the_tolerance_or_the_limit_and_say_which() {
 #[test]
 fn components_put_the_largest_first_and_ties_by_their_first_member() {
     // {2, 4, 5}, then {0, 3}, then {1}: by size
-    let found = components(&graph(6, &[(3, 0), (5, 2), (4, 5)]));
+    let found = weak_components(&graph(6, &[(3, 0), (5, 2), (4, 5)]));
     assert_eq!(found, [vec![2, 4, 5], vec![0, 3], vec![1]]);
-    let ties = components(&graph(4, &[(2, 3), (0, 1)]));
+    let ties = weak_components(&graph(4, &[(2, 3), (0, 1)]));
     assert_eq!(ties, [vec![0, 1], vec![2, 3]]);
 }
 

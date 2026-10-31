@@ -1,7 +1,7 @@
 # Graph algorithms
 
-Status: stages 0 to 2 built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)); stage 3 is apack's and
-stage 4 is planned. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
+Status: stages 0 to 2 built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)); stage 3 is apack's: the
+query builder's methods, with no app caller yet; stage 4 is planned. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
 caller to read every edge and compute over them in JavaScript. `../architecture/engine.md`, Reads, has them as built.
 
 ## Why in the engine
@@ -76,13 +76,14 @@ heap test bounds.
 
   The scores go where a search's do, so `hits` answers them beside the ids, and a `rank` after a `hybrid` or `search`
   re-ranks its results. `hits()` is refused today without a search step; `rank` counts as one.
-- **`components` terminal:** the weakly connected components of the projection, as `groupBy` answers groups: each
+- **`weakComponents` terminal:** the weak components of the projection, the groups its edges join whichever way they
+  point, as `groupBy` answers groups: each
   group's ids, or with `counts` its size, largest first, ties by first member's place in the set.
 - **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, with
   `resolution` (default `1.0`) and a `seed`. Leiden rather than Louvain, because Louvain can return communities that
   are not connected, and Leiden guarantees they are.
 
-All three take `kinds`. `rank` and `communities` take `direction` too; `components` doesn't, an edge joining its ends
+All three take `kinds`. `rank` and `communities` take `direction` too; `weakComponents` doesn't, an edge joining its ends
 whichever way it points, so a direction would change nothing. `rank` and `communities` also take `iterations`
 (default `100`) and `tolerance` (default `1e-6`, L1 change in scores between rounds): at damping 0.85 the change after
 `n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 89th, so the defaults always settle.
@@ -125,16 +126,15 @@ much the largest of the three to write and to verify.
 ## Stages
 
 0. **Evaluate the libraries** against the requirements above, and record the decision in `development-libraries.md`.
-1. **Projection and `components`.** CSR from the set, the `components` terminal, EXPLAIN, tracked reads, the protocol
+1. **Projection and `weakComponents`.** CSR from the set, the `weakComponents` terminal, EXPLAIN, tracked reads, the protocol
    and its TypeScript declarations. Components first, because it is exact and its reference is trivial, so it proves
    the projection.
 2. **`rank`: personalized PageRank**, with scores through `hits`, seeds by ids, and
    `converged`/`iterations` in the answer; `pagerank` as every node seeded.
-3. **apack.** `@apackdev/ears` exposes `.rank(...)` and `.components(...)` on the typed query builder and
-   `untypedQuery`, with its API report updated. The first callers are the ones that justified this: related notes
-   ranked by personalized PageRank from the open note over `references` both ways, and prompt context ranked by
-   personalized PageRank from the entities the user mentions and fused with text search (a note has a text index and
-   no vector index, so hybrid search has nothing to fuse).
+3. **apack.** `@apackdev/ears` exposes `.rank(...)` and `.weakComponents(...)` on the typed query builder and
+   `untypedQuery`, with its API report updated, and no app caller yet. Related notes and prompt context were built and
+   withdrawn: a notes graph this small and sparse ranks about as a two-step walk does, and the prompt context sent
+   notes the user had not chosen. A caller comes with a need, such as ranking across every entity type.
 4. **`communities`: Leiden**, off the critical path: its one caller is a graph view coloured by community, which
    stages 1 to 3 do not wait on. It starts when that view is being built, with its own library evaluation, and
    `@apackdev/ears` gains `.communities(...)` then.
@@ -147,9 +147,9 @@ betweenness centrality (Brandes), label propagation, and weights once relations 
 Each stage, beside the usual `cargo fmt`, clippy with warnings denied, `cargo nextest run --workspace`,
 `cargo xtask check-generated` and the binding's suite:
 
-- **A plain reference in the tests:** components by breadth-first search, and PageRank by dense power iteration over an
-  adjacency matrix, both written as plainly as the model harness's reference model. Property tests over random graphs
-  (`proptest`): components equal exactly; scores equal the reference within `1e-9`.
+- **A plain reference in the tests:** weak components by breadth-first search, and PageRank by dense power iteration
+  over an adjacency matrix, both written as plainly as the model harness's reference model. Property tests over random graphs
+  (`proptest`): weak components equal exactly; scores equal the reference within `1e-9`.
 - **Invariants that hold for any correct implementation:** scores sum to 1; relabelling entities permutes scores and
   nothing else; a directed cycle and a complete graph score every node equally; personalized PageRank with every node
   a seed equals PageRank; a community is always connected (Leiden's guarantee).

@@ -68,7 +68,7 @@ fn maintenance(c: &mut Criterion) {
         let graph = Fixture::graph(rows, 5);
         let mut group = c.benchmark_group("graph");
         group.throughput(Throughput::Elements(rows as u64));
-        for read in ["components", "rank", "personalized"] {
+        for read in ["weakComponents", "rank", "personalized"] {
             graph.assert_graph_read(read);
             let request = graph.graph_read(read);
             group.bench_function(BenchmarkId::new(read, rows), |b| {

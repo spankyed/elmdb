@@ -1,4 +1,4 @@
-//! The graph algorithms as plan steps (`docs/roadmap/graph-algorithms.md`): `rank` and the `components` answer over the
+//! The graph algorithms as plan steps (`docs/roadmap/graph-algorithms.md`): `rank` and the `weakComponents` answer over the
 //! set a plan built, case by case, and the graph each builds from the store against one built by hand from the same
 //! random edges.
 
@@ -160,22 +160,22 @@ fn components_answer_each_connected_group_largest_first() {
         query(
             &db,
             json!({ "start": { "from": "types", "types": ["Task"] },
-                "terminal": { "answer": "components", "kinds": ["refs"], "counts": counts } }),
+                "terminal": { "answer": "weakComponents", "kinds": ["refs"], "counts": counts } }),
         )
     };
-    assert_eq!(all(false)["components"], json!([["Task-c", "Task-d", "Task-e"], ["Task-a", "Task-b"]]));
-    assert_eq!(all(true)["components"], json!([3, 2]));
+    assert_eq!(all(false)["weakComponents"], json!([["Task-c", "Task-d", "Task-e"], ["Task-a", "Task-b"]]));
+    assert_eq!(all(true)["weakComponents"], json!([3, 2]));
     let both = query(
         &db,
-        json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": { "answer": "components", "kinds": ["refs", "blocks"] } }),
+        json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": { "answer": "weakComponents", "kinds": ["refs", "blocks"] } }),
     );
-    assert_eq!(both["components"], json!([["Task-a", "Task-b", "Task-c", "Task-d", "Task-e"]]));
+    assert_eq!(both["weakComponents"], json!([["Task-a", "Task-b", "Task-c", "Task-d", "Task-e"]]));
     // Only edges between two of the set's entities join: without e, c and d are apart
     let some = query(
         &db,
-        json!({ "start": { "from": "ids", "ids": ["Task-c", "Task-d"] }, "terminal": { "answer": "components", "kinds": ["refs"] } }),
+        json!({ "start": { "from": "ids", "ids": ["Task-c", "Task-d"] }, "terminal": { "answer": "weakComponents", "kinds": ["refs"] } }),
     );
-    assert_eq!(some["components"], json!([["Task-c"], ["Task-d"]]));
+    assert_eq!(some["weakComponents"], json!([["Task-c"], ["Task-d"]]));
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn explain_reports_the_graph_each_built() {
             vec![json!({ "read": "query", "explain": true, "plan": {
                 "start": { "from": "types", "types": ["Task"] },
                 "steps": [{ "step": "rank", "kinds": ["refs"] }],
-                "terminal": { "answer": "components", "kinds": ["refs"] }
+                "terminal": { "answer": "weakComponents", "kinds": ["refs"] }
             } })],
             None,
         ))
@@ -203,7 +203,7 @@ fn explain_reports_the_graph_each_built() {
     assert!(stages[1]["iterations"].as_u64().unwrap() > 1);
     assert_eq!(
         (&stages[2]["stage"], &stages[2]["nodes"], &stages[2]["edges"]),
-        (&json!("components"), &json!(4), &json!(3))
+        (&json!("weakComponents"), &json!(4), &json!(3))
     );
     assert!(stages[2].get("iterations").is_none());
     assert!(stages[0].get("nodes").is_none(), "a stage that built no graph says nothing of one");
@@ -295,10 +295,10 @@ proptest! {
             prop_assert_eq!(hit["score"].as_f64().unwrap(), expected.scores[n], "{}", hit);
         }
 
-        let mut groups = algorithms::components(&by_hand(&edges, &kinds, "out"));
+        let mut groups = algorithms::weak_components(&by_hand(&edges, &kinds, "out"));
         let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
-            "terminal": { "answer": "components", "kinds": kind_names } }));
+            "terminal": { "answer": "weakComponents", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = groups.drain(..).map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
-        prop_assert_eq!(&answer["components"], &json!(named));
+        prop_assert_eq!(&answer["weakComponents"], &json!(named));
     }
 }

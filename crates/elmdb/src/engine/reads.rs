@@ -1702,7 +1702,7 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::FirstRow { .. } => "firstRow",
         Terminal::Edges { .. } => "edges",
         Terminal::Degrees { .. } => "degrees",
-        Terminal::Components { .. } => "components",
+        Terminal::WeakComponents { .. } => "weakComponents",
         Terminal::GroupBy { .. } => "groupBy",
         Terminal::Hits { .. } => "hits",
     }
@@ -2050,12 +2050,12 @@ fn query_with(
                 w.uint(n);
             }
         }
-        Terminal::Components { kinds, counts } => {
+        Terminal::WeakComponents { kinds, counts } => {
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
-            let groups = algorithms::components(&graph);
+            let groups = algorithms::weak_components(&graph);
             w.map(2);
-            w.kind("components");
-            w.str("components");
+            w.kind("weakComponents");
+            w.str("weakComponents");
             w.array(groups.len() as u32);
             for group in &groups {
                 if *counts {

@@ -482,10 +482,10 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
-    /// The set's weakly connected components over the edges of the kinds between two of its entities, each edge joining
-    /// its ends whichever way it points: each component's ids in the set's order, largest first, ties by the earlier
+    /// The set's weak components over the edges of the kinds between two of its entities, each edge joining its ends
+    /// whichever way it points: each component's ids in the set's order, largest first, ties by the earlier
     /// first member; with `counts`, how many in place of the ids
-    Components {
+    WeakComponents {
         kinds: Vec<String>,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]

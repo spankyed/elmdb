@@ -93,7 +93,7 @@ fn maintenance_heap_bounds() {
     // score vectors at 8 bytes a node fit within what the ids freed. A rank that recorded a hit for every entity, not
     // only those a limit after it keeps, would add some 430 bytes an entity, past the allowance
     let graph = |rows| Fixture::graph(rows, 5);
-    for read in ["rank", "components"] {
+    for read in ["rank", "weakComponents"] {
         measure_growth(read, 256, [5_000, 10_000], graph, |fixture| {
             black_box(fixture.db.read(&fixture.graph_read(read)).unwrap());
         });
