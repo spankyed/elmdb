@@ -185,11 +185,14 @@ describe('terminals', () => {
     expect([q.count(), q.first(), q.last(), q.exists()]).toEqual([3, t.a, t.d, true]);
     const none = e.query('Task').where('status', 'gone');
     expect([none.count(), none.first(), none.last(), none.exists()]).toEqual([0, undefined, undefined, false]);
+    const readIds = q.ids;
+    q.ids = () => [];
     expect(q.map((id) => id.length > 0)).toEqual([true, true, true]);
     const seen: Id[] = [];
     expect(q.forEach((id) => seen.push(id)).count()).toBe(3);
     expect(seen).toEqual([t.a, t.c, t.d]);
     expect(q.reduce((n, id) => n + (id === t.c ? 1 : 0), 0)).toBe(1);
+    q.ids = readIds;
     const ids = q.ids();
     ids.pop();
     expect(q.count()).toBe(3);

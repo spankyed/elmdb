@@ -66,7 +66,15 @@ function faces(): Record<'engine' | 'admin' | 'query' | 'builder' | 'write', Rec
   const engine = freshEngine({ types: ['Note'], relationKinds: [], roles: [] });
   const id = engine.create('Note').id();
   const { admin, ...operations } = engine;
-  const face = (members: object) => members as Record<string, unknown>;
+  const face = (members: object) => {
+    const result = { ...members } as Record<string, unknown>;
+    for (let prototype = Object.getPrototypeOf(members); prototype && prototype !== Object.prototype && prototype !== Function.prototype; prototype = Object.getPrototypeOf(prototype)) {
+      for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name !== 'constructor' && !Object.hasOwn(result, name)) result[name] = (members as Record<string, unknown>)[name];
+      }
+    }
+    return result;
+  };
   return { engine: face(operations), admin: face(admin), query: face(engine.query), builder: face(engine.query.all()), write: face(engine.write(id)) };
 }
 

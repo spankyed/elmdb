@@ -223,6 +223,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'edges', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
       return (answer.relations as Record<string, unknown>[]).map(relationRow);
     }
+    #ids() { return run(this.#recipe, { answer: 'ids' }).ids as EARS.EntityId[]; }
 
     ofType(t: string) { return this.#next({ step: 'ofType', type: t }); }
     within(sub: readonly EARS.EntityId[]) { return this.#next({ step: 'within', ids: [...sub] }); }
@@ -328,7 +329,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
       return answer.hits;
     }
-    ids() { return run(this.#recipe, { answer: 'ids' }).ids as EARS.EntityId[]; }
+    ids() { return this.#ids(); }
     explain() {
       if (this.#recipe.steps.some((p) => !('step' in p))) {
         throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
@@ -342,9 +343,9 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     last() { return (run(this.#recipe, { answer: 'last' }).id as EARS.EntityId | null) ?? undefined; }
     exists() { return run(this.#recipe, { answer: 'exists' }).value as boolean; }
     // A callback runs on the ids once they are read, so its own writes are its to read
-    map<T>(fn: (i: EARS.EntityId) => T) { return this.ids().map(fn); }
-    forEach(fn: (i: EARS.EntityId) => void) { return (this.ids().forEach(fn), this); }
-    reduce<T>(fn: (a: T, i: EARS.EntityId) => T, init: T) { return this.ids().reduce(fn, init); }
+    map<T>(fn: (i: EARS.EntityId) => T) { return this.#ids().map(fn); }
+    forEach(fn: (i: EARS.EntityId) => void) { return (this.#ids().forEach(fn), this); }
+    reduce<T>(fn: (a: T, i: EARS.EntityId) => T, init: T) { return this.#ids().reduce(fn, init); }
     // Share implementations, binding only methods a recipe uses. Private state also permits a
     // frozen recipe to retain stable extracted functions without caching any database answers.
     static {
