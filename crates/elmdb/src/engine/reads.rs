@@ -14,7 +14,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
 use crate::format::value::TIMESTAMP_EXTENSION;
 
-use super::algorithms::{self, Projection};
+use super::algorithms::{self, Groups, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
 use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal};
@@ -1938,17 +1938,20 @@ fn each(ids: Vec<String>, visit: &mut Visit<'_>) -> Result<bool> {
     Ok(true)
 }
 
-/// A graph answer's groups, under `kind`: each group's ids, its nodes named by `ids`, or with `counts` its size
-fn write_groups(kind: &str, ids: &[String], groups: &[Vec<u32>], counts: bool, w: &mut W<'_>) {
+/// A graph answer's groups, under `kind`: each group's ids, its nodes named by `ids`, or with `counts` its size, read
+/// without its members
+fn write_groups(kind: &str, ids: &[String], groups: &Groups, counts: bool, w: &mut W<'_>) {
     w.map(2);
     w.kind(kind);
     w.str(kind);
     w.array(groups.len() as u32);
-    for group in groups {
-        if counts {
-            w.uint(group.len() as u64);
-            continue;
+    if counts {
+        for size in groups.sizes() {
+            w.uint(u64::from(size));
         }
+        return;
+    }
+    for group in groups.iter() {
         w.array(group.len() as u32);
         for &at in group {
             w.str(&ids[at as usize]);

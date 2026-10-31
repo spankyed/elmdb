@@ -38,9 +38,71 @@ impl Projection {
     }
 }
 
-/// The weak components, the groups the edges join whichever way they point: each a list of nodes in their numbering,
-/// largest first, ties by first member
-pub fn weak_components(graph: &Projection) -> Vec<Vec<u32>> {
+/// Groups of nodes, held flat: group `i` is `members[offsets[i]..offsets[i + 1]]`. Every answer in groups orders them the
+/// same way, largest first, ties by lowest member, and each group's members in their numbering
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Groups {
+    members: Vec<u32>,
+    offsets: Vec<u32>,
+}
+
+impl Groups {
+    /// The groups `labels` names, one label per node, each label below the number of nodes: a group is the nodes that
+    /// share a label, so a label's own value orders nothing
+    pub fn from_labels(labels: &[u32]) -> Self {
+        let n = labels.len();
+        let mut size = vec![0u32; n];
+        let mut lowest = vec![u32::MAX; n];
+        for (v, &label) in labels.iter().enumerate() {
+            size[label as usize] += 1;
+            lowest[label as usize] = lowest[label as usize].min(v as u32);
+        }
+        let mut order: Vec<u32> = (0..n as u32).filter(|&label| size[label as usize] > 0).collect();
+        order.sort_unstable_by_key(|&label| (std::cmp::Reverse(size[label as usize]), lowest[label as usize]));
+        // Each label's next free place in `members`, in the groups' order
+        let mut next = vec![0u32; n];
+        let mut offsets = Vec::with_capacity(order.len() + 1);
+        let mut at = 0u32;
+        for &label in &order {
+            offsets.push(at);
+            next[label as usize] = at;
+            at += size[label as usize];
+        }
+        offsets.push(at);
+        // Nodes in their numbering, so each group's members come out in it
+        let mut members = vec![0u32; n];
+        for (v, &label) in labels.iter().enumerate() {
+            members[next[label as usize] as usize] = v as u32;
+            next[label as usize] += 1;
+        }
+        Groups { members, offsets }
+    }
+
+    pub fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    pub fn get(&self, group: usize) -> &[u32] {
+        &self.members[self.offsets[group] as usize..self.offsets[group + 1] as usize]
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &[u32]> {
+        (0..self.len()).map(|group| self.get(group))
+    }
+
+    /// Each group's size, without reading its members
+    pub fn sizes(&self) -> impl Iterator<Item = u32> + '_ {
+        self.offsets.windows(2).map(|pair| pair[1] - pair[0])
+    }
+
+    #[cfg(test)]
+    pub fn to_vecs(&self) -> Vec<Vec<u32>> {
+        self.iter().map(<[u32]>::to_vec).collect()
+    }
+}
+
+/// The weak components, the groups the edges join whichever way they point
+pub fn weak_components(graph: &Projection) -> Groups {
     let n = graph.nodes();
     // Union-find whose root is always the lowest node of its set, so the answer doesn't depend on the order of unions
     let mut parent: Vec<u32> = (0..n as u32).collect();
@@ -60,26 +122,15 @@ pub fn weak_components(graph: &Projection) -> Vec<Vec<u32>> {
             }
         }
     }
-    let mut group_of: Vec<Option<usize>> = vec![None; n];
-    let mut groups: Vec<Vec<u32>> = Vec::new();
-    for v in 0..n as u32 {
-        let r = root(&mut parent, v) as usize;
-        let at = *group_of[r].get_or_insert_with(|| {
-            groups.push(Vec::new());
-            groups.len() - 1
-        });
-        groups[at].push(v);
-    }
-    // Groups are in order of first member already, and the sort is stable
-    groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
-    groups
+    let labels: Vec<u32> = (0..n as u32).map(|v| root(&mut parent, v)).collect();
+    Groups::from_labels(&labels)
 }
 
-/// The strong components, the groups whose nodes each reach every other following the edges' direction: each a list of
-/// nodes in their numbering, largest first, ties by first member. A node on no cycle is a group of its own. Reversing
+/// The strong components, the groups whose nodes each reach every other following the edges' direction. A node on no
+/// cycle is a group of its own. Reversing
 /// every edge leaves them as they are. Tarjan's algorithm, walking with a stack of its own rather than recursing, so a
 /// long chain can't overflow the thread's
-pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
+pub fn strong_components(graph: &Projection) -> Groups {
     const UNSEEN: u32 = u32::MAX;
     let n = graph.nodes();
     // Each node's place in the walk, and the earliest place it reaches among the nodes still on `open`
@@ -90,7 +141,9 @@ pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
     let mut open: Vec<u32> = Vec::new();
     let mut walk: Vec<(u32, usize)> = Vec::new();
     let mut next = 0u32;
-    let mut groups: Vec<Vec<u32>> = Vec::new();
+    // Each node's group, numbered as the walk settles them
+    let mut labels = vec![0u32; n];
+    let mut settled = 0u32;
     let mut visit = |v: u32, place: &mut [u32], low: &mut [u32], on_open: &mut [bool], open: &mut Vec<u32>| {
         // Each node is placed once, so the walk and `open` never outgrow the graph. Checked in test builds, where a
         // walk that revisited nodes would otherwise grow without bound until the machine ran out of memory
@@ -124,22 +177,19 @@ pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
                 low[parent as usize] = low[parent as usize].min(low[v as usize]);
             }
             if low[v as usize] == place[v as usize] {
-                let mut group = Vec::new();
                 loop {
                     let w = open.pop().expect("v is still open");
                     on_open[w as usize] = false;
-                    group.push(w);
+                    labels[w as usize] = settled;
                     if w == v {
                         break;
                     }
                 }
-                group.sort_unstable();
-                groups.push(group);
+                settled += 1;
             }
         }
     }
-    groups.sort_by_key(|group| (std::cmp::Reverse(group.len()), group[0]));
-    groups
+    Groups::from_labels(&labels)
 }
 
 /// What `topological_order` found: every node once, and how many cycles kept their members together
@@ -184,10 +234,10 @@ pub fn topological_order(graph: &Projection) -> Ordered {
     }
     // A group's members are in their numbering, so its first is its lowest
     let mut ready: BinaryHeap<Reverse<(u32, u32)>> =
-        (0..groups.len()).filter(|&at| waiting[at] == 0).map(|at| Reverse((groups[at][0], at as u32))).collect();
+        (0..groups.len()).filter(|&at| waiting[at] == 0).map(|at| Reverse((groups.get(at)[0], at as u32))).collect();
     let mut order = Vec::with_capacity(n);
     while let Some(Reverse((_, at))) = ready.pop() {
-        let group = &groups[at as usize];
+        let group = groups.get(at as usize);
         order.extend_from_slice(group);
         for &v in group {
             for &w in graph.out(v as usize) {
@@ -197,7 +247,7 @@ pub fn topological_order(graph: &Projection) -> Ordered {
                 }
                 waiting[to as usize] -= 1;
                 if waiting[to as usize] == 0 {
-                    ready.push(Reverse((groups[to as usize][0], to)));
+                    ready.push(Reverse((groups.get(to as usize)[0], to)));
                 }
             }
         }
@@ -278,14 +328,14 @@ pub fn rank(graph: &Projection, seeds: &[u32], damping: f64, iterations: u32, to
 
 /// Leiden communities (Traag, Waltman and van Eck, 2019) by modularity at `resolution`, through leiden-rs: each edge
 /// joins its ends whichever way it points, and counts once. Each community is connected, which Leiden guarantees and
-/// Louvain doesn't. Each a list of nodes in their numbering, largest first, ties by first member. Leiden's random
+/// Louvain doesn't. Leiden's random
 /// order comes from `seed`, so a seed and a graph answer the same partition on every platform; it runs on one thread,
 /// leiden-rs's parallel moves being compiled out, and stops after `iterations` rounds or when a round no longer
 /// improves the partition
-pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u32) -> Vec<Vec<u32>> {
+pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u32) -> Groups {
     let n = graph.nodes();
     if n == 0 {
-        return Vec::new();
+        return Groups::default();
     }
     let mut data = leiden_rs::GraphDataBuilder::new(n);
     for v in 0..n {
@@ -302,18 +352,8 @@ pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u
     };
     let found = leiden_rs::Leiden::new(config).run(&data).expect("leiden-rs runs over a built graph");
     // leiden-rs numbers communities from 0 and has no more of them than nodes
-    let mut group_of: Vec<Option<usize>> = vec![None; n];
-    let mut groups: Vec<Vec<u32>> = Vec::new();
-    for v in 0..n {
-        let community = found.partition.community_of(v);
-        let at = *group_of[community].get_or_insert_with(|| {
-            groups.push(Vec::new());
-            groups.len() - 1
-        });
-        groups[at].push(v as u32);
-    }
-    groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
-    groups
+    let labels: Vec<u32> = (0..n).map(|v| found.partition.community_of(v) as u32).collect();
+    Groups::from_labels(&labels)
 }
 
 #[cfg(test)]

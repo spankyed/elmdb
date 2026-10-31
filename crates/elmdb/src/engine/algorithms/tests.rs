@@ -5,7 +5,8 @@
 use proptest::prelude::*;
 
 use super::{
-    Ordered, Projection, adamic_adar, communities, jaccard, rank, strong_components, topological_order, weak_components,
+    Groups, Ordered, Projection, adamic_adar, communities, jaccard, rank, strong_components, topological_order,
+    weak_components,
 };
 
 pub(crate) const KARATE_EDGES: [(u32, u32); 78] = [
@@ -295,7 +296,7 @@ proptest! {
 
     #[test]
     fn components_agree_with_breadth_first_search((n, edges, _) in graphs()) {
-        let mut found = weak_components(&graph(n, &edges));
+        let mut found = weak_components(&graph(n, &edges)).to_vecs();
         prop_assert!(found.windows(2).all(|pair| pair[0].len() >= pair[1].len()), "largest first");
         found.sort_by_key(|group| group[0]);
         prop_assert_eq!(found, reached(n, &edges));
@@ -303,20 +304,20 @@ proptest! {
 
     #[test]
     fn strong_components_agree_with_mutual_reachability((n, edges, _) in graphs()) {
-        prop_assert_eq!(strong_components(&graph(n, &edges)), mutually_reached(n, &edges));
+        prop_assert_eq!(strong_components(&graph(n, &edges)).to_vecs(), mutually_reached(n, &edges));
     }
 
     #[test]
     fn reversing_every_edge_leaves_the_strong_components((n, edges, _) in graphs()) {
         let reversed: Vec<(u32, u32)> = edges.iter().map(|&(a, b)| (b, a)).collect();
-        prop_assert_eq!(strong_components(&graph(n, &edges)), strong_components(&graph(n, &reversed)));
+        prop_assert_eq!(strong_components(&graph(n, &edges)).to_vecs(), strong_components(&graph(n, &reversed)).to_vecs());
     }
 
     #[test]
     fn each_strong_component_lies_in_one_weak_one_and_together_they_form_no_cycle((n, edges, _) in graphs()) {
-        let strong = strong_components(&graph(n, &edges));
+        let strong = strong_components(&graph(n, &edges)).to_vecs();
         let mut weak_of = vec![0; n];
-        for (at, group) in weak_components(&graph(n, &edges)).iter().enumerate() {
+        for (at, group) in weak_components(&graph(n, &edges)).to_vecs().iter().enumerate() {
             for &v in group {
                 weak_of[v as usize] = at;
             }
@@ -335,7 +336,7 @@ proptest! {
             .map(|&(a, b)| (strong_of[a as usize], strong_of[b as usize]))
             .filter(|(a, b)| a != b)
             .collect();
-        let condensed = strong_components(&graph(strong.len(), &between));
+        let condensed = strong_components(&graph(strong.len(), &between)).to_vecs();
         prop_assert!(condensed.iter().all(|group| group.len() == 1), "{condensed:?}");
     }
 
@@ -362,7 +363,7 @@ fn the_karate_club_scores_as_networkx_does() {
             assert!((got - want).abs() < 1e-9, "member {v}: {got} against networkx's {want}");
         }
     }
-    assert_eq!(weak_components(&karate()), [all]);
+    assert_eq!(weak_components(&karate()).to_vecs(), [all]);
 }
 
 #[test]
@@ -394,7 +395,7 @@ fn seeds_outside_the_graph_are_ignored_and_none_inside_answers_nothing() {
     assert_eq!(rank(&g, &[1, 9], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6));
     assert_eq!(rank(&g, &[1, 1], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6), "a seed named twice counts once");
     assert_eq!(rank(&Projection::new(), &[0], 0.85, 100, 1e-6), None);
-    assert_eq!(weak_components(&Projection::new()), Vec::<Vec<u32>>::new());
+    assert_eq!(weak_components(&Projection::new()).to_vecs(), Vec::<Vec<u32>>::new());
 }
 
 #[test]
@@ -413,27 +414,27 @@ fn rounds_stop_at_the_tolerance_or_the_limit_and_say_which() {
 #[test]
 fn components_put_the_largest_first_and_ties_by_their_first_member() {
     // {2, 4, 5}, then {0, 3}, then {1}: by size
-    let found = weak_components(&graph(6, &[(3, 0), (5, 2), (4, 5)]));
+    let found = weak_components(&graph(6, &[(3, 0), (5, 2), (4, 5)])).to_vecs();
     assert_eq!(found, [vec![2, 4, 5], vec![0, 3], vec![1]]);
-    let ties = weak_components(&graph(4, &[(2, 3), (0, 1)]));
+    let ties = weak_components(&graph(4, &[(2, 3), (0, 1)])).to_vecs();
     assert_eq!(ties, [vec![0, 1], vec![2, 3]]);
 }
 
 #[test]
 fn strong_components_find_the_cycles() {
     // 0 → 1 → 2 → 0, a cycle; 2 → 3 → 4 → 3, another past it; 5 → 5, a self-link; 6 alone
-    let found = strong_components(&graph(7, &[(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3), (5, 5)]));
+    let found = strong_components(&graph(7, &[(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3), (5, 5)])).to_vecs();
     assert_eq!(found, [vec![0, 1, 2], vec![3, 4], vec![5], vec![6]]);
     // Two cycles sharing node 0 are one group, and one inside a larger cycle is part of it
-    let nested = strong_components(&graph(5, &[(0, 1), (1, 0), (0, 2), (2, 3), (3, 0), (3, 4), (4, 3)]));
+    let nested = strong_components(&graph(5, &[(0, 1), (1, 0), (0, 2), (2, 3), (3, 0), (3, 4), (4, 3)])).to_vecs();
     assert_eq!(nested, [vec![0, 1, 2, 3, 4]]);
     // A chain one way has no cycle, so every node is a group of its own, in order
-    let chain = strong_components(&graph(4, &[(2, 3), (0, 1), (1, 2)]));
+    let chain = strong_components(&graph(4, &[(2, 3), (0, 1), (1, 2)])).to_vecs();
     assert_eq!(chain, [vec![0], vec![1], vec![2], vec![3]]);
     // Ties by first member, whichever node the walk starts from
-    let ties = strong_components(&graph(4, &[(3, 2), (2, 3), (1, 0), (0, 1)]));
+    let ties = strong_components(&graph(4, &[(3, 2), (2, 3), (1, 0), (0, 1)])).to_vecs();
     assert_eq!(ties, [vec![0, 1], vec![2, 3]]);
-    assert_eq!(strong_components(&Projection::new()), Vec::<Vec<u32>>::new());
+    assert_eq!(strong_components(&Projection::new()).to_vecs(), Vec::<Vec<u32>>::new());
 }
 
 #[test]
@@ -447,12 +448,12 @@ fn a_long_chain_or_cycle_walks_without_overflowing_the_stack() {
         }
         g
     };
-    let chain = strong_components(&along(false));
+    let chain = strong_components(&along(false)).to_vecs();
     assert_eq!(
         (chain.len(), chain[0].as_slice(), chain[n as usize - 1].as_slice()),
         (n as usize, &[0][..], &[n - 1][..])
     );
-    let cycle = strong_components(&along(true));
+    let cycle = strong_components(&along(true)).to_vecs();
     assert_eq!((cycle.len(), cycle[0].len()), (1, n as usize));
 }
 
@@ -592,7 +593,7 @@ proptest! {
 
     #[test]
     fn communities_cover_every_node_once_each_connected_and_no_worse_than_alone((n, edges, _) in graphs(), seed in 0u64..4) {
-        let found = communities(&graph(n, &edges), 1.0, seed, 100);
+        let found = communities(&graph(n, &edges), 1.0, seed, 100).to_vecs();
         let mut all: Vec<u32> = found.iter().flatten().copied().collect();
         all.sort_unstable();
         prop_assert_eq!(all, (0..n as u32).collect::<Vec<_>>());
@@ -602,13 +603,13 @@ proptest! {
         }
         let alone: Vec<Vec<u32>> = (0..n as u32).map(|v| vec![v]).collect();
         prop_assert!(modularity(n, &edges, &found, 1.0) >= modularity(n, &edges, &alone, 1.0) - 1e-12);
-        prop_assert_eq!(&found, &communities(&graph(n, &edges), 1.0, seed, 100), "a seed answers the same");
+        prop_assert_eq!(&found, &communities(&graph(n, &edges), 1.0, seed, 100).to_vecs(), "a seed answers the same");
     }
 }
 
 #[test]
 fn the_karate_club_splits_into_its_known_communities() {
-    let found = communities(&karate(), 1.0, 0, 100);
+    let found = communities(&karate(), 1.0, 0, 100).to_vecs();
     // The club's best modularity is 0.4198 (Brandes et al., 2008), in four communities, and Leiden finds that partition
     let q = modularity(34, &KARATE_EDGES, &found, 1.0);
     assert!((q - 0.4197896).abs() < 1e-6, "modularity {q} of {found:?}");
@@ -622,7 +623,7 @@ fn the_karate_club_splits_into_its_known_communities() {
     ];
     assert_eq!(found, recorded);
     assert!(found.iter().all(|group| connected(group, &KARATE_EDGES)));
-    assert_eq!(found, communities(&karate(), 1.0, 0, 100));
+    assert_eq!(found, communities(&karate(), 1.0, 0, 100).to_vecs());
     // The two leaders, 0 and 33, around whom the club split, end up apart
     let of = |v: u32| found.iter().position(|group| group.contains(&v)).unwrap();
     assert_ne!(of(0), of(33));
@@ -631,21 +632,21 @@ fn the_karate_club_splits_into_its_known_communities() {
 #[test]
 fn a_round_moves_refines_and_aggregates_once_and_more_rounds_merge_further() {
     // One round leaves the club in seven communities; the rounds after merge them into its best four
-    let one = communities(&karate(), 1.0, 0, 1);
-    let many = communities(&karate(), 1.0, 0, 100);
+    let one = communities(&karate(), 1.0, 0, 1).to_vecs();
+    let many = communities(&karate(), 1.0, 0, 100).to_vecs();
     assert_eq!((one.len(), many.len()), (7, 4));
     assert!(modularity(34, &KARATE_EDGES, &one, 1.0) < modularity(34, &KARATE_EDGES, &many, 1.0));
 }
 
 #[test]
 fn a_lower_resolution_merges_and_none_leaves_each_component_whole() {
-    let coarse = communities(&karate(), 0.25, 0, 100);
-    let fine = communities(&karate(), 2.0, 0, 100);
+    let coarse = communities(&karate(), 0.25, 0, 100).to_vecs();
+    let fine = communities(&karate(), 2.0, 0, 100).to_vecs();
     assert!(coarse.len() < fine.len(), "{} at 0.25 against {} at 2", coarse.len(), fine.len());
     // Two triangles apart: at resolution 0, every edge only adds, so each component is one community
     let apart = graph(6, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)]);
-    assert_eq!(communities(&apart, 0.0, 0, 100), weak_components(&apart));
-    assert_eq!(communities(&Projection::new(), 1.0, 0, 100), Vec::<Vec<u32>>::new());
+    assert_eq!(communities(&apart, 0.0, 0, 100).to_vecs(), weak_components(&apart).to_vecs());
+    assert_eq!(communities(&Projection::new(), 1.0, 0, 100).to_vecs(), Vec::<Vec<u32>>::new());
 }
 
 /// The topological order by its definition: the strong components by brute force, then each time, of the components
@@ -728,4 +729,28 @@ fn similarity_scores_as_defined() {
     assert_eq!(jaccard(3, 3, 3), 1.0);
     assert_eq!(adamic_adar(2), 1.0 / 2f64.ln());
     assert!(adamic_adar(2) > adamic_adar(10), "a rarer shared neighbour counts for more");
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, failure_persistence: None, ..ProptestConfig::default() })]
+
+    #[test]
+    fn groups_from_labels_agree_with_grouping_by_hand(labels in (1usize..=40).prop_flat_map(|n| prop::collection::vec(0..n as u32, n))) {
+        let mut by_label: std::collections::BTreeMap<u32, Vec<u32>> = std::collections::BTreeMap::new();
+        for (v, &label) in labels.iter().enumerate() {
+            by_label.entry(label).or_default().push(v as u32);
+        }
+        let mut expected: Vec<Vec<u32>> = by_label.into_values().collect();
+        expected.sort_by_key(|group| (std::cmp::Reverse(group.len()), group[0]));
+        let found = Groups::from_labels(&labels);
+        prop_assert_eq!(found.sizes().collect::<Vec<_>>(), expected.iter().map(|g| g.len() as u32).collect::<Vec<_>>());
+        prop_assert_eq!(found.to_vecs(), expected);
+    }
+}
+
+#[test]
+fn groups_from_no_labels_are_none() {
+    let none = Groups::from_labels(&[]);
+    assert_eq!((none.len(), none.to_vecs()), (0, Vec::<Vec<u32>>::new()));
+    assert_eq!(none.sizes().count(), 0);
 }
