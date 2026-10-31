@@ -348,6 +348,7 @@ describe('graph algorithms', () => {
     expect(e.query('Task').communities('refs', { seed: 3 })).toEqual([[a, b, c], [x, y, z]]);
     expect(e.query('Task').communities('refs', { resolution: 0 })).toEqual([[a, b, c, x, y, z]]);
     expect(() => e.query('Task').communities('refs', { resolution: -1 })).toThrow();
+    for (const seed of [-1, 1.5, 2 ** 32]) expect(() => e.query('Task').communities('refs', { seed }), String(seed)).toThrow();
   });
 
   it('explain reports the graph a rank built and the rounds it ran', () => {

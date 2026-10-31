@@ -351,7 +351,8 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * The query's entities in Leiden communities by modularity over the edges of the kinds between two of them, whichever
    * way each points: groups more densely linked inside than out, each connected, the largest first. A higher
    * `resolution` (1 when not given) finds smaller communities, and 0 keeps each connected group whole. Leiden's order
-   * comes from `seed` (0), so the same data answers the same communities every time
+   * comes from `seed` (0), so the same data answers the same communities every time. A seed is a whole number from 0
+   * to 4294967295, and a resolution below 0 is refused
    */
   communities(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { resolution?: number; seed?: number }): EARS.EntityId<E>[][];
   pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
