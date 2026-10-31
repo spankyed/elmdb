@@ -79,7 +79,7 @@ heap test bounds.
 - **`weakComponents` terminal:** the weak components of the projection, the groups its edges join whichever way they
   point, as `groupBy` answers groups: each
   group's ids, or with `counts` its size, largest first, ties by first member's place in the set.
-- **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, with
+- **`communities` terminal** (a separate later stage, see Stages): Leiden communities (Traag, Waltman and van Eck, 2019) in the same shape, without `counts`, with
   `resolution` (default `1.0`) and a `seed`. Leiden rather than Louvain, because Louvain can return communities that
   are not connected, and Leiden guarantees they are.
 

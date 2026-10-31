@@ -71,7 +71,7 @@ Leiden through leiden-rs 0.8.1, no default features (`development-libraries.md`,
 - **Resolution:** 0.25 finds fewer communities than 2; at 0, every edge only adds, so each component is one community.
 - **Through the store** (`crates/elmdb/src/engine/tests/ranks.rs`): over 64 random graphs, the engine's answer equals
   the communities of the graph built by hand from the same edges; two four-cliques joined by one edge answer as the
-  two cliques, whatever the seed.
+  two cliques, at seeds 0 and 7.
 - **Time** (Criterion, the same graph as the other reads): 3.66 ms at 1,000 documents and 54.6 ms at 10,000, about
   four times `weakComponents`' 1.30 and 14.14: Leiden's rounds of moves, refinement and aggregation over the graph it
   copied, beside the reads every graph costs.
