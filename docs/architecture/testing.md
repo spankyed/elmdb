@@ -173,7 +173,10 @@ doesn't: one expression swapped for another, and heap and timing regressions.
 `check()` runs after every model-harness case, so an index that drifts from its primary data fails the case that
 caused it. `engine/tests/derived.rs` corrupts derived keys directly and checks that `check()` reports them and
 `rebuild()` repairs them; text and vector indexes are checked and rebuilt in their own specs (`engine/text/tests.rs`,
-`engine/vector/tests.rs`).
+`engine/vector/tests.rs`). A rank index has its own specs (`engine/tests/rank_index.rs`): random histories of links,
+unlinks, weights, creates, trashes, restores and destroys, each followed by `check()` and the index held within its
+bound of `rank`; damage `check()` reports; a savepoint rolled back; a drain killed part way through, in a child process,
+resumed on open; and an exact-bits golden of a scripted history, which the CI matrix holds.
 
 ## Tracked reads
 

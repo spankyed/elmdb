@@ -32,10 +32,17 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
 | `d/qj` type index item | a unit's graph changes, applied as it commits | derived |
 | `d/qn` type index | the index's graph number and next item | derived |
+| `d/ra` index entity | a rank index's node: its estimate, residual and out-weight, three f64, and its place | derived |
+| `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to 16 significant bits | derived |
+| `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
+| `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, how far it is built, where its sweep is | derived |
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` does the same in a scratch transaction and
-compares.
+compares. A rank index's stored bits depend on the order of the commits and pushes that made it, so `check()` holds
+it to what it promises instead: its scores within the bound it reports of PageRank over the same graph, each residual
+and out-weight what the estimates and the edges make them, and its score order, queue and totals what its nodes make
+them.
 
 ## Values
 
