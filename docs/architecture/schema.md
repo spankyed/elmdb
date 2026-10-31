@@ -241,6 +241,29 @@ search step names its text, trigram or vector index only when the type has more 
 - `model`: an opaque name the engine records with each vector. A changed model makes every vector pending again, and
   a vector written under another model is refused.
 
+## Rank indexes
+
+```json
+"ranks": {
+  "noteRank": { "types": ["Note"], "relations": ["references"], "direction": "both", "weights": true,
+                "damping": 0.85, "tolerance": 1e-6 }
+}
+```
+
+A rank index holds PageRank over a graph and keeps it current as commits change the graph, so a plan reads scores
+rather than computing them (`engine.md`, Reads: plans). It spans types, so it is declared at the top of the schema,
+beside `types` and `relations`.
+
+- `types`: the types whose live entities are the graph's nodes; their order is the order ties keep. Each is declared.
+- `relations`: the kinds whose edges between two nodes are the graph's edges. Each is declared, and there is at least
+  one.
+- `direction`: `out` (the default), `in` or `both`, as `rank` takes it.
+- `weights`: whether an edge of a kind declared `weighted` counts by its weight, `true` by default.
+- `damping`: in (0, 1), `0.85` by default.
+- `tolerance`: above 0, `1e-6` by default: the bound on the L1 distance between the index's scores and PageRank once
+  its pushes are done.
+- The name is lowerCamelCase, and no type has an index of the same name.
+
 ## Changing a schema
 
 A database stores its schema (`m/schema`) and its canonical hash. Opening with a schema compares the two, applies the
@@ -254,6 +277,8 @@ stored one.
 | An index's definition changed | rebuilt in the background under its name |
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
+| A rank index added, changed or removed | added, built in the background, and a `ranked` read refused until it is (`INDEX_BUILDING`); changed, rebuilt; removed, dropped |
+| `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic`, `unique` added) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |

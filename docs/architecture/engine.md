@@ -104,7 +104,12 @@ A plan is a scope, a start, steps and a terminal:
   (a shortest path from an entity of the set to `to`, following edges `out`, `in` or `both` ways and at most `depth`
   long when given: its entities in order, both ends included, or none; of paths as short, the one found first).
 - **Graph algorithms** (`archive/roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
-  edges of the kinds named between two of them the edges. `rank` orders the set by personalized PageRank, highest
+  edges of the kinds named between two of them the edges. `ranked` orders the set by the scores a rank index holds
+  (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
+  index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`, and one still building
+  `INDEX_BUILDING`. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
+  those `n` from the index's score order and nothing else. Its scores are hits', and the `hits` answer's `rank` is
+  `{ index, error }`: the bound on the scores' L1 distance from PageRank. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
   `damping` (0.85) and otherwise jumps back to a `seeds` entity, every entity when none are given, which is PageRank.
   Over a kind declared weighted it follows an edge in proportion to its weight among its entity's edges, an edge of a
@@ -177,7 +182,8 @@ included, which is what says whether a filter walked rows an index could have an
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
 `topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, the `weight` of its
-edges added up when it read weights, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+edges added up when it read weights, a rank's `iterations` and whether it `converged`, a `ranked` stage's rank index as
+its `index` and the bound on its scores as its `error`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
@@ -349,6 +355,15 @@ unit is open.
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
   everything leaves such an index unbuilt, as a build does.
+- Rank indexes (`roadmap/rank-index.md`): every write that changes a rank index's graph — a link, an unlink, a weight
+  changed, an entity created, trashed, restored or destroyed — updates the index in its unit by forward push: each
+  node holds an estimate and a residual, a change moves the residuals its edges touch, and pushing a node moves its
+  residual into its estimate and on along its arcs. A commit pushes up to 16 nodes; the rest wait in the index's
+  queue for the index thread, which reads the graph once, pushes in memory until none waits, and writes back each node
+  it moved, in one unit that tells the watches it wrote into. A rank index is built by that thread too: its nodes added
+  1,000 at a time, then pushed. The scores are within `2R / ((1 − α)² n)` of PageRank in L1, `R` the residuals' sum,
+  which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
+  and the next open goes on.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
