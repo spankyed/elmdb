@@ -7,6 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, DefaultHasher};
 
 use rmpv::Value;
 
@@ -354,7 +355,7 @@ struct Query<'r, R: Read> {
     /// What each stage did, for a read asked to explain itself
     stages: Option<&'r Stages>,
     /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
-    hits: RefCell<HashMap<String, (Hit, String)>>,
+    hits: RefCell<HashMap<String, (Hit, String), Fixed>>,
     /// The stage of a hop a `reverse` straight after it asks to walk its edges from the last (`Step::Reverse`)
     backward_hop: Cell<Option<usize>>,
     /// The stage of a hop that did, handing its ids on already reversed
@@ -364,6 +365,11 @@ struct Query<'r, R: Read> {
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
+
+/// A hasher with fixed keys, for the maps the graph algorithms build: one keyed per process would make a read's work
+/// differ from run to run, which the instruction counts compare (`scripts/diagnostics-overhead.py`). The keys are
+/// ids from the store, which the process reading them wrote or was given, so no one picks them to collide
+type Fixed = BuildHasherDefault<DefaultHasher>;
 
 impl<R: Read> Query<'_, R> {
     /// One entity read from the store, by the start or by a step reading an index or walking a type
@@ -626,7 +632,7 @@ impl<R: Read> Query<'_, R> {
                 let seeds: Vec<u32> = match seeds {
                     None => (0..ids.len() as u32).collect(),
                     Some(seeds) => {
-                        let place: HashMap<&str, u32> =
+                        let place: HashMap<&str, u32, Fixed> =
                             ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
                         seeds.iter().filter_map(|seed| place.get(seed.as_str()).copied()).collect()
                     }
@@ -1413,9 +1419,10 @@ impl<R: Read> Query<'_, R> {
             relations::definition(self.r, kind)?;
         }
         let mut ids = self.collect(before)?;
-        let mut seen = HashSet::new();
+        let mut seen: HashSet<String, Fixed> = HashSet::default();
         ids.retain(|id| seen.insert(id.clone()));
-        let place: HashMap<&str, u32> = ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
+        let place: HashMap<&str, u32, Fixed> =
+            ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
         let mut graph = Projection::new();
         for id in &ids {
             let mut targets = Vec::new();
@@ -1887,7 +1894,7 @@ fn query_with(
         plan,
         visited: Cell::new(0),
         stages,
-        hits: RefCell::new(HashMap::new()),
+        hits: RefCell::new(HashMap::default()),
         backward_hop: Cell::new(None),
         walked_back: Cell::new(None),
         ranked: Cell::new(None),

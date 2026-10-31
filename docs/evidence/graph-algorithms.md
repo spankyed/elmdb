@@ -54,4 +54,6 @@ and direction at five edges.
 edges, measured between 5,000 and 10,000 documents, against an allowance of 256. The graph itself is 24 of them.
 
 **Instruction counts** (`benches/instructions.rs`): `graph` at 1,000 documents for each read, which CI counts on every
-pull request and `scripts/diagnostics-overhead.py` gates.
+pull request and `scripts/diagnostics-overhead.py` gates. Their maps hash with fixed keys: with the standard library's
+per-process keys, one build's personalized rank counted 2.9% fewer instructions than another's in one run and 0.0085%
+in the next, which no comparison of two counts can gate on; with fixed keys the two builds agree to 3 instructions.
