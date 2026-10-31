@@ -7,6 +7,8 @@
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
 //!   parallel moves would make a partition depend on the threads' timing rather than on its seed alone.
+//! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
+//!   testing.md`, The build directory).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -21,8 +23,9 @@ fn main() -> ExitCode {
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
+        Some("sweep") => sweep(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | sweep>"
                 .to_owned(),
         ),
     };
@@ -33,6 +36,38 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The cargo-sweep this task runs, pinned as the repository pins its dependencies
+const CARGO_SWEEP: &str = "0.8.0";
+/// Artifacts no build has used for this many days go
+const SWEEP_DAYS: &str = "14";
+/// And past this size, the oldest go until the build directory fits
+const SWEEP_MAX_SIZE: &str = "15GB";
+
+/// Cargo never removes an artifact from a build directory: a build of other code or other features hashes a new one
+/// beside the last, so a long-lived build directory grows with every branch built in it. This removes what a toolchain
+/// no longer installed made, what no build has used for `SWEEP_DAYS`, and then the oldest until it is under
+/// `SWEEP_MAX_SIZE`, printing what each pass freed
+fn sweep(root: &Path) -> Result<(), String> {
+    let installed = Command::new("cargo").args(["sweep", "--version"]).output().is_ok_and(|out| out.status.success());
+    if !installed {
+        return Err(format!(
+            "cargo-sweep isn't installed: cargo install cargo-sweep --version '={CARGO_SWEEP}' --locked"
+        ));
+    }
+    for pass in [vec!["--installed"], vec!["--time", SWEEP_DAYS], vec!["--maxsize", SWEEP_MAX_SIZE]] {
+        let status = Command::new("cargo")
+            .arg("sweep")
+            .args(&pass)
+            .arg(root)
+            .status()
+            .map_err(|e| format!("cargo sweep {}: {e}", pass.join(" ")))?;
+        if !status.success() {
+            return Err(format!("cargo sweep {} failed with {status}", pass.join(" ")));
+        }
+    }
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {
