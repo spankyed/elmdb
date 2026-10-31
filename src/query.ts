@@ -89,7 +89,7 @@ const STREAMING: readonly string[] = [
   'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both', 'limit',
 ];
 /** The steps whose hits `hits()` answers */
-const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid'];
+const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank'];
 
 /**
  * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
@@ -263,6 +263,14 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         const answer = run(recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
         return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
       },
+      rank: (kinds: MaybeArr<string>, { direction = 'out', seeds }: { direction?: EdgeDirection; seeds?: readonly EARS.EntityId[] } = {}) => {
+        names.relationKinds(kinds, 'rank');
+        return next({ step: 'rank', kinds: asArr(kinds), direction, ...(seeds !== undefined && { seeds: [...seeds] }) });
+      },
+      components: (kinds: MaybeArr<string>) => {
+        names.relationKinds(kinds, 'components');
+        return run(recipe, { answer: 'components', kinds: asArr(kinds) }).components as EARS.EntityId[][];
+      },
 
       pick: (fields: readonly string[]) => run(recipe, { answer: 'rows', fields: [...fields] }).rows,
       // The first row: the fields picked, or with none the whole row, as pickAll reads it
@@ -294,8 +302,8 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         const split = lastWhere((p) => !('step' in p));
         if (searched < 0 || split > searched) {
           throw new EarsError('NO_SEARCH', searched < 0
-            ? 'hits() answers what a search found: the query has no search(...), near(...), like(...) or hybrid(...)'
-            : 'hits() answers what a search found, and a where(...) given a function follows the search: put the search after it');
+            ? 'hits() answers what a search or a rank found: the query has no search(...), near(...), like(...), hybrid(...) or rank(...)'
+            : 'hits() answers what a search or a rank found, and a where(...) given a function follows it: put the search or rank after it');
         }
         const answer = run(recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
         return answer.hits;

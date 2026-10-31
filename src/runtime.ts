@@ -161,7 +161,7 @@ export interface SearchHit<E extends string = string> {
   highlights?: SearchHighlights;
 }
 
-/** Which of an entity's edges a walk follows (`pathTo`, `degrees`): those out of it, those into it, or both */
+/** Which of an entity's edges a walk follows (`pathTo`, `degrees`, `rank`): those out of it, those into it, or both */
 export type EdgeDirection = 'out' | 'in' | 'both';
 
 /** One stage of a query's plan as the database ran it: its start, a step or its terminal (`explain()`) */
@@ -176,6 +176,14 @@ export interface QueryStage {
   kept: number;
   /** Milliseconds spent in the stage's own work */
   ms: number;
+  /** For a stage that built a graph (`rank`, `components`): its entities */
+  nodes?: number;
+  /** For a stage that built a graph: the edges between its entities */
+  edges?: number;
+  /** For a `rank`: the rounds it ran */
+  iterations?: number;
+  /** For a `rank`: whether its scores settled within the rounds it ran */
+  converged?: boolean;
 }
 
 /** A query's ids, and how the database found them: every stage of its plan, the entities it read, and its time */
@@ -325,6 +333,19 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[],
     options?: { direction?: EdgeDirection },
   ): Map<EARS.EntityId<E>, number>;
+  /**
+   * The query's entities by how much they matter from `seeds`, highest first, ties in query order: personalized
+   * PageRank over the edges of the kinds between two of them, followed `out` unless `direction` says `in` or `both`. A
+   * walker follows one of an entity's edges, or jumps back to a seed; an entity's score is the share of its time spent
+   * there. With no `seeds` every entity is one, which ranks what is central overall. A seed the query doesn't reach is
+   * ignored, and none it reaches answers nothing. `hits()` answers each score, and `limit(n)` keeps the `n` highest.
+   */
+  rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: EdgeDirection; seeds?: readonly EARS.EntityId[] }): QueryBuilder<E, D>;
+  /**
+   * The query's entities in groups joined by edges of the kinds between two of them, whichever way each points: each
+   * group's ids in query order, the largest group first, of two as large the one whose first entity comes first
+   */
+  components(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
   pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
@@ -375,7 +396,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
   /** The entities after `id` in the order so far: the page after one that ended at `id` */
   after(id: EARS.EntityId): QueryBuilder<E, D>;
   /**
-   * What the query's `search` (or `near`, `like` or `hybrid`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
+   * What the query's `search` (or `near`, `like`, `hybrid` or `rank`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
    * they are, and with `fields` its row's fields picked (`pick`'s)
    */
   hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(

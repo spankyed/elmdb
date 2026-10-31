@@ -481,6 +481,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     both<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
     both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    components(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
     containing(text: string, options?: {
         caseInsensitive?: boolean;
     }): QueryBuilder<E, D>;
@@ -565,6 +566,10 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
         id: EARS.EntityId<E>;
     } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
     pickOne(): ShapeOf<D['shapes'], E> | undefined;
+    rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
+        direction?: EdgeDirection;
+        seeds?: readonly EARS.EntityId[];
+    }): QueryBuilder<E, D>;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -590,9 +595,13 @@ export interface QueryExplanation<E extends string = string> {
 
 // @public
 export interface QueryStage {
+    converged?: boolean;
+    edges?: number;
     index?: string;
+    iterations?: number;
     kept: number;
     ms: number;
+    nodes?: number;
     stage: string;
     visited: number;
 }
