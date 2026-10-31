@@ -1718,6 +1718,7 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::Edges { .. } => "edges",
         Terminal::Degrees { .. } => "degrees",
         Terminal::WeakComponents { .. } => "weakComponents",
+        Terminal::StrongComponents { .. } => "strongComponents",
         Terminal::Communities { .. } => "communities",
         Terminal::GroupBy { .. } => "groupBy",
         Terminal::Hits { .. } => "hits",
@@ -1739,6 +1740,24 @@ fn each(ids: Vec<String>, visit: &mut Visit<'_>) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+/// A graph answer's groups, under `kind`: each group's ids, its nodes named by `ids`, or with `counts` its size
+fn write_groups(kind: &str, ids: &[String], groups: &[Vec<u32>], counts: bool, w: &mut W<'_>) {
+    w.map(2);
+    w.kind(kind);
+    w.str(kind);
+    w.array(groups.len() as u32);
+    for group in groups {
+        if counts {
+            w.uint(group.len() as u64);
+            continue;
+        }
+        w.array(group.len() as u32);
+        for &at in group {
+            w.str(&ids[at as usize]);
+        }
+    }
 }
 
 fn of_types(id: &str, types: Option<&[String]>) -> bool {
@@ -2068,21 +2087,11 @@ fn query_with(
         }
         Terminal::WeakComponents { kinds, counts } => {
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
-            let groups = algorithms::weak_components(&graph);
-            w.map(2);
-            w.kind("weakComponents");
-            w.str("weakComponents");
-            w.array(groups.len() as u32);
-            for group in &groups {
-                if *counts {
-                    w.uint(group.len() as u64);
-                    continue;
-                }
-                w.array(group.len() as u32);
-                for &at in group {
-                    w.str(&ids[at as usize]);
-                }
-            }
+            write_groups("weakComponents", &ids, &algorithms::weak_components(&graph), *counts, &mut w);
+        }
+        Terminal::StrongComponents { kinds, counts } => {
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            write_groups("strongComponents", &ids, &algorithms::strong_components(&graph), *counts, &mut w);
         }
         Terminal::Communities { kinds, resolution, seed, iterations } => {
             // NaN is not finite
@@ -2097,16 +2106,7 @@ fn query_with(
             }
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
             let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
-            w.map(2);
-            w.kind("communities");
-            w.str("communities");
-            w.array(groups.len() as u32);
-            for group in &groups {
-                w.array(group.len() as u32);
-                for &at in group {
-                    w.str(&ids[at as usize]);
-                }
-            }
+            write_groups("communities", &ids, &groups, false, &mut w);
         }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;

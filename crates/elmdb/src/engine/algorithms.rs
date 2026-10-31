@@ -75,6 +75,73 @@ pub fn weak_components(graph: &Projection) -> Vec<Vec<u32>> {
     groups
 }
 
+/// The strong components, the groups whose nodes each reach every other following the edges' direction: each a list of
+/// nodes in their numbering, largest first, ties by first member. A node on no cycle is a group of its own. Reversing
+/// every edge leaves them as they are. Tarjan's algorithm, walking with a stack of its own rather than recursing, so a
+/// long chain can't overflow the thread's
+pub fn strong_components(graph: &Projection) -> Vec<Vec<u32>> {
+    const UNSEEN: u32 = u32::MAX;
+    let n = graph.nodes();
+    // Each node's place in the walk, and the earliest place it reaches among the nodes still on `open`
+    let mut place = vec![UNSEEN; n];
+    let mut low = vec![0u32; n];
+    let mut on_open = vec![false; n];
+    // The nodes seen whose group isn't settled, and the walk: each node being visited with the next edge to follow
+    let mut open: Vec<u32> = Vec::new();
+    let mut walk: Vec<(u32, usize)> = Vec::new();
+    let mut next = 0u32;
+    let mut groups: Vec<Vec<u32>> = Vec::new();
+    let mut visit = |v: u32, place: &mut [u32], low: &mut [u32], on_open: &mut [bool], open: &mut Vec<u32>| {
+        // Each node is placed once, so the walk and `open` never outgrow the graph. Checked in test builds, where a
+        // walk that revisited nodes would otherwise grow without bound until the machine ran out of memory
+        debug_assert_eq!(place[v as usize], UNSEEN, "a node is placed once");
+        place[v as usize] = next;
+        low[v as usize] = next;
+        next += 1;
+        on_open[v as usize] = true;
+        open.push(v);
+    };
+    for start in 0..n as u32 {
+        if place[start as usize] != UNSEEN {
+            continue;
+        }
+        visit(start, &mut place, &mut low, &mut on_open, &mut open);
+        walk.push((start, 0));
+        while let Some(&(v, at)) = walk.last() {
+            let out = graph.out(v as usize);
+            if let Some(&w) = out.get(at) {
+                walk.last_mut().expect("the walk holds v").1 += 1;
+                if place[w as usize] == UNSEEN {
+                    visit(w, &mut place, &mut low, &mut on_open, &mut open);
+                    walk.push((w, 0));
+                } else if on_open[w as usize] {
+                    low[v as usize] = low[v as usize].min(place[w as usize]);
+                }
+                continue;
+            }
+            walk.pop();
+            if let Some(&(parent, _)) = walk.last() {
+                low[parent as usize] = low[parent as usize].min(low[v as usize]);
+            }
+            if low[v as usize] == place[v as usize] {
+                let mut group = Vec::new();
+                loop {
+                    let w = open.pop().expect("v is still open");
+                    on_open[w as usize] = false;
+                    group.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                group.sort_unstable();
+                groups.push(group);
+            }
+        }
+    }
+    groups.sort_by_key(|group| (std::cmp::Reverse(group.len()), group[0]));
+    groups
+}
+
 /// What `rank` found: each node's score, summing to 1, and whether the scores settled within the rounds allowed
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ranked {

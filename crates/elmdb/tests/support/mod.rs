@@ -176,7 +176,8 @@ impl Fixture {
     }
 
     /// A graph read over every document: `rank` (PageRank, or personalized from the first document), the ten
-    /// highest as hits, every document's rank counted (`rankCounted`), or the `weakComponents` or `communities` answer
+    /// highest as hits, every document's rank counted (`rankCounted`), or the `weakComponents`, `strongComponents` or
+    /// `communities` answer
     #[allow(dead_code)]
     pub fn graph_read(&self, read: &str) -> Reads {
         let (steps, terminal) = match read {
@@ -187,6 +188,7 @@ impl Fixture {
                 json!({"answer":"hits"}),
             ),
             "communities" => (json!([]), json!({"answer":"communities","kinds":["refs"]})),
+            "strongComponents" => (json!([]), json!({"answer":"strongComponents","kinds":["refs"],"counts":true})),
             _ => (json!([]), json!({"answer":"weakComponents","kinds":["refs"],"counts":true})),
         };
         serde_json::from_value(json!({"reads":[{"read":"query","plan":{
@@ -195,7 +197,7 @@ impl Fixture {
         .unwrap()
     }
 
-    /// The graph read's answer, checked: ten hits, settled, for a rank, and every document in the weak components or the
+    /// The graph read's answer, checked: ten hits, settled, for a rank, and every document in the components or the
     /// communities
     #[allow(dead_code)]
     pub fn assert_graph_read(&self, read: &str) {
@@ -204,8 +206,8 @@ impl Fixture {
         let answer = &answers[0];
         if read == "rankCounted" {
             assert_eq!(answer["count"].as_u64().unwrap() as usize, self.rows);
-        } else if read == "weakComponents" {
-            let total: u64 = answer["weakComponents"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
+        } else if read == "weakComponents" || read == "strongComponents" {
+            let total: u64 = answer[read].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
             assert_eq!(total as usize, self.rows);
         } else if read == "communities" {
             let total: usize =
