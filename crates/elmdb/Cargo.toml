@@ -32,6 +32,8 @@ leiden-rs.workspace = true
 # A logarithm the same to the bit on every platform, for `similar`'s Adamic-Adar (`src/engine/algorithms.rs`), where
 # std's calls the platform's maths library
 libm.workspace = true
+# FxHash, deterministic and cheap on short strings, for the maps a graph read builds per edge (`src/engine/reads.rs`)
+rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
