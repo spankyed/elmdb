@@ -4,7 +4,7 @@
 
 use proptest::prelude::*;
 
-use super::{Projection, communities, rank, weak_components};
+use super::{Projection, communities, rank, strong_components, weak_components};
 
 const KARATE_EDGES: [(u32, u32); 78] = [
     (0, 1),
@@ -231,6 +231,46 @@ fn reached(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
     groups
 }
 
+/// Which nodes each node reaches following the edges' direction, itself included
+fn reachable(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<bool>> {
+    (0..n)
+        .map(|start| {
+            let mut seen = vec![false; n];
+            seen[start] = true;
+            let mut frontier = vec![start as u32];
+            while let Some(v) = frontier.pop() {
+                for &(a, b) in edges {
+                    if a == v && !seen[b as usize] {
+                        seen[b as usize] = true;
+                        frontier.push(b);
+                    }
+                }
+            }
+            seen
+        })
+        .collect()
+}
+
+/// The strong components by brute force: two nodes are together when each reaches the other. Largest first, ties by
+/// first member, each sorted
+fn mutually_reached(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    let reach = reachable(n, edges);
+    let mut placed = vec![false; n];
+    let mut groups = Vec::new();
+    for v in 0..n {
+        if placed[v] {
+            continue;
+        }
+        let group: Vec<u32> = (0..n).filter(|&w| reach[v][w] && reach[w][v]).map(|w| w as u32).collect();
+        for &w in &group {
+            placed[w as usize] = true;
+        }
+        groups.push(group);
+    }
+    groups.sort_by_key(|group| std::cmp::Reverse(group.len()));
+    groups
+}
+
 fn graphs() -> impl Strategy<Value = (usize, Vec<(u32, u32)>, Vec<u32>)> {
     (1usize..=12).prop_flat_map(|n| {
         let node = 0..n as u32;
@@ -257,6 +297,44 @@ proptest! {
         prop_assert!(found.windows(2).all(|pair| pair[0].len() >= pair[1].len()), "largest first");
         found.sort_by_key(|group| group[0]);
         prop_assert_eq!(found, reached(n, &edges));
+    }
+
+    #[test]
+    fn strong_components_agree_with_mutual_reachability((n, edges, _) in graphs()) {
+        prop_assert_eq!(strong_components(&graph(n, &edges)), mutually_reached(n, &edges));
+    }
+
+    #[test]
+    fn reversing_every_edge_leaves_the_strong_components((n, edges, _) in graphs()) {
+        let reversed: Vec<(u32, u32)> = edges.iter().map(|&(a, b)| (b, a)).collect();
+        prop_assert_eq!(strong_components(&graph(n, &edges)), strong_components(&graph(n, &reversed)));
+    }
+
+    #[test]
+    fn each_strong_component_lies_in_one_weak_one_and_together_they_form_no_cycle((n, edges, _) in graphs()) {
+        let strong = strong_components(&graph(n, &edges));
+        let mut weak_of = vec![0; n];
+        for (at, group) in weak_components(&graph(n, &edges)).iter().enumerate() {
+            for &v in group {
+                weak_of[v as usize] = at;
+            }
+        }
+        let mut strong_of = vec![0u32; n];
+        for (at, group) in strong.iter().enumerate() {
+            prop_assert!(group.iter().all(|&v| weak_of[v as usize] == weak_of[group[0] as usize]));
+            for &v in group {
+                strong_of[v as usize] = at as u32;
+            }
+        }
+        // The groups as nodes, an edge between two where an edge joins their members: no group reaches another that
+        // reaches it back, or the two would be one
+        let between: Vec<(u32, u32)> = edges
+            .iter()
+            .map(|&(a, b)| (strong_of[a as usize], strong_of[b as usize]))
+            .filter(|(a, b)| a != b)
+            .collect();
+        let condensed = strong_components(&graph(strong.len(), &between));
+        prop_assert!(condensed.iter().all(|group| group.len() == 1), "{condensed:?}");
     }
 
     #[test]
@@ -337,6 +415,43 @@ fn components_put_the_largest_first_and_ties_by_their_first_member() {
     assert_eq!(found, [vec![2, 4, 5], vec![0, 3], vec![1]]);
     let ties = weak_components(&graph(4, &[(2, 3), (0, 1)]));
     assert_eq!(ties, [vec![0, 1], vec![2, 3]]);
+}
+
+#[test]
+fn strong_components_find_the_cycles() {
+    // 0 → 1 → 2 → 0, a cycle; 2 → 3 → 4 → 3, another past it; 5 → 5, a self-link; 6 alone
+    let found = strong_components(&graph(7, &[(0, 1), (1, 2), (2, 0), (2, 3), (3, 4), (4, 3), (5, 5)]));
+    assert_eq!(found, [vec![0, 1, 2], vec![3, 4], vec![5], vec![6]]);
+    // Two cycles sharing node 0 are one group, and one inside a larger cycle is part of it
+    let nested = strong_components(&graph(5, &[(0, 1), (1, 0), (0, 2), (2, 3), (3, 0), (3, 4), (4, 3)]));
+    assert_eq!(nested, [vec![0, 1, 2, 3, 4]]);
+    // A chain one way has no cycle, so every node is a group of its own, in order
+    let chain = strong_components(&graph(4, &[(2, 3), (0, 1), (1, 2)]));
+    assert_eq!(chain, [vec![0], vec![1], vec![2], vec![3]]);
+    // Ties by first member, whichever node the walk starts from
+    let ties = strong_components(&graph(4, &[(3, 2), (2, 3), (1, 0), (0, 1)]));
+    assert_eq!(ties, [vec![0, 1], vec![2, 3]]);
+    assert_eq!(strong_components(&Projection::new()), Vec::<Vec<u32>>::new());
+}
+
+#[test]
+fn a_long_chain_or_cycle_walks_without_overflowing_the_stack() {
+    // A recursive walk would be 100,000 calls deep here, past a test thread's 2 MiB stack
+    let n = 100_000u32;
+    let along = |closed: bool| {
+        let mut g = Projection::new();
+        for v in 0..n {
+            g.node((v + 1 < n || closed).then_some((v + 1) % n));
+        }
+        g
+    };
+    let chain = strong_components(&along(false));
+    assert_eq!(
+        (chain.len(), chain[0].as_slice(), chain[n as usize - 1].as_slice()),
+        (n as usize, &[0][..], &[n - 1][..])
+    );
+    let cycle = strong_components(&along(true));
+    assert_eq!((cycle.len(), cycle[0].len()), (1, n as usize));
 }
 
 /// The karate club's scores at the defaults, bit for bit, as this code answered them on an Apple M1 Pro on 2026-10-30.

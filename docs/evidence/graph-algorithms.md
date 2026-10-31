@@ -1,6 +1,6 @@
 # Graph algorithms: what they answer and what they cost
 
-The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2 and 4. 2026-10-31, on
+The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2, 4 and 5. 2026-10-31, on
 `session/graph-algorithms` from `f613add`, on an Apple M1 Pro (macOS), Rust 1.99.1, Node 23.11.1.
 
 ## Correct
@@ -77,3 +77,24 @@ Leiden through leiden-rs 0.8.1, no default features (`development-libraries.md`,
   copied, beside the reads every graph costs.
 - **Heap:** about 764 bytes an entity at five edges, measured between 5,000 and 10,000 documents: leiden-rs copies
   the graph into its builder's edge list and a CSR holding each edge both ways. The heap test holds it to 1,024.
+
+## Strong components (stage 5)
+
+Tarjan's algorithm in elmdb, walking with its own stack.
+
+- **Against a reference** (`crates/elmdb/src/engine/algorithms/tests.rs`): over 256 random graphs of up to 12 nodes,
+  the groups equal those found by brute force (two nodes together when each reaches the other), in the same order.
+- **Invariants:** reversing every edge leaves the groups as they are; each lies inside one weak component; and the
+  groups taken as nodes form no cycle, or two of them would be one.
+- **Cases:** a cycle, a cycle reached from another, a self-link, two cycles sharing a node, a chain with no cycle, ties
+  by first member, the empty graph; a chain and a cycle of 100,000 nodes, which a recursive walk would take 100,000
+  calls deep.
+- **Through the store** (`crates/elmdb/src/engine/tests/ranks.rs`): over 64 random graphs, the engine's answer equals
+  the strong components of the graph built by hand from the same edges; a tracked read is written into by an edge
+  between two of its entities and not by one outside them.
+- **Time** (Criterion, the same graph as the other reads, `ELMDB_BENCH_ROWS=1000,10000 cargo bench -p elmdb --bench
+  maintenance -- 'graph/(weakComponents|strongComponents)'`, 2026-10-31, with apack's chain running beside it): 1.45 ms
+  at 1,000 documents and 17.3 ms at 10,000, against `weakComponents`' 1.61 and 17.8 in the same run. The two differ by
+  less than their spread: both cost what building the graph does.
+- **Heap:** 184 bytes an entity, as `weakComponents`: Tarjan's walk, some 33 bytes a node at its deepest, fits within
+  what building the graph freed. The heap test holds it to 256.

@@ -491,6 +491,16 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         counts: bool,
     },
+    /// The set's strong components over the edges of the kinds between two of its entities: groups whose entities each
+    /// reach every other following the edges' direction, so an entity on no cycle is a group of its own. Reversing every
+    /// edge leaves them as they are, so it takes no direction. Each one's ids in the set's order, largest first, ties by
+    /// the earlier first member; with `counts`, how many in place of the ids
+    StrongComponents {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        counts: bool,
+    },
     /// The set's Leiden communities by modularity over the edges of the kinds between two of its entities, each edge
     /// joining its ends whichever way it points: groups more densely linked inside than out, each connected, each one's
     /// ids in the set's order, largest first, ties by the earlier first member. A higher `resolution` finds smaller

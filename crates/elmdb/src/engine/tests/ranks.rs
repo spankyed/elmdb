@@ -1,6 +1,6 @@
-//! The graph algorithms as plan steps (`docs/roadmap/graph-algorithms.md`): `rank` and the `weakComponents` answer over the
-//! set a plan built, case by case, and the graph each builds from the store against one built by hand from the same
-//! random edges.
+//! The graph algorithms as plan steps (`docs/roadmap/graph-algorithms.md`): `rank` and the `weakComponents`,
+//! `strongComponents` and `communities` answers over the set a plan built, case by case, and the graph each builds from
+//! the store against one built by hand from the same random edges.
 
 use proptest::prelude::*;
 use serde_json::{Value as Json, json};
@@ -207,6 +207,50 @@ fn components_answer_each_connected_group_largest_first() {
 }
 
 #[test]
+fn strong_components_answer_the_cycles_following_each_edge_its_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    tasks(&db, &["Task-a", "Task-b", "Task-c", "Task-d", "Task-e"]);
+    // a → b → c → a, a cycle; c → d → e, a chain out of it; e blocks a, a kind the answer isn't asked about
+    link(
+        &db,
+        &[
+            ("Task-a", "refs", "Task-b"),
+            ("Task-b", "refs", "Task-c"),
+            ("Task-c", "refs", "Task-a"),
+            ("Task-c", "refs", "Task-d"),
+            ("Task-d", "refs", "Task-e"),
+            ("Task-e", "blocks", "Task-a"),
+        ],
+    );
+    let strong = |start: Json, kinds: Json, counts: bool| {
+        query(
+            &db,
+            json!({ "start": start, "terminal": { "answer": "strongComponents", "kinds": kinds, "counts": counts } }),
+        )["strongComponents"]
+            .clone()
+    };
+    let every = json!({ "from": "types", "types": ["Task"] });
+    assert_eq!(
+        strong(every.clone(), json!(["refs"]), false),
+        json!([["Task-a", "Task-b", "Task-c"], ["Task-d"], ["Task-e"]])
+    );
+    assert_eq!(strong(every.clone(), json!(["refs"]), true), json!([3, 1, 1]));
+    // With blocks too, e leads back to a, closing one cycle through all five
+    assert_eq!(strong(every, json!(["refs", "blocks"]), true), json!([5]));
+    // Only edges between two of the set's entities count: without c, the cycle is broken
+    assert_eq!(
+        strong(json!({ "from": "ids", "ids": ["Task-a", "Task-b"] }), json!(["refs"]), false),
+        json!([["Task-a"], ["Task-b"]])
+    );
+    let unknown = try_query(
+        &db,
+        json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": { "answer": "strongComponents", "kinds": ["refz"] } }),
+    );
+    assert!(unknown.is_err(), "a kind nothing declares is refused");
+}
+
+#[test]
 fn explain_reports_the_graph_each_built() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -231,6 +275,21 @@ fn explain_reports_the_graph_each_built() {
             None,
         ))
         .unwrap(),
+    );
+    let strong = decode(
+        &db.read(&reads(
+            vec![json!({ "read": "query", "explain": true, "plan": {
+                "start": { "from": "types", "types": ["Task"] },
+                "terminal": { "answer": "strongComponents", "kinds": ["refs"] }
+            } })],
+            None,
+        ))
+        .unwrap(),
+    );
+    let terminal = &strong[0]["stages"][1];
+    assert_eq!(
+        (&terminal["stage"], &terminal["nodes"], &terminal["edges"]),
+        (&json!("strongComponents"), &json!(4), &json!(3))
     );
     let terminal = &communities[0]["stages"][1];
     assert_eq!(
@@ -308,6 +367,27 @@ fn a_tracked_weak_components_read_is_written_into_by_an_edge_between_two_of_its_
     };
     assert!(touched(("Task-y", "Task-z")).is_empty(), "entities outside its set");
     assert_eq!(touched(("Task-c", "Task-a")), [1], "an edge inside its set");
+}
+
+#[test]
+fn a_tracked_strong_components_read_is_written_into_by_an_edge_between_two_of_its_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    chain(&db);
+    tasks(&db, &["Task-y", "Task-z"]);
+    let strong = json!({ "read": "query", "plan": {
+        "start": { "from": "ids", "ids": ["Task-a", "Task-b", "Task-c"] },
+        "terminal": { "answer": "strongComponents", "kinds": ["refs"] }
+    } });
+    db.read(&reads(vec![strong], Some(1))).unwrap();
+    let touched = |edge: (&str, &str)| {
+        db.write(&batch(vec![json!({ "op": "link", "source": edge.0, "kind": "refs", "target": edge.1 })]), false)
+            .unwrap()
+            .1
+            .touched
+    };
+    assert!(touched(("Task-y", "Task-z")).is_empty(), "entities outside its set");
+    assert_eq!(touched(("Task-c", "Task-a")), [1], "an edge inside its set, closing a cycle");
 }
 
 #[test]
@@ -421,6 +501,12 @@ proptest! {
             "terminal": { "answer": "weakComponents", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = groups.drain(..).map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
         prop_assert_eq!(&answer["weakComponents"], &json!(named));
+
+        let strong = algorithms::strong_components(&by_hand(&edges, &kinds, "out"));
+        let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
+            "terminal": { "answer": "strongComponents", "kinds": kind_names } }));
+        let named: Vec<Vec<String>> = strong.into_iter().map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
+        prop_assert_eq!(&answer["strongComponents"], &json!(named));
 
         let communities = algorithms::communities(&by_hand(&edges, &kinds, "out"), 1.0, 0, 100);
         let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
