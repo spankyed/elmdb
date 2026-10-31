@@ -1,6 +1,7 @@
 # Rank index
 
-Status: designed, 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35). A declared index that holds
+Status: designed, 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights
+([rank-weights.md](rank-weights.md), elmdb #44). A declared index that holds
 PageRank scores and keeps them current as commits change the graph, so a query reads scores rather than computing
 them.
 
@@ -30,18 +31,25 @@ document beside `types` and `relations`, not on a type:
 ```json
 "ranks": {
   "noteRank": { "types": ["Note"], "relations": ["references"], "direction": "both",
-                "damping": 0.85, "tolerance": 1e-6 }
+                "weights": true, "damping": 0.85, "tolerance": 1e-6 }
 }
 ```
 
 - **Graph:** the live entities of `types`, and the edges of `relations` whose two ends are both among them, followed
   `out`, `in` or `both` (`Direction`). A trashed entity leaves the graph and a restored one joins it.
+- **`weights`**, default `true`, as `rank`'s: an edge of a kind declared weighted counts by its weight, an edge of a
+  kind not weighted by 1, and `false` counts every edge 1.
 - **`damping`** in (0, 1), default `0.85`. **`tolerance`** > 0, default `1e-6`: the bound on the scores' L1 error that
   the index keeps (Error, below).
 - **Names:** lowerCamelCase, unique across the schema's indexes. `types` and `relations` must be declared, and
   `relations` is required, as `rank`'s `kinds` is.
 
 ### The contract: within a bound of true PageRank
+
+**One definition of PageRank.** The index's graph is the one `rank` builds from the same declaration (`project()`:
+the same entities, kinds, direction and weights), and true PageRank is what `rank` answers over it, every node a seed
+of weight 1. The contract below is stated against that, so a rule `rank` follows — a node whose edges weigh nothing in
+all is dangling, parallel edges add — is the index's too, and never a second implementation of it.
 
 The index is approximate, and the error bound is its contract. Any incremental method reaches an approximation by a
 path, and the path is the history of commits, so two databases holding the same data can hold different bits. True
@@ -62,7 +70,8 @@ PageRank is unique and depends on the graph alone, so the index promises what bo
 Changing a schema treats it as every index is treated (`schema.md`, Changing a schema): added, it builds in the
 background and a `ranked` read is refused until it has built, with a new error code naming the index (a rank index
 has no rows to walk in its place, as a value index does); changed, it rebuilds under its name;
-removed, it is dropped.
+removed, it is dropped. `weighted` added to or removed from a relation kind the index reads changes the index's graph,
+so the index rebuilds, though the change rewrites no relation.
 
 ## How it stays current
 
@@ -70,15 +79,18 @@ removed, it is dropped.
 
 The index keeps, per node, an **estimate** `p(v)` and a **residual** `r(v)`, under the invariant of forward push
 (Andersen, Chung and Lang, 2006): the true scores are the estimate plus what the residuals would push. Pushing a node
-moves `(1 − damping)` of its residual into its estimate and spreads the rest over its out-neighbours' residuals. The
+moves `(1 − damping)` of its residual into its estimate and spreads the rest over its out-neighbours' residuals,
+each by its edge's share of the node's: `w(u, v) / W(u)` with weights, `1 / out-degree` without. The
 total residual mass bounds the estimate's error, so pushing until it falls below `tolerance` gives scores within that
 L1 bound.
 
 A graph change updates residuals locally while keeping the invariant (Zhang, Lofgren and Goel, 2016, *Approximate
 Personalized PageRank on Dynamic Graphs*):
 
-- **An edge added or removed** at `u` changes `u`'s out-degree, which adjusts the residuals of `u` and its far end from
-  `p(u)`: constant work per edge changed.
+- **An edge added or removed** at `u` changes `u`'s out-weight `W(u)` (its out-degree without weights), which adjusts
+  the residuals of `u` and its far end from `p(u)`: constant work per edge changed.
+- **An edge's weight changed** is the same correction, from the old weight and the new, which the commit reads in its
+  own transaction: constant work, with no re-read of `u`'s other edges.
 - **A node joining or leaving** (created, destroyed, trashed, restored, its type entering the graph) adds or removes
   its teleport share at that node alone.
 
@@ -88,7 +100,8 @@ Pushing then spreads the change only as far as it is large enough to matter.
 
 - **Unnormalized scores.** Each node's teleport is `1 − damping`, not `(1 − damping) / n`, so a node joining doesn't
   change every other node's share. A read divides by the total mass, held in the index's totals.
-- **Dangling mass as one shared term.** Today `rank` sends a node with no out-edges to the teleport, which spreads it
+- **Dangling mass as one shared term.** Today `rank` sends a node with no out-edges, or whose edges weigh nothing in
+  all, to the teleport, which spreads it
   over every node. The index holds that mass as one shared term added uniformly at read, not written per node.
 
 ### When the work runs
@@ -140,8 +153,8 @@ A push that changes a score rewrites its `d/rk` key. That doubles the writes of 
 
 Each is held to the contract (Declaring, The contract), not to stored bits:
 
-- **`check()`** verifies the contract directly. It computes true PageRank by power iteration (`rank`'s code, run to a
-  tolerance far below the index's) and reports each stored score further from it than the stored error bound allows.
+- **`check()`** verifies the contract directly. It computes true PageRank by power iteration (`rank`'s code over the
+  same graph, weights included, run to a tolerance far below the index's) and reports each stored score further from it than the stored error bound allows.
   It also checks the invariant, that each estimate plus what the residuals would push reproduces the scores within the
   same bound, so a corrupted residual is caught even while its estimate still looks right. Every other index's check
   compares bits; this one's compares against the answer, which is the stronger check of the two.
@@ -159,14 +172,16 @@ contract.
 - **Manifest:** `apack.json` `data.ranks`, beside `data.relations`, with the same keys. Codegen writes it into the
   schema it opens with, as it does `search` and `embed`.
 - **Builder:** `.ranked(index)` on the query builder (`packages/apack-ears/src/query.ts`), with `hits()` accepting it as
-  it accepts `rank`. The index name is typed from the manifest, as relation kinds are.
+  it accepts `rank`. The index name is typed from the manifest as `weightedKinds` is (rank weights' apack PR): a
+  string union member of `EarsSchema`, `rankIndexes`, filled by codegen and `never` when the manifest declares none.
 - **Reports:** `npm run api:update` for the builder, `facade:update` for default-setup's facade, and the manifest's JSON
   Schema (`schema:update`).
 
 ## Verification
 
 - **Against a full recompute:** a model test (proptest-state-machine, as `crates/elmdb/src/engine/tests/model.rs` drives the store) applies
-  random sequences of links, unlinks, creates, trashes and destroys, and after each checks the scores against power
+  random sequences of links, unlinks, weight changes (`updateRelation` and a unique kind's relink), creates, trashes and
+  destroys over a weighted kind and an unweighted one, and after each checks the scores against power
   iteration within the reported bound, and the invariant.
 - **The contract across histories:** the same graph built by random permutations of its commits gives scores within
   the bound of each other, and the same order wherever two scores differ by more than twice it.
