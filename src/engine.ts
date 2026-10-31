@@ -3,7 +3,7 @@
 // contract, not a security boundary (packs run in-process). Everything the engine holds is in the database; the
 // engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
 import type { EARS } from './entities.ts';
-import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge } from './runtime.ts';
+import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
 import type { EarsOperationObserver } from './observation.ts';
 import { createConnection, runCommitted, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
@@ -86,8 +86,8 @@ export interface Ears {
   getRelation(relId: EARS.RelationId): RelationRow | undefined;
   /** The rows of the relations matching every end and kind named; with none named, every relation */
   findRelations(match?: RelationMatch): RelationRow[];
-  /** Moves a relation to new ends, or replaces its info, keeping its id; refuses an id no relation has */
-  updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
+  /** Moves a relation to new ends, or replaces its info or its weight, keeping its id; refuses an id no relation has */
+  updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
   /** Removes the relation with the id, refusing an id no relation has */
   removeRelation(relId: EARS.RelationId): void;
   /** Whether linking `source` to `target` would close a cycle through `kinds` */
@@ -138,11 +138,11 @@ export interface EarsAdmin {
   /** Removes an attribute, any kind the engine owns included */
   deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
   /** Links any kind between any ids, either end missing included: unchecked, as loaded data is */
-  addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
-  /** `updateRelation` without its checks: any relation, to any ends */
-  updateRelation(relId: EARS.RelationId, patch: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void;
+  addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
+  /** `updateRelation` without its checks: any relation, to any ends; one given no weight keeps the weight it holds */
+  updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
   /** Loads a stored relation under its own id, unchecked */
-  bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
+  bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
   /** Runs `fn`, whose loads are applied together as one unit when it returns */
   bulkLoad<T>(fn: () => T): T;
   /**
@@ -198,6 +198,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     const answer = one({ read: 'field', id, field });
     return answer.present ? answer.value as EARS.AttributeValue : undefined;
   };
+  // A weight of 1 is no weight on a relation's row, as a link stores it, so a loaded edge is the bytes a linked one is
+  const storedWeight = (weight: number | undefined) => (weight === 1 ? undefined : weight);
   const getRelation = (relId: EARS.RelationId) => {
     const row = one({ read: 'relation', id: relId }).relation as Record<string, unknown> | null;
     return row ? relationRow(row) : undefined;
@@ -325,21 +327,23 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     bulkLoadAttr: entityLoad,
     putAttr: entityLoad,
     deleteAttr: (id, kind) => load({ load: 'unset', id, field: kind }),
-    addRelation(source, kind, target, info) {
+    addRelation(source, kind, target, info, weight) {
       const id = newRelationId();
-      load({ load: 'relation', id, kind, source, target, info });
+      load({ load: 'relation', id, kind, source, target, info, weight: storedWeight(weight) });
       return id;
     },
-    updateRelation(relId, { source, target, info }) {
+    updateRelation(relId, { source, target, info, weight }) {
       const held = getRelation(relId);
       if (!held) return;
       load({
         load: 'relation', id: relId, kind: held.kind,
         source: source || held.source, target: target || held.target,
         info: info !== undefined ? info : held.info,
+        weight: storedWeight(weight ?? held.weight),
       });
     },
-    bulkLoadRelation: (relId, kind, source, target, info) => load({ load: 'relation', id: relId, kind, source, target, info }),
+    bulkLoadRelation: (relId, kind, source, target, info, weight) =>
+      load({ load: 'relation', id: relId, kind, source, target, info, weight: storedWeight(weight) }),
     bulkLoad<T>(fn: () => T): T {
       if (loading) return fn();
       outsideUnit('bulkLoad()');

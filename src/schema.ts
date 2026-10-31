@@ -11,6 +11,8 @@ export interface RelationRules {
   acyclic?: boolean;
   /** At most one edge of this kind from an entity to another; linking the pair again replaces the edge's info */
   unique?: boolean;
+  /** Each edge carries a weight, 1 unless a link gives another, which `rank` and `communities` read */
+  weighted?: boolean;
 }
 
 /** What an engine's database knows: its entity types, relation kinds and roles, each with its rules */
@@ -118,6 +120,7 @@ export function toElmdbSchema(schema: EngineSchema): object {
     cardinality: 'many-to-many',
     ...(rules.acyclic && { acyclic: true }),
     ...(rules.unique && { unique: true }),
+    ...(rules.weighted && { weighted: true }),
   }]));
   const roles = Object.fromEntries(schema.roles.map((role) => [role, {}]));
   return { $schema: ELMDB_SCHEMA_LANGUAGE, roles, relations, types };

@@ -159,11 +159,7 @@ export interface Ears {
     query: Query;
     removeRelation(relId: EARS.RelationId): void;
     transact<T>(fn: () => T, options?: UnitOptions): T;
-    updateRelation(relId: EARS.RelationId, patch: {
-        source?: EARS.EntityId;
-        target?: EARS.EntityId;
-        info?: unknown;
-    }): void;
+    updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     upsert: Upsert;
     watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
     wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
@@ -172,10 +168,10 @@ export interface Ears {
 
 // @public
 export interface EarsAdmin {
-    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown): EARS.RelationId;
+    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
     bulkLoad<T>(fn: () => T): T;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown): void;
+    bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
     readonly calls: CallCounting;
     clear(): void;
     countEntities(): Record<string, number>;
@@ -187,11 +183,7 @@ export interface EarsAdmin {
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
-    updateRelation(relId: EARS.RelationId, patch: {
-        source?: EARS.EntityId;
-        target?: EARS.EntityId;
-        info?: unknown;
-    }): void;
+    updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     watchesSettled(): Promise<void>;
     watchStats(): {
         watches: number;
@@ -356,6 +348,7 @@ export interface EarsSchema {
     relKinds: string;
     roles: string;
     shapes: EntityShapes;
+    weightedKinds: string;
 }
 
 // @public
@@ -517,6 +510,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     communities(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
         resolution?: number;
         seed?: number;
+        weights?: boolean;
     }): EARS.EntityId<E>[][];
     containing(text: string, options?: {
         caseInsensitive?: boolean;
@@ -602,10 +596,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
         id: EARS.EntityId<E>;
     } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
     pickOne(): ShapeOf<D['shapes'], E> | undefined;
-    rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
-        direction?: EdgeDirection;
-        seeds?: readonly EARS.EntityId[];
-    }): QueryBuilder<E, D>;
+    rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -652,7 +643,21 @@ export interface QueryStage {
     nodes?: number;
     stage: string;
     visited: number;
+    weight?: number;
 }
+
+// @public
+export interface RankOptions {
+    direction?: EdgeDirection;
+    seeds?: readonly RankSeed[];
+    weights?: boolean;
+}
+
+// @public
+export type RankSeed = EARS.EntityId | {
+    id: EARS.EntityId;
+    weight: number;
+};
 
 // @public
 export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
@@ -666,6 +671,7 @@ export interface RelationEdge<K extends string = string, Source extends string =
     source: EARS.EntityId<Source>;
     // (undocumented)
     target: EARS.EntityId<Target>;
+    weight?: number;
 }
 
 // @public
@@ -679,12 +685,21 @@ export interface RelationMatch {
 }
 
 // @public
+export interface RelationPatch {
+    info?: unknown;
+    source?: EARS.EntityId;
+    target?: EARS.EntityId;
+    weight?: number;
+}
+
+// @public
 export type RelationRow = RelationEdge;
 
 // @public
 export interface RelationRules {
     acyclic?: boolean;
     unique?: boolean;
+    weighted?: boolean;
 }
 
 // @public
@@ -878,6 +893,8 @@ export interface UntypedSchema extends EarsSchema {
     roles: string;
     // (undocumented)
     shapes: {};
+    // (undocumented)
+    weightedKinds: string;
 }
 
 // @public
@@ -935,6 +952,11 @@ export interface WatchSchedule {
 }
 
 // @public
+export interface WeightedLinkOptions extends LinkOptions {
+    weight?: number;
+}
+
+// @public
 export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);
 
 // @public
@@ -958,7 +980,7 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
     grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
     // (undocumented)
     id(): EARS.EntityId<E>;
-    link(kind: D['relKinds'], target: EARS.EntityId, options?: LinkOptions): WriteBuilder<E, D>;
+    link<K extends D['relKinds']>(kind: K, target: EARS.EntityId, options?: [K] extends [D['weightedKinds']] ? WeightedLinkOptions : LinkOptions): WriteBuilder<E, D>;
     merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
     removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
     removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;

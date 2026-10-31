@@ -5,9 +5,9 @@ import type { EARS } from './entities.ts';
 import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
 import type { Op, OpResult } from './database.ts';
-import type { LinkOptions, RowIdentity, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
+import type { RelationPatch, RowIdentity, WeightedLinkOptions, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
 
-const LINK_OPTIONS: readonly string[] = ['info'] satisfies Array<keyof LinkOptions>;
+const LINK_OPTIONS: readonly string[] = ['info', 'weight'] satisfies Array<keyof WeightedLinkOptions>;
 
 /** A string that is not shaped like an id: where a type is meant, an id fails to compile */
 export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
@@ -84,12 +84,12 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
       removeAt: (k, index) => attribute({ op: 'removeAt', field: k, index }),
       removeValue: (k, v) => (valued('removeValue', k, v), attribute({ op: 'removeValue', field: k, value: v })),
 
-      link(kind, target, options: LinkOptions = {}) {
+      link(kind, target, options: WeightedLinkOptions = {}) {
         // An edge's info is `{ info }`: an object with other keys is info passed where the options go
         const stray = Object.keys(options).filter((k) => !LINK_OPTIONS.includes(k));
         if (stray.length) throw new Error(`link(${kind}): unknown option ${stray.join(', ')}; an edge's info goes in { info }`);
         names.relationKinds(kind, 'link');
-        one({ op: 'link', source: id, kind, target, info: options.info });
+        one({ op: 'link', source: id, kind, target, info: options.info, weight: options.weight });
         return self;
       },
       unlink(kind, target) {
@@ -193,11 +193,12 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
   }) as Upsert;
 
   /**
-   * Moves a relation's ends or changes its info, refusing an id no relation has (`NO_SUCH_RELATION`), as
-   * `removeRelation` does, and held to the rule `link` is: an end it names must exist when the unit commits
+   * Moves a relation's ends or changes its info or its weight, refusing an id no relation has (`NO_SUCH_RELATION`), as
+   * `removeRelation` does, and held to the rules `link` is: an end it names must exist when the unit commits, and a
+   * weight is a kind declared `weighted`'s, from 0 to 2^960 (`VALUE_INVALID`)
    */
-  function updateRelation(relId: EARS.RelationId, { source, target, info }: { source?: EARS.EntityId; target?: EARS.EntityId; info?: unknown }): void {
-    one({ op: 'updateRelation', relation: relId, source, target, info });
+  function updateRelation(relId: EARS.RelationId, { source, target, info, weight }: RelationPatch): void {
+    one({ op: 'updateRelation', relation: relId, source, target, info, weight });
   }
 
   /** Removes the relation with the id: refused (`NO_SUCH_RELATION`) when no relation has it */

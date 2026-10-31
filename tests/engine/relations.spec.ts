@@ -82,8 +82,8 @@ describe('links', () => {
 
   it('refuses options it does not know, which is info passed where the options go', () => {
     const [a, b] = [task('A'), task('B')];
-    const info: any = { weight: 2 };
-    expect(() => e.write(a).link('blocks', b, info)).toThrow("unknown option weight; an edge's info goes in { info }");
+    const info: any = { size: 2 };
+    expect(() => e.write(a).link('blocks', b, info)).toThrow("unknown option size; an edge's info goes in { info }");
     expect(e.findRelations()).toEqual([]);
   });
 
@@ -448,5 +448,95 @@ describe('roles', () => {
     e.write(b).revoke('owner');
     expect(e.getRoles(b)).toEqual([]);
     expect(e.getRow(b)).not.toHaveProperty('role');
+  });
+});
+
+describe('weighted kinds', () => {
+  // `refers` sets its edges' weights (unique), `mentions` keeps parallel edges whose weights add, `refs` weighs nothing
+  const weighted = () => engine({ relationRules: { refers: { weighted: true, unique: true }, mentions: { weighted: true } } });
+  const scores = (hits: { id: string; score: number }[]) => new Map(hits.map((h) => [h.id, h.score]));
+
+  it('a link takes a weight, 1 unless given, and rows of a weighted kind answer it', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 2.5 }).link('refers', c).link('refs', b);
+    const [heavy, plain, other] = e.findRelations({ source: a });
+    expect(heavy).toMatchObject({ kind: 'refers', target: b, weight: 2.5 });
+    expect(plain).toMatchObject({ kind: 'refers', target: c, weight: 1 });
+    expect(other).not.toHaveProperty('weight');
+    expect(e.getRelation(heavy!.id)).toEqual(heavy);
+    expect(e.query.ids(a).outEdges('refers').map((r) => r.weight)).toEqual([2.5, 1]);
+  });
+
+  it('refuses a weight outside 0 to 2^960 and a weight on a kind not declared weighted', () => {
+    e = weighted();
+    const [a, b] = [task('a'), task('b')];
+    for (const weight of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 961]) {
+      expect(() => e.write(a).link('refers', b, { weight }), String(weight)).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
+    }
+    expect(() => e.write(a).link('refs', b, { weight: 2 })).toThrow(expect.objectContaining({ code: 'VALUE_INVALID', message: expect.stringContaining('refs') }));
+    expect(e.findRelations()).toEqual([]);
+    // 0 is a weight: an edge the walker never follows
+    e.write(a).link('refers', b, { weight: 0 });
+    expect(e.findRelations()[0]).toMatchObject({ weight: 0 });
+  });
+
+  it('a unique kind relinked takes the new weight; another kind adds an edge whose weight a rank adds to the first', () => {
+    e = weighted();
+    const [a, b] = [task('a'), task('b')];
+    e.write(a).link('refers', b, { weight: 2 });
+    e.write(a).link('refers', b, { weight: 5 });
+    expect(e.findRelations({ kind: 'refers' }).map((r) => r.weight)).toEqual([5]);
+    e.write(a).link('mentions', b, { weight: 2 });
+    e.write(a).link('mentions', b, { weight: 2 });
+    e.write(a).link('mentions', b, { weight: 3 });
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.weight)).toEqual([2, 3]);
+  });
+
+  it('updateRelation replaces a weight, with or without a move, and the admin face loads one', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 2 });
+    const [rel] = e.findRelations();
+    e.updateRelation(rel!.id, { weight: 4 });
+    expect(e.getRelation(rel!.id)).toMatchObject({ target: b, weight: 4 });
+    e.updateRelation(rel!.id, { info: 'kept' });
+    expect(e.getRelation(rel!.id)).toMatchObject({ info: 'kept', weight: 4 });
+    e.updateRelation(rel!.id, { target: c, weight: 0.5 });
+    expect(e.getRelation(rel!.id)).toMatchObject({ target: c, weight: 0.5 });
+    expect(() => e.updateRelation(rel!.id, { weight: -1 })).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
+    const loaded = e.admin.addRelation(b, 'refers', c, undefined, 3);
+    expect(e.getRelation(loaded)).toMatchObject({ weight: 3 });
+    e.admin.updateRelation(loaded, { target: a });
+    expect(e.getRelation(loaded)).toMatchObject({ target: a, weight: 3 });
+  });
+
+  it('rank walks and teleports by weight unless told not to, and EXPLAIN reports the weight it read', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 9 }).link('refers', c, { weight: 1 });
+    const byWeight = scores(e.query('Task').rank('refers', { seeds: [a] }).hits());
+    expect(byWeight.get(b)! / byWeight.get(c)!).toBeCloseTo(9, 9);
+    const even = scores(e.query('Task').rank('refers', { seeds: [a], weights: false }).hits());
+    expect(even.get(b)).toBe(even.get(c));
+    // A seed's weight is how often walkers start there; an id is weight 1, named again it adds
+    const seeded = scores(e.query('Task').rank('refers', { seeds: [{ id: b, weight: 3 }, c] }).hits());
+    expect(seeded.get(b)! / seeded.get(c)!).toBeCloseTo(3, 9);
+    expect(scores(e.query('Task').rank('refers', { seeds: [b, b, b, c] }).hits())).toEqual(seeded);
+    for (const weight of [0, -1]) {
+      expect(() => e.query('Task').rank('refers', { seeds: [{ id: a, weight }] }).ids(), String(weight)).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+    }
+    const [, stage] = e.query('Task').rank('refers').explain().stages;
+    expect(stage).toMatchObject({ stage: 'rank', nodes: 3, edges: 2, weight: 10 });
+    expect(e.query('Task').rank('refers', { weights: false }).explain().stages[1]).not.toHaveProperty('weight');
+  });
+
+  it('communities count each edge by its weight unless told not to', () => {
+    e = weighted();
+    // A square whose sides a–d and b–c are heavy
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map(task);
+    for (const [s, t, weight] of [[a, b, 1], [b, c, 10], [c, d, 1], [d, a, 10]] as const) e.write(s!).link('refers', t!, { weight });
+    expect(e.query('Task').communities('refers')).toEqual([[a, d], [b, c]]);
+    expect(e.query('Task').communities('refers', { weights: false })).not.toEqual([[a, d], [b, c]]);
   });
 });

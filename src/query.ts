@@ -1,7 +1,7 @@
 // The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
-import type { EdgeDirection, QueryBuilder, QueryStage, RelationEdge, SimilarityMeasure } from './runtime.ts';
+import type { EdgeDirection, QueryBuilder, QueryStage, RankOptions, RelationEdge, SimilarityMeasure } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import type { Answer } from './database.ts';
 import type { TypeName } from './write.ts';
@@ -263,9 +263,12 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         const answer = run(recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
         return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
       },
-      rank: (kinds: MaybeArr<string>, { direction = 'out', seeds }: { direction?: EdgeDirection; seeds?: readonly EARS.EntityId[] } = {}) => {
+      rank: (kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) => {
         names.relationKinds(kinds, 'rank');
-        return next({ step: 'rank', kinds: asArr(kinds), direction, ...(seeds !== undefined && { seeds: [...seeds] }) });
+        return next({
+          step: 'rank', kinds: asArr(kinds), direction,
+          ...(seeds !== undefined && { seeds: [...seeds] }), ...(weights !== undefined && { weights }),
+        });
       },
       topological: (kinds: MaybeArr<string>, { direction = 'out' }: { direction?: 'out' | 'in' } = {}) => {
         names.relationKinds(kinds, 'topological');
@@ -287,10 +290,11 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'strongComponents');
         return run(recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
       },
-      communities: (kinds: MaybeArr<string>, { resolution, seed }: { resolution?: number; seed?: number } = {}) => {
+      communities: (kinds: MaybeArr<string>, { resolution, seed, weights }: { resolution?: number; seed?: number; weights?: boolean } = {}) => {
         names.relationKinds(kinds, 'communities');
         const answer = run(recipe, {
           answer: 'communities', kinds: asArr(kinds), ...(resolution !== undefined && { resolution }), ...(seed !== undefined && { seed }),
+          ...(weights !== undefined && { weights }),
         });
         return answer.communities as EARS.EntityId[][];
       },
