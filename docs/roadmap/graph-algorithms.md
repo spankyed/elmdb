@@ -1,7 +1,7 @@
 # Graph algorithms
 
 Status: built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)): stages 0 to 2, 4 and 5 in elmdb, stage 3
-in apack. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
+in apack; stage 5 has no consumer yet. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
 caller to read every edge and compute over them in JavaScript. `../architecture/engine.md`, Reads, has them as built.
 
 ## Why in the engine
@@ -148,8 +148,9 @@ much the largest of the three to write and to verify.
    6), with `@apackdev/ears`'s `.communities(...)`; the graph view isn't built. Like `weakComponents`, it takes no
    `direction`: modularity is of the undirected graph, an edge joining its ends whichever way it points.
 5. **`strongComponents`: Tarjan's algorithm**, written in elmdb (about sixty lines, walking with its own stack so a
-   long chain can't overflow the thread's), with `@apackdev/ears`'s `.strongComponents(...)`. No caller yet: the first
-   would be a warning for threads that block each other in a loop, or the code map's import-cycle check.
+   long chain can't overflow the thread's). No consumer: `@apackdev/ears` doesn't expose it yet. The code map's
+   import-cycle check would be the first; a check of one new link, such as the thread link form's, needs only
+   `wouldCreateCycle`.
 
 Later, each when a caller needs it: node similarity (Jaccard over neighbours, "notes linked like this one"), k-core,
 betweenness centrality (Brandes), label propagation, and weights once relations declare fields.
