@@ -6,6 +6,7 @@
 //! own, a savepoint inside it rolls back alone, and its deferred checks run as it commits.
 
 pub mod admin;
+mod algorithms;
 mod apply;
 pub mod batch;
 mod builder;

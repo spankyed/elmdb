@@ -22,7 +22,7 @@ BASELINE = "off"
 # Each case's allowed growth: this share of its count without the feature, or this many instructions if more
 SHARE = 0.0005
 FLOOR = 100
-GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write"}
+GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write", "graph"}
 # The tokenizer seeds its hash map per process, which moves a text rebuild's count by a fraction of a percent between
 # runs of one build (`docs/evidence/instruction-counts.md`)
 REPORTED = {"text_rebuild"}

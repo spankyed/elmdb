@@ -110,4 +110,7 @@ exclude_re = [
     # decompresses the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
     "values.rs:.*replace match guard size <= ONE_CALL_UP_TO with false in decompress",
     "values.rs:69:.*replace << with >>",
+    # rank's stop: a round whose scores moved by exactly the tolerance stops, or runs one more round that moves them
+    # less; the two differ only where an L1 sum of floats lands on the tolerance to the bit
+    "algorithms.rs:.*replace < with <= in rank",
 ]

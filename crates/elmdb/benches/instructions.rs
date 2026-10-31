@@ -147,7 +147,27 @@ library_benchmark_group!(name = write, benchmarks = [small_write]);
 library_benchmark_group!(name = read, benchmarks = [read_bytes]);
 
 #[cfg(target_os = "linux")]
-main!(library_benchmark_groups = keys, maintenance, read, write);
+fn graph_read(read: &str) -> (support::Fixture, Reads) {
+    let fixture = support::Fixture::graph(ROWS, 5);
+    fixture.assert_graph_read(read);
+    let reads = fixture.graph_read(read);
+    (fixture, reads)
+}
+
+// A graph read over 1,000 documents of five edges each: the graph built from the store and the algorithm over it
+#[cfg(target_os = "linux")]
+#[library_benchmark]
+#[benches::read(args = ["weakComponents", "rank", "personalized"], setup = graph_read)]
+fn graph((fixture, reads): (support::Fixture, Reads)) -> (support::Fixture, Vec<u8>) {
+    let answer = fixture.db.read(black_box(&reads)).unwrap();
+    (fixture, black_box(answer))
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(name = graphs, benchmarks = [graph]);
+
+#[cfg(target_os = "linux")]
+main!(library_benchmark_groups = keys, maintenance, read, write, graphs);
 
 #[cfg(not(target_os = "linux"))]
 fn main() {

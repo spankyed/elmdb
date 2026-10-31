@@ -93,6 +93,35 @@ pub fn visit_edges(
     result.map(|_| ())
 }
 
+/// An edge key's far end, read where it lies: an edge's value is plain msgpack, `[relation, far]`
+fn far_of(bytes: &[u8]) -> Result<&str> {
+    let corrupt = || Error::new(ErrorCode::Corrupted, "An edge key's value doesn't read");
+    let mut rest = bytes;
+    if rmp::decode::read_array_len(&mut rest).map_err(|_| corrupt())? != 2 {
+        return Err(corrupt());
+    }
+    let (_, rest) = rmp::decode::read_str_from_slice(rest).map_err(|_| corrupt())?;
+    let (far, _) = rmp::decode::read_str_from_slice(rest).map_err(|_| corrupt())?;
+    Ok(far)
+}
+
+/// Visits the far end of each of an entity's edges out (or in), of one kind or every kind, in place order, until
+/// `each` answers false; a far end is lent, not copied, so a caller that only looks one up allocates nothing
+pub fn visit_far_ends(
+    t: &impl Read,
+    entity: &str,
+    outward: bool,
+    kind: Option<&str>,
+    mut each: impl FnMut(&str) -> Result<bool>,
+) -> Result<()> {
+    let mut result = Ok(true);
+    t.visit(&keys::edges_of(outward, entity, kind), |_, value| {
+        result = far_of(value).and_then(&mut each);
+        matches!(result, Ok(true))
+    })?;
+    result.map(|_| ())
+}
+
 /// The place of the first edge of a kind from `source` to `target`, the place order of its edges being their order
 pub fn first_between(t: &impl Read, source: &str, kind: &str, target: &str) -> Result<Option<u64>> {
     let mut first = Ok(None);

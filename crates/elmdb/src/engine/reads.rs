@@ -7,6 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasherDefault, DefaultHasher};
 
 use rmpv::Value;
 
@@ -14,6 +15,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
 use crate::format::value::TIMESTAMP_EXTENSION;
 
+use super::algorithms::{self, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
 use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Start, Step, Terminal};
@@ -353,14 +355,21 @@ struct Query<'r, R: Read> {
     /// What each stage did, for a read asked to explain itself
     stages: Option<&'r Stages>,
     /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
-    hits: RefCell<HashMap<String, (Hit, String)>>,
+    hits: RefCell<HashMap<String, (Hit, String), Fixed>>,
     /// The stage of a hop a `reverse` straight after it asks to walk its edges from the last (`Step::Reverse`)
     backward_hop: Cell<Option<usize>>,
     /// The stage of a hop that did, handing its ids on already reversed
     walked_back: Cell<Option<usize>>,
+    /// Whether the plan's last rank settled within its tolerance, and in how many rounds, for the `hits` terminal
+    ranked: Cell<Option<(bool, u32)>>,
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
+
+/// A hasher with fixed keys, for the maps the graph algorithms build: one keyed per process would make a read's work
+/// differ from run to run, which the instruction counts compare (`scripts/diagnostics-overhead.py`). The keys are
+/// ids from the store, which the process reading them wrote or was given, so no one picks them to collide
+type Fixed = BuildHasherDefault<DefaultHasher>;
 
 impl<R: Read> Query<'_, R> {
     /// One entity read from the store, by the start or by a step reading an index or walking a type
@@ -607,6 +616,60 @@ impl<R: Read> Query<'_, R> {
                 self.reach(before, kinds, types.as_deref(), false, *depth, visit)
             }
             Step::PathTo { to, kinds, direction, depth } => self.path_to(before, to, kinds, *direction, *depth, visit),
+            Step::Rank { kinds, direction, seeds, damping, iterations, tolerance } => {
+                // NaN is in none of these ranges
+                let valid = (0.0..1.0).contains(damping) && *damping > 0.0 && *tolerance > 0.0;
+                if !valid || *iterations == 0 {
+                    return Err(Error::new(
+                        ErrorCode::BatchInvalid,
+                        format!(
+                            "rank takes a damping between 0 and 1, at least one iteration and a tolerance above 0, and \
+                             was given {damping}, {iterations} and {tolerance}"
+                        ),
+                    ));
+                }
+                let (ids, graph) = self.project(before, upto, kinds, *direction)?;
+                let seeds: Vec<u32> = match seeds {
+                    None => (0..ids.len() as u32).collect(),
+                    Some(seeds) => {
+                        let place: HashMap<&str, u32, Fixed> =
+                            ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
+                        seeds.iter().filter_map(|seed| place.get(seed.as_str()).copied()).collect()
+                    }
+                };
+                // No seed in the set answers nothing, settled in no rounds
+                let Some(ranked) = algorithms::rank(&graph, &seeds, *damping, *iterations, *tolerance) else {
+                    self.ranked.set(Some((true, 0)));
+                    return Ok(true);
+                };
+                self.ranked.set(Some((ranked.converged, ranked.iterations)));
+                if let Some(stages) = self.stages {
+                    stages.ranked(upto, ranked.iterations, ranked.converged);
+                }
+                let mut order: Vec<usize> = (0..ids.len()).collect();
+                // Stable: equal scores keep the set's order
+                order.sort_by(|&a, &b| ranked.scores[b].total_cmp(&ranked.scores[a]));
+                // Each hit recorded as its entity is handed on, so a limit after the rank keeps that many and no more,
+                // and none for a plan whose terminal doesn't answer them
+                let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
+                for at in order {
+                    let id = &ids[at];
+                    if scored {
+                        let hit = Hit {
+                            id: id.clone(),
+                            seq: 0,
+                            score: ranked.scores[at],
+                            terms: Vec::new(),
+                            fields: Vec::new(),
+                        };
+                        self.hits.borrow_mut().insert(id.clone(), (hit, "rank".to_owned()));
+                    }
+                    if !visit(id)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             Step::OrderBy { field: name, descending } => {
                 let ids = self.collect(before)?;
                 let collator = collator(&self.r.schema().collation)?;
@@ -813,6 +876,8 @@ impl<R: Read> Query<'_, R> {
         }
         found.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
         let ids: Vec<String> = found.iter().map(|(_, hit, _)| hit.id.clone()).collect();
+        // These scores replace a rank's before them, so the answer no longer says how that rank settled
+        self.ranked.set(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (_, hit, name) in found {
@@ -1051,6 +1116,8 @@ impl<R: Read> Query<'_, R> {
     /// Records each hit for the `hits` terminal and visits its entity, in the order given
     fn record_and_visit(&self, found: Vec<(Hit, String)>, visit: &mut Visit<'_>) -> Result<bool> {
         let ids: Vec<String> = found.iter().map(|(hit, _)| hit.id.clone()).collect();
+        // These scores replace a rank's before them, so the answer no longer says how that rank settled
+        self.ranked.set(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (hit, name) in found {
@@ -1352,6 +1419,44 @@ impl<R: Read> Query<'_, R> {
         each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
     }
 
+    /// The set after the first `before` steps as a graph for stage `stage`: its entities once each, in order, numbered
+    /// so, and the edges of the kinds between two of them, followed the direction's ways, each entity's kind by kind and
+    /// in place order. The edges are read through the plan's reader, so a tracked read is written into by a link or an
+    /// unlink at any of the set's entities
+    fn project(
+        &self,
+        before: usize,
+        stage: usize,
+        kinds: &[String],
+        direction: Direction,
+    ) -> Result<(Vec<String>, Projection)> {
+        for kind in kinds {
+            relations::definition(self.r, kind)?;
+        }
+        let mut ids = self.collect(before)?;
+        let mut seen: HashSet<String, Fixed> = HashSet::default();
+        ids.retain(|id| seen.insert(id.clone()));
+        let place: HashMap<&str, u32, Fixed> =
+            ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
+        let mut graph = Projection::new();
+        for id in &ids {
+            let mut targets = Vec::new();
+            for kind in kinds {
+                for &outward in direction.sides() {
+                    relations::visit_far_ends(self.r, id, outward, Some(kind), |far| {
+                        targets.extend(place.get(far));
+                        Ok(true)
+                    })?;
+                }
+            }
+            graph.node(targets);
+        }
+        if let Some(stages) = self.stages {
+            stages.projected(stage, graph.nodes(), graph.edges());
+        }
+        Ok((ids, graph))
+    }
+
     /// A shortest path from an entity of the set to `to`, walked level by level as `reach` walks; nothing visited when
     /// there is none within `depth`
     fn path_to(
@@ -1417,9 +1522,18 @@ struct Stages {
     kept: Vec<Cell<u64>>,
     index: RefCell<Vec<Option<String>>>,
     nanos: Vec<Cell<u64>>,
+    /// Per stage that built a graph: its nodes and edges, and for a rank its rounds and whether it settled
+    graph: RefCell<Vec<Option<Graphed>>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
+}
+
+#[derive(Clone, Copy)]
+struct Graphed {
+    nodes: usize,
+    edges: usize,
+    rounds: Option<(u32, bool)>,
 }
 
 /// Puts back the stage that ran before, charging the time since to the one ending
@@ -1443,6 +1557,7 @@ impl Stages {
             kept: (0..n).map(|_| Cell::new(0)).collect(),
             index: RefCell::new(vec![None; n]),
             nanos: (0..n).map(|_| Cell::new(0)).collect(),
+            graph: RefCell::new(vec![None; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -1482,6 +1597,16 @@ impl Stages {
         });
     }
 
+    fn projected(&self, stage: usize, nodes: usize, edges: usize) {
+        self.graph.borrow_mut()[stage] = Some(Graphed { nodes, edges, rounds: None });
+    }
+
+    fn ranked(&self, stage: usize, iterations: u32, converged: bool) {
+        if let Some(graphed) = &mut self.graph.borrow_mut()[stage] {
+            graphed.rounds = Some((iterations, converged));
+        }
+    }
+
     /// The rest of the `explained` answer after its `answer`: `visited`, `ms` and `stages`
     fn write(&self, plan: &Plan, visited: u64, w: &mut W<'_>) {
         self.switch(self.running.get());
@@ -1494,6 +1619,7 @@ impl Stages {
         let n = self.read.len();
         w.array(n as u32);
         let index = self.index.borrow();
+        let graph = self.graph.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -1502,12 +1628,30 @@ impl Stages {
             };
             // A stage visits what the stage before handed it, and what it read from the store itself
             let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
-            w.map(if index[at].is_some() { 5 } else { 4 });
+            let graphed = graph[at];
+            let extra = match graphed {
+                None => 0,
+                Some(Graphed { rounds: None, .. }) => 2,
+                Some(Graphed { rounds: Some(_), .. }) => 4,
+            };
+            w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
             if let Some(index) = &index[at] {
                 w.str("index");
                 w.str(index);
+            }
+            if let Some(Graphed { nodes, edges, rounds }) = graphed {
+                w.str("nodes");
+                w.uint(nodes as u64);
+                w.str("edges");
+                w.uint(edges as u64);
+                if let Some((iterations, converged)) = rounds {
+                    w.str("iterations");
+                    w.uint(u64::from(iterations));
+                    w.str("converged");
+                    w.bool(converged);
+                }
             }
             w.str("visited");
             w.uint(received + self.read[at].get());
@@ -1547,6 +1691,7 @@ fn step_name(step: &Step) -> &'static str {
         Step::Descendants { .. } => "descendants",
         Step::Ancestors { .. } => "ancestors",
         Step::PathTo { .. } => "pathTo",
+        Step::Rank { .. } => "rank",
         Step::OrderBy { .. } => "orderBy",
         Step::Reverse => "reverse",
         Step::Limit { .. } => "limit",
@@ -1572,6 +1717,7 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::FirstRow { .. } => "firstRow",
         Terminal::Edges { .. } => "edges",
         Terminal::Degrees { .. } => "degrees",
+        Terminal::WeakComponents { .. } => "weakComponents",
         Terminal::GroupBy { .. } => "groupBy",
         Terminal::Hits { .. } => "hits",
     }
@@ -1763,9 +1909,10 @@ fn query_with(
         plan,
         visited: Cell::new(0),
         stages,
-        hits: RefCell::new(HashMap::new()),
+        hits: RefCell::new(HashMap::default()),
         backward_hop: Cell::new(None),
         walked_back: Cell::new(None),
+        ranked: Cell::new(None),
     };
     let last = plan.steps.len();
     let mut w = W(out);
@@ -1918,6 +2065,24 @@ fn query_with(
                 w.uint(n);
             }
         }
+        Terminal::WeakComponents { kinds, counts } => {
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            let groups = algorithms::weak_components(&graph);
+            w.map(2);
+            w.kind("weakComponents");
+            w.str("weakComponents");
+            w.array(groups.len() as u32);
+            for group in &groups {
+                if *counts {
+                    w.uint(group.len() as u64);
+                    continue;
+                }
+                w.array(group.len() as u32);
+                for &at in group {
+                    w.str(&ids[at as usize]);
+                }
+            }
+        }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;
             let mut groups: Vec<(SameValue, Vec<u8>, Vec<String>)> = Vec::new();
@@ -1954,15 +2119,34 @@ fn query_with(
         }
         Terminal::Hits { fields, highlights } => {
             let searches = |step: &Step| {
-                matches!(step, Step::Search { .. } | Step::Near { .. } | Step::Like { .. } | Step::Hybrid { .. })
+                matches!(
+                    step,
+                    Step::Search { .. }
+                        | Step::Near { .. }
+                        | Step::Like { .. }
+                        | Step::Hybrid { .. }
+                        | Step::Rank { .. }
+                )
             };
             if !plan.steps.iter().any(searches) {
-                return Err(Error::new(ErrorCode::BatchInvalid, "hits() answers a search, and the plan has none"));
+                return Err(Error::new(
+                    ErrorCode::BatchInvalid,
+                    "hits() answers a search or a rank, and the plan has neither",
+                ));
             }
             let ids = q.collect(last)?;
             let hits = q.hits.borrow();
-            w.map(3);
+            let ranked = q.ranked.get();
+            w.map(if ranked.is_some() { 4 } else { 3 });
             w.kind("hits");
+            if let Some((converged, iterations)) = ranked {
+                w.str("rank");
+                w.map(2);
+                w.str("converged");
+                w.bool(converged);
+                w.str("iterations");
+                w.uint(u64::from(iterations));
+            }
             w.str("hits");
             let start = w.0.len();
             w.array(ids.len() as u32);
