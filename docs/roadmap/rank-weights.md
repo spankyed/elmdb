@@ -8,6 +8,8 @@ Where the build differs from the design below:
   nothing.
 - **A weight is part of the edge's identity**, as its info is: linking a pair again with another weight adds a parallel
   edge, or on a `unique` kind replaces the weight in place; no weight given matches any edge between the ends.
+- **A weight, an edge's or a seed's, is at most 2^960**, so no sum of them a rank adds up reaches infinity and loses
+  the walkers it holds; -0 is held as 0.
 - **An id named twice among the seeds adds its weights.**
 - **The hits answer's `rank` record gains no `weighted` flag**: EXPLAIN's `weight`, the total weight read, says whether
   weights were read.
