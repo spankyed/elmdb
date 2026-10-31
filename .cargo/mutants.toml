@@ -113,4 +113,9 @@ exclude_re = [
     # rank's stop: a round whose scores moved by exactly the tolerance stops, or runs one more round that moves them
     # less; the two differ only where an L1 sum of floats lands on the tolerance to the bit
     "algorithms.rs:.*replace < with <= in rank",
+    # project's fast path: a start of distinct types hands each entity on once and no step hands one on twice, so
+    # dropping repeats from a set that holds none answers the same, at the cost of marking every id. Anchored by line,
+    # the `!` of `if !distinct` two lines below being one the tests catch
+    "reads.rs:1592:.*replace == with != in Query<'_, R>::project",
+    "reads.rs:1593:.*delete ! in Query<'_, R>::project",
 ]
