@@ -43,6 +43,21 @@ too: the directory has to exist before anything is built, in a fresh clone, a wo
 and a mutation copy alike. A unit test's database is refused growth past 1 GiB (`TEST_MAP_LIMIT`, `MAP_FULL`), which no test nears, so a
 mutant that keeps one growing fails its test instead of filling the disk.
 
+## The build directory
+
+Cargo never removes an artifact from a build directory: a build of other code, or the same code with other features
+(`diagnostics` on and off), hashes a new one beside the last. So:
+
+- **A worktree builds into its own `target/`**, and removing the worktree frees it. Pointing several checkouts at one
+  build directory with `CARGO_TARGET_DIR` saves a cold build per worktree, but removing a worktree then frees nothing,
+  and the shared directory grows with every branch any of them built.
+- **A long-lived build directory is swept:** `cargo xtask sweep` removes what a toolchain no longer installed made,
+  what no build has used for 14 days, and then the oldest until it is under 15 GB, through `cargo-sweep` (`cargo
+  install cargo-sweep --version '=0.8.0' --locked`).
+- **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
+  reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
+  of locals.
+
 ## Crashes and failed syncs
 
 The crash harness (`engine/tests/model.rs`, `mod crash`): a child process, the test binary run again, applies a seeded
