@@ -1,6 +1,7 @@
 //! Cross-process declarations cannot be paired with an earlier handle's cached schema.
 
 use super::{batch, write};
+use crate::engine::watch::Unwatched;
 use crate::schema::Schema;
 use crate::{Database, ErrorCode, OpenOptions};
 use serde_json::json;
@@ -124,7 +125,7 @@ fn stale_handle_probe(read_only: bool) {
         .watch(query(), Box::new(move |answer| *into.lock().unwrap() = answer.as_ref().err().map(|e| e.code)))
         .unwrap();
     assert_eq!(*heard.lock().unwrap(), Some(ErrorCode::SchemaChanged));
-    db.unwatch(watch);
+    assert_eq!(db.unwatch(watch), Unwatched::Ended);
     if !read_only {
         assert_eq!(db.write(&batch(vec![]), false).unwrap_err().code, ErrorCode::SchemaChanged);
         assert_eq!(db.bulk_load(&[]).unwrap_err().code, ErrorCode::SchemaChanged);

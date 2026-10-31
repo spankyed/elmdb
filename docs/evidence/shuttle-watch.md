@@ -37,6 +37,7 @@ Each on a disposable worktree, never the working tree, the other cases run besid
 | `claim_writer` checks the slot, unlocks, then takes the writer (the race fixed in `33a17bd`) | `a_write_never_waits…` fails |
 | `unwatch` doesn't wait for a delivery on another thread | `a_watch_ended_during_delivery…` fails: the listener was called after `unwatch` returned |
 | `unwatch` waits even inside a listener | `listeners_ending_each_others_watch…` and `a_listener_ending_its_own_watch…` deadlock |
+| `unwatch` inside a listener answers `Ended` while a delivery holds the ended watch's listener (2026-10-31, 3,000 schedules a model) | `a_listener_ending_its_own_watch…` fails: its own delivery holds it; `listeners_ending_each_others_watch…` fails: `Ended` before the other listener was dropped |
 
 Each failed only the case written for it.
 

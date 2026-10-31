@@ -202,22 +202,40 @@ fn register(tracks: &SharedTracks, reads: Reads, listener: Listener) -> u64 {
     id
 }
 
-/// Ends a watch: once this returns, its listener isn't called again and has been dropped. A delivery running its
-/// listener on another thread is waited for, so whatever the listener uses may be released after. Called from inside a
-/// listener of this database's watches, its own or another's, it doesn't wait: a delivery running on this thread
-/// can't end while it does, and two listeners ending each other's watch would wait on each other. Nor may the caller
-/// hold anything the listener needs, which the wait would never get
-pub fn unwatch(tracks: &SharedTracks, id: u64) {
+/// What an `unwatch` left: either way its listener isn't called again
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "Ending means the listener may still be running: release nothing it uses until its delivery returns"]
+pub enum Unwatched {
+    /// The listener isn't running and has been dropped, so whatever it uses may be released
+    Ended,
+    /// Ended from inside a listener while a delivery holds the ended watch's listener, which can't be waited for
+    /// there: the listener may still be running, its own call included, and is dropped when that delivery lets go of it
+    Ending,
+}
+
+/// Ends a watch: once this returns, its listener isn't called again. A delivery running its listener on another thread
+/// is waited for, and the answer is `Ended`: the listener has returned and been dropped. Called from inside a listener of
+/// this database's watches, its own or another's, it doesn't wait — a delivery running on this thread can't end while it
+/// does, and two listeners ending each other's watch would wait on each other — so it answers `Ending` while a delivery
+/// holds the watch's listener, and `Ended` when none does. Nor may the caller hold anything the listener needs, which
+/// the wait would never get
+pub fn unwatch(tracks: &SharedTracks, id: u64) -> Unwatched {
     let mut held = tracks.tracks.lock();
     let removed = held.watches.remove(&id);
     held.index.remove(&Owner::Watch(id));
-    if !in_callback(tracks) {
+    let outcome = if !in_callback(tracks) {
         while held.delivering.contains(&id) {
             held = tracks.delivered.wait(held);
         }
-    }
+        Unwatched::Ended
+    } else if held.delivering.contains(&id) {
+        Unwatched::Ending
+    } else {
+        Unwatched::Ended
+    };
     drop(held);
     drop(removed);
+    outcome
 }
 
 /// Runs each watch again and hands its listener the answer when it differs from the last. Sequence validation and
@@ -287,7 +305,8 @@ fn deliver_with(
                 tracks.delivered(id);
             }
             if outcome.is_err() || dropped.is_err() {
-                unwatch(tracks, id);
+                // Its listener already dropped, nothing is left to wait for
+                let _ = unwatch(tracks, id);
                 panicked.push((
                     id,
                     if calling_listener || dropped.is_err() {
@@ -465,7 +484,7 @@ mod registration_tests {
         assert_eq!(runs, 2);
         assert!(
             read_watch_with(&tracks, &|| store.sequence(), 1, |_| {
-                unwatch(&tracks, 1);
+                assert_eq!(unwatch(&tracks, 1), Unwatched::Ended);
                 (Ok(Vec::new()), dependency())
             })
             .is_none()
@@ -584,7 +603,7 @@ mod registration_tests {
         let unwatcher = {
             let tracks = Arc::clone(&tracks);
             std::thread::spawn(move || {
-                unwatch(&tracks, id);
+                assert_eq!(unwatch(&tracks, id), Unwatched::Ended);
                 ended.send(()).unwrap();
             })
         };
