@@ -1,0 +1,37 @@
+# The concurrency models with deeper bounds than a pull request's run: Loom one preemption further, Shuttle a hundred
+# times the schedules (docs/architecture/testing.md, Concurrency models). Nightly, and on a dispatch
+name: models
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  loom:
+    name: concurrency models, deep (Loom)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_MAX_PREEMPTIONS: 4
+      CARGO_TARGET_DIR: target/loom
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p elmdb --release --lib store::unit_slot::model
+
+  shuttle:
+    name: concurrency models, deep (Shuttle)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      RUSTFLAGS: --cfg shuttle
+      CARGO_TARGET_DIR: target/shuttle
+      ELMDB_SHUTTLE_ITERATIONS: "10000000"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
