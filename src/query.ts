@@ -271,6 +271,13 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'weakComponents');
         return run(recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
       },
+      communities: (kinds: MaybeArr<string>, { resolution, seed }: { resolution?: number; seed?: number } = {}) => {
+        names.relationKinds(kinds, 'communities');
+        const answer = run(recipe, {
+          answer: 'communities', kinds: asArr(kinds), ...(resolution !== undefined && { resolution }), ...(seed !== undefined && { seed }),
+        });
+        return answer.communities as EARS.EntityId[][];
+      },
 
       pick: (fields: readonly string[]) => run(recipe, { answer: 'rows', fields: [...fields] }).rows,
       // The first row: the fields picked, or with none the whole row, as pickAll reads it

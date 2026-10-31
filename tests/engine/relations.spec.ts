@@ -196,6 +196,7 @@ describe('relation kinds', () => {
       ['degrees', () => e.query.ids(a).degrees('blokcs')],
       ['rank', () => e.query.ids(a).rank('blokcs')],
       ['weakComponents', () => e.query.ids(a).weakComponents('blokcs')],
+      ['communities', () => e.query.ids(a).communities('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -337,6 +338,16 @@ describe('graph algorithms', () => {
     expect(e.query('Task').weakComponents('refs')).toEqual([[c, d, x], [a, b]]);
     expect(e.query('Task').weakComponents(['refs', 'blocks'])).toEqual([[a, b, c, d, x]]);
     expect(e.query.ids([c, x]).weakComponents('refs')).toEqual([[c], [x]]);
+  });
+
+  it('communities splits the query where its edges thin, the same each time', () => {
+    // Two triangles, joined by one edge
+    const [a, b, c, x, y, z] = ['a', 'b', 'c', 'x', 'y', 'z'].map(task);
+    for (const [s, t] of [[a, b], [b, c], [c, a], [x, y], [y, z], [z, x], [c, x]] as const) e.write(s!).link('refs', t!);
+    expect(e.query('Task').communities('refs')).toEqual([[a, b, c], [x, y, z]]);
+    expect(e.query('Task').communities('refs', { seed: 3 })).toEqual([[a, b, c], [x, y, z]]);
+    expect(e.query('Task').communities('refs', { resolution: 0 })).toEqual([[a, b, c, x, y, z]]);
+    expect(() => e.query('Task').communities('refs', { resolution: -1 })).toThrow();
   });
 
   it('explain reports the graph a rank built and the rounds it ran', () => {

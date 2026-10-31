@@ -481,6 +481,10 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     both<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
     both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+    communities(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
+        resolution?: number;
+        seed?: number;
+    }): EARS.EntityId<E>[][];
     containing(text: string, options?: {
         caseInsensitive?: boolean;
     }): QueryBuilder<E, D>;
