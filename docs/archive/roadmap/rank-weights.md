@@ -1,6 +1,6 @@
 # Rank weights
 
-Status: built in elmdb, 2026-10-31 (`docs/evidence/graph-algorithms.md`, Weights); apack's side follows in its own PR.
+Status: built, 2026-10-31 (`docs/evidence/graph-algorithms.md`, Weights): elmdb #44, and apack's side in apack #304.
 Where the build differs from the design below:
 
 - **The weight is stored only when it isn't 1**, on the row and in the edge entries, so an unweighted kind's rows and

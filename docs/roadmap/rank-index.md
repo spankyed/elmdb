@@ -1,7 +1,7 @@
 # Rank index
 
 Status: designed, 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights
-([rank-weights.md](rank-weights.md), elmdb #44). A declared index that holds
+([rank-weights.md](../archive/roadmap/rank-weights.md), elmdb #44). A declared index that holds
 PageRank scores and keeps them current as commits change the graph, so a query reads scores rather than computing
 them.
 

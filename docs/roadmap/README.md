@@ -2,7 +2,7 @@
 
 Directions past the planned work (`../roadmap.md`), each with the measurements it rests on and the reading that would
 trigger it (`../evidence/next-phase-10.md`); each file says how far it is built. Directions that were built are in
-`../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`), graph algorithms (`graph-algorithms.md`),
+`../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`), graph algorithms (`graph-algorithms.md`) and their weights (`rank-weights.md`),
 read allocations, copies and codecs (`read-allocation-codec.md`) and query work efficiency
 (`query-work-efficiency.md`), and the maintenance verification (`maintenance-verification.md`).
 What graph query languages answer that a plan doesn't, and the order to add it, is in
@@ -19,7 +19,6 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [One plan algebra](plan-algebra.md) | The planner's three fixes and EXPLAIN built; designed: the smaller filter first, then value indexes as bitmaps and filters as operations on them |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
-| [Rank weights](rank-weights.md) | Built in elmdb: relation kinds declared weighted, and `rank` and `communities` over weighted edges and seeds |
 | [Rank index](rank-index.md) | Designed: PageRank scores declared as an index and kept current by each commit, read instead of computed |
 
 ## Development improvements

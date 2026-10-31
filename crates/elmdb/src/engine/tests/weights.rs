@@ -1,4 +1,4 @@
-//! Edge weights (`docs/roadmap/rank-weights.md`): a kind declared `weighted` takes a weight on each edge, stored on the
+//! Edge weights (`docs/archive/roadmap/rank-weights.md`): a kind declared `weighted` takes a weight on each edge, stored on the
 //! relation's row only when it isn't 1 and copied into its edge entries; rows answer it, `rank` walks and teleports by
 //! weight and `communities` counts it, and `check()` holds the edge entries to the row.
 
