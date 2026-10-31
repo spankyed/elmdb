@@ -1,4 +1,4 @@
-//! Rank indexes (`docs/archive/roadmap/rank-index.md` once built, `docs/architecture/engine.md`, Rank indexes): PageRank
+//! Rank indexes (`docs/roadmap/rank-index.md`, `docs/architecture/schema.md` and `engine.md`): PageRank
 //! over a declared graph, kept current by every commit rather than computed by every read.
 //!
 //! **The system.** Over the index's graph, its nodes the live entities of its types and its arcs the edges of its kinds
