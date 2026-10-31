@@ -1,7 +1,8 @@
 # Graph algorithms
 
-Status: planned, 2026-10-30. Nothing is built. This plan puts graph algorithms in the engine, as plan steps and
-answers, rather than leaving each caller to read every edge and compute over them in JavaScript.
+Status: stages 0 to 2 built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)); stage 3 is apack's and
+stage 4 is planned. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
+caller to read every edge and compute over them in JavaScript. `../architecture/engine.md`, Reads, has them as built.
 
 ## Why in the engine
 
@@ -57,14 +58,18 @@ answers, so it can never be stale. A cache keyed by commit sequence waits for a 
 building costs.
 
 Building it: one pass over the set gives each entity a dense `u32` index in set order, and one pass over each entity's
-edges (`relations::visit_edges`, the edge reads the walks use) builds compressed sparse rows (CSR), keeping only
-edges whose far end is in the set. Its memory is about `8 × nodes + 4 × edges` bytes plus the id table.
+edges (`relations::visit_far_ends`, which lends each far end where it lies rather than copying it) builds compressed
+sparse rows (CSR), keeping only edges whose far end is in the set. The graph is `4 × nodes + 4 × edges` bytes beside
+the set's ids and a map from id to node: a graph read holds about 184 bytes an entity at five edges each, which the
+heap test bounds.
 
 ### Steps and answers
 
-- **`rank` step:** orders the set by score, highest first, keeping the top `k` when given, with damping `0.85` by
-  default. It is one algorithm, personalized PageRank, whose teleport goes to the **seeds**:
-  - `personalized`: the seeds are a second set, named by ids or by a nested plan's answer. Its score answers "how much
+- **`rank` step:** orders the set by score, highest first, with damping `0.85` by default; a `limit` after it keeps
+  the highest, and a hit is recorded only for an entity handed on, so a limit keeps that many and no more. It is one
+  algorithm, personalized PageRank, whose teleport goes to the **seeds**:
+  - `personalized`: the seeds, named by ids. A nested plan's answer was considered and is not built: no plan nests
+    another, and both callers already hold their seeds' ids. Its score answers "how much
     does this matter from there", which is what apack's callers ask, so this is the case built and tested first;
   - `pagerank`: every node of the projection is a seed, so the teleport is uniform. It answers "what is central
     overall", and is the same code with a different seed set rather than a second implementation.
@@ -77,8 +82,10 @@ edges whose far end is in the set. Its memory is about `8 × nodes + 4 × edges`
   `resolution` (default `1.0`) and a `seed`. Leiden rather than Louvain, because Louvain can return communities that
   are not connected, and Leiden guarantees they are.
 
-All three take `kinds` and `direction`. `rank` and `communities` also take `iterations` (default `100`) and
-`tolerance` (default `1e-6`, L1 change in scores between rounds).
+All three take `kinds`. `rank` and `communities` take `direction` too; `components` doesn't, an edge joining its ends
+whichever way it points, so a direction would change nothing. `rank` and `communities` also take `iterations`
+(default `100`) and `tolerance` (default `1e-6`, L1 change in scores between rounds): at damping 0.85 the change after
+`n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 89th, so the defaults always settle.
 
 ### Rules every algorithm keeps
 
@@ -86,7 +93,8 @@ All three take `kinds` and `direction`. `rank` and `communities` also take `iter
   numbered in set order, sums run in a fixed order, nothing runs in parallel in the first stages, and Leiden's
   randomness comes from its `seed` through a seeded generator in the engine. Ties go to the earlier entity in the set.
 - **Bounded, and partial says so.** Iteration stops at convergence or at `iterations`, whichever comes first. The
-  answer says which: `{ converged: bool, iterations: n }` beside the scores. No time limit: a clock is not a check.
+  `hits` answer says which, as `rank: { converged, iterations }` beside the hits, and EXPLAIN's stage does too. No
+  time limit: a clock is not a check.
 - **Standard edge cases, written down.** A node with no out-edges (a dangling node) gives its score to the teleport
   targets, all nodes for `pagerank` and the seeds for `personalized`. An empty set answers nothing. A seed outside the
   projection is ignored; no seed inside it answers nothing, rather than falling back to plain PageRank.
@@ -120,12 +128,13 @@ much the largest of the three to write and to verify.
 1. **Projection and `components`.** CSR from the set, the `components` terminal, EXPLAIN, tracked reads, the protocol
    and its TypeScript declarations. Components first, because it is exact and its reference is trivial, so it proves
    the projection.
-2. **`rank`: personalized PageRank**, with scores through `hits`, seeds by ids or a nested plan, and
+2. **`rank`: personalized PageRank**, with scores through `hits`, seeds by ids, and
    `converged`/`iterations` in the answer; `pagerank` as every node seeded.
 3. **apack.** `@apackdev/ears` exposes `.rank(...)` and `.components(...)` on the typed query builder and
    `untypedQuery`, with its API report updated. The first callers are the ones that justified this: related notes
    ranked by personalized PageRank from the open note over `references` both ways, and prompt context ranked by
-   personalized PageRank from the entities the user mentions and fused with hybrid search.
+   personalized PageRank from the entities the user mentions and fused with text search (a note has a text index and
+   no vector index, so hybrid search has nothing to fuse).
 4. **`communities`: Leiden**, off the critical path: its one caller is a graph view coloured by community, which
    stages 1 to 3 do not wait on. It starts when that view is being built, with its own library evaluation, and
    `@apackdev/ears` gains `.communities(...)` then.

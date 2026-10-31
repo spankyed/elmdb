@@ -3,7 +3,8 @@
 Status: partial implementation. Criterion maintenance benchmarks are implemented (2026-10-27); stage 1 is built and
 stage 3 was evaluated and declined (2026-10-30), each with its record below; stage 4's first model is built and kept
 (2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 is built and kept behind a feature that is off
-by default (2026-10-30, [its record](../evidence/diagnostics.md)).
+by default (2026-10-30, [its record](../evidence/diagnostics.md)); stage 6, the graph algorithms, was evaluated and
+declined (2026-10-31).
 The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
@@ -30,6 +31,7 @@ or change public error meanings as part of this work.
 | 3 | rustix | Evaluate Unix API coverage; migrate only operations that become clearer and safer |
 | 4 | Loom | Model one production concurrency state machine, then decide whether to expand |
 | 5 | tracing | Prove useful diagnostics and collection through the binding before broader instrumentation |
+| 6 | petgraph, graph, rustworkx-core | Evaluate for the graph algorithms; declined, written in elmdb (`graph-algorithms.md`) |
 
 Each stage is a separate reviewable change. Stages 1 and 2 can proceed independently; stage 3 follows the platform API
 inventory from stage 1. Stages 4 and 5 have explicit evaluation gates rather than unconditional adoption.
@@ -159,6 +161,24 @@ Acceptance:
   duplicate state machines for diagnostics and avoid introducing a Tokio runtime solely for tracing.
 - Document an end-to-end diagnostic example through the binding. If useful collection requires apack changes,
   propose that integration separately and use an isolated apack worktree for any subsequent implementation.
+
+## 6. Graph algorithms
+
+Status: evaluated and declined, 2026-10-31. `graph-algorithms.md`'s stage 0, against its requirements: personalized
+PageRank with explicit seeds, its dangling-node rule and a convergence report; deterministic output with no
+parallelism that can't be turned off; building from the plan's CSR without copying the graph into the library's.
+
+- **petgraph 0.8.3**: `algo::page_rank(graph, damping, nb_iter)` runs a fixed number of rounds over every node, with no
+  seeds, no tolerance and no report of whether it settled; its documentation gives it O(n·|V|²·|E|) time and it
+  panics on a damping outside [0, 1]. Its weakly connected components need its own graph types.
+- **graph 0.3.2** (neo4j-labs): CSR and a `page_rank` that reports rounds and error, but in `f32`, without seeds, and
+  built on rayon-parallel neighbour traversal (`G: Sync`), whose summation order isn't fixed.
+- **rustworkx-core 0.18.1**: connected components, and centralities (betweenness, closeness, eigenvector, Katz), but no
+  PageRank.
+
+None meets the requirements, so `crates/elmdb/src/engine/algorithms.rs` holds the two the roadmap sized: union-find
+components and power-iteration personalized PageRank over its own CSR, about a hundred lines, checked against a dense
+reference over random graphs and networkx's karate-club scores. Leiden is evaluated on its own, with its stage.
 
 ## Delivery and validation
 
