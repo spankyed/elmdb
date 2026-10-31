@@ -88,20 +88,20 @@ fn maintenance_heap_bounds() {
     measure_growth("vector_rebuild", 768, [1_000, 2_000], vectors, |fixture| {
         fixture.db.rebuild(Some(("Doc", "meaning"))).unwrap()
     });
-    // A graph read keeps the set's ids, each once, a map from id to node and the graph: about 184 bytes an entity at five
+    // A graph read keeps the set's ids, each once, a map from id to node and the graph: about 131 bytes an entity at five
     // edges each, measured, of which the graph is 24 (a 4-byte offset and five 4-byte targets) and the ranks' three
     // score vectors at 8 bytes a node fit within what the ids freed. A rank that recorded a hit for every entity, not
-    // only those a limit after it keeps, would add some 430 bytes an entity, past the allowance. Strong components hold
-    // the same, measured: Tarjan's walk, some 33 bytes a node at its deepest, fits within what building the graph freed
-    // A topological order holds the same, measured, its strong components and ready heap within it too. A similar read
-    // straight after a type start holds only what lies two edges from `to`, so it doesn't grow with the type: none an
-    // entity, measured
+    // only those a limit after it keeps, would add some 430 bytes an entity, and a copy of every id to drop repeats some
+    // 50, each past the allowance. Strong components hold about 126, measured, their groups held flat: Tarjan's walk,
+    // some 33 bytes a node at its deepest, fits within what building the graph freed, and a topological order holds the
+    // same. A similar read straight after a type start holds only what lies two edges from `to`, so it doesn't grow with
+    // the type: none an entity, measured
     let graph = |rows| Fixture::graph(rows, 5);
     // A rank whose terminal answers no scores, over every document with no limit, records none
     for read in
         ["rank", "rankCounted", "weakComponents", "strongComponents", "topological", "similar", "similarAdamicAdar"]
     {
-        measure_growth(read, 256, [5_000, 10_000], graph, |fixture| {
+        measure_growth(read, 192, [5_000, 10_000], graph, |fixture| {
             black_box(fixture.db.read(&fixture.graph_read(read)).unwrap());
         });
     }

@@ -207,6 +207,36 @@ fn components_answer_each_connected_group_largest_first() {
 }
 
 #[test]
+fn group_counts_are_the_groups_sizes_and_a_repeated_id_is_one_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    chain(&db);
+    tasks(&db, &["Task-x"]);
+    for answer in ["weakComponents", "strongComponents"] {
+        let plan = |counts: bool| json!({ "start": { "from": "types", "types": ["Task"] }, "terminal": { "answer": answer, "kinds": ["refs"], "counts": counts } });
+        let groups = query(&db, plan(false));
+        let sizes: Vec<usize> =
+            groups[answer].as_array().unwrap().iter().map(|g| g.as_array().unwrap().len()).collect();
+        let counts: Vec<usize> =
+            query(&db, plan(true))[answer].as_array().unwrap().iter().map(|n| n.as_u64().unwrap() as usize).collect();
+        assert_eq!(counts, sizes, "{answer}");
+    }
+    // Named twice, an entity is one node, at its first place
+    let repeated = query(
+        &db,
+        json!({ "start": { "from": "ids", "ids": ["Task-x", "Task-a", "Task-x", "Task-b"] },
+            "terminal": { "answer": "weakComponents", "kinds": ["refs"] } }),
+    );
+    assert_eq!(repeated["weakComponents"], json!([["Task-a", "Task-b"], ["Task-x"]]));
+    let twice = query(
+        &db,
+        json!({ "start": { "from": "types", "types": ["Task", "Task"] },
+            "terminal": { "answer": "weakComponents", "kinds": ["refs"], "counts": true } }),
+    );
+    assert_eq!(twice["weakComponents"], json!([4, 1]), "a type named twice starts each entity once");
+}
+
+#[test]
 fn strong_components_answer_the_cycles_following_each_edge_its_way() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -817,19 +847,19 @@ proptest! {
             prop_assert_eq!(hit["score"].as_f64().unwrap(), expected.scores[n], "{}", hit);
         }
 
-        let mut groups = algorithms::weak_components(&by_hand(&edges, &kinds, "out"));
+        let mut groups = algorithms::weak_components(&by_hand(&edges, &kinds, "out")).to_vecs();
         let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
             "terminal": { "answer": "weakComponents", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = groups.drain(..).map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
         prop_assert_eq!(&answer["weakComponents"], &json!(named));
 
-        let strong = algorithms::strong_components(&by_hand(&edges, &kinds, "out"));
+        let strong = algorithms::strong_components(&by_hand(&edges, &kinds, "out")).to_vecs();
         let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
             "terminal": { "answer": "strongComponents", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = strong.into_iter().map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();
         prop_assert_eq!(&answer["strongComponents"], &json!(named));
 
-        let communities = algorithms::communities(&by_hand(&edges, &kinds, "out"), 1.0, 0, 100);
+        let communities = algorithms::communities(&by_hand(&edges, &kinds, "out"), 1.0, 0, 100).to_vecs();
         let answer = query(&db, json!({ "start": { "from": "types", "types": ["Task"] },
             "terminal": { "answer": "communities", "kinds": kind_names } }));
         let named: Vec<Vec<String>> = communities.into_iter().map(|g| g.into_iter().map(|n| name(n as usize)).collect()).collect();

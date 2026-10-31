@@ -7,7 +7,6 @@
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::hash::{BuildHasherDefault, DefaultHasher};
 
 use rmpv::Value;
 
@@ -15,7 +14,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
 use crate::format::value::TIMESTAMP_EXTENSION;
 
-use super::algorithms::{self, Projection};
+use super::algorithms::{self, Groups, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
 use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal};
@@ -366,10 +365,11 @@ struct Query<'r, R: Read> {
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
 
-/// A hasher with fixed keys, for the maps the graph algorithms build: one keyed per process would make a read's work
-/// differ from run to run, which the instruction counts compare (`scripts/diagnostics-overhead.py`). The keys are
-/// ids from the store, which the process reading them wrote or was given, so no one picks them to collide
-type Fixed = BuildHasherDefault<DefaultHasher>;
+/// FxHash, for the maps the graph algorithms build, which hash an id per edge: its keys are fixed, where one keyed per
+/// process would make a read's work differ from run to run, which the instruction counts compare
+/// (`scripts/diagnostics-overhead.py`); and it is several times cheaper than std's SipHash on ids this short. The keys
+/// are ids from the store, which the process reading them wrote or was given, so no one picks them to collide
+type Fixed = rustc_hash::FxBuildHasher;
 
 impl<R: Read> Query<'_, R> {
     /// One entity read from the store, by the start or by a step reading an index or walking a type
@@ -635,10 +635,10 @@ impl<R: Read> Query<'_, R> {
                 let (ids, graph) = self.project(before, upto, kinds, *direction)?;
                 let seeds: Vec<u32> = match seeds {
                     None => (0..ids.len() as u32).collect(),
+                    // The few seeds looked up as the set is walked, rather than a map of the whole set built for them
                     Some(seeds) => {
-                        let place: HashMap<&str, u32, Fixed> =
-                            ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
-                        seeds.iter().filter_map(|seed| place.get(seed.as_str()).copied()).collect()
+                        let wanted: HashSet<&str, Fixed> = seeds.iter().map(String::as_str).collect();
+                        (0..ids.len() as u32).filter(|&at| wanted.contains(ids[at as usize].as_str())).collect()
                     }
                 };
                 // No seed in the set answers nothing, settled in no rounds
@@ -1587,13 +1587,25 @@ impl<R: Read> Query<'_, R> {
             relations::definition(self.r, kind)?;
         }
         let mut ids = self.collect(before)?;
-        let mut seen: HashSet<String, Fixed> = HashSet::default();
-        ids.retain(|id| seen.insert(id.clone()));
+        // A start of distinct types, nothing after it, walks each entity once; any other set may repeat one, kept at its
+        // first place, its ids marked by reference rather than copied
+        let distinct = before == 0
+            && self.start_types().is_some_and(|types| types.iter().enumerate().all(|(at, t)| !types[..at].contains(t)));
+        if !distinct {
+            let first: Vec<bool> = {
+                let mut seen: HashSet<&str, Fixed> = HashSet::default();
+                ids.iter().map(|id| seen.insert(id.as_str())).collect()
+            };
+            let mut first = first.into_iter();
+            ids.retain(|_| first.next().unwrap_or(false));
+        }
         let place: HashMap<&str, u32, Fixed> =
             ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
         let mut graph = Projection::new();
+        // One buffer for every node's targets, which `node` copies into the graph
+        let mut targets = Vec::new();
         for id in &ids {
-            let mut targets = Vec::new();
+            targets.clear();
             for kind in kinds {
                 for &outward in direction.sides() {
                     relations::visit_far_ends(self.r, id, outward, Some(kind), |far| {
@@ -1602,7 +1614,7 @@ impl<R: Read> Query<'_, R> {
                     })?;
                 }
             }
-            graph.node(targets);
+            graph.node(targets.drain(..));
         }
         if let Some(stages) = self.stages {
             stages.projected(stage, graph.nodes(), graph.edges());
@@ -1926,17 +1938,20 @@ fn each(ids: Vec<String>, visit: &mut Visit<'_>) -> Result<bool> {
     Ok(true)
 }
 
-/// A graph answer's groups, under `kind`: each group's ids, its nodes named by `ids`, or with `counts` its size
-fn write_groups(kind: &str, ids: &[String], groups: &[Vec<u32>], counts: bool, w: &mut W<'_>) {
+/// A graph answer's groups, under `kind`: each group's ids, its nodes named by `ids`, or with `counts` its size, read
+/// without its members
+fn write_groups(kind: &str, ids: &[String], groups: &Groups, counts: bool, w: &mut W<'_>) {
     w.map(2);
     w.kind(kind);
     w.str(kind);
     w.array(groups.len() as u32);
-    for group in groups {
-        if counts {
-            w.uint(group.len() as u64);
-            continue;
+    if counts {
+        for size in groups.sizes() {
+            w.uint(u64::from(size));
         }
+        return;
+    }
+    for group in groups.iter() {
         w.array(group.len() as u32);
         for &at in group {
             w.str(&ids[at as usize]);

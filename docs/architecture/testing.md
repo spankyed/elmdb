@@ -124,6 +124,10 @@ cargo mutants -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --t
 cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
 ```
 
+Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one
+shared by every copy lets a job run another's test binary, which reports a caught mutant as missed.
+`scripts/mutants-in-diff.py` drops it from what it runs.
+
 Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
 the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c 'cargo install --locked
 cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there

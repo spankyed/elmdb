@@ -136,3 +136,30 @@ Tarjan's algorithm in elmdb, walking with its own stack.
   Adamic–Adar takes a logarithm, which std leaves to the platform's maths library. It takes libm's (a port of musl's,
   pinned `=0.2.16`), and an exact-bits golden of the karate club's scores from node 0 (`ranks.rs`,
   `KARATE_ADAMIC_ADAR_BITS`) is held identical by the CI matrix.
+
+## Building the graph
+
+Every graph read builds its graph the same way, and that is nearly all of its cost: `rank` and `weakComponents` take
+the same time at every size. Building it no longer copies every id to drop repeats (only a start that could repeat one
+is checked, by reference), fills each node's targets through one buffer, and hashes the far end of every edge with
+FxHash (`rustc-hash`, already in the tree through leiden-rs) rather than std's SipHash. Group answers are held flat, one
+members array and its offsets built from a label per node, and `counts` reads the offsets alone.
+
+- **Time** (Criterion, the same graph, five edges a document, `ELMDB_BENCH_ROWS=1000,10000 cargo bench -p elmdb --bench
+  maintenance -- 'graph/'`, the change against its base saved as a baseline, 2026-10-31, Apple M1 Pro, other sessions'
+  builds running, a load average about 20):
+
+  | Read | 1,000 before | after | 10,000 before | after |
+  |---|---:|---:|---:|---:|
+  | `weakComponents` | 1.29 ms | 1.04 ms | 14.1 ms | 11.3 ms |
+  | `strongComponents` | 1.40 ms | 1.05 ms | 14.4 ms | 11.6 ms |
+  | `rank` | 1.30 ms | 1.03 ms | 14.1 ms | 11.2 ms |
+  | `rank` from one document, both ways | 2.56 ms | 2.13 ms | 30.0 ms | 24.4 ms |
+  | `communities` | 3.90 ms | 3.44 ms | 55.0 ms | 51.2 ms |
+  | `topological` | 1.32 ms | 1.05 ms | 19.1 ms | 11.7 ms |
+
+  About a fifth off every read that builds the graph; `communities` less, leiden-rs's own work being most of its time.
+  The answers are the same bits: the karate club's PageRank goldens, its Leiden partition and its Adamic–Adar golden
+  pass unchanged.
+- **Heap:** 131 bytes an entity for `rank` and `weakComponents`, from 184, and 126 for `strongComponents` and
+  `topological`. The heap test holds them to 192.

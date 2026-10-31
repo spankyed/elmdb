@@ -678,6 +678,7 @@ dependencies = [
  "rmpv",
  "roaring",
  "rust-stemmers",
+ "rustc-hash 2.1.3",
  "ryu-js",
  "schemars",
  "serde",
