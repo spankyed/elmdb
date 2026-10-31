@@ -303,6 +303,7 @@ pub fn link(
         if stored != before {
             if stored.weight != before.weight {
                 file_edges(t, relation, &stored)?;
+                super::ranks::edge_changed(t, kind, source, target, Some(before.weight), Some(stored.weight))?;
             }
             put(t, relation, &stored)?;
             t.event(Event::RelationChanged {
@@ -339,6 +340,7 @@ pub fn link(
     };
     put(t, &relation, &stored)?;
     file(t, &relation, &stored)?;
+    super::ranks::edge_changed(t, kind, source, target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.clone(),
         kind: kind.to_owned(),
@@ -354,6 +356,7 @@ pub fn link(
 pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<()> {
     put(t, relation, stored)?;
     file(t, relation, stored)?;
+    super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.to_owned(),
         kind: stored.kind.clone(),
@@ -367,6 +370,7 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
 pub fn remove(t: &mut Txn<'_, '_>, relation: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };
     unfile(t, &stored)?;
+    super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, Some(stored.weight), None)?;
     t.del(&keys::relation(relation))?;
     t.event(Event::Unlinked {
         relation: relation.to_owned(),
@@ -443,11 +447,14 @@ pub fn update(
         }
         check_rules(t, &def, &next.kind, &next.source, &next.target, Some(relation))?;
         unfile(t, &before)?;
+        super::ranks::edge_changed(t, &before.kind, &before.source, &before.target, Some(before.weight), None)?;
         next.seq = entities::next_seq(t)?;
         file(t, relation, &next)?;
+        super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, None, Some(next.weight))?;
         t.defer(Check::Ends { relation: relation.to_owned(), via: "updateRelation" });
     } else if next.weight != before.weight {
         file_edges(t, relation, &next)?;
+        super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
     }
     put(t, relation, &next)?;
     t.event(Event::RelationChanged {

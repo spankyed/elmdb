@@ -91,6 +91,7 @@ pub fn insert(t: &mut Txn<'_, '_>, id: &str) -> Result<Record> {
     let entity_type = ids::type_of(id).to_owned();
     t.put(&keys::of_type(false, &entity_type, seq), &values::encode(&id.into()))?;
     add_count(t, &entity_type, 1)?;
+    super::ranks::liveness(t, id, true)?;
     t.event(Event::Created { id: id.to_owned() });
     Ok(record)
 }
@@ -106,6 +107,7 @@ fn set_trashed(t: &mut Txn<'_, '_>, id: &str, trashed: bool) -> Result<()> {
     t.put(&keys::of_type(trashed, &entity_type, record.seq), &values::encode(&id.into()))?;
     put_record(t, id, Record { seq: record.seq, trashed })?;
     add_count(t, &entity_type, if trashed { -1 } else { 1 })?;
+    super::ranks::liveness(t, id, !trashed)?;
     t.event(if trashed { Event::Trashed { id: id.to_owned() } } else { Event::Restored { id: id.to_owned() } });
     Ok(())
 }
@@ -206,6 +208,7 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
             add_count(t, &entity_type, -1)?;
         }
         t.del(&keys::entity(id))?;
+        super::ranks::liveness(t, id, false)?;
         t.event(Event::Destroyed { id: id.to_owned() });
     }
     Ok(())

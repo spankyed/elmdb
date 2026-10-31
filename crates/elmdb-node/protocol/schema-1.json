@@ -33,6 +33,14 @@
         "$ref": "#/$defs/TypeDef"
       },
       "default": {}
+    },
+    "ranks": {
+      "description": "Rank indexes: PageRank over a graph of types and relation kinds, kept current by every commit",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/RankDef"
+      },
+      "default": {}
     }
   },
   "required": [
@@ -701,6 +709,68 @@
         "f32",
         "f16",
         "i8"
+      ]
+    },
+    "RankDef": {
+      "description": "A rank index (`docs/roadmap/rank-index.md`): the PageRank of a graph whose nodes are the live entities of `types`\nand whose edges are those of `relations` between two of them, every node a seed, kept within `tolerance` of the\nscores `rank` would answer for the same graph",
+      "type": "object",
+      "properties": {
+        "declaredBy": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "types": {
+          "description": "The types whose live entities are the graph's nodes, in the order ties keep",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "relations": {
+          "description": "The relation kinds whose edges between two nodes are the graph's edges",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "direction": {
+          "description": "Which way each edge is followed",
+          "$ref": "#/$defs/Direction",
+          "default": "out"
+        },
+        "weights": {
+          "description": "Whether an edge of a kind declared weighted counts by its weight",
+          "type": "boolean",
+          "default": true
+        },
+        "damping": {
+          "description": "The probability a walker follows an edge rather than jumping to a node at random, in (0, 1)",
+          "type": "number",
+          "format": "double",
+          "default": 0.85
+        },
+        "tolerance": {
+          "description": "The bound on the scores' L1 distance from `rank`'s that the index keeps once its pushes are done, above 0",
+          "type": "number",
+          "format": "double",
+          "default": 1e-6
+        }
+      },
+      "required": [
+        "types",
+        "relations"
+      ]
+    },
+    "Direction": {
+      "description": "Which of an entity's edges a walk follows: those out of it, those into it, or both",
+      "type": "string",
+      "enum": [
+        "out",
+        "in",
+        "both"
       ]
     }
   }

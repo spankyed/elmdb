@@ -196,8 +196,9 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
     )
     .unwrap();
     change_in_child(dir.path());
-    let mut builder = crate::engine::Builder::start(db.store().unwrap(), db.engine_schema());
-    builder.queue([("Task".into(), "lookup".into())]);
+    let mut builder =
+        crate::database::start_builder(&db.store().unwrap(), &db.engine_schema(), &db.tracks, &db.observing_schema());
+    builder.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
     builder.waiter().wait();
     let failures = builder.failures();
     builder.stop();
@@ -285,9 +286,9 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
         .unwrap();
     // Deterministically represent a stopped worker with pending work, avoiding a scheduler-dependent race with a
     // fast single-row build. set_schema must retain this queue even when its recovery inventory cannot be read.
-    let mut builder = crate::engine::Builder::start(store.clone(), db.engine_schema());
+    let mut builder = crate::database::start_builder(&store, &db.engine_schema(), &db.tracks, &db.observing_schema());
     builder.stop();
-    builder.queue([("Task".into(), "lookup".into())]);
+    builder.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
     *db.builder() = Some(builder);
     crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, || {
         crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH)
