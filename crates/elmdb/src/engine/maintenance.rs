@@ -39,6 +39,10 @@ pub enum Load {
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
+        /// The edge's weight when it isn't 1, loaded as given
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        weight: Option<f64>,
     },
     /// A numbering sequence's next number: `shortCode:<Type>`, `label:<Type>:<base>`, or the store's `seq`
     Sequence { name: String, next: u64 },
@@ -101,7 +105,7 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                     entities::put_field(t, id, entities::field::TRASHED_AT, &Value::from(0))?;
                 }
             }
-            Load::Relation { id, kind, source, target, info } => {
+            Load::Relation { id, kind, source, target, info, weight } => {
                 if relations::get(t, id)?.is_some() {
                     relations::remove(t, id)?;
                 }
@@ -111,6 +115,7 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                     source: source.clone(),
                     target: target.clone(),
                     info: info.clone(),
+                    weight: *weight,
                     seq,
                 };
                 relations::restore(t, id, &stored)?;
@@ -194,6 +199,7 @@ pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Resu
             source: stored.source,
             target: stored.target,
             info: stored.info,
+            weight: stored.weight,
         })?;
     }
     drop(relations);
@@ -443,6 +449,7 @@ mod export_tests {
                 source: "Task-089".into(),
                 target: "Task-000".into(),
                 info: None,
+                weight: None,
             },
             Load::Relation {
                 id: "a".into(),
@@ -450,6 +457,7 @@ mod export_tests {
                 source: "Task-000".into(),
                 target: "Task-089".into(),
                 info: Some(Value::Binary(vec![7; 4096])),
+                weight: None,
             },
         ])
         .unwrap();

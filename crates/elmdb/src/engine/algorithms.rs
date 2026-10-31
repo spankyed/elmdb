@@ -6,23 +6,45 @@
 //! added them, and nothing runs in parallel, so one projection answers the same, bit for bit, on every platform.
 
 /// A directed graph of `nodes` nodes as compressed sparse rows: node `v`'s edges lead to
-/// `targets[offsets[v]..offsets[v + 1]]`
+/// `targets[offsets[v]..offsets[v + 1]]`, and in a weighted graph weigh `weights` over the same range
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Projection {
     offsets: Vec<u32>,
     targets: Vec<u32>,
+    weights: Option<Vec<f64>>,
 }
 
 impl Projection {
     /// An empty graph, to which nodes are added in order with `node`
     pub fn new() -> Self {
-        Self { offsets: vec![0], targets: Vec::new() }
+        Self { offsets: vec![0], targets: Vec::new(), weights: None }
+    }
+
+    /// An empty weighted graph, to which nodes are added in order with `weighted_node`
+    pub fn weighted() -> Self {
+        Self { offsets: vec![0], targets: Vec::new(), weights: Some(Vec::new()) }
     }
 
     /// Adds the next node, with edges to the nodes `targets` names (each below the number of nodes the graph will hold)
     pub fn node(&mut self, targets: impl IntoIterator<Item = u32>) {
+        debug_assert!(self.weights.is_none(), "a weighted graph's nodes come with their weights");
         self.targets.extend(targets);
         self.offsets.push(u32::try_from(self.targets.len()).expect("fewer than 2^32 edges"));
+    }
+
+    /// Adds the next node of a weighted graph, with an edge to each node named and the edge's weight
+    pub fn weighted_node(&mut self, edges: impl IntoIterator<Item = (u32, f64)>) {
+        let weights = self.weights.as_mut().expect("a weighted graph");
+        for (target, weight) in edges {
+            self.targets.push(target);
+            weights.push(weight);
+        }
+        self.offsets.push(u32::try_from(self.targets.len()).expect("fewer than 2^32 edges"));
+    }
+
+    /// Every edge's weight added up, for a weighted graph
+    pub fn total_weight(&self) -> Option<f64> {
+        self.weights.as_ref().map(|weights| weights.iter().sum())
     }
 
     pub fn nodes(&self) -> usize {
@@ -35,6 +57,11 @@ impl Projection {
 
     fn out(&self, v: usize) -> &[u32] {
         &self.targets[self.offsets[v] as usize..self.offsets[v + 1] as usize]
+    }
+
+    /// Node `v`'s edges' weights, in the order of `out(v)`, for a weighted graph
+    fn out_weights(&self, v: usize) -> Option<&[f64]> {
+        self.weights.as_ref().map(|weights| &weights[self.offsets[v] as usize..self.offsets[v + 1] as usize])
     }
 }
 
@@ -276,26 +303,30 @@ pub struct Ranked {
 }
 
 /// Personalized PageRank by power iteration: a walker follows one of a node's edges with probability `damping`, and
-/// otherwise jumps back to a seed, chosen evenly; a node with no edges sends the walker back to the seeds. Every node
-/// as a seed is PageRank. Stops when the scores change by less than `tolerance` (the L1 distance between two rounds),
-/// or after `iterations` rounds. `None` when no seed is a node of the graph
-pub fn rank(graph: &Projection, seeds: &[u32], damping: f64, iterations: u32, tolerance: f64) -> Option<Ranked> {
+/// otherwise jumps back to a seed, each in proportion to its weight; a node with no edges sends the walker back to the
+/// seeds. Every node as a seed of one weight is PageRank. In a weighted graph the walker follows an edge in proportion to
+/// its weight among its node's, and a node whose edges weigh nothing sends it back to the seeds too. Stops when the
+/// scores change by less than `tolerance` (the L1 distance between two rounds), or after `iterations` rounds. `None`
+/// when no seed is a node of the graph
+pub fn rank(graph: &Projection, seeds: &[(u32, f64)], damping: f64, iterations: u32, tolerance: f64) -> Option<Ranked> {
     let n = graph.nodes();
     let mut teleport = vec![0.0; n];
-    let mut seeded = 0usize;
-    for &s in seeds {
-        if let Some(slot) = teleport.get_mut(s as usize).filter(|slot| **slot == 0.0) {
-            *slot = 1.0;
-            seeded += 1;
+    let mut seeded = 0.0;
+    for &(s, weight) in seeds {
+        if let Some(slot) = teleport.get_mut(s as usize) {
+            *slot += weight;
+            seeded += weight;
         }
     }
-    if seeded == 0 {
+    if seeded == 0.0 {
         return None;
     }
-    let share = 1.0 / seeded as f64;
     for slot in &mut teleport {
-        *slot *= share;
+        *slot /= seeded;
     }
+    // Each node's edges' weights added up, once: what a walker's share of each edge is out of
+    let out_weight: Option<Vec<f64>> =
+        graph.weights.as_ref().map(|_| (0..n).map(|v| graph.out_weights(v).unwrap_or_default().iter().sum()).collect());
     let mut scores = teleport.clone();
     let mut next = vec![0.0; n];
     for round in 1..=iterations {
@@ -303,12 +334,22 @@ pub fn rank(graph: &Projection, seeds: &[u32], damping: f64, iterations: u32, to
         let mut dangling = 0.0;
         for (v, &score) in scores.iter().enumerate() {
             let out = graph.out(v);
-            if out.is_empty() {
-                dangling += score;
-            } else {
-                let each = score / out.len() as f64;
-                for &w in out {
-                    next[w as usize] += each;
+            match (&out_weight, graph.out_weights(v)) {
+                (Some(totals), Some(weights)) => {
+                    if totals[v] == 0.0 {
+                        dangling += score;
+                    } else {
+                        for (&w, &weight) in out.iter().zip(weights) {
+                            next[w as usize] += score * weight / totals[v];
+                        }
+                    }
+                }
+                _ if out.is_empty() => dangling += score,
+                _ => {
+                    let each = score / out.len() as f64;
+                    for &w in out {
+                        next[w as usize] += each;
+                    }
                 }
             }
         }
@@ -327,11 +368,10 @@ pub fn rank(graph: &Projection, seeds: &[u32], damping: f64, iterations: u32, to
 }
 
 /// Leiden communities (Traag, Waltman and van Eck, 2019) by modularity at `resolution`, through leiden-rs: each edge
-/// joins its ends whichever way it points, and counts once. Each community is connected, which Leiden guarantees and
-/// Louvain doesn't. Leiden's random
-/// order comes from `seed`, so a seed and a graph answer the same partition on every platform; it runs on one thread,
-/// leiden-rs's parallel moves being compiled out, and stops after `iterations` rounds or when a round no longer
-/// improves the partition
+/// joins its ends whichever way it points, and counts once, by its weight in a weighted graph. Each community is
+/// connected, which Leiden guarantees and Louvain doesn't. Leiden's random order comes from `seed`, so a seed and a graph
+/// answer the same partition on every platform; it runs on one thread, leiden-rs's parallel moves being compiled out,
+/// and stops after `iterations` rounds or when a round no longer improves the partition
 pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u32) -> Groups {
     let n = graph.nodes();
     if n == 0 {
@@ -339,8 +379,10 @@ pub fn communities(graph: &Projection, resolution: f64, seed: u64, iterations: u
     }
     let mut data = leiden_rs::GraphDataBuilder::new(n);
     for v in 0..n {
-        for &w in graph.out(v) {
-            data.add_edge(v, w as usize, 1.0).expect("a node of the graph, and a finite weight");
+        let weights = graph.out_weights(v);
+        for (at, &w) in graph.out(v).iter().enumerate() {
+            let weight = weights.map_or(1.0, |weights| weights[at]);
+            data.add_edge(v, w as usize, weight).expect("a node of the graph, and a finite weight of at least 0");
         }
     }
     let data = data.build().expect("a graph of its own nodes");

@@ -16,6 +16,11 @@ acyclic?: boolean,
  */
 unique?: boolean, 
 /**
+ * Each edge carries a weight, a finite number of at least 0 and 1 when a link gives none, which `rank` and
+ * `communities` read
+ */
+weighted?: boolean, 
+/**
  * The type pairs an edge may join; `None` is any
  */
 endpoints?: Array<Endpoint> | null, 

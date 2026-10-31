@@ -160,9 +160,8 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
         };
         let s: relations::Stored = rmp_serde::from_slice(&bytes)
             .map_err(|e| Error::new(ErrorCode::Corrupted, format!("Relation {relation}'s row doesn't read: {e}")))?;
-        let edge = |far: &str| values::encode(&Value::Array(vec![relation.as_str().into(), far.into()]));
-        emit(keys::edge(true, &s.source, &s.kind, s.seq), edge(&s.target))?;
-        emit(keys::edge(false, &s.target, &s.kind, s.seq), edge(&s.source))?;
+        emit(keys::edge(true, &s.source, &s.kind, s.seq), relations::edge_value(&relation, &s.target, s.weight))?;
+        emit(keys::edge(false, &s.target, &s.kind, s.seq), relations::edge_value(&relation, &s.source, s.weight))?;
         emit(keys::between(&s.source, &s.kind, &s.target, s.seq), values::encode(&relation.as_str().into()))?;
     }
     Ok(())

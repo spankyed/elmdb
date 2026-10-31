@@ -153,7 +153,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             w.kind("relation");
             w.str("relation");
             match relations::get(r, id)? {
-                Some(stored) => write_relation(id, &stored, &mut w),
+                Some(stored) => write_relation(r, id, &stored, &mut w),
                 None => w.nil(),
             }
             Ok(())
@@ -169,7 +169,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             w.str("relations");
             w.array(found.len() as u32);
             for (id, stored) in &found {
-                write_relation(id, stored, &mut w);
+                write_relation(r, id, stored, &mut w);
             }
             Ok(())
         }
@@ -235,8 +235,10 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
     }
 }
 
-fn write_relation(id: &str, s: &relations::Stored, w: &mut W<'_>) {
-    w.map(5);
+/// A relation's row as a read answers it, with its `weight` when its kind is declared weighted: the row's, or 1
+fn write_relation(r: &impl Read, id: &str, s: &relations::Stored, w: &mut W<'_>) {
+    let weighted = relations::definition(r, &s.kind).is_ok_and(|def| def.weighted);
+    w.map(if weighted { 6 } else { 5 });
     w.str("id");
     w.str(id);
     w.str("kind");
@@ -249,6 +251,10 @@ fn write_relation(id: &str, s: &relations::Stored, w: &mut W<'_>) {
     match &s.info {
         Some(info) => w.raw(&values::encode(info)),
         None => w.nil(),
+    }
+    if weighted {
+        w.str("weight");
+        rmp::encode::write_f64(w.0, s.weight.unwrap_or(1.0)).expect("a Vec");
     }
 }
 
@@ -627,7 +633,7 @@ impl<R: Read> Query<'_, R> {
                 self.reach(before, kinds, types.as_deref(), false, *depth, visit)
             }
             Step::PathTo { to, kinds, direction, depth } => self.path_to(before, to, kinds, *direction, *depth, visit),
-            Step::Rank { kinds, direction, seeds, damping, iterations, tolerance } => {
+            Step::Rank { kinds, direction, seeds, weights, damping, iterations, tolerance } => {
                 // NaN is in none of these ranges
                 let valid = (0.0..1.0).contains(damping) && *damping > 0.0 && *tolerance > 0.0;
                 if !valid || *iterations == 0 {
@@ -639,13 +645,31 @@ impl<R: Read> Query<'_, R> {
                         ),
                     ));
                 }
-                let (ids, graph) = self.project(before, upto, kinds, *direction)?;
-                let seeds: Vec<u32> = match seeds {
-                    None => (0..ids.len() as u32).collect(),
-                    // The few seeds looked up as the set is walked, rather than a map of the whole set built for them
+                if let Some(bad) =
+                    seeds.iter().flatten().find(|seed| !(seed.weight().is_finite() && seed.weight() > 0.0))
+                {
+                    return Err(Error::new(
+                        ErrorCode::BatchInvalid,
+                        format!(
+                            "rank takes a seed's weight above 0, and was given {} for {:?}",
+                            bad.weight(),
+                            bad.id()
+                        ),
+                    ));
+                }
+                let (ids, graph) = self.project(before, upto, kinds, *direction, *weights)?;
+                let seeds: Vec<(u32, f64)> = match seeds {
+                    None => (0..ids.len() as u32).map(|at| (at, 1.0)).collect(),
+                    // The few seeds looked up as the set is walked, rather than a map of the whole set built for them;
+                    // a seed named twice adds its weights
                     Some(seeds) => {
-                        let wanted: HashSet<&str, Fixed> = seeds.iter().map(String::as_str).collect();
-                        (0..ids.len() as u32).filter(|&at| wanted.contains(ids[at as usize].as_str())).collect()
+                        let mut wanted: HashMap<&str, f64, Fixed> = HashMap::default();
+                        for seed in seeds {
+                            *wanted.entry(seed.id()).or_insert(0.0) += seed.weight();
+                        }
+                        (0..ids.len() as u32)
+                            .filter_map(|at| wanted.get(ids[at as usize].as_str()).map(|&weight| (at, weight)))
+                            .collect()
                     }
                 };
                 // No seed in the set answers nothing, settled in no rounds
@@ -688,7 +712,7 @@ impl<R: Read> Query<'_, R> {
                         "topological follows each edge one way, out or in: an edge followed both ways orders nothing",
                     ));
                 }
-                let (ids, graph) = self.project(before, upto, kinds, *direction)?;
+                let (ids, graph) = self.project(before, upto, kinds, *direction, false)?;
                 let ordered = algorithms::topological_order(&graph);
                 if let Some(stages) = self.stages {
                     stages.cycled(upto, ordered.cycles);
@@ -1564,7 +1588,7 @@ impl<R: Read> Query<'_, R> {
         let mut seen: HashSet<String, Fixed> = HashSet::default();
         for kind in kinds {
             for &outward in sides {
-                relations::visit_far_ends(self.r, id, outward, Some(kind), |far| {
+                relations::visit_far_ends(self.r, id, outward, Some(kind), |far, _| {
                     *walked += 1;
                     if far != id && !seen.contains(far) {
                         seen.insert(far.to_owned());
@@ -1589,9 +1613,14 @@ impl<R: Read> Query<'_, R> {
         stage: usize,
         kinds: &[String],
         direction: Direction,
+        weights: bool,
     ) -> Result<(Vec<String>, Projection)> {
+        // Which of the kinds weigh their edges, when the read takes weights: the graph is weighted if any does, and an
+        // edge of one that doesn't weighs 1
+        let mut weighted = Vec::with_capacity(kinds.len());
         for kind in kinds {
-            relations::definition(self.r, kind)?;
+            let weighs = relations::definition(self.r, kind)?.weighted;
+            weighted.push(weights && weighs);
         }
         let mut ids = self.collect(before)?;
         // A start of distinct types, nothing after it, walks each entity once; any other set may repeat one, kept at its
@@ -1606,23 +1635,30 @@ impl<R: Read> Query<'_, R> {
         }
         let place: HashMap<&str, u32, Fixed> =
             ids.iter().enumerate().map(|(at, id)| (id.as_str(), at as u32)).collect();
-        let mut graph = Projection::new();
-        // One buffer for every node's targets, which `node` copies into the graph
-        let mut targets = Vec::new();
+        let any_weighted = weighted.iter().any(|w| *w);
+        let mut graph = if any_weighted { Projection::weighted() } else { Projection::new() };
+        // One buffer for every node's targets and their weights, which `node` copies into the graph
+        let mut targets: Vec<(u32, f64)> = Vec::new();
         for id in &ids {
             targets.clear();
-            for kind in kinds {
+            for (kind, &weighs) in kinds.iter().zip(&weighted) {
                 for &outward in direction.sides() {
-                    relations::visit_far_ends(self.r, id, outward, Some(kind), |far| {
-                        targets.extend(place.get(far));
+                    relations::visit_far_ends(self.r, id, outward, Some(kind), |far, weight| {
+                        if let Some(&at) = place.get(far) {
+                            targets.push((at, if weighs { weight.unwrap_or(1.0) } else { 1.0 }));
+                        }
                         Ok(true)
                     })?;
                 }
             }
-            graph.node(targets.drain(..));
+            if any_weighted {
+                graph.weighted_node(targets.drain(..));
+            } else {
+                graph.node(targets.drain(..).map(|(at, _)| at));
+            }
         }
         if let Some(stages) = self.stages {
-            stages.projected(stage, graph.nodes(), graph.edges());
+            stages.projected(stage, graph.nodes(), graph.edges(), graph.total_weight());
         }
         Ok((ids, graph))
     }
@@ -1705,6 +1741,8 @@ struct Stages {
 struct Graphed {
     nodes: usize,
     edges: usize,
+    /// The weight of every edge added up, for a graph built with weights
+    weight: Option<f64>,
     rounds: Option<(u32, bool)>,
     cycles: Option<u32>,
 }
@@ -1771,8 +1809,8 @@ impl Stages {
         });
     }
 
-    fn projected(&self, stage: usize, nodes: usize, edges: usize) {
-        self.graph.borrow_mut()[stage] = Some(Graphed { nodes, edges, rounds: None, cycles: None });
+    fn projected(&self, stage: usize, nodes: usize, edges: usize, weight: Option<f64>) {
+        self.graph.borrow_mut()[stage] = Some(Graphed { nodes, edges, weight, rounds: None, cycles: None });
     }
 
     fn ranked(&self, stage: usize, iterations: u32, converged: bool) {
@@ -1816,8 +1854,8 @@ impl Stages {
             let graphed = graph[at];
             let extra = match graphed {
                 None => 0,
-                Some(Graphed { rounds, cycles, .. }) => {
-                    2 + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
+                Some(Graphed { weight, rounds, cycles, .. }) => {
+                    2 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
             let extra = extra + if compared[at].is_some() { 3 } else { 0 };
@@ -1828,11 +1866,15 @@ impl Stages {
                 w.str("index");
                 w.str(index);
             }
-            if let Some(Graphed { nodes, edges, rounds, cycles }) = graphed {
+            if let Some(Graphed { nodes, edges, weight, rounds, cycles }) = graphed {
                 w.str("nodes");
                 w.uint(nodes as u64);
                 w.str("edges");
                 w.uint(edges as u64);
+                if let Some(weight) = weight {
+                    w.str("weight");
+                    rmp::encode::write_f64(w.0, weight).expect("a Vec");
+                }
                 if let Some((iterations, converged)) = rounds {
                     w.str("iterations");
                     w.uint(u64::from(iterations));
@@ -2271,7 +2313,7 @@ fn query_with(
             w.str("relations");
             w.array(rows.len() as u32);
             for (id, stored) in &rows {
-                write_relation(id, stored, &mut w);
+                write_relation(r, id, stored, &mut w);
             }
         }
         Terminal::Degrees { kinds, direction, types } => {
@@ -2300,14 +2342,14 @@ fn query_with(
             }
         }
         Terminal::WeakComponents { kinds, counts } => {
-            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, false)?;
             write_groups("weakComponents", &ids, &algorithms::weak_components(&graph), *counts, &mut w);
         }
         Terminal::StrongComponents { kinds, counts } => {
-            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, false)?;
             write_groups("strongComponents", &ids, &algorithms::strong_components(&graph), *counts, &mut w);
         }
-        Terminal::Communities { kinds, resolution, seed, iterations } => {
+        Terminal::Communities { kinds, resolution, seed, iterations, weights } => {
             // NaN is not finite
             if !(resolution.is_finite() && *resolution >= 0.0) || *iterations == 0 {
                 return Err(Error::new(
@@ -2318,7 +2360,7 @@ fn query_with(
                     ),
                 ));
             }
-            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, *weights)?;
             let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
             write_groups("communities", &ids, &groups, false, &mut w);
         }

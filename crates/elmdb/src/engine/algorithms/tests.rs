@@ -1,6 +1,7 @@
 //! The algorithms against plain references over random graphs, the invariants any correct implementation keeps, and
-//! one known answer: Zachary's karate club, against networkx 3.4.2's `pagerank` (alpha 0.85, unweighted, run to a
-//! tolerance of 1e-15), the club's 78 friendships followed both ways as networkx follows an undirected graph's.
+//! known answers: Zachary's karate club against networkx 3.4.2's `pagerank` (alpha 0.85, run to a tolerance of 1e-15),
+//! unweighted and weighted by networkx's edge weights, the club's 78 friendships followed both ways as networkx follows
+//! an undirected graph's.
 
 use proptest::prelude::*;
 
@@ -162,6 +163,91 @@ const KARATE_FROM_0: [f64; 34] = [
     0.051199989203185206,
 ];
 
+/// The weight of each of `KARATE_EDGES`, in its order: networkx 3.4.2's `karate_club_graph()` edge weights, the count of
+/// contexts in which the two members met (Zachary, 1977)
+pub(crate) const KARATE_WEIGHTS: [f64; 78] = [
+    4.0, 5.0, 3.0, 3.0, 3.0, 3.0, 2.0, 2.0, 2.0, 3.0, 1.0, 3.0, 2.0, 2.0, 2.0, 2.0, 6.0, 3.0, 4.0, 5.0, 1.0, 2.0, 2.0,
+    2.0, 3.0, 4.0, 5.0, 1.0, 3.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 2.0, 3.0, 5.0, 3.0, 3.0, 3.0, 3.0, 3.0, 4.0, 2.0, 3.0,
+    3.0, 2.0, 3.0, 4.0, 1.0, 2.0, 1.0, 3.0, 1.0, 2.0, 3.0, 5.0, 4.0, 3.0, 5.0, 4.0, 2.0, 3.0, 2.0, 7.0, 4.0, 2.0, 4.0,
+    2.0, 2.0, 4.0, 2.0, 3.0, 3.0, 4.0, 4.0, 5.0,
+];
+
+/// networkx 3.4.2's `pagerank` of the weighted club, `weight="weight"`, alpha 0.85, to a tolerance of 1e-15
+const KARATE_WEIGHTED: [f64; 34] = [
+    0.08850031542803063,
+    0.05741231936288988,
+    0.06276562384809184,
+    0.03721003481796645,
+    0.020500801080601497,
+    0.033803873051637845,
+    0.031523018964512234,
+    0.026463202686028763,
+    0.03338248346554575,
+    0.009463494950838803,
+    0.020685684694912557,
+    0.009784998142584388,
+    0.011474264117328404,
+    0.03347292496547842,
+    0.012942403848309383,
+    0.016377443782027087,
+    0.01675226013827256,
+    0.009676695208228218,
+    0.009545337709169831,
+    0.013076990052964912,
+    0.01122488388145053,
+    0.01135947008610606,
+    0.01296139074559846,
+    0.04114975820303691,
+    0.016635732755783558,
+    0.028676448853551348,
+    0.015241717408478576,
+    0.027237726789702883,
+    0.014479228223759934,
+    0.02827466646924245,
+    0.023032846090755725,
+    0.04198817776196013,
+    0.0759344195807689,
+    0.096989362834385,
+];
+
+/// The same, its walkers starting from member 0 twice as often as from member 33: `personalization={0: 2, 33: 1}`
+const KARATE_WEIGHTED_FROM_0_33: [f64; 34] = [
+    0.1855275035443386,
+    0.06153043270470945,
+    0.0652419707298416,
+    0.03840670334980886,
+    0.021876578177892934,
+    0.03314567768975504,
+    0.031136565818616062,
+    0.02688620902770751,
+    0.03223734751964631,
+    0.005858291688175462,
+    0.020519854302583646,
+    0.011264169858048973,
+    0.009195672927239136,
+    0.03703066053683407,
+    0.007879672411400014,
+    0.012057489095928055,
+    0.0121448055776915,
+    0.00931292477199824,
+    0.005411768593485365,
+    0.013205311314227851,
+    0.005790764069135994,
+    0.011116402971963832,
+    0.00873462884470671,
+    0.028248191655559772,
+    0.008569930543832502,
+    0.017169006833143482,
+    0.008756207762120358,
+    0.019412003390123788,
+    0.010216150136534857,
+    0.017505612943734407,
+    0.01841113928154221,
+    0.0330735601993821,
+    0.055164908871031176,
+    0.11796188285725986,
+];
+
 fn graph(n: usize, edges: &[(u32, u32)]) -> Projection {
     let mut graph = Projection::new();
     for v in 0..n as u32 {
@@ -170,21 +256,48 @@ fn graph(n: usize, edges: &[(u32, u32)]) -> Projection {
     graph
 }
 
+/// A weighted graph of `n` nodes, each edge with its weight
+fn weighted_graph(n: usize, edges: &[(u32, u32, f64)]) -> Projection {
+    let mut graph = Projection::weighted();
+    for v in 0..n as u32 {
+        graph.weighted_node(edges.iter().filter(|(a, ..)| *a == v).map(|&(_, b, w)| (b, w)));
+    }
+    graph
+}
+
+/// The club's friendships weighted, each followed both ways
+fn karate_weighted() -> Projection {
+    let both: Vec<(u32, u32, f64)> =
+        KARATE_EDGES.iter().zip(KARATE_WEIGHTS).flat_map(|(&(a, b), w)| [(a, b, w), (b, a, w)]).collect();
+    weighted_graph(34, &both)
+}
+
+/// Edges of equal weight
+fn unweighted(edges: &[(u32, u32)]) -> Vec<(u32, u32, f64)> {
+    edges.iter().map(|&(a, b)| (a, b, 1.0)).collect()
+}
+
+/// Seeds of equal weight
+fn unit(seeds: &[u32]) -> Vec<(u32, f64)> {
+    seeds.iter().map(|&at| (at, 1.0)).collect()
+}
+
 fn karate() -> Projection {
     let both: Vec<(u32, u32)> = KARATE_EDGES.iter().flat_map(|&(a, b)| [(a, b), (b, a)]).collect();
     graph(34, &both)
 }
 
-/// PageRank as its definition reads, over an adjacency matrix: what the walker holds after each round, until it stops
-/// moving
-fn dense(n: usize, edges: &[(u32, u32)], seeds: &[u32], damping: f64) -> Vec<f64> {
-    let mut seeded = vec![false; n];
-    seeds.iter().for_each(|&s| seeded[s as usize] = true);
-    let count = seeded.iter().filter(|s| **s).count() as f64;
-    let teleport: Vec<f64> = seeded.iter().map(|&s| if s { 1.0 / count } else { 0.0 }).collect();
+/// PageRank as its definition reads, over an adjacency matrix of edge weights: what the walker holds after each round,
+/// until it stops moving. Each seed's share of the teleport is its weight over all of theirs, and a node whose edges
+/// weigh nothing in all hands its walker back to the seeds
+fn dense(n: usize, edges: &[(u32, u32, f64)], seeds: &[(u32, f64)], damping: f64) -> Vec<f64> {
+    let mut teleport = vec![0.0; n];
+    seeds.iter().for_each(|&(s, w)| teleport[s as usize] += w);
+    let total: f64 = teleport.iter().sum();
+    teleport.iter_mut().for_each(|t| *t /= total);
     let mut matrix = vec![vec![0.0; n]; n];
-    for &(a, b) in edges {
-        matrix[a as usize][b as usize] += 1.0;
+    for &(a, b, w) in edges {
+        matrix[a as usize][b as usize] += w;
     }
     let mut p = teleport.clone();
     for _ in 0..100_000 {
@@ -274,6 +387,24 @@ fn mutually_reached(n: usize, edges: &[(u32, u32)]) -> Vec<Vec<u32>> {
     groups
 }
 
+/// Random graphs whose edges weigh 0 to 4 in quarters, 0 often enough that some nodes' edges weigh nothing in all, and
+/// whose seeds weigh a quarter to 4
+/// A graph's size, its weighted edges and its weighted seeds
+type WeightedCase = (usize, Vec<(u32, u32, f64)>, Vec<(u32, f64)>);
+
+fn weighted_graphs() -> impl Strategy<Value = WeightedCase> {
+    (1usize..=12).prop_flat_map(|n| {
+        let node = 0..n as u32;
+        let weight = prop_oneof![Just(0.0), (1u32..=16).prop_map(|q| f64::from(q) / 4.0)];
+        let seed_weight = (1u32..=16).prop_map(|q| f64::from(q) / 4.0);
+        (
+            Just(n),
+            prop::collection::vec((node.clone(), node.clone(), weight), 0..=30),
+            prop::collection::vec((node, seed_weight), 1..=3),
+        )
+    })
+}
+
 fn graphs() -> impl Strategy<Value = (usize, Vec<(u32, u32)>, Vec<u32>)> {
     (1usize..=12).prop_flat_map(|n| {
         let node = 0..n as u32;
@@ -286,12 +417,30 @@ proptest! {
 
     #[test]
     fn rank_agrees_with_the_dense_reference((n, edges, seeds) in graphs()) {
-        let found = rank(&graph(n, &edges), &seeds, 0.85, 100_000, 1e-15).unwrap();
+        let found = rank(&graph(n, &edges), &unit(&seeds), 0.85, 100_000, 1e-15).unwrap();
+        let expected = dense(n, &unweighted(&edges), &unit(&seeds), 0.85);
+        for (got, want) in found.scores.iter().zip(&expected) {
+            prop_assert!((got - want).abs() < 1e-9, "{got} against {want}");
+        }
+        prop_assert!((found.scores.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn weighted_rank_agrees_with_the_dense_reference((n, edges, seeds) in weighted_graphs()) {
+        let found = rank(&weighted_graph(n, &edges), &seeds, 0.85, 100_000, 1e-15).unwrap();
         let expected = dense(n, &edges, &seeds, 0.85);
         for (got, want) in found.scores.iter().zip(&expected) {
             prop_assert!((got - want).abs() < 1e-9, "{got} against {want}");
         }
         prop_assert!((found.scores.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unit_weights_rank_as_no_weights_to_the_bit((n, edges, seeds) in graphs()) {
+        let plain = rank(&graph(n, &edges), &unit(&seeds), 0.85, 100, 1e-6).unwrap();
+        let weighted = rank(&weighted_graph(n, &unweighted(&edges)), &unit(&seeds), 0.85, 100, 1e-6).unwrap();
+        prop_assert_eq!(bits(&plain.scores), bits(&weighted.scores));
+        prop_assert_eq!((plain.converged, plain.iterations), (weighted.converged, weighted.iterations));
     }
 
     #[test]
@@ -344,8 +493,8 @@ proptest! {
     fn relabelling_the_nodes_permutes_the_scores((n, edges, seeds) in graphs(), shift in 0u32..12) {
         let to = |v: u32| (v + shift) % n as u32;
         let moved: Vec<(u32, u32)> = edges.iter().map(|&(a, b)| (to(a), to(b))).collect();
-        let before = rank(&graph(n, &edges), &seeds, 0.85, 100_000, 1e-15).unwrap().scores;
-        let after = rank(&graph(n, &moved), &seeds.iter().map(|&s| to(s)).collect::<Vec<_>>(), 0.85, 100_000, 1e-15)
+        let before = rank(&graph(n, &edges), &unit(&seeds), 0.85, 100_000, 1e-15).unwrap().scores;
+        let after = rank(&graph(n, &moved), &unit(&seeds.iter().map(|&s| to(s)).collect::<Vec<_>>()), 0.85, 100_000, 1e-15)
             .unwrap()
             .scores;
         for v in 0..n as u32 {
@@ -358,7 +507,7 @@ proptest! {
 fn the_karate_club_scores_as_networkx_does() {
     let all: Vec<u32> = (0..34).collect();
     for (seeds, expected) in [(&all[..], &KARATE_PAGERANK), (&[0][..], &KARATE_FROM_0)] {
-        let found = rank(&karate(), seeds, 0.85, 100_000, 1e-15).unwrap();
+        let found = rank(&karate(), &unit(seeds), 0.85, 100_000, 1e-15).unwrap();
         for (v, (got, want)) in found.scores.iter().zip(expected.iter()).enumerate() {
             assert!((got - want).abs() < 1e-9, "member {v}: {got} against networkx's {want}");
         }
@@ -367,12 +516,48 @@ fn the_karate_club_scores_as_networkx_does() {
 }
 
 #[test]
+fn the_weighted_karate_club_scores_as_networkx_does() {
+    let all: Vec<(u32, f64)> = (0..34).map(|v| (v, 1.0)).collect();
+    for (seeds, expected) in [(&all[..], &KARATE_WEIGHTED), (&[(0, 2.0), (33, 1.0)][..], &KARATE_WEIGHTED_FROM_0_33)] {
+        let found = rank(&karate_weighted(), seeds, 0.85, 100_000, 1e-15).unwrap();
+        for (v, (got, want)) in found.scores.iter().zip(expected).enumerate() {
+            assert!((got - want).abs() < 1e-9, "member {v}: {got} against networkx's {want}");
+        }
+    }
+}
+
+#[test]
+fn a_seed_named_again_adds_its_weight_and_parallel_edges_add_theirs() {
+    let g = weighted_graph(3, &[(0, 1, 1.0), (1, 2, 1.0), (2, 0, 1.0), (0, 2, 1.0)]);
+    assert_eq!(
+        rank(&g, &[(1, 1.0), (1, 1.0), (2, 1.0)], 0.85, 100, 1e-12),
+        rank(&g, &[(1, 2.0), (2, 1.0)], 0.85, 100, 1e-12)
+    );
+    let parallel = weighted_graph(3, &[(0, 1, 1.0), (0, 1, 2.0), (0, 2, 1.0), (1, 0, 1.0), (2, 0, 1.0)]);
+    let summed = weighted_graph(3, &[(0, 1, 3.0), (0, 2, 1.0), (1, 0, 1.0), (2, 0, 1.0)]);
+    let (a, b) = (
+        rank(&parallel, &unit(&[0]), 0.85, 100, 1e-12).unwrap(),
+        rank(&summed, &unit(&[0]), 0.85, 100, 1e-12).unwrap(),
+    );
+    assert!(a.scores.iter().zip(&b.scores).all(|(x, y)| (x - y).abs() < 1e-15), "{a:?} against {b:?}");
+}
+
+#[test]
+fn a_node_whose_edges_weigh_nothing_sends_its_walker_back_to_the_seeds() {
+    // Node 1's one edge weighs 0: it holds its walker as a node without edges does
+    let zero = rank(&weighted_graph(3, &[(0, 1, 1.0), (1, 2, 0.0)]), &unit(&[0]), 0.85, 1000, 1e-15).unwrap();
+    let none = rank(&weighted_graph(3, &[(0, 1, 1.0)]), &unit(&[0]), 0.85, 1000, 1e-15).unwrap();
+    assert_eq!(bits(&zero.scores), bits(&none.scores));
+    assert_eq!(zero.scores[2], 0.0);
+}
+
+#[test]
 fn a_cycle_and_a_complete_graph_score_every_node_alike() {
     let cycle: Vec<(u32, u32)> = (0..5).map(|v| (v, (v + 1) % 5)).collect();
     let complete: Vec<(u32, u32)> = (0..5).flat_map(|a| (0..5).filter(move |&b| b != a).map(move |b| (a, b))).collect();
     let all: Vec<u32> = (0..5).collect();
     for edges in [cycle, complete] {
-        let found = rank(&graph(5, &edges), &all, 0.85, 1000, 1e-15).unwrap();
+        let found = rank(&graph(5, &edges), &unit(&all), 0.85, 1000, 1e-15).unwrap();
         assert!(found.scores.iter().all(|s| (s - 0.2).abs() < 1e-12), "{:?}", found.scores);
     }
 }
@@ -380,7 +565,7 @@ fn a_cycle_and_a_complete_graph_score_every_node_alike() {
 #[test]
 fn a_node_without_edges_sends_its_walker_back_to_the_seeds() {
     // 0 → 1, and 1 leads nowhere: what reaches 1 returns to 0, the seed, so 2, unreached, holds nothing
-    let found = rank(&graph(3, &[(0, 1)]), &[0], 0.85, 1000, 1e-15).unwrap();
+    let found = rank(&graph(3, &[(0, 1)]), &unit(&[0]), 0.85, 1000, 1e-15).unwrap();
     let total: f64 = found.scores.iter().sum();
     assert!((total - 1.0).abs() < 1e-12);
     assert_eq!(found.scores[2], 0.0);
@@ -391,10 +576,14 @@ fn a_node_without_edges_sends_its_walker_back_to_the_seeds() {
 #[test]
 fn seeds_outside_the_graph_are_ignored_and_none_inside_answers_nothing() {
     let g = graph(3, &[(0, 1), (1, 2)]);
-    assert_eq!(rank(&g, &[7, 9], 0.85, 100, 1e-6), None);
-    assert_eq!(rank(&g, &[1, 9], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6));
-    assert_eq!(rank(&g, &[1, 1], 0.85, 100, 1e-6), rank(&g, &[1], 0.85, 100, 1e-6), "a seed named twice counts once");
-    assert_eq!(rank(&Projection::new(), &[0], 0.85, 100, 1e-6), None);
+    assert_eq!(rank(&g, &unit(&[7, 9]), 0.85, 100, 1e-6), None);
+    assert_eq!(rank(&g, &unit(&[1, 9]), 0.85, 100, 1e-6), rank(&g, &unit(&[1]), 0.85, 100, 1e-6));
+    assert_eq!(
+        rank(&g, &unit(&[1, 1]), 0.85, 100, 1e-6),
+        rank(&g, &unit(&[1]), 0.85, 100, 1e-6),
+        "a lone seed named twice starts every walk at it"
+    );
+    assert_eq!(rank(&Projection::new(), &unit(&[0]), 0.85, 100, 1e-6), None);
     assert_eq!(weak_components(&Projection::new()).to_vecs(), Vec::<Vec<u32>>::new());
 }
 
@@ -402,12 +591,12 @@ fn seeds_outside_the_graph_are_ignored_and_none_inside_answers_nothing() {
 fn rounds_stop_at_the_tolerance_or_the_limit_and_say_which() {
     let g = karate();
     let all: Vec<u32> = (0..34).collect();
-    let settled = rank(&g, &all, 0.85, 100, 1e-6).unwrap();
+    let settled = rank(&g, &unit(&all), 0.85, 100, 1e-6).unwrap();
     assert!(settled.converged && settled.iterations < 100, "{settled:?}");
-    let cut = rank(&g, &all, 0.85, 3, 1e-6).unwrap();
+    let cut = rank(&g, &unit(&all), 0.85, 3, 1e-6).unwrap();
     assert_eq!((cut.converged, cut.iterations), (false, 3));
     // One round more or fewer than the one it stopped at would have answered differently
-    let one_less = rank(&g, &all, 0.85, settled.iterations - 1, 1e-6).unwrap();
+    let one_less = rank(&g, &unit(&all), 0.85, settled.iterations - 1, 1e-6).unwrap();
     assert!(!one_less.converged);
 }
 
@@ -534,13 +723,59 @@ const KARATE_FROM_0_BITS: [u64; 34] = [
 
 #[test]
 fn the_same_graph_ranks_to_the_same_bits_on_every_platform() {
-    let found = rank(&karate(), &(0..34).collect::<Vec<_>>(), 0.85, 100, 1e-6).unwrap();
+    let found = rank(&karate(), &unit(&(0..34).collect::<Vec<_>>()), 0.85, 100, 1e-6).unwrap();
     assert_eq!((found.converged, found.iterations), (true, 30));
     assert_eq!(bits(&found.scores), KARATE_BITS);
-    let from_0 = rank(&karate(), &[0], 0.85, 100, 1e-6).unwrap();
+    let from_0 = rank(&karate(), &unit(&[0]), 0.85, 100, 1e-6).unwrap();
     assert_eq!((from_0.converged, from_0.iterations), (true, 39));
     assert_eq!(bits(&from_0.scores), KARATE_FROM_0_BITS);
+    // Every edge weighing 1 takes the weighted way to the same bits
+    let ones: Vec<(u32, u32, f64)> = KARATE_EDGES.iter().flat_map(|&(a, b)| [(a, b, 1.0), (b, a, 1.0)]).collect();
+    let unit_weighted = rank(&weighted_graph(34, &ones), &unit(&(0..34).collect::<Vec<_>>()), 0.85, 100, 1e-6).unwrap();
+    assert_eq!(bits(&unit_weighted.scores), KARATE_BITS);
+    let weighted = rank(&karate_weighted(), &[(0, 2.0), (33, 1.0)], 0.85, 100, 1e-6).unwrap();
+    assert_eq!((weighted.converged, weighted.iterations), (true, 39));
+    assert_eq!(bits(&weighted.scores), KARATE_WEIGHTED_FROM_0_33_BITS);
 }
+
+/// The weighted club's scores from members 0 and 33, weighing 2 and 1, to a tolerance of 1e-6, as this code found them
+/// on an Apple M1 Pro on 2026-10-31, which CI's Linux, macOS and Windows runs must each find too
+const KARATE_WEIGHTED_FROM_0_33_BITS: [u64; 34] = [
+    4595852361333665679,
+    4589028304391443933,
+    4589365603542901225,
+    4585695820439634533,
+    4581962739039482759,
+    4584937640270600825,
+    4584631769072396196,
+    4583406656943521374,
+    4584806708494806749,
+    4573404162515408404,
+    4581571691473382037,
+    4577646984243927878,
+    4576454577449120406,
+    4585497507268508728,
+    4575695927630950687,
+    4578104268989847026,
+    4578154670924813878,
+    4576522166579629116,
+    4572889347865476227,
+    4578765973749070002,
+    4573326292494581099,
+    4577561803069621833,
+    4576188776813398553,
+    4583799171519793830,
+    4576093826832075025,
+    4580605826382904195,
+    4576201209241865797,
+    4581252331836856254,
+    4577042821152177649,
+    4580702846719612980,
+    4580963862018814871,
+    4584927209138467227,
+    4588110893919673573,
+    4593164454127188380,
+];
 
 fn bits(scores: &[f64]) -> Vec<u64> {
     scores.iter().map(|s| s.to_bits()).collect()
@@ -548,7 +783,12 @@ fn bits(scores: &[f64]) -> Vec<u64> {
 
 /// Newman's modularity of a partition of an undirected graph, each listed edge once, as its definition reads
 fn modularity(n: usize, edges: &[(u32, u32)], groups: &[Vec<u32>], resolution: f64) -> f64 {
-    let m = edges.len() as f64;
+    weighted_modularity(n, &unweighted(edges), groups, resolution)
+}
+
+/// Modularity with each edge counted by its weight: `m` the edges' total weight and a node's degree its edges'
+fn weighted_modularity(n: usize, edges: &[(u32, u32, f64)], groups: &[Vec<u32>], resolution: f64) -> f64 {
+    let m: f64 = edges.iter().map(|&(.., w)| w).sum();
     if m == 0.0 {
         return 0.0;
     }
@@ -558,11 +798,11 @@ fn modularity(n: usize, edges: &[(u32, u32)], groups: &[Vec<u32>], resolution: f
     }
     let mut degree = vec![0.0; n];
     let mut inside = vec![0.0; groups.len()];
-    for &(a, b) in edges {
-        degree[a as usize] += 1.0;
-        degree[b as usize] += 1.0;
+    for &(a, b, w) in edges {
+        degree[a as usize] += w;
+        degree[b as usize] += w;
         if community[a as usize] == community[b as usize] {
-            inside[community[a as usize]] += 1.0;
+            inside[community[a as usize]] += w;
         }
     }
     let mut total = vec![0.0; groups.len()];
@@ -627,6 +867,35 @@ fn the_karate_club_splits_into_its_known_communities() {
     // The two leaders, 0 and 33, around whom the club split, end up apart
     let of = |v: u32| found.iter().position(|group| group.contains(&v)).unwrap();
     assert_ne!(of(0), of(33));
+}
+
+#[test]
+fn the_weighted_karate_club_splits_by_weighted_modularity() {
+    let found = communities(&karate_weighted(), 1.0, 0, 100).to_vecs();
+    let edges: Vec<(u32, u32, f64)> = KARATE_EDGES.iter().zip(KARATE_WEIGHTS).map(|(&(a, b), w)| (a, b, w)).collect();
+    let q = weighted_modularity(34, &edges, &found, 1.0);
+    // networkx 3.4.2's `community.modularity(G, partition, weight="weight")` of this partition. Seed 0 finds the same
+    // four communities with weights as without, the weights only confirming the club's split
+    assert!((q - 0.44490358126721763).abs() < 1e-12, "weighted modularity {q} of {found:?}");
+    let recorded: [&[u32]; 4] = [
+        &[8, 9, 14, 15, 18, 20, 22, 26, 29, 30, 32, 33],
+        &[0, 1, 2, 3, 7, 11, 12, 13, 17, 19, 21],
+        &[23, 24, 25, 27, 28, 31],
+        &[4, 5, 6, 10, 16],
+    ];
+    assert_eq!(found, recorded);
+}
+
+#[test]
+fn heavier_edges_decide_which_neighbours_share_a_community() {
+    // A square of four nodes, two opposite sides heavy: each heavy side is a community, whichever pair of sides it is
+    let square = |a: f64, b: f64| {
+        let sides = [(0, 1, a), (1, 2, b), (2, 3, a), (3, 0, b)];
+        let both: Vec<(u32, u32, f64)> = sides.iter().flat_map(|&(x, y, w)| [(x, y, w), (y, x, w)]).collect();
+        communities(&weighted_graph(4, &both), 1.0, 0, 100).to_vecs()
+    };
+    assert_eq!(square(10.0, 1.0), [vec![0, 1], vec![2, 3]]);
+    assert_eq!(square(1.0, 10.0), [vec![0, 3], vec![1, 2]]);
 }
 
 #[test]

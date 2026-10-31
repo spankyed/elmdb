@@ -114,9 +114,9 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             grant(t, id, role)?;
             Ok(OpResult::Done)
         }
-        Op::Link { source, kind, target, info } => {
+        Op::Link { source, kind, target, info, weight } => {
             existing(t, source)?;
-            let (id, linked) = relations::link(t, source, kind, target, info.clone())?;
+            let (id, linked) = relations::link(t, source, kind, target, info.clone(), *weight)?;
             Ok(OpResult::Relation { id, linked })
         }
         Op::Unlink { source, kind, target } => {
@@ -124,8 +124,8 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             relations::unlink(t, source, kind.as_deref(), target.as_deref())?;
             Ok(OpResult::Done)
         }
-        Op::UpdateRelation { relation, source, target, info } => {
-            relations::update(t, relation, source.as_deref(), target.as_deref(), info.clone())?;
+        Op::UpdateRelation { relation, source, target, info, weight } => {
+            relations::update(t, relation, source.as_deref(), target.as_deref(), info.clone(), *weight)?;
             Ok(OpResult::Done)
         }
         Op::RemoveRelation { relation } => {

@@ -21,7 +21,7 @@ test('the canonical form a database answers is a Schema, every absent option nul
   const given = {
     $schema: 'https://elmdb.dev/schema/1.json',
     roles: { admin: {} },
-    relations: { cites: { cardinality: 'many-to-many' } },
+    relations: { cites: { cardinality: 'many-to-many' }, weighs: { cardinality: 'many-to-many', weighted: true } },
     types: {
       Note: {
         fields: { title: { type: 'string' } },
@@ -41,6 +41,16 @@ test('the canonical form a database answers is a Schema, every absent option nul
         endpoints: null,
         info: { nullable: true, optional: true, type: 'any' },
         unique: false,
+        weighted: false,
+      },
+      weighs: {
+        acyclic: false,
+        cardinality: 'many-to-many',
+        declaredBy: null,
+        endpoints: null,
+        info: { nullable: true, optional: true, type: 'any' },
+        unique: false,
+        weighted: true,
       },
     },
     roles: { admin: { declaredBy: null } },
