@@ -267,9 +267,9 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'rank');
         return next({ step: 'rank', kinds: asArr(kinds), direction, ...(seeds !== undefined && { seeds: [...seeds] }) });
       },
-      components: (kinds: MaybeArr<string>) => {
-        names.relationKinds(kinds, 'components');
-        return run(recipe, { answer: 'components', kinds: asArr(kinds) }).components as EARS.EntityId[][];
+      weakComponents: (kinds: MaybeArr<string>) => {
+        names.relationKinds(kinds, 'weakComponents');
+        return run(recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
       },
 
       pick: (fields: readonly string[]) => run(recipe, { answer: 'rows', fields: [...fields] }).rows,

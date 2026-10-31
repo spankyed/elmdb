@@ -195,7 +195,7 @@ describe('relation kinds', () => {
       ['pathTo', () => e.query.ids(a).pathTo(b, 'blokcs')],
       ['degrees', () => e.query.ids(a).degrees('blokcs')],
       ['rank', () => e.query.ids(a).rank('blokcs')],
-      ['components', () => e.query.ids(a).components('blokcs')],
+      ['weakComponents', () => e.query.ids(a).weakComponents('blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -328,15 +328,15 @@ describe('graph algorithms', () => {
     expect(e.query.ids([a, b]).rank('refs').ids()).toEqual([b, a]);
   });
 
-  it('components groups the query by the edges between its entities, either way, the largest first', () => {
+  it('weakComponents groups the query by the edges between its entities, either way, the largest first', () => {
     const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
     e.write(b).link('refs', a);
     e.write(c).link('refs', d);
     e.write(x).link('refs', d);
     e.write(a).link('blocks', x);
-    expect(e.query('Task').components('refs')).toEqual([[c, d, x], [a, b]]);
-    expect(e.query('Task').components(['refs', 'blocks'])).toEqual([[a, b, c, d, x]]);
-    expect(e.query.ids([c, x]).components('refs')).toEqual([[c], [x]]);
+    expect(e.query('Task').weakComponents('refs')).toEqual([[c, d, x], [a, b]]);
+    expect(e.query('Task').weakComponents(['refs', 'blocks'])).toEqual([[a, b, c, d, x]]);
+    expect(e.query.ids([c, x]).weakComponents('refs')).toEqual([[c], [x]]);
   });
 
   it('explain reports the graph a rank built and the rounds it ran', () => {

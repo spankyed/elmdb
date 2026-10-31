@@ -176,7 +176,7 @@ export interface QueryStage {
   kept: number;
   /** Milliseconds spent in the stage's own work */
   ms: number;
-  /** For a stage that built a graph (`rank`, `components`): its entities */
+  /** For a stage that built a graph (`rank`, `weakComponents`): its entities */
   nodes?: number;
   /** For a stage that built a graph: the edges between its entities */
   edges?: number;
@@ -342,10 +342,11 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    */
   rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: EdgeDirection; seeds?: readonly EARS.EntityId[] }): QueryBuilder<E, D>;
   /**
-   * The query's entities in groups joined by edges of the kinds between two of them, whichever way each points: each
-   * group's ids in query order, the largest group first, of two as large the one whose first entity comes first
+   * The query's weak components: its entities in groups joined by edges of the kinds between two of them, whichever way
+   * each points: each group's ids in query order, the largest group first, of two as large the one whose first entity
+   * comes first
    */
-  components(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
+  weakComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
   pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
     fields: A,
   ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
