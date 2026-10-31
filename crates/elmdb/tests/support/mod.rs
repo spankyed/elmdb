@@ -215,7 +215,7 @@ impl Fixture {
         let answers: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
         let answer = &answers[0];
         if read == "rankCounted" || read == "topological" {
-            assert_eq!(answer["count"].as_u64().unwrap() as usize, self.rows);
+            assert_eq!(answer["n"].as_u64().unwrap() as usize, self.rows);
         } else if read == "weakComponents" || read == "strongComponents" {
             let total: u64 = answer[read].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
             assert_eq!(total as usize, self.rows);
