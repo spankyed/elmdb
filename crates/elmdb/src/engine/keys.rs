@@ -284,3 +284,53 @@ pub fn vector_graph(entity_type: &str, index: &str) -> Vec<u8> {
 pub fn vector_graphs() -> Vec<u8> {
     Prefix::VectorGraph.key().to_vec()
 }
+
+/// A rank index's node: `d/ra index entity`
+pub fn rank_node(index: &str, entity: &str) -> Vec<u8> {
+    with(Prefix::RankNode, |w| {
+        w.string(index).string(entity);
+    })
+}
+
+/// Every node of a rank index
+pub fn rank_nodes(index: &str) -> Vec<u8> {
+    with(Prefix::RankNode, |w| {
+        w.string(index);
+    })
+}
+
+/// A rank index's node in score order: the estimate negated, so the highest comes first, then the node's type in the
+/// index's order and its place, as a plan over the index's types holds them
+pub fn rank_order(index: &str, estimate: f64, type_at: u32, seq: u64) -> Vec<u8> {
+    with(Prefix::RankOrder, |w| {
+        w.string(index).number(-estimate).number(f64::from(type_at)).number(seq as f64);
+    })
+}
+
+/// A rank index's nodes in score order
+pub fn rank_orders(index: &str) -> Vec<u8> {
+    with(Prefix::RankOrder, |w| {
+        w.string(index);
+    })
+}
+
+/// A rank index's node waiting to be pushed, in place order
+pub fn rank_queued(index: &str, type_at: u32, seq: u64) -> Vec<u8> {
+    with(Prefix::RankQueue, |w| {
+        w.string(index).number(f64::from(type_at)).number(seq as f64);
+    })
+}
+
+/// A rank index's nodes waiting to be pushed
+pub fn rank_queue(index: &str) -> Vec<u8> {
+    with(Prefix::RankQueue, |w| {
+        w.string(index);
+    })
+}
+
+/// A rank index's totals
+pub fn rank_totals(index: &str) -> Vec<u8> {
+    with(Prefix::RankTotals, |w| {
+        w.string(index);
+    })
+}

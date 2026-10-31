@@ -61,7 +61,7 @@ pub struct Database {
     engine_schema: Arc<RwLock<Arc<EngineSchema>>>,
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
-    builder: Mutex<Option<crate::engine::Builder>>,
+    builder: Arc<Mutex<Option<crate::engine::Builder>>>,
     /// The tracked reads' read sets, and the database's watches
     pub(crate) tracks: crate::engine::watch::SharedTracks,
 }
@@ -74,6 +74,7 @@ fn empty_schema() -> Schema {
         roles: Default::default(),
         relations: Default::default(),
         types: Default::default(),
+        ranks: Default::default(),
     }
 }
 
@@ -139,8 +140,10 @@ impl Database {
         }
         let engine_schema = Arc::new(EngineSchema::stored(schema.clone(), hash));
         let store = Arc::new(store);
+        let tracks: crate::engine::watch::SharedTracks = Default::default();
+        let observing = Arc::new(RwLock::new(Arc::clone(&engine_schema)));
         let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
-            let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&engine_schema));
+            let builder = start_builder(&store, &engine_schema, &tracks, &observing);
             builder.queue(unbuilt);
             builder
         });
@@ -148,11 +151,11 @@ impl Database {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
             store: Mutex::new(Some(store)),
-            engine_schema: Arc::new(RwLock::new(engine_schema)),
+            engine_schema: observing,
             schema: RwLock::new(schema),
             report,
-            builder: Mutex::new(builder),
-            tracks: Default::default(),
+            builder: Arc::new(Mutex::new(builder)),
+            tracks,
         })
     }
 
@@ -214,7 +217,7 @@ impl Database {
             },
         };
         if !unbuilt.is_empty() {
-            let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&current));
+            let builder = start_builder(&store, &current, &self.tracks, &self.engine_schema);
             builder.queue(unbuilt);
             *self.builder() = Some(builder);
         }
@@ -362,8 +365,61 @@ struct AppliedSchema {
     /// The fingerprint stored beside the schema, which the handle validates against
     hash: Option<Vec<u8>>,
     report: OpenReport,
-    unbuilt: Vec<(String, String)>,
+    unbuilt: Vec<crate::engine::Work>,
     commit: Option<crate::store::Commit>,
+}
+
+/// The builder over `schema`, whose rank chunks commit as writes do
+pub(crate) fn start_builder(
+    store: &Arc<Store>,
+    schema: &Arc<EngineSchema>,
+    tracks: &crate::engine::watch::SharedTracks,
+    observing: &Arc<RwLock<Arc<EngineSchema>>>,
+) -> crate::engine::Builder {
+    let commits =
+        crate::engine::drain_commits(Arc::clone(tracks), Arc::clone(store), Arc::clone(observing), Arc::clone(schema));
+    crate::engine::Builder::start(Arc::clone(store), Arc::clone(schema), commits)
+}
+
+/// The database's builder slot and what starting a builder in it takes, which a unit holds to hand the builder the
+/// pushes its commit left
+#[derive(Clone)]
+pub(crate) struct Builders {
+    pub(crate) slot: Arc<Mutex<Option<crate::engine::Builder>>>,
+    pub(crate) store: Arc<Store>,
+    pub(crate) schemas: Arc<RwLock<Arc<EngineSchema>>>,
+    pub(crate) tracks: crate::engine::watch::SharedTracks,
+}
+
+impl Builders {
+    /// Queues work for the builder, starting it when none runs: a rank index a commit left with pushes waiting
+    pub(crate) fn queue(&self, work: Vec<crate::engine::Work>) {
+        if work.is_empty() {
+            return;
+        }
+        // The schema's lock before the builder's slot, the order a schema change takes them in
+        let schema = self.schemas.read();
+        let mut slot = self.slot.lock().expect("the builder slot's lock is never poisoned");
+        if slot.is_none() {
+            *slot = Some(start_builder(&self.store, &schema, &self.tracks, &self.schemas));
+        }
+        slot.as_ref().expect("started above").queue(work);
+    }
+}
+
+impl Database {
+    /// What a commit hands the pushes it left to; none in a read-only database, which never writes
+    pub(crate) fn builders(&self) -> Result<Option<Builders>> {
+        if self.read_only {
+            return Ok(None);
+        }
+        Ok(Some(Builders {
+            slot: Arc::clone(&self.builder),
+            store: self.store()?,
+            schemas: self.observing_schema(),
+            tracks: Arc::clone(&self.tracks),
+        }))
+    }
 }
 
 fn unchanged_schema(store: &Store, schema: Option<Schema>, hash: Option<Vec<u8>>) -> Result<AppliedSchema> {

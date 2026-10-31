@@ -292,7 +292,7 @@ fn the_canonical_form_writes_every_default_and_sorts_keys() {
     .unwrap();
     assert_eq!(
         schema.canonical(),
-        r#"{"$schema":"https://elmdb.dev/schema/1.json","collation":"root","relations":{},"roles":{},"types":{"Note":{"additionalFields":"refuse","declaredBy":null,"fields":{"title":{"nullable":false,"optional":false,"type":"string"}},"indexes":{},"shortCode":null}}}"#
+        r#"{"$schema":"https://elmdb.dev/schema/1.json","collation":"root","ranks":{},"relations":{},"roles":{},"types":{"Note":{"additionalFields":"refuse","declaredBy":null,"fields":{"title":{"nullable":false,"optional":false,"type":"string"}},"indexes":{},"shortCode":null}}}"#
     );
     assert_eq!(Schema::from_canonical(&schema.canonical()).unwrap(), schema);
 }

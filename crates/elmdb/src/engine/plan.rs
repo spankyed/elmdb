@@ -131,27 +131,7 @@ pub enum Scope {
     Trashed,
 }
 
-/// Which of an entity's edges a walk follows: those out of it, those into it, or both
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
-#[serde(rename_all = "camelCase")]
-pub enum Direction {
-    #[default]
-    Out,
-    In,
-    Both,
-}
-
-impl Direction {
-    /// The `outward` of each side of the edges it follows
-    pub fn sides(self) -> &'static [bool] {
-        match self {
-            Direction::Out => &[true],
-            Direction::In => &[false],
-            Direction::Both => &[true, false],
-        }
-    }
-}
+pub use crate::schema::Direction;
 
 /// How `similar` scores two entities' neighbours
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -315,6 +295,13 @@ pub enum Step {
         #[serde(default = "rank_tolerance")]
         #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
         tolerance: f64,
+    },
+    /// The set by the scores a rank index holds, highest first, ties in the set's order; each score is a hit's, which
+    /// `hits` answers, with the bound on the scores' distance from PageRank. Every entity of the set must be one of the
+    /// index's nodes, a live entity of its types. A plan that starts from the index's types, in its order, and keeps
+    /// the first `n` with `limit` reads only those from the index
+    Ranked {
+        index: String,
     },
     /// The set in an order where each edge of the kinds between two of its entities, followed the direction's way,
     /// leads from an entity to one after it: `A blocks B` puts A first with `out`, and `in` reverses it. The members

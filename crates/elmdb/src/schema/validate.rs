@@ -29,6 +29,9 @@ pub fn validate(schema: &Schema) -> Vec<Problem> {
             );
         }
     }
+    for (name, rank) in &schema.ranks {
+        v.rank(name, rank);
+    }
     v.problems
 }
 
@@ -86,6 +89,51 @@ impl Validator<'_> {
     fn type_exists(&mut self, at: String, name: &str, declared_by: Option<&str>) {
         if !self.schema.types.contains_key(name) {
             self.problem(at, format!("no such type \"{name}\""), declared_by);
+        }
+    }
+
+    fn rank(&mut self, name: &str, rank: &RankDef) {
+        let who = rank.declared_by.as_deref();
+        let at = format!("ranks.{name}");
+        self.lower_camel(&at, name, "rank index", who);
+        // A rank index is named on its own in a plan, so no type's index may share its name
+        let shared: Vec<&str> = self
+            .schema
+            .types
+            .iter()
+            .filter(|(_, def)| def.indexes.contains_key(name))
+            .map(|(t, _)| t.as_str())
+            .collect();
+        if !shared.is_empty() {
+            self.problem(at.clone(), format!("\"{name}\" is already an index of {}", shared.join(", ")), who);
+        }
+        if rank.types.is_empty() {
+            self.problem(format!("{at}.types"), "names no type, so the graph has no node".into(), who);
+        }
+        let mut seen = BTreeSet::new();
+        for (i, ty) in rank.types.iter().enumerate() {
+            self.type_exists(format!("{at}.types[{i}]"), ty, who);
+            if !seen.insert(ty) {
+                self.problem(format!("{at}.types[{i}]"), format!("\"{ty}\" is named twice"), who);
+            }
+        }
+        if rank.relations.is_empty() {
+            self.problem(format!("{at}.relations"), "names no relation kind, so the graph has no edge".into(), who);
+        }
+        let mut seen = BTreeSet::new();
+        for (i, kind) in rank.relations.iter().enumerate() {
+            if !self.schema.relations.contains_key(kind) {
+                self.problem(format!("{at}.relations[{i}]"), format!("no such relation kind \"{kind}\""), who);
+            }
+            if !seen.insert(kind) {
+                self.problem(format!("{at}.relations[{i}]"), format!("\"{kind}\" is named twice"), who);
+            }
+        }
+        if !(rank.damping > 0.0 && rank.damping < 1.0) {
+            self.problem(format!("{at}.damping"), format!("is between 0 and 1, not {}", rank.damping), who);
+        }
+        if !(rank.tolerance > 0.0 && rank.tolerance.is_finite()) {
+            self.problem(format!("{at}.tolerance"), format!("is a finite number above 0, not {}", rank.tolerance), who);
         }
     }
 

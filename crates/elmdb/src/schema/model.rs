@@ -30,6 +30,76 @@ pub struct Schema {
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, TypeDef>>", optional))]
     pub types: BTreeMap<String, TypeDef>,
+    /// Rank indexes: PageRank over a graph of types and relation kinds, kept current by every commit
+    #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<BTreeMap<String, RankDef>>", optional))]
+    pub ranks: BTreeMap<String, RankDef>,
+}
+
+/// Which of an entity's edges a walk follows: those out of it, those into it, or both
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum Direction {
+    #[default]
+    Out,
+    In,
+    Both,
+}
+
+impl Direction {
+    /// The `outward` of each side of the edges it follows
+    pub fn sides(self) -> &'static [bool] {
+        match self {
+            Direction::Out => &[true],
+            Direction::In => &[false],
+            Direction::Both => &[true, false],
+        }
+    }
+}
+
+/// A rank index (`docs/roadmap/rank-index.md`): the PageRank of a graph whose nodes are the live entities of `types`
+/// and whose edges are those of `relations` between two of them, every node a seed, kept within `tolerance` of the
+/// scores `rank` would answer for the same graph
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS, schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct RankDef {
+    #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(optional = nullable))]
+    pub declared_by: Option<String>,
+    /// The types whose live entities are the graph's nodes, in the order ties keep
+    pub types: Vec<String>,
+    /// The relation kinds whose edges between two nodes are the graph's edges
+    pub relations: Vec<String>,
+    /// Which way each edge is followed
+    #[serde(default)]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+    pub direction: Direction,
+    /// Whether an edge of a kind declared weighted counts by its weight
+    #[serde(default = "yes")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+    pub weights: bool,
+    /// The probability a walker follows an edge rather than jumping to a node at random, in (0, 1)
+    #[serde(default = "rank_damping")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
+    pub damping: f64,
+    /// The bound on the scores' L1 distance from `rank`'s that the index keeps once its pushes are done, above 0
+    #[serde(default = "rank_tolerance")]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
+    pub tolerance: f64,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn rank_damping() -> f64 {
+    0.85
+}
+
+fn rank_tolerance() -> f64 {
+    1e-6
 }
 
 fn root_collation() -> String {

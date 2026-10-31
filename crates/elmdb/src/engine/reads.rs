@@ -21,7 +21,7 @@ use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Sta
 use super::text::{self, search::Hit};
 use super::trigram::{self, Matcher};
 use super::unit::Read;
-use super::{ids, relations, values};
+use super::{ids, ranks, relations, values};
 
 /// What one plan's run read, for the specs that show a query stops early
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -365,8 +365,16 @@ struct Query<'r, R: Read> {
     backward_hop: Cell<Option<usize>>,
     /// The stage of a hop that did, handing its ids on already reversed
     walked_back: Cell<Option<usize>>,
-    /// Whether the plan's last rank settled within its tolerance, and in how many rounds, for the `hits` terminal
-    ranked: Cell<Option<(bool, u32)>>,
+    /// What the plan's last rank or ranked step says of its scores, for the `hits` terminal
+    ranked: RefCell<Option<Scored>>,
+}
+
+/// What a `hits` answer says of a rank's scores
+enum Scored {
+    /// A `rank`: whether it settled within its tolerance, and in how many rounds
+    Rank { converged: bool, iterations: u32 },
+    /// A `ranked`: the index read, and the bound on its scores' distance from PageRank
+    Ranked { index: String, error: f64 },
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
@@ -674,10 +682,10 @@ impl<R: Read> Query<'_, R> {
                 };
                 // No seed in the set answers nothing, settled in no rounds
                 let Some(ranked) = algorithms::rank(&graph, &seeds, *damping, *iterations, *tolerance) else {
-                    self.ranked.set(Some((true, 0)));
+                    self.ranked.replace(Some(Scored::Rank { converged: true, iterations: 0 }));
                     return Ok(true);
                 };
-                self.ranked.set(Some((ranked.converged, ranked.iterations)));
+                self.ranked.replace(Some(Scored::Rank { converged: ranked.converged, iterations: ranked.iterations }));
                 if let Some(stages) = self.stages {
                     stages.ranked(upto, ranked.iterations, ranked.converged);
                 }
@@ -705,6 +713,7 @@ impl<R: Read> Query<'_, R> {
                 }
                 Ok(true)
             }
+            Step::Ranked { index } => self.ranked_by(before, upto, index, visit),
             Step::Topological { kinds, direction } => {
                 if *direction == Direction::Both {
                     return Err(Error::new(
@@ -869,6 +878,18 @@ impl<R: Read> Query<'_, R> {
                 if take <= 0 {
                     return Ok(true);
                 }
+                if before == 1
+                    && let Step::Ranked { index } = &self.plan.steps[0]
+                    && self.reads_rank_top(index)
+                {
+                    let first = self.rank_top(index, take as usize)?;
+                    if let Some(stages) = self.stages {
+                        for _ in &first {
+                            stages.kept(before);
+                        }
+                    }
+                    return each(first, visit);
+                }
                 if before > 0
                     && let Step::OrderBy { field: name, descending } = &self.plan.steps[before - 1]
                 {
@@ -1031,7 +1052,7 @@ impl<R: Read> Query<'_, R> {
         found.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
         let ids: Vec<String> = found.iter().map(|(_, hit, _)| hit.id.clone()).collect();
         // These scores replace a rank's before them, so the answer no longer says how that rank settled
-        self.ranked.set(None);
+        self.ranked.replace(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (_, hit, name) in found {
@@ -1271,7 +1292,7 @@ impl<R: Read> Query<'_, R> {
     fn record_and_visit(&self, found: Vec<(Hit, String)>, visit: &mut Visit<'_>) -> Result<bool> {
         let ids: Vec<String> = found.iter().map(|(hit, _)| hit.id.clone()).collect();
         // These scores replace a rank's before them, so the answer no longer says how that rank settled
-        self.ranked.set(None);
+        self.ranked.replace(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (hit, name) in found {
@@ -1375,6 +1396,105 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// Every id after the first `upto` steps
+    /// A rank index's totals, refusing an index the schema doesn't declare (`UNKNOWN_INDEX`) or one not built yet
+    /// (`INDEX_BUILDING`), and recording what a `hits` answer and EXPLAIN say of its scores
+    fn rank_index(&self, stage: usize, index: &str) -> Result<(&crate::schema::RankDef, ranks::Totals)> {
+        let Some(def) = self.r.schema().ranks.get(index) else {
+            return Err(Error::new(ErrorCode::UnknownIndex, format!("No rank index is named \"{index}\"")));
+        };
+        let totals = ranks::totals(self.r, index)?;
+        if totals.stage != ranks::Stage::Built {
+            return Err(Error::new(
+                ErrorCode::IndexBuilding,
+                format!("The rank index {index} is still being built, and has nothing to answer from until it is"),
+            ));
+        }
+        let error = totals.error(def.damping);
+        self.ranked.replace(Some(Scored::Ranked { index: index.to_owned(), error }));
+        if let Some(stages) = self.stages {
+            stages.reads_index_at(stage, index);
+            stages.rank_error(stage, error);
+        }
+        Ok((def, totals))
+    }
+
+    /// Whether `limit` after a `ranked` first step reads the index's top from its score order: the plan starts from
+    /// the index's live entities, its types in its order, so the order's ties are the set's
+    fn reads_rank_top(&self, index: &str) -> bool {
+        self.plan.scope == Scope::Live
+            && self.r.schema().ranks.get(index).is_some_and(|def| self.start_types() == Some(def.types.as_slice()))
+    }
+
+    /// The first `take` of a rank index's nodes in score order, read from the top of its order and no further, each a
+    /// hit when the terminal answers them
+    fn rank_top(&self, index: &str, take: usize) -> Result<Vec<String>> {
+        let (_, totals) = self.rank_index(1, index)?;
+        let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
+        let mut ids = Vec::with_capacity(take);
+        let mut failed = None;
+        self.r.visit(&keys::rank_orders(index), |_, id| {
+            self.count_visit();
+            match String::from_utf8(id.to_vec()) {
+                Ok(id) => ids.push(id),
+                Err(_) => failed = Some(Error::new(ErrorCode::Corrupted, "A rank index's order names no entity")),
+            }
+            failed.is_none() && ids.len() < take
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        if scored {
+            for id in &ids {
+                let node = ranks::node(self.r, index, id)?.ok_or_else(|| {
+                    Error::new(ErrorCode::Corrupted, format!("{id} is in a rank index's order and no node"))
+                })?;
+                self.record_rank_hit(id, node.x / totals.estimates);
+            }
+        }
+        Ok(ids)
+    }
+
+    fn record_rank_hit(&self, id: &str, score: f64) {
+        let hit = Hit { id: id.to_owned(), seq: 0, score, terms: Vec::new(), fields: Vec::new() };
+        self.hits.borrow_mut().insert(id.to_owned(), (hit, "ranked".to_owned()));
+    }
+
+    /// `ranked`: the set by the index's scores, highest first, ties in the set's order; an entity that isn't one of the
+    /// index's nodes is refused
+    fn ranked_by(&self, before: usize, upto: usize, index: &str, visit: &mut Visit<'_>) -> Result<bool> {
+        let (def, totals) = self.rank_index(upto, index)?;
+        let mut ids = self.collect(before)?;
+        if !self.holds_each_once(before) {
+            let mut seen: HashSet<String, Fixed> = HashSet::default();
+            ids.retain(|id| seen.insert(id.clone()));
+        }
+        let mut scored = Vec::with_capacity(ids.len());
+        for id in ids {
+            let Some(node) = ranks::node(self.r, index, &id)? else {
+                return Err(Error::new(
+                    ErrorCode::BatchInvalid,
+                    format!(
+                        "{id} isn't a node of the rank index {index}, whose nodes are the live entities of {}",
+                        def.types.join(", ")
+                    ),
+                ));
+            };
+            scored.push((id, node.x / totals.estimates));
+        }
+        // Stable: equal scores keep the set's order
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let hits = matches!(self.plan.terminal, Terminal::Hits { .. });
+        for (id, score) in scored {
+            if hits {
+                self.record_rank_hit(&id, score);
+            }
+            if !visit(&id)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     fn collect(&self, upto: usize) -> Result<Vec<String>> {
         let mut ids = Vec::new();
         self.pull(upto, &mut |id| {
@@ -1732,6 +1852,8 @@ struct Stages {
     graph: RefCell<Vec<Option<Graphed>>>,
     /// Per `similar` stage: the neighbours of `to`, the entities it scored, and the edges it read
     compared: RefCell<Vec<Option<(usize, usize, usize)>>>,
+    /// Per `ranked` stage: the bound on its scores' distance from PageRank
+    errors: RefCell<Vec<Option<f64>>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
@@ -1770,6 +1892,7 @@ impl Stages {
             nanos: (0..n).map(|_| Cell::new(0)).collect(),
             graph: RefCell::new(vec![None; n]),
             compared: RefCell::new(vec![None; n]),
+            errors: RefCell::new(vec![None; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -1801,7 +1924,11 @@ impl Stages {
     }
 
     fn reads_index(&self, name: &str) {
-        let at = self.running.get();
+        self.reads_index_at(self.running.get(), name);
+    }
+
+    /// The index stage `at` read, which a stage another reads for names (`limit` reading a `ranked` index's top)
+    fn reads_index_at(&self, at: usize, name: &str) {
         let mut index = self.index.borrow_mut();
         index[at] = Some(match index[at].take() {
             Some(held) if held != name => format!("{held}, {name}"),
@@ -1817,6 +1944,10 @@ impl Stages {
         if let Some(graphed) = &mut self.graph.borrow_mut()[stage] {
             graphed.rounds = Some((iterations, converged));
         }
+    }
+
+    fn rank_error(&self, stage: usize, error: f64) {
+        self.errors.borrow_mut()[stage] = Some(error);
     }
 
     fn compared(&self, stage: usize, neighbours: usize, candidates: usize, edges: usize) {
@@ -1843,6 +1974,7 @@ impl Stages {
         let index = self.index.borrow();
         let graph = self.graph.borrow();
         let compared = self.compared.borrow();
+        let errors = self.errors.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -1858,7 +1990,7 @@ impl Stages {
                     2 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
-            let extra = extra + if compared[at].is_some() { 3 } else { 0 };
+            let extra = extra + if compared[at].is_some() { 3 } else { 0 } + u32::from(errors[at].is_some());
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -1885,6 +2017,10 @@ impl Stages {
                     w.str("cycles");
                     w.uint(u64::from(cycles));
                 }
+            }
+            if let Some(error) = errors[at] {
+                w.str("error");
+                rmp::encode::write_f64(w.0, error).expect("a Vec");
             }
             if let Some((neighbours, candidates, edges)) = compared[at] {
                 w.str("neighbours");
@@ -1933,6 +2069,7 @@ fn step_name(step: &Step) -> &'static str {
         Step::Ancestors { .. } => "ancestors",
         Step::PathTo { .. } => "pathTo",
         Step::Rank { .. } => "rank",
+        Step::Ranked { .. } => "ranked",
         Step::Topological { .. } => "topological",
         Step::Similar { .. } => "similar",
         Step::OrderBy { .. } => "orderBy",
@@ -2178,7 +2315,7 @@ fn query_with(
         hits: RefCell::new(HashMap::default()),
         backward_hop: Cell::new(None),
         walked_back: Cell::new(None),
-        ranked: Cell::new(None),
+        ranked: RefCell::new(None),
     };
     let last = plan.steps.len();
     let mut w = W(out);
@@ -2407,6 +2544,7 @@ fn query_with(
                         | Step::Like { .. }
                         | Step::Hybrid { .. }
                         | Step::Rank { .. }
+                        | Step::Ranked { .. }
                         | Step::Similar { .. }
                 )
             };
@@ -2418,16 +2556,27 @@ fn query_with(
             }
             let ids = q.collect(last)?;
             let hits = q.hits.borrow();
-            let ranked = q.ranked.get();
+            let ranked = q.ranked.borrow();
             w.map(if ranked.is_some() { 4 } else { 3 });
             w.kind("hits");
-            if let Some((converged, iterations)) = ranked {
-                w.str("rank");
-                w.map(2);
-                w.str("converged");
-                w.bool(converged);
-                w.str("iterations");
-                w.uint(u64::from(iterations));
+            match &*ranked {
+                Some(Scored::Rank { converged, iterations }) => {
+                    w.str("rank");
+                    w.map(2);
+                    w.str("converged");
+                    w.bool(*converged);
+                    w.str("iterations");
+                    w.uint(u64::from(*iterations));
+                }
+                Some(Scored::Ranked { index, error }) => {
+                    w.str("rank");
+                    w.map(2);
+                    w.str("index");
+                    w.str(index);
+                    w.str("error");
+                    rmp::encode::write_f64(w.0, *error).expect("a Vec");
+                }
+                None => {}
             }
             w.str("hits");
             let start = w.0.len();

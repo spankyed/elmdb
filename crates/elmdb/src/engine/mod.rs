@@ -18,6 +18,7 @@ mod keys;
 pub mod maintenance;
 mod numbering;
 pub mod plan;
+mod ranks;
 mod reads;
 mod relations;
 mod text;
@@ -61,6 +62,30 @@ fn finish_commit(
     watch::deliver(tracks, store, schema, &touched.watches);
     commit.finish()?;
     Ok(changes)
+}
+
+/// How the builder's rank chunks commit: as a write does, each telling the watches whose reads it wrote into
+pub(crate) fn drain_commits(
+    tracks: watch::SharedTracks,
+    store: Arc<Store>,
+    observing: Arc<RwLock<Arc<EngineSchema>>>,
+    schema: Arc<EngineSchema>,
+) -> builder::Commits {
+    Arc::new(move |chunk| {
+        let logging = !tracks.lock().is_empty();
+        let ((done, written), commit) = store.write_committed(
+            |txn, db| {
+                schema.validate(txn, db)?;
+                let mut state = UnitState::new(logging);
+                let mut t = Txn { txn, db, state: &mut state, schema: &schema, now: now_ms() };
+                let done = chunk(&mut t)?;
+                Ok((done, state.written.take()))
+            },
+            false,
+        )?;
+        finish_commit(&tracks, &store, &observing, ChangeSet::default(), written.as_ref(), commit)?;
+        Ok(done)
+    })
 }
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
@@ -127,6 +152,19 @@ pub(crate) fn drop_index_data(
     use crate::schema::Effect;
     for change in changes.iter().filter(|c| matches!(c.effect, Effect::Drops | Effect::Rebuilds)) {
         let parts: Vec<&str> = change.path.split('.').collect();
+        if let ["ranks", name] = parts.as_slice() {
+            for prefix in [keys::rank_nodes(name), keys::rank_orders(name), keys::rank_queue(name)] {
+                let (low, high) = crate::format::key::prefix_range(&prefix);
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let doomed: Vec<Vec<u8>> =
+                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                for key in doomed {
+                    db.delete(txn, &key)?;
+                }
+            }
+            db.delete(txn, &keys::rank_totals(name))?;
+            continue;
+        }
         if let ["types", entity_type, "indexes", index] = parts.as_slice() {
             let (low, high) = crate::format::key::prefix_range(&keys::index_range(entity_type, index, &[]));
             let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
@@ -240,24 +278,39 @@ pub(crate) fn held_in(
     Ok(held)
 }
 
-type IndexList = Vec<(String, String)>;
+type IndexList = Vec<Work>;
 
 fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
     let mut empty = Vec::new();
     let mut unbuilt = Vec::new();
-    for entity_type in r.schema().types.keys() {
-        let mut has_entities = false;
-        for trashed in [false, true] {
-            r.visit(&keys::type_range(trashed, entity_type), |_, _| {
-                has_entities = true;
+    let has_entities = |entity_type: &str, trashed_too: bool| -> Result<bool> {
+        let mut found = false;
+        for trashed in if trashed_too { &[false, true][..] } else { &[false][..] } {
+            r.visit(&keys::type_range(*trashed, entity_type), |_, _| {
+                found = true;
                 false
             })?;
         }
+        Ok(found)
+    };
+    for entity_type in r.schema().types.keys() {
+        let held = has_entities(entity_type, true)?;
         for index in derive::index_names(r.schema(), entity_type) {
             if !derive::is_built(r, entity_type, &index)? {
-                if has_entities { &mut unbuilt } else { &mut empty }.push((entity_type.clone(), index));
+                let work = Work::Index { entity_type: entity_type.clone(), index };
+                if held { &mut unbuilt } else { &mut empty }.push(work);
             }
         }
+    }
+    // A rank index's nodes are live entities: one over types with none is built empty
+    for name in ranks::unfinished(r)? {
+        let def = &r.schema().ranks[&name];
+        let mut held = false;
+        for entity_type in &def.types {
+            held |= has_entities(entity_type, false)?;
+        }
+        let built = ranks::totals(r, &name)?.stage != ranks::Stage::Joining;
+        if held || built { &mut unbuilt } else { &mut empty }.push(Work::Rank { name });
     }
     Ok((empty, unbuilt))
 }
@@ -265,8 +318,13 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
 /// Marks empty types' indexes built inside the mutation that changes their contents or declaration.
 pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     let (empty, unbuilt) = unbuilt_indexes(t)?;
-    for (entity_type, index) in empty {
-        t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+    for work in empty {
+        match work {
+            Work::Index { entity_type, index } => {
+                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?
+            }
+            Work::Rank { name } => ranks::rebuild(t, &name)?,
+        }
     }
     Ok(unbuilt)
 }
@@ -302,7 +360,7 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
     Ok((unbuilt, None))
 }
 
-pub(crate) use builder::Builder;
+pub(crate) use builder::{Builder, Work};
 
 /// What a write's caller gets back across the binding: each operation's answer, and the commit's change set
 #[derive(Debug, Clone, serde::Serialize)]
@@ -385,13 +443,14 @@ impl Database {
         let schema = self.schema_guard();
         let store = self.store()?;
         let now = now_ms();
-        let ((), mut commit) = store.write_committed(
+        let (waiting, mut commit) = store.write_committed(
             |txn, db| {
                 schema.validate(txn, db)?;
                 let mut state = UnitState::default();
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
-                vector::flush(&mut t)
+                vector::flush(&mut t)?;
+                ranks::push_at_commit(&mut t)
             },
             !recycle,
         )?;
@@ -402,7 +461,11 @@ impl Database {
             commit.synced = store.committed(true);
         }
         drop(schema);
-        self.finish_admin_commit(&store, commit)
+        self.finish_admin_commit(&store, commit)?;
+        if let Some(builders) = self.builders()? {
+            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+        }
+        Ok(())
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
@@ -435,7 +498,9 @@ impl Database {
             let mut out = Vec::new();
             for entity_type in schema.types.keys() {
                 for index in entities::value_indexes(&schema, entity_type) {
-                    let failure = failures.iter().find(|f| f.entity_type == *entity_type && f.index == index.name);
+                    let failure = failures.iter().find(|f| {
+                        matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
+                    });
                     out.push(IndexStatus {
                         entity_type: entity_type.clone(),
                         index: index.name.clone(),
@@ -504,7 +569,7 @@ impl Database {
         let store = self.store()?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
-        let ((results, changes, written), commit) = store.write_committed(
+        let ((results, changes, written, waiting), commit) = store.write_committed(
             |txn, db| {
                 schema.validate(txn, db)?;
                 let mut state = UnitState::new(logging);
@@ -512,12 +577,16 @@ impl Database {
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
-                Ok((results, ChangeSet::of(&state.events), state.written.take()))
+                let waiting = ranks::push_at_commit(&mut t)?;
+                Ok((results, ChangeSet::of(&state.events), state.written.take(), waiting))
             },
             durable,
         )?;
         drop(schema);
         let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
+        if let Some(builders) = self.builders()? {
+            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+        }
         Ok((results, changes))
     }
 
@@ -560,6 +629,7 @@ impl Database {
             gate: Some(gate),
             schema,
             store,
+            builders: self.builders()?,
             _thread: PhantomData,
         })
     }
@@ -579,6 +649,8 @@ pub struct Unit {
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
+    /// The builder the rank indexes' pushes its commit leaves go to
+    builders: Option<crate::database::Builders>,
     _thread: PhantomData<*const ()>,
 }
 
@@ -667,12 +739,16 @@ impl Unit {
     pub fn commit(mut self, durable: bool) -> Result<ChangeSet> {
         let checked = self.view(0.0).and_then(|mut t| {
             run_checks(&t)?;
-            vector::flush(&mut t)
+            vector::flush(&mut t)?;
+            ranks::push_at_commit(&mut t)
         });
-        if let Err(error) = checked {
-            self.abort();
-            return Err(error);
-        }
+        let waiting = match checked {
+            Ok(waiting) => waiting,
+            Err(error) => {
+                self.abort();
+                return Err(error);
+            }
+        };
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         let committed = self.store.commit_txn(txn);
@@ -680,14 +756,18 @@ impl Unit {
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        finish_commit(
+        let changes = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },
-        )
+        )?;
+        if let Some(builders) = &self.builders {
+            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+        }
+        Ok(changes)
     }
 
     /// Ends the unit, keeping nothing of it

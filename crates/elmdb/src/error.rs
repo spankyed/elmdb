@@ -84,8 +84,11 @@ pub enum ErrorCode {
     Unique,
     /// An operation a unit can't hold, made while one is open, or a second unit begun
     UnitOpen,
-    /// A search naming an index its type doesn't have, or none on a type with no text index or with several
+    /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
+    /// `ranked` step naming no rank index
     UnknownIndex,
+    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
+    IndexBuilding,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
@@ -147,6 +150,7 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::IndexBuilding => "INDEX_BUILDING",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
@@ -239,6 +243,8 @@ mod tests {
             ErrorCode::Cycle,
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
+            ErrorCode::UnknownIndex,
+            ErrorCode::IndexBuilding,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
