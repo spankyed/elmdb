@@ -101,6 +101,11 @@ fn the_engine_never_installs_a_collector_and_one_installed_hears_every_operation
         !sorts.is_empty() && sorts.iter().all(|s| s.parent() == Some(names::REBUILD)),
         "a rebuild's sorts are its own"
     );
+    // And by id, each sort of the one-index rebuild under that rebuild, not another of the same name
+    let one_index = rebuilds[0].field("id");
+    assert!(sorts.iter().any(|s| s.field("parent_id") == one_index), "{one_index}");
+    let ids: std::collections::HashSet<String> = heard.iter().map(|h| h.field("id")).collect();
+    assert_eq!(ids.len(), heard.len(), "every span its own id");
     assert!(sorts.iter().all(|s| s.field(names::OUTCOME) == "sorted"));
     // One index's entries: eight tags for each of the 200 entities
     assert_eq!(sorts[0].field(names::ROWS), "1600");
