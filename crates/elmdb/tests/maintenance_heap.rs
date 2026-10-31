@@ -105,6 +105,13 @@ fn maintenance_heap_bounds() {
             black_box(fixture.db.read(&fixture.graph_read(read)).unwrap());
         });
     }
+    // A weighted rank holds each edge's weight beside its target, 8 bytes an edge, and each node's total, 8 bytes a node:
+    // some 48 bytes an entity more at five edges, 184 in all, measured on an Apple M1 Pro on 2026-10-31, which leaves
+    // the unweighted allowance too little room for the graph's run-to-run share
+    let weighted = |rows| Fixture::weighted_graph(rows, 5);
+    measure_growth("rankWeighted", 256, [5_000, 10_000], weighted, |fixture| {
+        black_box(fixture.db.read(&fixture.graph_read("rankWeighted")).unwrap());
+    });
     // Communities copy the graph into leiden-rs's own: its builder's edge list at 24 bytes an edge, and its CSR holding
     // each edge both ways at 16 bytes a side, some 280 bytes an entity at five edges, beside its partition and the
     // statistics it moves nodes by: about 764 bytes an entity, measured
