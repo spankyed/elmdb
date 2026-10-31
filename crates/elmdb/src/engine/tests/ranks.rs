@@ -495,6 +495,12 @@ fn topological_puts_what_blocks_before_what_it_blocks_and_keeps_a_cycle_together
         (&stage["stage"], &stage["nodes"], &stage["edges"], &stage["cycles"]),
         (&json!("topological"), &json!(5), &json!(5), &json!(1))
     );
+    // The stage's every field reads, and so does the terminal's after it: a miscounted stage would spill into the next
+    assert_eq!((&stage["kept"], &stage["visited"]), (&json!(5), &json!(5)), "{stage}");
+    assert!(stage["ms"].is_number(), "{stage}");
+    let stages = explained[0]["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 3, "{explained}");
+    assert_eq!(stages[2]["stage"], json!("ids"));
 }
 
 #[test]

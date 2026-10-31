@@ -168,7 +168,8 @@ pub fn topological_order(graph: &Projection) -> Ordered {
     let mut cycles = 0u32;
     let mut waiting = vec![0u32; groups.len()];
     for (at, group) in groups.iter().enumerate() {
-        let mut looped = group.len() > 1;
+        // A component of more than one node holds an edge between two of them, so an edge inside is what makes a cycle
+        let mut looped = false;
         for &v in group {
             for &w in graph.out(v as usize) {
                 let to = group_of[w as usize];
