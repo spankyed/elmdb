@@ -1,3 +1,4 @@
+import { WatchCauses } from './observation.ts';
 // Live reads: `watch` runs a read with every database read it makes tracked under a token of its own, which elmdb files
 // in its interval index (`elmdb/docs/architecture/engine.md`, Change sets and watch), and runs it again after each
 // commit that names the token, handing the listener the result when it changed. A result equal to the last delivered is
@@ -72,8 +73,7 @@ interface Watch {
   token: number;
   label: string;
   read: (context: WatchReadContext | undefined) => unknown;
-  recordCauses?: () => boolean;
-  causes?: { sequences: Set<number>; dropped: number };
+  causes?: WatchCauses;
   observer: WatchObserver<unknown>;
   /** What was last delivered: a value, an error, or nothing yet */
   last: { ok: true; value: unknown } | { ok: false; error: unknown } | undefined;
@@ -169,18 +169,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     const marked = commit.touched === 'all' ? [...open.values()]
       : [...commit.touched].flatMap((token) => open.get(token) ?? []);
     for (const watch of marked) {
-      if (watch.recordCauses) {
-        try {
-          if (watch.recordCauses()) {
-            const causes = watch.causes ??= { sequences: new Set(), dropped: 0 };
-            if (causes.sequences.size < 32 || causes.sequences.has(commit.sequence)) causes.sequences.add(commit.sequence);
-            else causes.dropped++;
-          } else watch.causes = undefined;
-        } catch {
-          const causes = watch.causes ??= { sequences: new Set(), dropped: 0 };
-          causes.dropped++;
-        }
-      }
+      watch.causes?.add(commit.sequence);
       // A commit landing on a watch already waiting is one whose state the coming run skips
       if (dirty.has(watch)) connection.tally()?.watchSkipped(watch.label);
       else dirty.add(watch);
@@ -194,9 +183,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     // What the token held was the last run's: this run's reads replace it
     connection.untrack(watch.token);
     const started = clock.now();
-    const causes = watch.causes;
-    watch.causes = undefined;
-    const context = causes && Object.freeze({ sequences: Object.freeze([...causes.sequences]), dropped: causes.dropped });
+    const context = watch.causes?.take();
     let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
     try {
       outcome = { ok: true, value: connection.track(watch.token, () => watch.read(context)) };
@@ -312,7 +299,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         token: nextToken++,
         label: options?.label ?? callSite(),
         read,
-        recordCauses: options?.recordCauses,
+        causes: options?.recordCauses && new WatchCauses(options.recordCauses),
         observer: (typeof observer === 'function' ? { next: observer } : observer) as WatchObserver<unknown>,
         last: undefined,
         stopped: false,
