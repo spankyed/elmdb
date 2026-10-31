@@ -303,3 +303,57 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     drop(store);
     db.close().unwrap();
 }
+
+/// A schema stored before its canonical form gained a field: its stored text lacks the field, and its stored
+/// fingerprint is that text's. An open that changes nothing validates against that stored fingerprint, so the database
+/// reads as it did; only an open that writes a schema stores a fingerprint of today's form
+#[test]
+fn a_schema_stored_before_its_canonical_form_grew_a_field_still_opens_and_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let with_kind = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE,
+        "relations":{"refs":{"cardinality":"many-to-many"}},
+        "types":{"Task":{"fields":{"a":{"type":"string"}}}}}))
+    .unwrap();
+    let options =
+        |schema: Option<Schema>, read_only: bool| OpenOptions { schema, read_only, syncs: false, ..Default::default() };
+    {
+        let db = Database::open(dir.path(), options(Some(with_kind.clone()), false)).unwrap();
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": "match" } })])
+            .unwrap();
+        // The stored text as an older canonical form wrote it, its stored fingerprint left as it is
+        let store = db.store().unwrap();
+        store
+            .write(
+                |txn, d| {
+                    let key = crate::store::meta_key(crate::format::meta::SCHEMA);
+                    let held = String::from_utf8(d.main.get(txn, &key)?.unwrap().to_vec()).unwrap();
+                    let older = held.replace(",\"weighted\":false", "");
+                    assert_ne!(older, held, "the older form lacks the field");
+                    // Its fingerprint is the one that form had: the SHA-256 of the text as stored
+                    use sha2::Digest;
+                    let fingerprint: String =
+                        sha2::Sha256::digest(older.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+                    crate::store::put_meta(txn, d.main, crate::format::meta::SCHEMA, older.as_bytes())?;
+                    crate::store::put_meta(txn, d.main, crate::format::meta::SCHEMA_HASH, fingerprint.as_bytes())
+                },
+                false,
+            )
+            .unwrap();
+        drop(store);
+        db.close().unwrap();
+    }
+    let reads = || {
+        serde_json::from_value::<crate::engine::plan::Reads>(json!({"reads":[{"read":"query",
+            "plan":{"start":{"from":"types","types":["Task"]},"terminal":{"answer":"count"}}}]}))
+        .unwrap()
+    };
+    for (schema, read_only) in [(None, false), (None, true), (Some(with_kind.clone()), true)] {
+        let db = Database::open(dir.path(), options(schema.clone(), read_only)).unwrap();
+        db.read(&reads()).unwrap_or_else(|e| panic!("given {:?}, read-only {read_only}: {e:?}", schema.is_some()));
+        assert!(db.check().unwrap().is_clean());
+        db.close().unwrap();
+    }
+    // A writable open with the schema stores today's form and its fingerprint, and reads as before
+    let db = Database::open(dir.path(), options(Some(with_kind), false)).unwrap();
+    db.read(&reads()).unwrap();
+}

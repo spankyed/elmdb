@@ -86,8 +86,10 @@ pub(crate) struct EngineSchema {
 }
 
 impl EngineSchema {
-    pub(crate) fn new(schema: Option<Schema>) -> Self {
-        let hash = schema.as_ref().map(|schema| schema.hash().into_bytes());
+    /// A schema as the database holds it, with the fingerprint stored beside it. A fingerprint computed again could
+    /// differ, the canonical form having since gained a field, and would then refuse every read of an unchanged
+    /// database as changed by another process
+    pub(crate) fn stored(schema: Option<Schema>, hash: Option<Vec<u8>>) -> Self {
         Self { schema: schema.unwrap_or_else(empty_schema), hash, hash_key: crate::store::meta_key(meta::SCHEMA_HASH) }
     }
 
@@ -122,7 +124,7 @@ impl Database {
                 map_size_bytes: options.map_size_bytes,
             },
         )?;
-        let AppliedSchema { schema, report, unbuilt, commit } = match apply_schema(&store, options.schema, None) {
+        let AppliedSchema { schema, hash, report, unbuilt, commit } = match apply_schema(&store, options.schema, None) {
             Ok(applied) => applied,
             Err(error) => {
                 let _ = store.close();
@@ -135,7 +137,7 @@ impl Database {
             let _ = store.close();
             return Err(error);
         }
-        let engine_schema = Arc::new(EngineSchema::new(schema.clone()));
+        let engine_schema = Arc::new(EngineSchema::stored(schema.clone(), hash));
         let store = Arc::new(store);
         let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
             let builder = crate::engine::Builder::start(Arc::clone(&store), Arc::clone(&engine_schema));
@@ -195,7 +197,7 @@ impl Database {
         };
         let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
-            *current = Arc::new(EngineSchema::new(applied.schema.clone()));
+            *current = Arc::new(EngineSchema::stored(applied.schema.clone(), applied.hash.clone()));
             *self.schema.write() = applied.schema.clone();
         }
         if applied.is_err() {
@@ -357,14 +359,17 @@ impl Drop for Database {
 /// The installed declaration and pending builds, with a completed transaction's sync outcome kept separate.
 struct AppliedSchema {
     schema: Option<Schema>,
+    /// The fingerprint stored beside the schema, which the handle validates against
+    hash: Option<Vec<u8>>,
     report: OpenReport,
     unbuilt: Vec<(String, String)>,
     commit: Option<crate::store::Commit>,
 }
 
-fn unchanged_schema(store: &Store, schema: Option<Schema>) -> Result<AppliedSchema> {
-    let (unbuilt, commit) = crate::engine::settle_indexes_committed(store, &EngineSchema::new(schema.clone()))?;
-    Ok(AppliedSchema { schema, report: OpenReport::default(), unbuilt, commit })
+fn unchanged_schema(store: &Store, schema: Option<Schema>, hash: Option<Vec<u8>>) -> Result<AppliedSchema> {
+    let (unbuilt, commit) =
+        crate::engine::settle_indexes_committed(store, &EngineSchema::stored(schema.clone(), hash.clone()))?;
+    Ok(AppliedSchema { schema, hash, report: OpenReport::default(), unbuilt, commit })
 }
 
 /// Compares declarations and atomically installs the schema, index removals and empty-index markers.
@@ -375,17 +380,22 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
         if let Some(expected) = expected {
             expected.validate(txn, db)?;
         }
-        Ok(db.get(txn, &crate::store::meta_key(meta::SCHEMA))?.map(<[u8]>::to_vec))
+        let schema = db.get(txn, &crate::store::meta_key(meta::SCHEMA))?.map(<[u8]>::to_vec);
+        let hash = db.get(txn, &crate::store::meta_key(meta::SCHEMA_HASH))?.map(<[u8]>::to_vec);
+        Ok((schema, hash))
     })?;
+    let (bytes, stored_hash) = bytes;
     let stored = match bytes {
         Some(bytes) => Some(Schema::from_canonical(&String::from_utf8_lossy(&bytes))?),
         None => None,
     };
-    let Some(given) = given else { return unchanged_schema(store, stored) };
+    // Whether the given schema means what the stored one does is asked of both in today's canonical form; which
+    // fingerprint a handle validates against is the stored one, until a change writes another
+    let Some(given) = given else { return unchanged_schema(store, stored, stored_hash) };
     if stored.as_ref().is_some_and(|s| s.hash() == given.hash()) {
-        return unchanged_schema(store, stored);
+        return unchanged_schema(store, stored, stored_hash);
     }
-    let version = EngineSchema::new(stored);
+    let version = EngineSchema::stored(stored, stored_hash);
     if store.is_read_only() {
         return Err(Error::new(
             ErrorCode::SchemaChangeRefused,
@@ -424,6 +434,7 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
     )?;
     Ok(AppliedSchema {
         schema: Some(given),
+        hash: Some(hash.into_bytes()),
         report: OpenReport { schema_changes: changes },
         unbuilt,
         commit: Some(commit),
