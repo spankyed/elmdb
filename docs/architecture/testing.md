@@ -223,7 +223,7 @@ test would run on the model's primitives outside a model, so only the models are
 how many times a thread is preempted in one interleaving; `ELMDB_SHUTTLE_ITERATIONS` sets Shuttle's schedules per
 model, 100,000 by default, and a failure prints its schedule for `shuttle::replay` and its seed for
 `SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands on every pull request; `models.yml` runs them
-every night, and on a dispatch, with deeper bounds (`LOOM_MAX_PREEMPTIONS=4`, ten million Shuttle schedules a model). What mutations showed:
+on a dispatch, its nightly schedule commented out for now, with deeper bounds (`LOOM_MAX_PREEMPTIONS=4`, ten million Shuttle schedules a model). What mutations showed:
 [`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md) and
 [`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md).
 

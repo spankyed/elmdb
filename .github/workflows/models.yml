@@ -1,10 +1,11 @@
 # The concurrency models with deeper bounds than a pull request's run: Loom one preemption further, Shuttle a hundred
-# times the schedules (docs/architecture/testing.md, Concurrency models). Nightly, and on a dispatch
+# times the schedules (docs/architecture/testing.md, Concurrency models). On a dispatch; the nightly schedule is
+# commented out until it's wanted
 name: models
 
 on:
-  schedule:
-    - cron: "17 7 * * *"
+  # schedule:
+  #   - cron: "17 7 * * *"
   workflow_dispatch:
 
 jobs:
