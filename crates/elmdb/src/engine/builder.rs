@@ -21,6 +21,11 @@ use super::unit::{Txn, UnitState};
 /// How many entities one unit of a build covers
 const CHUNK: usize = 1000;
 
+/// How many pushes one unit of a rank index's drain makes in memory, about 10 ms a million (2026-10-31, Apple M1 Pro,
+/// release), so a drain finishes in one unit, writing each node it moved once, rather than in several each writing
+/// them again
+const DRAIN_PUSHES: usize = 20_000_000;
+
 /// What the thread does: build a type's index, or build or drain a rank index
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
@@ -261,7 +266,7 @@ fn build_rank(
     }
     chunks(store, stopping, || {
         commits(&mut |t| {
-            if super::ranks::push(t, name, CHUNK)? {
+            if super::ranks::drain(t, name, DRAIN_PUSHES)? {
                 return Ok(false);
             }
             super::ranks::settle(t, name)?;

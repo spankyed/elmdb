@@ -34,7 +34,7 @@ use super::unit::{Read, Txn};
 use super::{algorithms, entities};
 
 /// How many nodes a commit pushes per index before leaving the rest to the drain
-pub const COMMIT_PUSHES: usize = 256;
+pub const COMMIT_PUSHES: usize = 16;
 
 /// A rank index's node as stored
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,6 +155,15 @@ impl Totals {
         let keep = 1.0 - damping;
         2.0 * self.residuals / (keep * keep * self.nodes as f64)
     }
+}
+
+/// A node's place in its index's score order: its estimate kept to 16 significant bits, so a push that moves the
+/// estimate less than that leaves the order's entry as it is. An edge changed moves nearly every estimate a little;
+/// rewriting each one's entry would be most of what a drain writes. The order is promised only between scores further
+/// apart than twice the bound an index reports, far coarser than this, and a `ranked` read sorts by the estimates
+/// themselves
+fn order_key(index: &str, node: &Node) -> Vec<u8> {
+    keys::rank_order(index, f64::from_bits(node.x.to_bits() & !((1u64 << 36) - 1)), node.type_at, node.seq)
 }
 
 /// A rank index's totals, or empty ones for an index nothing has written yet
@@ -481,8 +490,8 @@ impl<'i, 'a> Change<'i, 'a> {
                 continue;
             }
             if let Some(b) = before {
-                if after.is_none_or(|a| a.x != b.x || a.type_at != b.type_at || a.seq != b.seq) {
-                    t.del(&keys::rank_order(name, b.x, b.type_at, b.seq))?;
+                if after.is_none_or(|a| order_key(name, &a) != order_key(name, b)) {
+                    t.del(&order_key(name, b))?;
                 }
                 if b.r.abs() > threshold && after.is_none_or(|a| a.r.abs() <= threshold) {
                     t.del(&keys::rank_queued(name, b.type_at, b.seq))?;
@@ -491,8 +500,8 @@ impl<'i, 'a> Change<'i, 'a> {
             match after {
                 Some(a) => {
                     t.put(&keys::rank_node(name, id), &a.encode())?;
-                    if before.is_none_or(|b| a.x != b.x || a.type_at != b.type_at || a.seq != b.seq) {
-                        t.put(&keys::rank_order(name, a.x, a.type_at, a.seq), id.as_bytes())?;
+                    if before.is_none_or(|b| order_key(name, a) != order_key(name, &b)) {
+                        t.put(&order_key(name, a), id.as_bytes())?;
                     }
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
                         t.put(&keys::rank_queued(name, a.type_at, a.seq), id.as_bytes())?;
@@ -583,6 +592,132 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     change.totals.swept = after;
     let waiting = !change.waiting.is_empty() || change.next_waiting(t, None)?.is_some();
     change.finish(t)?;
+    Ok(waiting)
+}
+
+/// Drains a rank index in memory: its nodes and their arcs read once, pushed in the same sweep `push` makes until none
+/// waits or `limit` pushes are made, and the nodes whose estimate or residual moved written back once. Reading the
+/// graph costs what one `rank` read does; a push in memory then costs what an arc costs, where a push through the
+/// store costs its reads and writes. Whether any still wait
+pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
+    let schema = t.schema;
+    let Some(def) = schema.ranks.get(index) else { return Ok(false) };
+    let index = Index::new(index, def, schema);
+    let held = totals(t, index.name)?;
+    // The nodes in place order, which is the sweep's
+    let mut ids: Vec<String> = Vec::new();
+    let mut nodes: Vec<Node> = Vec::new();
+    let mut failed = None;
+    t.visit(&keys::rank_nodes(index.name), |key, bytes| {
+        let id = match crate::format::key::decode(key).ok().and_then(|p| p.into_iter().nth(2)) {
+            Some(crate::format::key::Part::String(id)) => id,
+            _ => {
+                failed = Some(Error::new(ErrorCode::Corrupted, "A rank index's node key doesn't read"));
+                return false;
+            }
+        };
+        match Node::decode(bytes) {
+            Ok(n) => {
+                ids.push(id);
+                nodes.push(n);
+                true
+            }
+            Err(e) => {
+                failed = Some(e);
+                false
+            }
+        }
+    })?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    order.sort_by_key(|&at| (nodes[at].type_at, nodes[at].seq));
+    let ids: Vec<String> = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
+    let mut nodes: Vec<Node> = order.iter().map(|&at| nodes[at]).collect();
+    let before = nodes.clone();
+    let place: std::collections::HashMap<&str, usize> =
+        ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
+    // Each node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order
+    let mut arcs: Vec<Vec<(usize, f64)>> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let mut out = Vec::new();
+        for kind in &def.relations {
+            for &outward in def.direction.sides() {
+                relations::visit_far_ends(t, id, outward, Some(kind), |far, weight| {
+                    if let Some(&to) = place.get(far) {
+                        out.push((to, index.weight(kind, weight)));
+                    }
+                    Ok(true)
+                })?;
+            }
+        }
+        arcs.push(out);
+    }
+    let threshold = index.threshold;
+    let alpha = def.damping;
+    let n = nodes.len();
+    // The sweep starts after the place pushed last
+    let mut at = match held.swept {
+        Some(swept) => nodes.partition_point(|node| (node.type_at, node.seq) <= swept),
+        None => 0,
+    };
+    let mut pushes = 0;
+    let mut since_push = 0;
+    while pushes < limit && n > 0 && since_push < n {
+        if at == n {
+            at = 0;
+        }
+        let u = at;
+        at += 1;
+        if nodes[u].r.abs() <= threshold {
+            since_push += 1;
+            continue;
+        }
+        since_push = 0;
+        let residual = nodes[u].r;
+        if nodes[u].w > 0.0 {
+            let share = alpha * residual / nodes[u].w;
+            for &(v, weight) in &arcs[u] {
+                nodes[v].r += share * weight;
+            }
+        }
+        nodes[u].x += residual;
+        nodes[u].r = 0.0;
+        pushes += 1;
+    }
+    let swept = (pushes > 0).then(|| {
+        let last = if at == 0 { n - 1 } else { at - 1 };
+        (nodes[last].type_at, nodes[last].seq)
+    });
+    let waiting = nodes.iter().any(|node| node.r.abs() > threshold);
+    // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
+    for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
+        if old == new {
+            continue;
+        }
+        let id = &ids[at];
+        t.put(&keys::rank_node(index.name, id), &new.encode())?;
+        let (from, to) = (order_key(index.name, old), order_key(index.name, new));
+        if from != to {
+            t.del(&from)?;
+            t.put(&to, id.as_bytes())?;
+        }
+        let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
+        if was && !is {
+            t.del(&keys::rank_queued(index.name, old.type_at, old.seq))?;
+        } else if is && !was {
+            t.put(&keys::rank_queued(index.name, new.type_at, new.seq), id.as_bytes())?;
+        }
+    }
+    let totals = Totals {
+        nodes: n as u64,
+        estimates: nodes.iter().map(|node| node.x).sum(),
+        residuals: nodes.iter().map(|node| node.r.abs()).sum(),
+        stage: held.stage,
+        swept: swept.or(held.swept),
+    };
+    t.put(&keys::rank_totals(index.name), &totals.encode())?;
     Ok(waiting)
 }
 
@@ -692,7 +827,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     while let Some(last) = join_chunk(t, index, after, 1000)? {
         after = Some(last);
     }
-    while push(t, index, 1000)? {}
+    while drain(t, index, usize::MAX)? {}
     settle(t, index)
 }
 
@@ -806,7 +941,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         })?;
         let mut expected_queued = 0usize;
         for (id, n) in &nodes {
-            if !r.contains(&keys::rank_order(name, n.x, n.type_at, n.seq))? {
+            if !r.contains(&order_key(name, n))? {
                 out.push(violation(format!("{id} is missing from the score order")));
             }
             if n.r.abs() > index.threshold {
