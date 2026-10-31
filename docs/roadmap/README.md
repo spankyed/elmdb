@@ -18,6 +18,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
 | [Graph algorithms](graph-algorithms.md) | Planned: connected components, PageRank and personalized PageRank, Leiden communities, as plan steps over the plan's set |
+| [Rank index](rank-index.md) | Designed: PageRank scores declared as an index and kept current by each commit, read instead of computed |
 
 ## Development improvements
 
