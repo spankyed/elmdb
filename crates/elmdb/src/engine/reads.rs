@@ -1718,6 +1718,7 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::Edges { .. } => "edges",
         Terminal::Degrees { .. } => "degrees",
         Terminal::WeakComponents { .. } => "weakComponents",
+        Terminal::Communities { .. } => "communities",
         Terminal::GroupBy { .. } => "groupBy",
         Terminal::Hits { .. } => "hits",
     }
@@ -2077,6 +2078,30 @@ fn query_with(
                     w.uint(group.len() as u64);
                     continue;
                 }
+                w.array(group.len() as u32);
+                for &at in group {
+                    w.str(&ids[at as usize]);
+                }
+            }
+        }
+        Terminal::Communities { kinds, resolution, seed, iterations } => {
+            // NaN is not finite
+            if !(resolution.is_finite() && *resolution >= 0.0) || *iterations == 0 {
+                return Err(Error::new(
+                    ErrorCode::BatchInvalid,
+                    format!(
+                        "communities takes a resolution of at least 0 and at least one iteration, and was given \
+                         {resolution} and {iterations}"
+                    ),
+                ));
+            }
+            let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out)?;
+            let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
+            w.map(2);
+            w.kind("communities");
+            w.str("communities");
+            w.array(groups.len() as u32);
+            for group in &groups {
                 w.array(group.len() as u32);
                 for &at in group {
                     w.str(&ids[at as usize]);

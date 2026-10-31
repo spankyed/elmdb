@@ -4,7 +4,7 @@
 
 use proptest::prelude::*;
 
-use super::{Projection, rank, weak_components};
+use super::{Projection, communities, rank, weak_components};
 
 const KARATE_EDGES: [(u32, u32); 78] = [
     (0, 1),
@@ -426,4 +426,98 @@ fn the_same_graph_ranks_to_the_same_bits_on_every_platform() {
 
 fn bits(scores: &[f64]) -> Vec<u64> {
     scores.iter().map(|s| s.to_bits()).collect()
+}
+
+/// Newman's modularity of a partition of an undirected graph, each listed edge once, as its definition reads
+fn modularity(n: usize, edges: &[(u32, u32)], groups: &[Vec<u32>], resolution: f64) -> f64 {
+    let m = edges.len() as f64;
+    if m == 0.0 {
+        return 0.0;
+    }
+    let mut community = vec![0usize; n];
+    for (c, group) in groups.iter().enumerate() {
+        group.iter().for_each(|&v| community[v as usize] = c);
+    }
+    let mut degree = vec![0.0; n];
+    let mut inside = vec![0.0; groups.len()];
+    for &(a, b) in edges {
+        degree[a as usize] += 1.0;
+        degree[b as usize] += 1.0;
+        if community[a as usize] == community[b as usize] {
+            inside[community[a as usize]] += 1.0;
+        }
+    }
+    let mut total = vec![0.0; groups.len()];
+    (0..n).for_each(|v| total[community[v]] += degree[v]);
+    (0..groups.len()).map(|c| inside[c] / m - resolution * (total[c] / (2.0 * m)).powi(2)).sum()
+}
+
+/// Whether a group's nodes are all reached from its first by edges between two of them, either way
+fn connected(group: &[u32], edges: &[(u32, u32)]) -> bool {
+    let mut reached = vec![group[0]];
+    let mut at = 0;
+    while at < reached.len() {
+        let v = reached[at];
+        for &(a, b) in edges {
+            for (from, to) in [(a, b), (b, a)] {
+                if from == v && group.contains(&to) && !reached.contains(&to) {
+                    reached.push(to);
+                }
+            }
+        }
+        at += 1;
+    }
+    reached.len() == group.len()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 128, failure_persistence: None, ..ProptestConfig::default() })]
+
+    #[test]
+    fn communities_cover_every_node_once_each_connected_and_no_worse_than_alone((n, edges, _) in graphs(), seed in 0u64..4) {
+        let found = communities(&graph(n, &edges), 1.0, seed, 100);
+        let mut all: Vec<u32> = found.iter().flatten().copied().collect();
+        all.sort_unstable();
+        prop_assert_eq!(all, (0..n as u32).collect::<Vec<_>>());
+        prop_assert!(found.windows(2).all(|pair| pair[0].len() >= pair[1].len()), "largest first");
+        for group in &found {
+            prop_assert!(connected(group, &edges), "{group:?} isn't connected over {edges:?}");
+        }
+        let alone: Vec<Vec<u32>> = (0..n as u32).map(|v| vec![v]).collect();
+        prop_assert!(modularity(n, &edges, &found, 1.0) >= modularity(n, &edges, &alone, 1.0) - 1e-12);
+        prop_assert_eq!(&found, &communities(&graph(n, &edges), 1.0, seed, 100), "a seed answers the same");
+    }
+}
+
+#[test]
+fn the_karate_club_splits_into_its_known_communities() {
+    let found = communities(&karate(), 1.0, 0, 100);
+    // The club's best modularity is 0.4198 (Brandes et al., 2008), in four communities, and Leiden finds that partition
+    let q = modularity(34, &KARATE_EDGES, &found, 1.0);
+    assert!((q - 0.4197896).abs() < 1e-6, "modularity {q} of {found:?}");
+    // Seed 0's partition as this code found it on an Apple M1 Pro on 2026-10-31, which CI's Linux, macOS and Windows
+    // runs must each find too
+    let recorded: [&[u32]; 4] = [
+        &[8, 9, 14, 15, 18, 20, 22, 26, 29, 30, 32, 33],
+        &[0, 1, 2, 3, 7, 11, 12, 13, 17, 19, 21],
+        &[23, 24, 25, 27, 28, 31],
+        &[4, 5, 6, 10, 16],
+    ];
+    assert_eq!(found, recorded);
+    assert!(found.iter().all(|group| connected(group, &KARATE_EDGES)));
+    assert_eq!(found, communities(&karate(), 1.0, 0, 100));
+    // The two leaders, 0 and 33, around whom the club split, end up apart
+    let of = |v: u32| found.iter().position(|group| group.contains(&v)).unwrap();
+    assert_ne!(of(0), of(33));
+}
+
+#[test]
+fn a_lower_resolution_merges_and_none_leaves_each_component_whole() {
+    let coarse = communities(&karate(), 0.25, 0, 100);
+    let fine = communities(&karate(), 2.0, 0, 100);
+    assert!(coarse.len() < fine.len(), "{} at 0.25 against {} at 2", coarse.len(), fine.len());
+    // Two triangles apart: at resolution 0, every edge only adds, so each component is one community
+    let apart = graph(6, &[(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)]);
+    assert_eq!(communities(&apart, 0.0, 0, 100), weak_components(&apart));
+    assert_eq!(communities(&Projection::new(), 1.0, 0, 100), Vec::<Vec<u32>>::new());
 }

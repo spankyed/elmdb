@@ -491,6 +491,24 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         counts: bool,
     },
+    /// The set's Leiden communities by modularity over the edges of the kinds between two of its entities, each edge
+    /// joining its ends whichever way it points: groups more densely linked inside than out, each connected, each one's
+    /// ids in the set's order, largest first, ties by the earlier first member. A higher `resolution` finds smaller
+    /// communities, and 0 leaves each component whole. Leiden visits the entities in an order drawn from `seed`, so a
+    /// seed answers the same communities for the same data on every platform; it stops after `iterations` rounds or
+    /// when a round finds nothing better
+    Communities {
+        kinds: Vec<String>,
+        #[serde(default = "communities_resolution")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
+        resolution: f64,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
+        seed: u32,
+        #[serde(default = "rank_iterations")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
+        iterations: u32,
+    },
     /// The ids by the field's value, in the order each value first appears; with `counts`, how many in place of the ids
     GroupBy {
         field: String,
@@ -522,4 +540,9 @@ fn rank_iterations() -> u32 {
 
 fn rank_tolerance() -> f64 {
     1e-6
+}
+
+/// Newman's modularity as Leiden was published optimizing it
+fn communities_resolution() -> f64 {
+    1.0
 }
