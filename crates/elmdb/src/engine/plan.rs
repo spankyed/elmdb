@@ -511,7 +511,7 @@ pub enum Terminal {
 }
 
 /// A rank's defaults: the damping PageRank was defined with, and enough rounds that the scores settle within the
-/// tolerance from any start, the L1 change after `n` rounds being at most 2 × 0.85ⁿ, below 1e-6 by the 89th
+/// tolerance from any start, the L1 change after `n` rounds being at most 2 × 0.85ⁿ, below 1e-6 by the 90th
 fn rank_damping() -> f64 {
     0.85
 }

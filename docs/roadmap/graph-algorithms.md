@@ -86,7 +86,7 @@ heap test bounds.
 All three take `kinds`. `rank` and `communities` take `direction` too; `weakComponents` doesn't, an edge joining its ends
 whichever way it points, so a direction would change nothing. `rank` and `communities` also take `iterations`
 (default `100`) and `tolerance` (default `1e-6`, L1 change in scores between rounds): at damping 0.85 the change after
-`n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 89th, so the defaults always settle.
+`n` rounds is at most 2 × 0.85ⁿ, below 1e-6 by the 90th, so the defaults always settle.
 
 ### Rules every algorithm keeps
 
@@ -94,7 +94,8 @@ whichever way it points, so a direction would change nothing. `rank` and `commun
   numbered in set order, sums run in a fixed order, nothing runs in parallel in the first stages, and Leiden's
   randomness comes from its `seed` through a seeded generator in the engine. Ties go to the earlier entity in the set.
 - **Bounded, and partial says so.** Iteration stops at convergence or at `iterations`, whichever comes first. The
-  `hits` answer says which, as `rank: { converged, iterations }` beside the hits, and EXPLAIN's stage does too. No
+  `hits` answer says which, as `rank: { converged, iterations }` beside the hits, and EXPLAIN's stage does too: settled
+  in 0 rounds for a rank with no seed in its set, and absent when a search after the rank scored the hits instead. No
   time limit: a clock is not a check.
 - **Standard edge cases, written down.** A node with no out-edges (a dangling node) gives its score to the teleport
   targets, all nodes for `pagerank` and the seeds for `personalized`. An empty set answers nothing. A seed outside the
@@ -104,7 +105,9 @@ whichever way it points, so a direction would change nothing. `rank` and `commun
   number out of it.
 - **Tracked and explained.** The projection is built through the read that tracked reads record, so a watch over a
   `rank` is written into by a commit that adds, removes or moves an edge between two of its entities, or changes the
-  set, and by nothing else. EXPLAIN names the stage and reports nodes, edges, iterations and whether it converged.
+  set. It reads each entity's edges of the kinds it follows, so an edge of those kinds from one of its entities to one
+  outside the set writes into it too, changing nothing it answers; an edge of another kind, or between two entities
+  outside it, doesn't. EXPLAIN names the stage and reports nodes, edges, iterations and whether it converged.
 
 ### Library or our own code
 

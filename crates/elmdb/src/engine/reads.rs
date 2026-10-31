@@ -637,7 +637,9 @@ impl<R: Read> Query<'_, R> {
                         seeds.iter().filter_map(|seed| place.get(seed.as_str()).copied()).collect()
                     }
                 };
+                // No seed in the set answers nothing, settled in no rounds
                 let Some(ranked) = algorithms::rank(&graph, &seeds, *damping, *iterations, *tolerance) else {
+                    self.ranked.set(Some((true, 0)));
                     return Ok(true);
                 };
                 self.ranked.set(Some((ranked.converged, ranked.iterations)));
@@ -647,12 +649,21 @@ impl<R: Read> Query<'_, R> {
                 let mut order: Vec<usize> = (0..ids.len()).collect();
                 // Stable: equal scores keep the set's order
                 order.sort_by(|&a, &b| ranked.scores[b].total_cmp(&ranked.scores[a]));
-                // Each hit recorded as its entity is handed on, so a limit after the rank keeps that many and no more
+                // Each hit recorded as its entity is handed on, so a limit after the rank keeps that many and no more,
+                // and none for a plan whose terminal doesn't answer them
+                let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
                 for at in order {
                     let id = &ids[at];
-                    let hit =
-                        Hit { id: id.clone(), seq: 0, score: ranked.scores[at], terms: Vec::new(), fields: Vec::new() };
-                    self.hits.borrow_mut().insert(id.clone(), (hit, "rank".to_owned()));
+                    if scored {
+                        let hit = Hit {
+                            id: id.clone(),
+                            seq: 0,
+                            score: ranked.scores[at],
+                            terms: Vec::new(),
+                            fields: Vec::new(),
+                        };
+                        self.hits.borrow_mut().insert(id.clone(), (hit, "rank".to_owned()));
+                    }
                     if !visit(id)? {
                         return Ok(false);
                     }
@@ -865,6 +876,8 @@ impl<R: Read> Query<'_, R> {
         }
         found.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
         let ids: Vec<String> = found.iter().map(|(_, hit, _)| hit.id.clone()).collect();
+        // These scores replace a rank's before them, so the answer no longer says how that rank settled
+        self.ranked.set(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (_, hit, name) in found {
@@ -1103,6 +1116,8 @@ impl<R: Read> Query<'_, R> {
     /// Records each hit for the `hits` terminal and visits its entity, in the order given
     fn record_and_visit(&self, found: Vec<(Hit, String)>, visit: &mut Visit<'_>) -> Result<bool> {
         let ids: Vec<String> = found.iter().map(|(hit, _)| hit.id.clone()).collect();
+        // These scores replace a rank's before them, so the answer no longer says how that rank settled
+        self.ranked.set(None);
         {
             let mut hits = self.hits.borrow_mut();
             for (hit, name) in found {

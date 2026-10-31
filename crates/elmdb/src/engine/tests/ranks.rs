@@ -91,9 +91,37 @@ fn seeds_personalize_the_rank_and_a_set_without_one_answers_nothing() {
     assert_eq!(order(&ranked(&db, json!({ "seeds": ["Task-d", "Task-gone"] }))), order(&from_d), "unknown ignored");
     let none = ranked(&db, json!({ "seeds": ["Task-gone"] }));
     assert_eq!(none["hits"], json!([]));
+    assert_eq!(none["rank"], json!({ "converged": true, "iterations": 0 }), "a rank that ran says so");
     // Followed both ways, from a the walk reaches d through c
     let both = ranked(&db, json!({ "seeds": ["Task-a"], "direction": "both" }));
     assert!(both["hits"].as_array().unwrap().iter().all(|h| h["score"].as_f64().unwrap() > 0.0), "{both}");
+}
+
+#[test]
+fn a_search_after_a_rank_answers_its_own_scores_and_not_how_the_rank_settled() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-a", "row": { "a": "apple" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-b", "row": { "a": "apple pie" } }),
+            json!({ "op": "link", "source": "Note-a", "kind": "refs", "target": "Note-b" }),
+        ],
+    )
+    .unwrap();
+    let hits = |steps: Json| {
+        query(
+            &db,
+            json!({ "start": { "from": "types", "types": ["Note"] }, "steps": steps, "terminal": { "answer": "hits" } }),
+        )
+    };
+    let rank = json!({ "step": "rank", "kinds": ["refs"] });
+    let search = json!({ "step": "search", "query": "apple", "index": "text" });
+    assert!(hits(json!([rank.clone()])).get("rank").is_some());
+    let searched = hits(json!([rank.clone(), search.clone()]));
+    assert!(searched.get("rank").is_none(), "{searched}");
+    assert_eq!(hits(json!([search, rank])).get("rank").unwrap()["converged"], json!(true));
 }
 
 #[test]
@@ -220,7 +248,42 @@ fn a_tracked_rank_is_written_into_by_an_edge_between_two_of_its_entities() {
         "steps": [{ "step": "rank", "kinds": ["refs"] }],
         "terminal": { "answer": "ids" }
     } });
-    db.read(&reads(vec![rank], Some(1))).unwrap();
+    db.read(&reads(vec![rank.clone()], Some(1))).unwrap();
+    let touched = |edge: (&str, &str)| {
+        db.write(&batch(vec![json!({ "op": "link", "source": edge.0, "kind": "refs", "target": edge.1 })]), false)
+            .unwrap()
+            .1
+            .touched
+    };
+    assert!(touched(("Task-y", "Task-z")).is_empty(), "entities outside its set");
+    assert_eq!(touched(("Task-c", "Task-a")), [1], "an edge inside its set");
+    db.read(&reads(vec![rank.clone()], Some(1))).unwrap();
+    let unlinked = db
+        .write(&batch(vec![json!({ "op": "unlink", "source": "Task-a", "kind": "refs", "target": "Task-b" })]), false)
+        .unwrap()
+        .1
+        .touched;
+    assert_eq!(unlinked, [1], "an edge inside its set removed");
+    db.read(&reads(vec![rank.clone()], Some(1))).unwrap();
+    let other = db
+        .write(&batch(vec![json!({ "op": "link", "source": "Task-a", "kind": "blocks", "target": "Task-b" })]), false)
+        .unwrap()
+        .1
+        .touched;
+    assert!(other.is_empty(), "a kind the rank doesn't follow");
+}
+
+#[test]
+fn a_tracked_weak_components_read_is_written_into_by_an_edge_between_two_of_its_entities() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    chain(&db);
+    tasks(&db, &["Task-y", "Task-z"]);
+    let weak = json!({ "read": "query", "plan": {
+        "start": { "from": "ids", "ids": ["Task-a", "Task-b", "Task-c"] },
+        "terminal": { "answer": "weakComponents", "kinds": ["refs"] }
+    } });
+    db.read(&reads(vec![weak], Some(1))).unwrap();
     let touched = |edge: (&str, &str)| {
         db.write(&batch(vec![json!({ "op": "link", "source": edge.0, "kind": "refs", "target": edge.1 })]), false)
             .unwrap()

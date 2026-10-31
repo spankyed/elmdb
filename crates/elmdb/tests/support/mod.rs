@@ -176,11 +176,12 @@ impl Fixture {
     }
 
     /// A graph read over every document: `rank` (PageRank, or personalized from the first document), the ten
-    /// highest as hits, or the `weakComponents` answer
+    /// highest as hits, every document's rank counted (`rankCounted`), or the `weakComponents` answer
     #[allow(dead_code)]
     pub fn graph_read(&self, read: &str) -> Reads {
         let (steps, terminal) = match read {
             "rank" => (json!([{"step":"rank","kinds":["refs"]},{"step":"limit","n":10}]), json!({"answer":"hits"})),
+            "rankCounted" => (json!([{"step":"rank","kinds":["refs"]}]), json!({"answer":"count"})),
             "personalized" => (
                 json!([{"step":"rank","kinds":["refs"],"direction":"both","seeds":["Doc-00000000"]},{"step":"limit","n":10}]),
                 json!({"answer":"hits"}),
@@ -199,7 +200,9 @@ impl Fixture {
         let bytes = self.db.read(&self.graph_read(read)).unwrap();
         let answers: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
         let answer = &answers[0];
-        if read == "weakComponents" {
+        if read == "rankCounted" {
+            assert_eq!(answer["count"].as_u64().unwrap() as usize, self.rows);
+        } else if read == "weakComponents" {
             let total: u64 = answer["weakComponents"].as_array().unwrap().iter().map(|n| n.as_u64().unwrap()).sum();
             assert_eq!(total as usize, self.rows);
         } else {
