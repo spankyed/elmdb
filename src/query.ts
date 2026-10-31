@@ -200,163 +200,174 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     return send({ scope, start, steps, terminal });
   };
 
-  const builder = (recipe: Recipe): QueryBuilder<string> => {
-    const next = (step: Step, unindexedWhere?: Recipe['unindexed']): QueryBuilder<string> =>
-      builder({ ...recipe, steps: [...recipe.steps, { step }], ...(unindexedWhere && { unindexed: unindexedWhere }) });
-    const atStart = recipe.steps.length === 0 && recipe.start.from === 'types' ? recipe.start.types : undefined;
-    const ids = () => run(recipe, { answer: 'ids' }).ids as EARS.EntityId[];
-    const walk = (via: string, step: string, kinds: MaybeArr<string>, type?: MaybeArr<string>, depth?: number) => {
+  class Builder {
+    readonly #recipe: Recipe;
+    #methods?: Map<string, (...args: unknown[]) => unknown>;
+    constructor(recipe: Recipe) {
+      this.#recipe = recipe;
+    }
+
+    #next(step: Step, unindexedWhere?: Recipe['unindexed']): QueryBuilder<string> {
+      return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { step }], ...(unindexedWhere && { unindexed: unindexedWhere }) });
+    }
+    #walk(via: string, step: string, kinds: MaybeArr<string>, type?: MaybeArr<string>, depth?: number) {
       names.relationKinds(kinds, via);
-      return next({ step, kinds: asArr(kinds), ...(type !== undefined && { types: asArr(type) }), ...edgeCount('depth', depth) });
-    };
-    const filterByLink = (step: string, kind: string, other?: EARS.EntityId) => {
+      return this.#next({ step, kinds: asArr(kinds), ...(type !== undefined && { types: asArr(type) }), ...edgeCount('depth', depth) });
+    }
+    #filterByLink(step: string, kind: string, other?: EARS.EntityId) {
       names.relationKinds(kind, step);
-      return next({ step, kind, ...(other !== undefined && { other }) });
-    };
-    const edges = (via: string, kinds: MaybeArr<string>, type: MaybeArr<string> | undefined, direction: 'out' | 'in') => {
+      return this.#next({ step, kind, ...(other !== undefined && { other }) });
+    }
+    #edges(via: string, kinds: MaybeArr<string>, type: MaybeArr<string> | undefined, direction: 'out' | 'in') {
       names.relationKinds(kinds, via);
-      const answer = run(recipe, { answer: 'edges', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
+      const answer = run(this.#recipe, { answer: 'edges', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
       return (answer.relations as Record<string, unknown>[]).map(relationRow);
-    };
+    }
 
-    const self = {
-      ofType: (t: string) => next({ step: 'ofType', type: t }),
-      within: (sub: readonly EARS.EntityId[]) => next({ step: 'within', ids: [...sub] }),
-      where: (k: string, v: unknown) => {
-        if (v === undefined) {
-          throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
-        }
-        if (typeof v === 'function') {
-          return builder({ ...recipe, steps: [...recipe.steps, { field: k, test: v as (value: unknown) => boolean }] });
-        }
-        // A value only `===` itself matches, an object or a Date, matches nothing a read gives back
-        if (!sendable(v)) return builder({ ...recipe, steps: [...recipe.steps, { field: k, test: (value) => value === v }] });
-        const walked = atStart?.filter((type) => !indexed(type, k));
-        return next({ step: 'where', field: k, value: v }, walked?.length ? { types: walked, field: k } : undefined);
-      },
-      has: (k: string) => next({ step: 'has', field: k }),
-      lacks: (k: string) => next({ step: 'lacks', field: k }),
-      withRole: (r: string) => {
-        names.role(r, 'withRole');
-        return next({ step: 'withRole', role: r });
-      },
-      linkedWith: (other: EARS.EntityId) => next({ step: 'linkedWith', other }),
-      linkedTo: (kind: string, other?: EARS.EntityId) => filterByLink('linkedTo', kind, other),
-      linkedFrom: (kind: string, other?: EARS.EntityId) => filterByLink('linkedFrom', kind, other),
-      unlinkedTo: (kind: string, other?: EARS.EntityId) => filterByLink('unlinkedTo', kind, other),
-      unlinkedFrom: (kind: string, other?: EARS.EntityId) => filterByLink('unlinkedFrom', kind, other),
-      out: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('out', 'out', kinds, type),
-      in: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('in', 'in', kinds, type),
-      both: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => walk('both', 'both', kinds, type),
-      descendants: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number } = {}) =>
-        walk('descendants', 'descendants', kinds, type, depth),
-      ancestors: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number } = {}) =>
-        walk('ancestors', 'ancestors', kinds, type, depth),
-      pathTo: (to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', depth }: { direction?: EdgeDirection; depth?: number } = {}) => {
-        names.relationKinds(kinds, 'pathTo');
-        return next({ step: 'pathTo', to, kinds: asArr(kinds), direction, ...edgeCount('depth', depth) });
-      },
-      outEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('outEdges', kinds, type, 'out'),
-      inEdges: (kinds: MaybeArr<string>, type?: MaybeArr<string>) => edges('inEdges', kinds, type, 'in'),
-      degrees: (kinds: MaybeArr<string>, type?: MaybeArr<string>, { direction = 'out' }: { direction?: EdgeDirection } = {}) => {
-        names.relationKinds(kinds, 'degrees');
-        const answer = run(recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
-        return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
-      },
-      rank: (kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) => {
-        names.relationKinds(kinds, 'rank');
-        return next({
-          step: 'rank', kinds: asArr(kinds), direction,
-          ...(seeds !== undefined && { seeds: [...seeds] }), ...(weights !== undefined && { weights }),
+    ofType(t: string) { return this.#next({ step: 'ofType', type: t }); }
+    within(sub: readonly EARS.EntityId[]) { return this.#next({ step: 'within', ids: [...sub] }); }
+    where(k: string, v: unknown) {
+      if (v === undefined) {
+        throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
+      }
+      if (typeof v === 'function') {
+        return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { field: k, test: v as (value: unknown) => boolean }] });
+      }
+      // A value only `===` itself matches, an object or a Date, matches nothing a read gives back
+      if (!sendable(v)) return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { field: k, test: (value) => value === v }] });
+      const atStart = this.#recipe.steps.length === 0 && this.#recipe.start.from === 'types' ? this.#recipe.start.types : undefined;
+      const walked = atStart?.filter((type) => !indexed(type, k));
+      return this.#next({ step: 'where', field: k, value: v }, walked?.length ? { types: walked, field: k } : undefined);
+    }
+    has(k: string) { return this.#next({ step: 'has', field: k }); }
+    lacks(k: string) { return this.#next({ step: 'lacks', field: k }); }
+    withRole(r: string) {
+      names.role(r, 'withRole');
+      return this.#next({ step: 'withRole', role: r });
+    }
+    linkedWith(other: EARS.EntityId) { return this.#next({ step: 'linkedWith', other }); }
+    linkedTo(kind: string, other?: EARS.EntityId) { return this.#filterByLink('linkedTo', kind, other); }
+    linkedFrom(kind: string, other?: EARS.EntityId) { return this.#filterByLink('linkedFrom', kind, other); }
+    unlinkedTo(kind: string, other?: EARS.EntityId) { return this.#filterByLink('unlinkedTo', kind, other); }
+    unlinkedFrom(kind: string, other?: EARS.EntityId) { return this.#filterByLink('unlinkedFrom', kind, other); }
+    out(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('out', 'out', kinds, type); }
+    in(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('in', 'in', kinds, type); }
+    both(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('both', 'both', kinds, type); }
+    descendants(kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number; } = {}) { return this.#walk('descendants', 'descendants', kinds, type, depth); }
+    ancestors(kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number; } = {}) { return this.#walk('ancestors', 'ancestors', kinds, type, depth); }
+    pathTo(to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', depth }: { direction?: EdgeDirection; depth?: number; } = {}) {
+      names.relationKinds(kinds, 'pathTo');
+      return this.#next({ step: 'pathTo', to, kinds: asArr(kinds), direction, ...edgeCount('depth', depth) });
+    }
+    outEdges(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#edges('outEdges', kinds, type, 'out'); }
+    inEdges(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#edges('inEdges', kinds, type, 'in'); }
+    degrees(kinds: MaybeArr<string>, type?: MaybeArr<string>, { direction = 'out' }: { direction?: EdgeDirection; } = {}) {
+      names.relationKinds(kinds, 'degrees');
+      const answer = run(this.#recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
+      return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
+    }
+    rank(kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) {
+      names.relationKinds(kinds, 'rank');
+      return this.#next({
+        step: 'rank', kinds: asArr(kinds), direction,
+        ...(seeds !== undefined && { seeds: [...seeds] }), ...(weights !== undefined && { weights }),
+      });
+    }
+    topological(kinds: MaybeArr<string>, { direction = 'out' }: { direction?: 'out' | 'in'; } = {}) {
+      names.relationKinds(kinds, 'topological');
+      return this.#next({ step: 'topological', kinds: asArr(kinds), direction });
+    }
+    similar(to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', measure = 'jaccard' }: { direction?: EdgeDirection; measure?: SimilarityMeasure; } = {}) {
+      names.relationKinds(kinds, 'similar');
+      return this.#next({ step: 'similar', to, kinds: asArr(kinds), direction, measure });
+    }
+    weakComponents(kinds: MaybeArr<string>) {
+      names.relationKinds(kinds, 'weakComponents');
+      return run(this.#recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
+    }
+    strongComponents(kinds: MaybeArr<string>) {
+      names.relationKinds(kinds, 'strongComponents');
+      return run(this.#recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
+    }
+    communities(kinds: MaybeArr<string>, { resolution, seed, weights }: { resolution?: number; seed?: number; weights?: boolean; } = {}) {
+      names.relationKinds(kinds, 'communities');
+      const answer = run(this.#recipe, {
+        answer: 'communities', kinds: asArr(kinds), ...(resolution !== undefined && { resolution }), ...(seed !== undefined && { seed }),
+        ...(weights !== undefined && { weights }),
+      });
+      return answer.communities as EARS.EntityId[][];
+    }
+    pick(fields: readonly string[]) { return run(this.#recipe, { answer: 'rows', fields: [...fields] }).rows; }
+    // The first row: the fields picked, or with none the whole row, as pickAll reads it
+    pickOne(fields?: readonly string[]) { return run(this.#recipe, { answer: 'firstRow', ...(fields && { fields: [...fields] }) }).row ?? undefined; }
+    pickAll() { return run(this.#recipe, { answer: 'rows' }).rows; }
+    orderBy(field: string, dir: 'asc' | 'desc' = 'asc') { return this.#next({ step: 'orderBy', field, descending: dir === 'desc' }); }
+    reverse() { return this.#next({ step: 'reverse' }); }
+    // The first `n` ids, `n` rounded down: none for a count below one, or one that isn't a number, and every one for
+    // an infinite count
+    limit(n: number) { return (n === Infinity ? this : this.#next({ step: 'limit', n: Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n)) })); }
+    distinct(field?: string) { return this.#next({ step: 'distinct', ...(field !== undefined && { field }) }); }
+    groupBy(field: string) { return new Map(run(this.#recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>); }
+    search(text: string, options: Record<string, unknown> = {}) { return this.#next({ step: 'search', query: text, options }); }
+    containing(text: string, { caseInsensitive = false }: { caseInsensitive?: boolean; } = {}) { return this.#next({ step: 'containing', text, caseInsensitive }); }
+    matching(pattern: string) { return this.#next({ step: 'matching', pattern }); }
+    after(id: EARS.EntityId) { return this.#next({ step: 'after', id }); }
+    near(vector: readonly number[], { k = 10 }: { k?: number; } = {}) { return this.#next({ step: 'near', vector: [...vector], k }); }
+    like(id: EARS.EntityId, { k = 10 }: { k?: number; } = {}) { return this.#next({ step: 'like', id, k }); }
+    hybrid(text: string, vector: readonly number[], { k = 10, ...options }: Record<string, unknown> & { k?: number; } = {}) { return this.#next({ step: 'hybrid', query: text, vector: [...vector], k, options }); }
+    hits({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean; } = {}) {
+      // The search must be in the plan the terminal ends, after every function a `where` was given
+      const lastWhere = (test: (p: Pending) => boolean) => this.#recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
+      const searched = lastWhere((p) => 'step' in p && SEARCHES.includes(p.step.step as string));
+      const split = lastWhere((p) => !('step' in p));
+      if (searched < 0 || split > searched) {
+        throw new EarsError('NO_SEARCH', searched < 0
+          ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...) or similar(...)'
+          : 'hits() answers what a search, a rank or a similar found, and a where(...) given a function follows it: put the search, rank or similar after it');
+      }
+      const answer = run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
+      return answer.hits;
+    }
+    ids() { return run(this.#recipe, { answer: 'ids' }).ids as EARS.EntityId[]; }
+    explain() {
+      if (this.#recipe.steps.some((p) => !('step' in p))) {
+        throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
+      }
+      const plan = { scope: this.#recipe.scope, start: this.#recipe.start, steps: this.#recipe.steps.map((p) => (p as { step: Step; }).step), terminal: { answer: 'ids' } };
+      const [explained] = read([{ read: 'query', plan, explain: true }]) as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[]; }>;
+      return { ids: explained!.answer.ids as EARS.EntityId[], visited: explained!.visited, ms: explained!.ms, stages: explained!.stages };
+    }
+    count() { return run(this.#recipe, { answer: 'count' }).n as number; }
+    first() { return (run(this.#recipe, { answer: 'first' }).id as EARS.EntityId | null) ?? undefined; }
+    last() { return (run(this.#recipe, { answer: 'last' }).id as EARS.EntityId | null) ?? undefined; }
+    exists() { return run(this.#recipe, { answer: 'exists' }).value as boolean; }
+    // A callback runs on the ids once they are read, so its own writes are its to read
+    map<T>(fn: (i: EARS.EntityId) => T) { return this.ids().map(fn); }
+    forEach(fn: (i: EARS.EntityId) => void) { return (this.ids().forEach(fn), this); }
+    reduce<T>(fn: (a: T, i: EARS.EntityId) => T, init: T) { return this.ids().reduce(fn, init); }
+    // Share implementations, binding only methods a recipe uses. Private state also permits a
+    // frozen recipe to retain stable extracted functions without caching any database answers.
+    static {
+      for (const name of Object.getOwnPropertyNames(Builder.prototype)) {
+        if (name === 'constructor') continue;
+        const method = Object.getOwnPropertyDescriptor(Builder.prototype, name)!.value as (...args: unknown[]) => unknown;
+        Object.defineProperty(Builder.prototype, name, {
+          configurable: true,
+          get(this: Builder) {
+            const methods = this.#methods ??= new Map();
+            let bound = methods.get(name);
+            if (!bound) methods.set(name, bound = method.bind(this));
+            return bound;
+          },
+          set(this: Builder, value: unknown) {
+            Object.defineProperty(this, name, { value, writable: true, configurable: true, enumerable: true });
+          },
         });
-      },
-      topological: (kinds: MaybeArr<string>, { direction = 'out' }: { direction?: 'out' | 'in' } = {}) => {
-        names.relationKinds(kinds, 'topological');
-        return next({ step: 'topological', kinds: asArr(kinds), direction });
-      },
-      similar: (
-        to: EARS.EntityId,
-        kinds: MaybeArr<string>,
-        { direction = 'out', measure = 'jaccard' }: { direction?: EdgeDirection; measure?: SimilarityMeasure } = {},
-      ) => {
-        names.relationKinds(kinds, 'similar');
-        return next({ step: 'similar', to, kinds: asArr(kinds), direction, measure });
-      },
-      weakComponents: (kinds: MaybeArr<string>) => {
-        names.relationKinds(kinds, 'weakComponents');
-        return run(recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
-      },
-      strongComponents: (kinds: MaybeArr<string>) => {
-        names.relationKinds(kinds, 'strongComponents');
-        return run(recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
-      },
-      communities: (kinds: MaybeArr<string>, { resolution, seed, weights }: { resolution?: number; seed?: number; weights?: boolean } = {}) => {
-        names.relationKinds(kinds, 'communities');
-        const answer = run(recipe, {
-          answer: 'communities', kinds: asArr(kinds), ...(resolution !== undefined && { resolution }), ...(seed !== undefined && { seed }),
-          ...(weights !== undefined && { weights }),
-        });
-        return answer.communities as EARS.EntityId[][];
-      },
+      }
+    }
+  }
 
-      pick: (fields: readonly string[]) => run(recipe, { answer: 'rows', fields: [...fields] }).rows,
-      // The first row: the fields picked, or with none the whole row, as pickAll reads it
-      pickOne: (fields?: readonly string[]) =>
-        run(recipe, { answer: 'firstRow', ...(fields && { fields: [...fields] }) }).row ?? undefined,
-      pickAll: () => run(recipe, { answer: 'rows' }).rows,
-
-      orderBy: (field: string, dir: 'asc' | 'desc' = 'asc') => next({ step: 'orderBy', field, descending: dir === 'desc' }),
-      reverse: () => next({ step: 'reverse' }),
-      // The first `n` ids, `n` rounded down: none for a count below one, or one that isn't a number, and every one for
-      // an infinite count
-      limit: (n: number) => (n === Infinity ? self : next({ step: 'limit', n: Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n)) })),
-      distinct: (field?: string) => next({ step: 'distinct', ...(field !== undefined && { field }) }),
-      groupBy: (field: string) => new Map(run(recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>),
-
-      search: (text: string, options: Record<string, unknown> = {}) => next({ step: 'search', query: text, options }),
-      containing: (text: string, { caseInsensitive = false }: { caseInsensitive?: boolean } = {}) =>
-        next({ step: 'containing', text, caseInsensitive }),
-      matching: (pattern: string) => next({ step: 'matching', pattern }),
-      after: (id: EARS.EntityId) => next({ step: 'after', id }),
-      near: (vector: readonly number[], { k = 10 }: { k?: number } = {}) => next({ step: 'near', vector: [...vector], k }),
-      like: (id: EARS.EntityId, { k = 10 }: { k?: number } = {}) => next({ step: 'like', id, k }),
-      hybrid: (text: string, vector: readonly number[], { k = 10, ...options }: Record<string, unknown> & { k?: number } = {}) =>
-        next({ step: 'hybrid', query: text, vector: [...vector], k, options }),
-      hits: ({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean } = {}) => {
-        // The search must be in the plan the terminal ends, after every function a `where` was given
-        const lastWhere = (test: (p: Pending) => boolean) => recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
-        const searched = lastWhere((p) => 'step' in p && SEARCHES.includes(p.step.step as string));
-        const split = lastWhere((p) => !('step' in p));
-        if (searched < 0 || split > searched) {
-          throw new EarsError('NO_SEARCH', searched < 0
-            ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...) or similar(...)'
-            : 'hits() answers what a search, a rank or a similar found, and a where(...) given a function follows it: put the search, rank or similar after it');
-        }
-        const answer = run(recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
-        return answer.hits;
-      },
-
-      ids,
-      explain: () => {
-        if (recipe.steps.some((p) => !('step' in p))) {
-          throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
-        }
-        const plan = { scope: recipe.scope, start: recipe.start, steps: recipe.steps.map((p) => (p as { step: Step }).step), terminal: { answer: 'ids' } };
-        const [explained] = read([{ read: 'query', plan, explain: true }]) as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[] }>;
-        return { ids: explained!.answer.ids as EARS.EntityId[], visited: explained!.visited, ms: explained!.ms, stages: explained!.stages };
-      },
-      count: () => run(recipe, { answer: 'count' }).n as number,
-      first: () => (run(recipe, { answer: 'first' }).id as EARS.EntityId | null) ?? undefined,
-      last: () => (run(recipe, { answer: 'last' }).id as EARS.EntityId | null) ?? undefined,
-      exists: () => run(recipe, { answer: 'exists' }).value as boolean,
-
-      // A callback runs on the ids once they are read, so its own writes are its to read
-      map: <T>(fn: (i: EARS.EntityId) => T) => ids().map(fn),
-      forEach: (fn: (i: EARS.EntityId) => void) => (ids().forEach(fn), self),
-      reduce: <T>(fn: (a: T, i: EARS.EntityId) => T, init: T) => ids().reduce(fn, init),
-    };
-    return self as unknown as QueryBuilder<string>;
-  };
+  const builder = (recipe: Recipe): QueryBuilder<string> => new Builder(recipe) as unknown as QueryBuilder<string>;
 
   /** The entry points over a scope */
   const entriesOver = (scope: Scope): QueryEntries => {

@@ -41,10 +41,13 @@ describe('starts', () => {
       ordered: e.query('Task').orderBy('title'),
       everything: e.query.all(),
     };
+    Object.freeze(held.indexed);
+    const openIds = held.indexed.ids;
+    expect(held.indexed.ids).toBe(openIds);
     // A terminal run before the write doesn't fix what the builder answers after it
-    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d]);
+    expect(openIds()).toEqual([t.a, t.c, t.d]);
     const late = e.create('Task').setMany({ title: 'aardvark', rank: 3, status: 'open' }).grant('focus').id();
-    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d, late]);
+    expect(openIds()).toEqual([t.a, t.c, t.d, late]);
     expect(held.role.ids()).toEqual([t.a, late]);
     expect(held.filtered.count()).toBe(4);
     expect(held.ordered.first()).toBe(late);
