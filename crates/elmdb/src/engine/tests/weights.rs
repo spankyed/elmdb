@@ -241,12 +241,20 @@ fn explain_reports_the_weight_a_rank_read() {
             json!({ "read": "query", "explain": true, "plan": { "start": { "from": "types", "types": ["Task"] },
                 "steps": [step], "terminal": { "answer": "ids" } } }),
         )
-        .unwrap()["stages"][1]
+        .unwrap()["stages"]
             .clone()
     };
-    let stage = explained(json!({}));
-    assert_eq!((&stage["nodes"], &stage["edges"], &stage["weight"]), (&json!(3), &json!(2), &json!(3.5)), "{stage}");
-    assert!(explained(json!({ "weights": false })).get("weight").is_none());
+    for (options, weight) in [(json!({}), Some(json!(3.5))), (json!({ "weights": false }), None)] {
+        let stages = explained(options);
+        let stage = &stages[1];
+        assert_eq!((&stage["nodes"], &stage["edges"]), (&json!(3), &json!(2)), "{stage}");
+        assert_eq!(stage.get("weight"), weight.as_ref(), "{stage}");
+        // Every field a rank's stage writes is in it, and the terminal's stage after it
+        assert_eq!(stage["converged"], json!(true), "{stage}");
+        assert!(stage["iterations"].as_u64().unwrap() > 0, "{stage}");
+        assert_eq!(stages.as_array().unwrap().len(), 3, "{stages}");
+        assert_eq!(stages[2]["stage"], json!("ids"), "{stages}");
+    }
 }
 
 #[test]

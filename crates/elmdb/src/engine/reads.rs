@@ -665,7 +665,7 @@ impl<R: Read> Query<'_, R> {
                     Some(seeds) => {
                         let mut wanted: HashMap<&str, f64, Fixed> = HashMap::default();
                         for seed in seeds {
-                            *wanted.entry(seed.id()).or_insert(0.0) += seed.weight();
+                            wanted.entry(seed.id()).and_modify(|held| *held += seed.weight()).or_insert(seed.weight());
                         }
                         (0..ids.len() as u32)
                             .filter_map(|at| wanted.get(ids[at as usize].as_str()).map(|&weight| (at, weight)))
