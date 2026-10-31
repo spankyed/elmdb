@@ -109,6 +109,14 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 message: format!("a {} relation links {} to itself", s.kind, s.source),
             });
         }
+        // A weight a write would refuse, which a load can bring; one kept on a kind no longer weighted is data nothing
+        // reads, not a violation
+        if let Some(weight) = s.weight.filter(|w| !(0.0..=relations::MAX_WEIGHT).contains(w)) {
+            out.push(Violation {
+                subject: relation.clone(),
+                message: format!("a {} relation weighs {weight}, where a weight is a number from 0 to 2^960", s.kind),
+            });
+        }
         if let Some(def) = schema.relations.get(&s.kind) {
             if let Some(endpoints) = &def.endpoints {
                 let (source, target) = (ids::type_of(&s.source), ids::type_of(&s.target));

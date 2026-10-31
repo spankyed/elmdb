@@ -238,6 +238,7 @@ impl Reader {
         );
         let acyclic = self.bool_or(&mut object, "acyclic", false);
         let unique = self.bool_or(&mut object, "unique", false);
+        let weighted = self.bool_or(&mut object, "weighted", false);
         let endpoints = match object.get("endpoints") {
             None | Some(Value::Null) => Some(None),
             Some(value) => self.endpoints(value, &object.at("endpoints")).map(Some),
@@ -252,6 +253,7 @@ impl Reader {
             cardinality: cardinality?,
             acyclic: acyclic?,
             unique: unique?,
+            weighted: weighted?,
             endpoints: endpoints?,
             info: info?,
         })

@@ -840,7 +840,7 @@ proptest! {
         let kind_names: Vec<&str> = kinds.iter().map(|&k| KINDS[k]).collect();
         let direction = ["out", "in", "both"][direction];
 
-        let expected = algorithms::rank(&by_hand(&edges, &kinds, direction), &[seed as u32], 0.85, 100, 1e-6).unwrap();
+        let expected = algorithms::rank(&by_hand(&edges, &kinds, direction), &[(seed as u32, 1.0)], 0.85, 100, 1e-6).unwrap();
         let hits = ranked(&db, json!({ "kinds": kind_names, "direction": direction, "seeds": [name(seed)] }));
         for hit in hits["hits"].as_array().unwrap() {
             let n: usize = hit["id"].as_str().unwrap().trim_start_matches("Task-").parse().unwrap();

@@ -84,8 +84,16 @@ fn maintenance(c: &mut Criterion) {
                 b.iter(|| black_box(graph.db.read(black_box(&request)).unwrap()))
             });
         }
+        // The same graph weighted: `rank` by weight, within 1.2× of the unweighted rank above
+        let weighted = Fixture::weighted_graph(rows, 5);
+        weighted.assert_graph_read("rankWeighted");
+        let request = weighted.graph_read("rankWeighted");
+        group.bench_function(BenchmarkId::new("rankWeighted", rows), |b| {
+            b.iter(|| black_box(weighted.db.read(black_box(&request)).unwrap()))
+        });
         group.finish();
         black_box(&graph.directory);
+        black_box(&weighted.directory);
     }
 }
 

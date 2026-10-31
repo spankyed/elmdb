@@ -16,6 +16,7 @@ mod schema_versions;
 mod tracked;
 mod trigram;
 mod walks;
+mod weights;
 
 use serde_json::{Value as Json, json};
 
@@ -36,7 +37,9 @@ pub(super) fn schema() -> Schema {
             "blocks": { "cardinality": "many-to-many" },
             "parent_of": { "cardinality": "one-to-many", "acyclic": true },
             "tags": { "cardinality": "many-to-many", "unique": true },
-            "pins": { "cardinality": "many-to-one", "endpoints": [{ "source": "Note", "target": "Task" }] }
+            "pins": { "cardinality": "many-to-one", "endpoints": [{ "source": "Note", "target": "Task" }] },
+            "weighs": { "cardinality": "many-to-many", "weighted": true },
+            "rates": { "cardinality": "many-to-many", "weighted": true, "unique": true }
         },
         "types": {
             "Task": {
@@ -679,6 +682,7 @@ fn cardinality_counts_far_ends_so_check_agrees_with_the_writes_it_allowed() {
         source: "Task-3".into(),
         target: "Task-2".into(),
         info: None,
+        weight: None,
     }])
     .unwrap();
     let report = db.check().unwrap();

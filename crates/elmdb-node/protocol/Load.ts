@@ -4,4 +4,8 @@
  * One unchecked load: an entity with its fields as they were, a relation under its own id, a sequence, an embedding, or
  * a field taken away
  */
-export type Load = { "load": "entity", id: string, fields: Record<string, unknown>, trashed?: boolean, } | { "load": "relation", id: string, kind: string, source: string, target: string, info?: unknown, } | { "load": "sequence", name: string, next: number, } | { "load": "embedding", id: string, index: string, chunk: number, model: string, hash: string, vector: Array<number>, } | { "load": "unset", id: string, field: string, };
+export type Load = { "load": "entity", id: string, fields: Record<string, unknown>, trashed?: boolean, } | { "load": "relation", id: string, kind: string, source: string, target: string, info?: unknown, 
+/**
+ * The edge's weight when it isn't 1, loaded as given
+ */
+weight?: number, } | { "load": "sequence", name: string, next: number, } | { "load": "embedding", id: string, index: string, chunk: number, model: string, hash: string, vector: Array<number>, } | { "load": "unset", id: string, field: string, };

@@ -74,6 +74,7 @@ impl Fixture {
                     source: format!("Doc-{i:08}"),
                     target: format!("Doc-{:08}", (i + 1) % rows),
                     info: Some(Value::from("r".repeat(8192))),
+                    weight: None,
                 });
             }
         }
@@ -140,10 +141,21 @@ impl Fixture {
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {
+        Self::graph_of(rows, degree, false)
+    }
+
+    /// The same graph with `refs` declared weighted, each edge weighing 1 to 4 by arithmetic: `rankWeighted`'s workload
+    #[allow(dead_code)]
+    pub fn weighted_graph(rows: usize, degree: usize) -> Self {
+        Self::graph_of(rows, degree, true)
+    }
+
+    #[allow(dead_code)]
+    fn graph_of(rows: usize, degree: usize, weighted: bool) -> Self {
         let schema = Schema::from_json(&json!({
             "$schema": SCHEMA_LANGUAGE,
             "types":{"Doc":{"fields":{"body":{"type":"string"}}}},
-            "relations":{"refs":{"cardinality":"many-to-many"}}
+            "relations":{"refs":{"cardinality":"many-to-many","weighted":weighted}}
         }))
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -168,6 +180,8 @@ impl Fixture {
                     source: format!("Doc-{i:08}"),
                     target: format!("Doc-{t:08}"),
                     info: None,
+                    // As a write stores it: 1 is no weight
+                    weight: (weighted && (i + t) % 4 != 0).then(|| ((i + t) % 4 + 1) as f64),
                 });
             }
         }
@@ -175,13 +189,15 @@ impl Fixture {
         Self { db, directory, rows }
     }
 
-    /// A graph read over every document: `rank` (PageRank, or personalized from the first document), the ten
-    /// highest as hits, every document's rank counted (`rankCounted`), or the `weakComponents`, `strongComponents` or
+    /// A graph read over every document: `rank` (PageRank, or personalized from the first document; `rankWeighted` is
+    /// `rank`, for the weighted graph), the ten highest as hits, every document's rank counted (`rankCounted`), or the `weakComponents`, `strongComponents` or
     /// `communities` answer
     #[allow(dead_code)]
     pub fn graph_read(&self, read: &str) -> Reads {
         let (steps, terminal) = match read {
-            "rank" => (json!([{"step":"rank","kinds":["refs"]},{"step":"limit","n":10}]), json!({"answer":"hits"})),
+            "rank" | "rankWeighted" => {
+                (json!([{"step":"rank","kinds":["refs"]},{"step":"limit","n":10}]), json!({"answer":"hits"}))
+            }
             "rankCounted" => (json!([{"step":"rank","kinds":["refs"]}]), json!({"answer":"count"})),
             "personalized" => (
                 json!([{"step":"rank","kinds":["refs"],"direction":"both","seeds":["Doc-00000000"]},{"step":"limit","n":10}]),

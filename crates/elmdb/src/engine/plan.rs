@@ -289,10 +289,12 @@ pub enum Step {
     },
     /// The set's entities by personalized PageRank over the edges of the kinds between two of them, followed the
     /// direction's ways, highest score first, ties in the set's order; each score is a hit's, which `hits` answers.
-    /// A walker follows an edge with probability `damping` and otherwise jumps back to a seed; with no `seeds` every
-    /// entity is one, which is PageRank. A seed outside the set is ignored, and none inside it answers nothing. Rounds
-    /// stop when the scores move by less than `tolerance` (their L1 distance) or after `iterations`, and a `hits` answer
-    /// says which (`docs/roadmap/graph-algorithms.md`)
+    /// A walker follows an edge with probability `damping` and otherwise jumps back to a seed, in proportion to its
+    /// weight (1 for a seed given by its id alone, a seed named twice adding up); with no `seeds` every entity is one,
+    /// which is PageRank. A seed outside the set is ignored, and none inside it answers nothing. Over a kind declared
+    /// `weighted` the walker follows an edge in proportion to its weight, unless `weights` is false; an edge of a kind
+    /// that isn't weighs 1. Rounds stop when the scores move by less than `tolerance` (their L1 distance) or after
+    /// `iterations`, and a `hits` answer says which (`docs/roadmap/graph-algorithms.md`)
     Rank {
         kinds: Vec<String>,
         #[serde(default)]
@@ -300,7 +302,10 @@ pub enum Step {
         direction: Direction,
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
-        seeds: Option<Vec<String>>,
+        seeds: Option<Vec<Seed>>,
+        #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        weights: bool,
         #[serde(default = "rank_damping")]
         #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
         damping: f64,
@@ -544,7 +549,8 @@ pub enum Terminal {
     /// ids in the set's order, largest first, ties by the earlier first member. A higher `resolution` finds smaller
     /// communities, and 0 leaves each component whole. Leiden visits the entities in an order drawn from `seed`, so a
     /// seed answers the same communities for the same data on every platform; it stops after `iterations` rounds or
-    /// when a round finds nothing better
+    /// when a round finds nothing better. An edge of a kind declared `weighted` counts by its weight, unless `weights`
+    /// is false
     Communities {
         kinds: Vec<String>,
         #[serde(default = "communities_resolution")]
@@ -556,6 +562,9 @@ pub enum Terminal {
         #[serde(default = "rank_iterations")]
         #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
         iterations: u32,
+        #[serde(default = "yes")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        weights: bool,
     },
     /// The ids by the field's value, in the order each value first appears; with `counts`, how many in place of the ids
     GroupBy {
@@ -574,6 +583,30 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         highlights: bool,
     },
+}
+
+/// A seed of `rank`: an entity by its id, of weight 1, or with a weight, a number above 0 and at most 2^960
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(untagged)]
+pub enum Seed {
+    Id(String),
+    Weighted { id: String, weight: f64 },
+}
+
+impl Seed {
+    pub fn id(&self) -> &str {
+        match self {
+            Seed::Id(id) | Seed::Weighted { id, .. } => id,
+        }
+    }
+
+    pub fn weight(&self) -> f64 {
+        match self {
+            Seed::Id(_) => 1.0,
+            Seed::Weighted { weight, .. } => *weight,
+        }
+    }
 }
 
 /// A rank's defaults: the damping PageRank was defined with, and enough rounds that the scores settle within the

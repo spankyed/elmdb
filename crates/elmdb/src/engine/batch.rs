@@ -139,7 +139,7 @@ pub enum Op {
         among: Vec<String>,
     },
     /// An edge of `kind` from `source` to `target`. Idempotent on the whole edge: linking it again keeps its id, and no
-    /// `info` matches any edge between the ends. The target must exist when the unit commits
+    /// `info` (or no `weight`) matches any edge between the ends. The target must exist when the unit commits
     Link {
         source: String,
         kind: String,
@@ -147,6 +147,10 @@ pub enum Op {
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
+        /// The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        weight: Option<f64>,
     },
     /// Removes the source's edges of `kind` to `target`; with no kind, of every kind; with no target, to every target
     Unlink {
@@ -158,7 +162,7 @@ pub enum Op {
         #[cfg_attr(feature = "codegen", ts(optional))]
         target: Option<String>,
     },
-    /// Moves a relation's ends or replaces its info, keeping its id
+    /// Moves a relation's ends or replaces its info or its weight, keeping its id
     UpdateRelation {
         relation: String,
         #[serde(default)]
@@ -170,6 +174,10 @@ pub enum Op {
         #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
         info: Option<Value>,
+        /// The edge's weight, for a kind declared `weighted`: a number from 0 to 2^960, 1 when none is given
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        weight: Option<f64>,
     },
     RemoveRelation {
         relation: String,

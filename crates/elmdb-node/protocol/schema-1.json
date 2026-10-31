@@ -77,6 +77,11 @@
           "type": "boolean",
           "default": false
         },
+        "weighted": {
+          "description": "Each edge carries a weight, a number from 0 to 2^960 and 1 when a link gives none, which `rank` and\n`communities` read",
+          "type": "boolean",
+          "default": false
+        },
         "endpoints": {
           "description": "The type pairs an edge may join; `None` is any",
           "type": [

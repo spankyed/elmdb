@@ -12,7 +12,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 |---|---|---|
 | `p/v` id field | an attribute's value | primary |
 | `p/i` id | an entity's type and sequence | primary |
-| `p/r` relation | a relation's row | primary |
+| `p/r` relation | a relation's row: its kind, ends, info, sequence, and its weight when it isn't 1 | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
 | `m/` | the format, the schema, the last synced transaction, the last commit's sequence | meta |
@@ -20,7 +20,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/c` type | a type's count | derived |
 | `d/xb` type index | that a value index is built; a plan reads only a built one | derived |
 | `d/x` type field value seq | a value index | derived |
-| `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges | derived |
+| `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities | derived |
 | `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
 | `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |

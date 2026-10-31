@@ -1,8 +1,10 @@
 //! Relations in the store's keys (`docs/architecture/format.md`, Keys):
 //!
-//! - `p/r relation` → `{ kind, source, target, info, seq }`: the relation's row and its place
+//! - `p/r relation` → `{ kind, source, target, info, weight, seq }`: the relation's row and its place, `weight` held
+//!   only when it isn't 1 (a kind declared `weighted`)
 //! - `d/o source kind seq` → `[relation, target]` and `d/n target kind seq` → `[relation, source]`: each entity's edges
-//!   out and in, by kind, in the order linked, so a walk reads a far end without the row
+//!   out and in, by kind, in the order linked, so a walk reads a far end without the row; a third element, the weight,
+//!   when the row holds one, so a weighted graph reads it there too
 //! - `d/b source kind target seq` → relation: the edges between two ends, so a link finds an edge it would repeat
 //!
 //! A relation is no entity: it holds no fields and no type lists it. The schema's rules for its kind are kept here.
@@ -26,6 +28,9 @@ pub struct Stored {
     pub target: String,
     #[serde(default)]
     pub info: Option<Value>,
+    /// The edge's weight when it isn't 1, which only a kind declared `weighted` holds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
     pub seq: u64,
 }
 
@@ -41,10 +46,27 @@ fn put(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<()> {
     t.put(&keys::relation(relation), &bytes)
 }
 
+/// An edge key's value: `[relation, far]`, and the row's weight third when it holds one. Filing and `rebuild` both
+/// write it through here, so `check` compares the same bytes
+pub fn edge_value(relation: &str, far: &str, weight: Option<f64>) -> Vec<u8> {
+    let mut parts = vec![relation.into(), far.into()];
+    parts.extend(weight.map(Value::F64));
+    values::encode(&Value::Array(parts))
+}
+
+/// The largest weight an edge or a seed takes, 2^960: a graph holds fewer than 2^32 edges and a plan fewer than 2^32
+/// seeds, so no sum of weights a rank adds up can reach infinity, which would lose the walkers it holds
+pub const MAX_WEIGHT: f64 = f64::from_bits((1023 + 960) << 52);
+
+/// The edge entries out and in, which hold the weight; the entry between the ends doesn't, so a new weight on edges
+/// that stay where they are is written here alone
+fn file_edges(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
+    t.put(&keys::edge(true, &s.source, &s.kind, s.seq), &edge_value(relation, &s.target, s.weight))?;
+    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge_value(relation, &s.source, s.weight))
+}
+
 fn file(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
-    let edge = |far: &str| values::encode(&Value::Array(vec![relation.into(), far.into()]));
-    t.put(&keys::edge(true, &s.source, &s.kind, s.seq), &edge(&s.target))?;
-    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge(&s.source))?;
+    file_edges(t, relation, s)?;
     t.put(&keys::between(&s.source, &s.kind, &s.target, s.seq), &values::encode(&relation.into()))
 }
 
@@ -57,7 +79,7 @@ fn unfile(t: &mut Txn<'_, '_>, s: &Stored) -> Result<()> {
 /// An edge key's value: the relation and the far end
 pub fn edge_of(bytes: &[u8]) -> Result<(String, String)> {
     let value = values::decode(bytes)?;
-    let pair = value.as_array().filter(|a| a.len() == 2);
+    let pair = value.as_array().filter(|a| a.len() == 2 || a.len() == 3);
     match pair.map(|a| (a[0].as_str(), a[1].as_str())) {
         Some((Some(relation), Some(far))) => Ok((relation.to_owned(), far.to_owned())),
         _ => Err(Error::new(ErrorCode::Corrupted, "An edge key's value doesn't read")),
@@ -93,30 +115,34 @@ pub fn visit_edges(
     result.map(|_| ())
 }
 
-/// An edge key's far end, read where it lies: an edge's value is plain msgpack, `[relation, far]`
-fn far_of(bytes: &[u8]) -> Result<&str> {
+/// An edge key's far end and weight, read where they lie: an edge's value is plain msgpack, `[relation, far]` or
+/// `[relation, far, weight]`
+fn far_of(bytes: &[u8]) -> Result<(&str, Option<f64>)> {
     let corrupt = || Error::new(ErrorCode::Corrupted, "An edge key's value doesn't read");
     let mut rest = bytes;
-    if rmp::decode::read_array_len(&mut rest).map_err(|_| corrupt())? != 2 {
+    let len = rmp::decode::read_array_len(&mut rest).map_err(|_| corrupt())?;
+    if len != 2 && len != 3 {
         return Err(corrupt());
     }
     let (_, rest) = rmp::decode::read_str_from_slice(rest).map_err(|_| corrupt())?;
-    let (far, _) = rmp::decode::read_str_from_slice(rest).map_err(|_| corrupt())?;
-    Ok(far)
+    let (far, mut rest) = rmp::decode::read_str_from_slice(rest).map_err(|_| corrupt())?;
+    let weight = if len == 3 { Some(rmp::decode::read_f64(&mut rest).map_err(|_| corrupt())?) } else { None };
+    Ok((far, weight))
 }
 
 /// Visits the far end of each of an entity's edges out (or in), of one kind or every kind, in place order, until
-/// `each` answers false; a far end is lent, not copied, so a caller that only looks one up allocates nothing
+/// `each` answers false, with the edge's weight when it holds one; a far end is lent, not copied, so a caller that only
+/// looks one up allocates nothing
 pub fn visit_far_ends(
     t: &impl Read,
     entity: &str,
     outward: bool,
     kind: Option<&str>,
-    mut each: impl FnMut(&str) -> Result<bool>,
+    mut each: impl FnMut(&str, Option<f64>) -> Result<bool>,
 ) -> Result<()> {
     let mut result = Ok(true);
     t.visit(&keys::edges_of(outward, entity, kind), |_, value| {
-        result = far_of(value).and_then(&mut each);
+        result = far_of(value).and_then(|(far, weight)| each(far, weight));
         matches!(result, Ok(true))
     })?;
     result.map(|_| ())
@@ -215,6 +241,26 @@ fn check_rules(
     Ok(())
 }
 
+/// A weight given to an edge of `def`, as the row holds it: refused unless the kind is declared weighted and the weight
+/// is a number from 0 to `MAX_WEIGHT`; 1, every edge's weight unless given another, held as none, and -0 held as 0, so
+/// equal weights are the same bytes
+fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
+    let Some(weight) = weight else { return Ok(None) };
+    if !def.weighted {
+        return Err(Error::new(
+            ErrorCode::ValueInvalid,
+            format!("A {kind} relation carries no weight: its kind isn't declared weighted"),
+        ));
+    }
+    if !(0.0..=MAX_WEIGHT).contains(&weight) {
+        return Err(Error::new(
+            ErrorCode::ValueInvalid,
+            format!("A {kind} relation's weight is a number from 0 to 2^960, and was given {weight}"),
+        ));
+    }
+    Ok((weight != 1.0).then_some(weight.abs()))
+}
+
 fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
     match info {
         Some(info) => values::check_field("relation", kind, &def.info, info),
@@ -224,54 +270,73 @@ fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()>
 }
 
 /// Links `source` to `target`, returning the relation and whether it was linked now. Idempotent on the whole edge:
-/// with no `info`, any edge between the ends is the edge; with one, an edge holding the same info. A `unique` kind
-/// keeps one edge per pair, whose info a link replaces
+/// with no `info`, any edge between the ends is the edge; with one, an edge holding the same info; and with a
+/// `weight`, an edge of that weight too. A `unique` kind keeps one edge per pair, whose info and weight a link replaces
 pub fn link(
     t: &mut Txn<'_, '_>,
     source: &str,
     kind: &str,
     target: &str,
     info: Option<Value>,
+    weight: Option<f64>,
 ) -> Result<(String, bool)> {
     let def = definition(t, kind)?.clone();
     if let Some(info) = &info {
         values::check_spec(info)?;
     }
     check_info(&def, kind, info.as_ref())?;
+    let held_weight = weight_of(&def, kind, weight)?;
     let existing = between(t, source, kind, target)?;
     if def.unique
         && let Some(relation) = existing.first()
     {
-        if let Some(info) = info {
-            let mut stored = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
-            if stored.info.as_ref().is_none_or(|i| !values::same(i, &info)) {
-                stored.info = Some(info);
-                put(t, relation, &stored)?;
-                t.event(Event::RelationChanged {
-                    relation: relation.clone(),
-                    kind: kind.to_owned(),
-                    source: source.to_owned(),
-                    target: target.to_owned(),
-                });
+        let before = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
+        let mut stored = before.clone();
+        if let Some(info) = info
+            && stored.info.as_ref().is_none_or(|i| !values::same(i, &info))
+        {
+            stored.info = Some(info);
+        }
+        if weight.is_some() {
+            stored.weight = held_weight;
+        }
+        if stored != before {
+            if stored.weight != before.weight {
+                file_edges(t, relation, &stored)?;
             }
+            put(t, relation, &stored)?;
+            t.event(Event::RelationChanged {
+                relation: relation.clone(),
+                kind: kind.to_owned(),
+                source: source.to_owned(),
+                target: target.to_owned(),
+            });
         }
         return Ok((relation.clone(), false));
     }
     for relation in &existing {
         let held = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
-        let matches = match (&info, &held.info) {
+        let same_info = match (&info, &held.info) {
             (None, _) => true,
             (Some(a), Some(b)) => values::same(a, b),
             (Some(_), None) => false,
         };
-        if matches {
+        let same_weight = weight.is_none() || held.weight == held_weight;
+        if same_info && same_weight {
             return Ok((relation.clone(), false));
         }
     }
     check_rules(t, &def, kind, source, target, None)?;
     let seq = entities::next_seq(t)?;
     let relation = ids::new_relation_id(t.now, seq);
-    let stored = Stored { kind: kind.to_owned(), source: source.to_owned(), target: target.to_owned(), info, seq };
+    let stored = Stored {
+        kind: kind.to_owned(),
+        source: source.to_owned(),
+        target: target.to_owned(),
+        info,
+        weight: held_weight,
+        seq,
+    };
     put(t, &relation, &stored)?;
     file(t, &relation, &stored)?;
     t.event(Event::Linked {
@@ -331,13 +396,15 @@ pub fn unlink(t: &mut Txn<'_, '_>, source: &str, kind: Option<&str>, target: Opt
     Ok(())
 }
 
-/// Moves the relation to new ends or replaces its info, keeping its id; a move files it last among its new ends' edges
+/// Moves the relation to new ends, or replaces its info or its weight, keeping its id; a move files it last among its new
+/// ends' edges, and a new weight files it again where it was
 pub fn update(
     t: &mut Txn<'_, '_>,
     relation: &str,
     source: Option<&str>,
     target: Option<&str>,
     info: Option<Value>,
+    weight: Option<f64>,
 ) -> Result<()> {
     let Some(before) = get(t, relation)? else {
         return Err(Error::new(ErrorCode::NoSuchRelation, format!("No relation has the id {relation}")));
@@ -356,6 +423,9 @@ pub fn update(
     }
     if info.is_some() {
         next.info = info;
+    }
+    if weight.is_some() {
+        next.weight = weight_of(&def, &before.kind, weight)?;
     }
     let moved = next.source != before.source || next.target != before.target;
     if moved {
@@ -376,6 +446,8 @@ pub fn update(
         next.seq = entities::next_seq(t)?;
         file(t, relation, &next)?;
         t.defer(Check::Ends { relation: relation.to_owned(), via: "updateRelation" });
+    } else if next.weight != before.weight {
+        file_edges(t, relation, &next)?;
     }
     put(t, relation, &next)?;
     t.event(Event::RelationChanged {

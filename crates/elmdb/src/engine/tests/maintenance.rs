@@ -122,6 +122,7 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
             source: "Task-1".into(),
             target: "Task-none".into(),
             info: None,
+            weight: None,
         },
         Load::Sequence { name: "shortCode:Task".into(), next: 10 },
     ])
@@ -435,6 +436,7 @@ fn check_names_a_relation_outside_its_endpoints_a_second_target_and_every_holder
         source: source.into(),
         target: target.into(),
         info: None,
+        weight: None,
     };
     db.bulk_load(&[
         entity("Task-1", &[("slug", "same".into())]),

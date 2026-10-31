@@ -163,3 +163,40 @@ members array and its offsets built from a label per node, and `counts` reads th
   pass unchanged.
 - **Heap:** 131 bytes an entity for `rank` and `weakComponents`, from 184, and 126 for `strongComponents` and
   `topological`. The heap test holds them to 192.
+
+## Weights (`roadmap/rank-weights.md`)
+
+A kind declared weighted carries each edge's weight on its row and in its edge entries, so building the graph reads the
+weight where it reads the far end. A read that takes no weights builds the graph it built before, and `rank` runs the
+loop it ran before.
+
+- **Against a reference** (`crates/elmdb/src/engine/algorithms/tests.rs`): over 256 random graphs of up to 12 nodes,
+  weights 0 to 4 in quarters with 0 often enough that some nodes' edges weigh nothing in all, parallel edges and weighted
+  seeds, `rank` agrees within 1e-9 with a dense power iteration over the weight matrix, and sums to 1. Over 256 more,
+  every weight 1 through the weighted loop gives the unweighted scores bit for bit, and the karate club with every
+  weight 1 reproduces `KARATE_BITS`.
+- **Against networkx** (3.4.2, the pure-Python `pagerank`, alpha 0.85, tolerance 1e-15): the karate club weighted by
+  `karate_club_graph()`'s edge weights, every member a seed and `personalization={0: 2, 33: 1}`, each within 1e-9. An
+  exact-bits golden of the second, to a tolerance of 1e-6, which CI's Linux, macOS and Windows runs must each find.
+- **Communities:** the weighted club's Leiden partition from seed 0 has networkx's
+  `community.modularity(G, partition, weight="weight")`, 0.44490358126721763, within 1e-12. It is the unweighted
+  partition: the club's weights confirm its split. A square whose opposite sides are heavy splits along the heavy sides,
+  whichever pair they are, in the algorithm and through the store.
+- **Through the store** (`crates/elmdb/src/engine/tests/weights.rs`): over 64 random graphs of 6 tasks, edges of a
+  weighted kind and of an unweighted one ranked together, the engine's scores equal, bit for bit, those of a graph built
+  by hand from the edges as written.
+- **Time** (Criterion, `ELMDB_BENCH_ROWS=1000` then `10000 cargo bench -p elmdb --bench maintenance -- 'graph/rank'`,
+  2026-10-31, Apple M1 Pro, other sessions' builds running): the same graph with `refs` weighted, each edge 1 to 4,
+  against it unweighted.
+
+  | Read | 1,000 | 10,000 |
+  |---|---:|---:|
+  | `rank` | 1.04 ms | 11.6 ms |
+  | `rankWeighted` | 1.06 ms | 11.8 ms |
+
+  1.02× and 1.01×, within the 1.2× budget: the graph's build is most of a rank's time, and the weights add a float an
+  edge to it.
+- **Heap** (`tests/maintenance_heap.rs`, release, dhat, 2026-10-31, Apple M1 Pro): 184 bytes an entity for
+  `rankWeighted`, against 131 for `rank`: a weight an edge beside its target, 40 bytes at five edges, and each node's
+  total, 8. The heap test holds it to 256, the 192 the unweighted reads are held to leaving too little room for the
+  graph's run-to-run share.

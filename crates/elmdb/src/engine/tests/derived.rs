@@ -751,6 +751,7 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
                 source: (*source).into(),
                 target: (*target).into(),
                 info: info.clone(),
+                weight: None,
                 seq: seq as u64 + 1,
             };
             d.put(txn, &keys::relation(&format!("Relation-{id}")), &rmp_serde::to_vec_named(&stored).unwrap())?;
@@ -995,6 +996,7 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
                 source: source.into(),
                 target: target.into(),
                 info: None,
+                weight: None,
             });
         }
         db.bulk_load(&loads).unwrap();
