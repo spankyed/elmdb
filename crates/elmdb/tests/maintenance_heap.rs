@@ -99,4 +99,10 @@ fn maintenance_heap_bounds() {
             black_box(fixture.db.read(&fixture.graph_read(read)).unwrap());
         });
     }
+    // Communities copy the graph into leiden-rs's own: its builder's edge list at 24 bytes an edge, and its CSR holding
+    // each edge both ways at 16 bytes a side, some 280 bytes an entity at five edges, beside its partition and the
+    // statistics it moves nodes by: about 764 bytes an entity, measured
+    measure_growth("communities", 1024, [5_000, 10_000], graph, |fixture| {
+        black_box(fixture.db.read(&fixture.graph_read("communities")).unwrap());
+    });
 }
