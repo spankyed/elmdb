@@ -176,7 +176,7 @@ export interface QueryStage {
   kept: number;
   /** Milliseconds spent in the stage's own work */
   ms: number;
-  /** For a stage that built a graph (`rank`, `weakComponents`): its entities */
+  /** For a stage that built a graph, which `explain()` reaches only through a `rank`: its entities */
   nodes?: number;
   /** For a stage that built a graph: the edges between its entities */
   edges?: number;
