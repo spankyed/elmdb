@@ -30,12 +30,16 @@ crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as
                 for p in metadata["packages"])
 assert crates, "the workspace names no crate"
 
+# cargo-mutants builds each job's copy of the tree in a directory of its own; a CARGO_TARGET_DIR from the caller would
+# put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
+env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
 missed, timeouts = [], []
 for name, path, features in crates:
     # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
     with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
     run = subprocess.run(["cargo", "mutants", "-j", jobs, "-o", str(out / name), "--in-diff", str(diff),
-                          "--file", f"{path}/**", "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])])
+                          "--file", f"{path}/**", "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])],
+                         env=env)
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
     results = out / name / "mutants.out"
