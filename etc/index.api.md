@@ -607,6 +607,7 @@ export interface QueryExplanation<E extends string = string> {
 
 // @public
 export interface QueryStage {
+    candidates?: number;
     converged?: boolean;
     cycles?: number;
     edges?: number;
@@ -614,6 +615,7 @@ export interface QueryStage {
     iterations?: number;
     kept: number;
     ms: number;
+    neighbours?: number;
     nodes?: number;
     stage: string;
     visited: number;

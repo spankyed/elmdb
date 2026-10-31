@@ -389,6 +389,7 @@ describe('graph algorithms', () => {
     expect(adamicAdar.map((h) => h.id)).toEqual([x, y]);
     expect(adamicAdar[1]!.score).toBeCloseTo(1 / Math.log(3), 12);
     expect(e.query('Task').similar('Task-gone' as never, 'refs').ids()).toEqual([]);
+    expect(e.query('Task').similar(to, 'refs').explain().stages[1]).toMatchObject({ stage: 'similar', neighbours: 2, candidates: 2 });
   });
 
   it('explain reports the graph a rank built and the rounds it ran', () => {

@@ -185,7 +185,7 @@ export interface QueryStage {
   ms: number;
   /** For a stage that built a graph, which `explain()` reaches only through a `rank`: its entities */
   nodes?: number;
-  /** For a stage that built a graph: the edges between its entities */
+  /** For a stage that built a graph: the edges between its entities; for a `similar`, the edges it read */
   edges?: number;
   /** For a `rank`: the rounds it ran */
   iterations?: number;
@@ -193,6 +193,10 @@ export interface QueryStage {
   converged?: boolean;
   /** For a `topological`: the cycles whose members it kept together */
   cycles?: number;
+  /** For a `similar`: the neighbours of the entity it compared with */
+  neighbours?: number;
+  /** For a `similar`: the entities it scored, each sharing a neighbour with it */
+  candidates?: number;
 }
 
 /** A query's ids, and how the database found them: every stage of its plan, the entities it read, and its time */
