@@ -164,6 +164,13 @@ export interface SearchHit<E extends string = string> {
 /** Which of an entity's edges a walk follows (`pathTo`, `degrees`, `rank`): those out of it, those into it, or both */
 export type EdgeDirection = 'out' | 'in' | 'both';
 
+/**
+ * How `similar` scores two entities' neighbours: `jaccard`, the neighbours both have over those either has, or
+ * `adamicAdar`, each neighbour both have counting 1 / ln of how many entities link with it, so a rarely linked one
+ * counts for more than a hub
+ */
+export type SimilarityMeasure = 'jaccard' | 'adamicAdar';
+
 /** One stage of a query's plan as the database ran it: its start, a step or its terminal (`explain()`) */
 export interface QueryStage {
   /** The stage's name: `types`, `ids` or `all` for the start, a step's (`where`, `orderBy`, …), the terminal's */
@@ -184,6 +191,8 @@ export interface QueryStage {
   iterations?: number;
   /** For a `rank`: whether its scores settled within the rounds it ran */
   converged?: boolean;
+  /** For a `topological`: the cycles whose members it kept together */
+  cycles?: number;
 }
 
 /** A query's ids, and how the database found them: every stage of its plan, the entities it read, and its time */
@@ -341,6 +350,25 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * ignored, and none it reaches answers nothing. `hits()` answers each score, and `limit(n)` keeps the `n` highest.
    */
   rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: EdgeDirection; seeds?: readonly EARS.EntityId[] }): QueryBuilder<E, D>;
+  /**
+   * The query's entities in an order where each edge of the kinds between two of them, followed `out` unless
+   * `direction` says `in`, leads from an entity to a later one: with `blocks`, what blocks comes before what it blocks.
+   * The members of a cycle can't be ordered so, and stay together in query order where the cycle falls
+   * (`strongComponents` answers which they are). What the edges leave free keeps query order.
+   */
+  topological(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: 'out' | 'in' }): QueryBuilder<E, D>;
+  /**
+   * The query's entities that share a neighbour with `to`, most alike first, ties in query order: an entity's
+   * neighbours are the far ends of its edges of the kinds, followed `out` unless `direction` says `in` or `both`,
+   * whether the query holds them or not. `measure` is `jaccard` unless it says `adamicAdar`. `to` itself, and an entity
+   * sharing nothing with it, aren't answered. `hits()` answers each score, and `limit(n)` keeps the `n` most alike.
+   * Unlike `like`, which ranks by embedding, this ranks by links.
+   */
+  similar(
+    to: EARS.EntityId,
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    options?: { direction?: EdgeDirection; measure?: SimilarityMeasure },
+  ): QueryBuilder<E, D>;
   /**
    * The query's weak components: its entities in groups joined by edges of the kinds between two of them, whichever way
    * each points: each group's ids in query order, the largest group first, of two as large the one whose first entity

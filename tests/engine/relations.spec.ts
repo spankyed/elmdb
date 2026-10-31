@@ -198,6 +198,8 @@ describe('relation kinds', () => {
       ['weakComponents', () => e.query.ids(a).weakComponents('blokcs')],
       ['strongComponents', () => e.query.ids(a).strongComponents('blokcs')],
       ['communities', () => e.query.ids(a).communities('blokcs')],
+      ['topological', () => e.query.ids(a).topological('blokcs')],
+      ['similar', () => e.query.ids(a).similar(b, 'blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -362,6 +364,31 @@ describe('graph algorithms', () => {
     expect(e.query('Task').communities('refs', { resolution: 0 })).toEqual([[a, b, c, x, y, z]]);
     expect(() => e.query('Task').communities('refs', { resolution: -1 })).toThrow();
     for (const seed of [-1, 1.5, 2 ** 32]) expect(() => e.query('Task').communities('refs', { seed }), String(seed)).toThrow();
+  });
+
+  it('topological puts what blocks before what it blocks, a cycle together, the rest in query order', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    // x blocks a; b, c and d block each other; a blocks c
+    for (const [s, t] of [[x, a], [a, c], [b, c], [c, d], [d, b]] as const) e.write(s!).link('blocks', t!);
+    expect(e.query('Task').topological('blocks').ids()).toEqual([x, a, b, c, d]);
+    expect(e.query('Task').topological('blocks', { direction: 'in' }).ids()).toEqual([b, c, d, a, x]);
+    expect(e.query('Task').topological('blocks').limit(2).ids()).toEqual([x, a]);
+    expect(e.query('Task').topological('blocks').explain().stages[1]).toMatchObject({ stage: 'topological', nodes: 5, edges: 5, cycles: 1 });
+    expect(() => e.query('Task').topological('blocks', { direction: 'both' as never }).ids()).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+  });
+
+  it('similar answers what shares neighbours with an entity, most alike first, scores in hits', () => {
+    const [to, x, y, z, w, alone] = ['to', 'x', 'y', 'z', 'w', 'alone'].map(task);
+    // to and x both reference z and w; y references z alone; alone references only y
+    for (const [s, t] of [[to, z], [to, w], [x, z], [x, w], [y, z], [alone, y]] as const) e.write(s!).link('refs', t!);
+    const hits = e.query('Task').similar(to, 'refs').hits();
+    expect(hits.map((h) => [h.id, h.score])).toEqual([[x, 1], [y, 0.5]]);
+    expect(e.query('Task').similar(to, 'refs').limit(1).ids()).toEqual([x]);
+    const adamicAdar = e.query('Task').similar(to, 'refs', { measure: 'adamicAdar' }).hits();
+    // z has three entities linking it, w two: x shares both, y z alone
+    expect(adamicAdar.map((h) => h.id)).toEqual([x, y]);
+    expect(adamicAdar[1]!.score).toBeCloseTo(1 / Math.log(3), 12);
+    expect(e.query('Task').similar('Task-gone' as never, 'refs').ids()).toEqual([]);
   });
 
   it('explain reports the graph a rank built and the rounds it ran', () => {

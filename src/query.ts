@@ -1,7 +1,7 @@
 // The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
-import type { EdgeDirection, QueryBuilder, QueryStage, RelationEdge } from './runtime.ts';
+import type { EdgeDirection, QueryBuilder, QueryStage, RelationEdge, SimilarityMeasure } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import type { Answer } from './database.ts';
 import type { TypeName } from './write.ts';
@@ -89,7 +89,7 @@ const STREAMING: readonly string[] = [
   'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both', 'limit',
 ];
 /** The steps whose hits `hits()` answers */
-const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank'];
+const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'similar'];
 
 /**
  * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
@@ -267,6 +267,18 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         names.relationKinds(kinds, 'rank');
         return next({ step: 'rank', kinds: asArr(kinds), direction, ...(seeds !== undefined && { seeds: [...seeds] }) });
       },
+      topological: (kinds: MaybeArr<string>, { direction = 'out' }: { direction?: 'out' | 'in' } = {}) => {
+        names.relationKinds(kinds, 'topological');
+        return next({ step: 'topological', kinds: asArr(kinds), direction });
+      },
+      similar: (
+        to: EARS.EntityId,
+        kinds: MaybeArr<string>,
+        { direction = 'out', measure = 'jaccard' }: { direction?: EdgeDirection; measure?: SimilarityMeasure } = {},
+      ) => {
+        names.relationKinds(kinds, 'similar');
+        return next({ step: 'similar', to, kinds: asArr(kinds), direction, measure });
+      },
       weakComponents: (kinds: MaybeArr<string>) => {
         names.relationKinds(kinds, 'weakComponents');
         return run(recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
@@ -313,8 +325,8 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         const split = lastWhere((p) => !('step' in p));
         if (searched < 0 || split > searched) {
           throw new EarsError('NO_SEARCH', searched < 0
-            ? 'hits() answers what a search or a rank found: the query has no search(...), near(...), like(...), hybrid(...) or rank(...)'
-            : 'hits() answers what a search or a rank found, and a where(...) given a function follows it: put the search or rank after it');
+            ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...) or similar(...)'
+            : 'hits() answers what a search, a rank or a similar found, and a where(...) given a function follows it: put the search, rank or similar after it');
         }
         const answer = run(recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
         return answer.hits;

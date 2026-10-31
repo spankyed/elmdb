@@ -14,7 +14,7 @@ export type { EngineSchema, RelationRules } from './schema.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';
 export type {
-  EARSRuntimeDeps, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, SearchHighlights, QueryExplanation, QueryStage, EdgeDirection, FieldRule, FieldType, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode,
+  EARSRuntimeDeps, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, SearchHighlights, QueryExplanation, QueryStage, EdgeDirection, SimilarityMeasure, FieldRule, FieldType, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, getTimestamp } from './ids.ts';
