@@ -141,21 +141,32 @@ impl Fixture {
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, false)
+        Self::graph_of(rows, degree, false, false)
+    }
+
+    /// The same graph with a rank index over it, `docRank`, its pushes drained: `ranked`'s workload, and what a change
+    /// costs an index kept current
+    #[allow(dead_code)]
+    pub fn ranked_graph(rows: usize, degree: usize) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, true);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
     }
 
     /// The same graph with `refs` declared weighted, each edge weighing 1 to 4 by arithmetic: `rankWeighted`'s workload
     #[allow(dead_code)]
     pub fn weighted_graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, true)
+        Self::graph_of(rows, degree, true, false)
     }
 
     #[allow(dead_code)]
-    fn graph_of(rows: usize, degree: usize, weighted: bool) -> Self {
+    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: bool) -> Self {
+        let ranks = if ranked { json!({"docRank":{"types":["Doc"],"relations":["refs"]}}) } else { json!({}) };
         let schema = Schema::from_json(&json!({
             "$schema": SCHEMA_LANGUAGE,
             "types":{"Doc":{"fields":{"body":{"type":"string"}}}},
-            "relations":{"refs":{"cardinality":"many-to-many","weighted":weighted}}
+            "relations":{"refs":{"cardinality":"many-to-many","weighted":weighted}},
+            "ranks": ranks
         }))
         .unwrap();
         let directory = tempfile::tempdir().unwrap();
@@ -199,6 +210,9 @@ impl Fixture {
                 (json!([{"step":"rank","kinds":["refs"]},{"step":"limit","n":10}]), json!({"answer":"hits"}))
             }
             "rankCounted" => (json!([{"step":"rank","kinds":["refs"]}]), json!({"answer":"count"})),
+            "ranked" => {
+                (json!([{"step":"ranked","index":"docRank"},{"step":"limit","n":10}]), json!({"answer":"hits"}))
+            }
             "personalized" => (
                 json!([{"step":"rank","kinds":["refs"],"direction":"both","seeds":["Doc-00000000"]},{"step":"limit","n":10}]),
                 json!({"answer":"hits"}),
@@ -244,6 +258,9 @@ impl Fixture {
                 answer["hits"].as_array().unwrap().iter().map(|h| h["score"].as_f64().unwrap()).collect();
             assert!(!scores.is_empty() && scores.len() <= 10, "{answer}");
             assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]) && scores.iter().all(|s| *s > 0.0));
+        } else if read == "ranked" {
+            assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
+            assert!(answer["rank"]["error"].as_f64().unwrap() <= 1e-6, "{answer}");
         } else {
             assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
             assert_eq!(answer["rank"]["converged"], json!(true));

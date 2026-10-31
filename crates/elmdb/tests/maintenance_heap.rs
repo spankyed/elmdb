@@ -112,6 +112,11 @@ fn maintenance_heap_bounds() {
     measure_growth("rankWeighted", 256, [5_000, 10_000], weighted, |fixture| {
         black_box(fixture.db.read(&fixture.graph_read("rankWeighted")).unwrap());
     });
+    // A rank index's top ten read from its score order hold ten hits whatever the graph's size: none an entity
+    let ranked = |rows| Fixture::ranked_graph(rows, 5);
+    measure_growth("ranked", 16, [5_000, 10_000], ranked, |fixture| {
+        black_box(fixture.db.read(&fixture.graph_read("ranked")).unwrap());
+    });
     // Communities copy the graph into leiden-rs's own: its builder's edge list at 24 bytes an edge, and its CSR holding
     // each edge both ways at 16 bytes a side, some 280 bytes an entity at five edges, beside its partition and the
     // statistics it moves nodes by: about 764 bytes an entity, measured

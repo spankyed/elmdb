@@ -225,12 +225,15 @@ struct Change<'i, 'a> {
     nodes: BTreeMap<String, (Option<Node>, Option<Node>)>,
     /// A node leaving, whose edges are still stored: no out-weight counted again counts an arc to it
     leaving: Option<String>,
+    /// Of the nodes read, those waiting to be pushed, by place: the queue as it stands for them, where the stored one
+    /// stands for the rest
+    waiting: BTreeMap<(u32, u64), String>,
 }
 
 impl<'i, 'a> Change<'i, 'a> {
     fn begin(t: &impl Read, index: &'i Index<'a>) -> Result<Self> {
         let held = totals(t, index.name)?;
-        Ok(Change { index, held, totals: held, nodes: BTreeMap::new(), leaving: None })
+        Ok(Change { index, held, totals: held, nodes: BTreeMap::new(), leaving: None, waiting: BTreeMap::new() })
     }
 
     fn get(&mut self, t: &impl Read, id: &str) -> Result<Option<Node>> {
@@ -239,6 +242,11 @@ impl<'i, 'a> Change<'i, 'a> {
         }
         let held = node(t, self.index.name, id)?;
         self.nodes.insert(id.to_owned(), (held, held));
+        if let Some(n) = held
+            && n.r.abs() > self.index.threshold
+        {
+            self.waiting.insert((n.type_at, n.seq), id.to_owned());
+        }
         Ok(held)
     }
 
@@ -249,7 +257,61 @@ impl<'i, 'a> Change<'i, 'a> {
         self.totals.estimates += estimate(to) - estimate(from);
         self.totals.residuals += residual(to) - residual(from);
         self.nodes.get_mut(id).expect("read above").1 = to;
+        if let Some(n) = to.or(from) {
+            if to.is_some_and(|n| n.r.abs() > self.index.threshold) {
+                self.waiting.insert((n.type_at, n.seq), id.to_owned());
+            } else {
+                self.waiting.remove(&(n.type_at, n.seq));
+            }
+        }
         Ok(())
+    }
+
+    /// The first node waiting to be pushed after the place `after`, of those this change has read and those it hasn't
+    fn next_waiting(&mut self, t: &impl Read, after: Option<(u32, u64)>) -> Result<Option<((u32, u64), String)>> {
+        use std::ops::Bound;
+        let read = match after {
+            Some(place) => self.waiting.range((Bound::Excluded(place), Bound::Unbounded)).next(),
+            None => self.waiting.iter().next(),
+        }
+        .map(|(place, id)| (*place, id.clone()));
+        let queue = keys::rank_queue(self.index.name);
+        let from =
+            after.map_or_else(|| queue.clone(), |(type_at, seq)| keys::rank_queued(self.index.name, type_at, seq));
+        let mut stored = None;
+        let mut failed = None;
+        t.visit_from(&queue, &from, |key, id| {
+            let place = match crate::format::key::decode(key)
+                .ok()
+                .map(|parts| (parts.get(2).cloned(), parts.get(3).cloned()))
+            {
+                Some((Some(crate::format::key::Part::Number(at)), Some(crate::format::key::Part::Number(seq)))) => {
+                    (at as u32, seq as u64)
+                }
+                _ => {
+                    failed =
+                        Some(Error::new(ErrorCode::Corrupted, "A rank index's queue holds a key that doesn't read"));
+                    return false;
+                }
+            };
+            if Some(place) == after {
+                return true;
+            }
+            let id = String::from_utf8_lossy(id).into_owned();
+            // A node this change has read waits as it says, in `waiting`
+            if self.nodes.contains_key(&id) {
+                return true;
+            }
+            stored = Some((place, id));
+            false
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        Ok(match (read, stored) {
+            (Some(a), Some(b)) => Some(if a.0 <= b.0 { a } else { b }),
+            (a, b) => a.or(b),
+        })
     }
 
     /// Adds `delta` to a node's residual
@@ -506,38 +568,21 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let schema = t.schema;
     let Some(def) = schema.ranks.get(index) else { return Ok(false) };
     let index = Index::new(index, def, schema);
-    let queue = keys::rank_queue(index.name);
-    let mut after = totals(t, index.name)?.swept.map(|(type_at, seq)| keys::rank_queued(index.name, type_at, seq));
+    // One change for every push: each node read and written once, however many pushes touch it
+    let mut change = Change::begin(t, &index)?;
+    let mut after = change.totals.swept;
     for _ in 0..limit {
-        let mut next = None;
-        let from = after.clone().unwrap_or_else(|| queue.clone());
-        t.visit_from(&queue, &from, |key, id| {
-            if after.as_deref() == Some(key) {
-                return true;
-            }
-            next = Some((key.to_vec(), String::from_utf8_lossy(id).into_owned()));
-            false
-        })?;
-        if next.is_none() && after.is_some() {
-            // Past the end: the sweep goes on from the start
-            t.visit(&queue, |key, id| {
-                next = Some((key.to_vec(), String::from_utf8_lossy(id).into_owned()));
-                false
-            })?;
-        }
-        let Some((key, id)) = next else { return Ok(false) };
-        let mut change = Change::begin(t, &index)?;
+        let next = match change.next_waiting(t, after)? {
+            None if after.is_some() => change.next_waiting(t, None)?,
+            next => next,
+        };
+        let Some((place, id)) = next else { break };
         change.push(t, &id)?;
-        let node = change.get(t, &id)?.expect("pushed a node");
-        change.totals.swept = Some((node.type_at, node.seq));
-        change.finish(t)?;
-        after = Some(key);
+        after = Some(place);
     }
-    let mut waiting = false;
-    t.visit(&keys::rank_queue(index.name), |_, _| {
-        waiting = true;
-        false
-    })?;
+    change.totals.swept = after;
+    let waiting = !change.waiting.is_empty() || change.next_waiting(t, None)?.is_some();
+    change.finish(t)?;
     Ok(waiting)
 }
 
