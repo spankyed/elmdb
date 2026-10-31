@@ -8,14 +8,16 @@ timings on an Apple M1 Pro (macOS), Node 23.11.1. The commands are in `../archit
 ## What is reported
 
 Spans under the target `elmdb`, each ending with an `outcome` (`committed`, `durable`, `not_durable`, `begun`,
-`returned`, `sorted` or `failed` with its `error` code) and `elapsed_us`:
+`returned`, `sorted`, `failed` with its `error` code as JavaScript's `error.code` names it, or `abandoned` for one
+dropped before it ended, by an error returned past it or a panic) and `elapsed_us`. `Collector` gives each its `id`,
+and its parent's `parent` and `parent_id`, so a take can be put back together as the tree it ran in:
 
 | Span | Fields |
 |---|---|
 | `rebuild` | `entity_type`, `index` (both empty for a full rebuild) |
 | `write` | `durable`, `waited_us` (until it held the writer), `growths` |
 | `begin` | `waited_us` |
-| `unit_wait` | `waited_us` |
+| `unit_wait` | none beyond its outcome and `elapsed_us` |
 | `sort` | `rows`, `runs`, `spilled_bytes` (scratch bytes at its finish) |
 
 A rebuild's write and sorts are its children. One run of `crates/elmdb-node/examples/diagnostics.mjs`, 1,000 notes

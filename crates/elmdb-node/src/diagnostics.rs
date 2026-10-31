@@ -32,7 +32,8 @@ pub fn collect_diagnostics() -> napi::Result<()> {
 
 #[napi(object)]
 pub struct Diagnostics {
-    /// Each span closed since the last take, oldest first, as JSON: `span`, `parent` and its fields
+    /// Each span closed since the last take, oldest first, as JSON: `span` and `id`, `parent` and `parent_id`, and its
+    /// fields
     pub spans: Vec<String>,
     /// Spans closed past the most kept, and so not in `spans`
     pub dropped: f64,

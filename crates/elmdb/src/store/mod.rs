@@ -636,7 +636,6 @@ impl Store {
     pub fn wait_while_unit_open(&self, stop: impl Fn() -> bool) {
         let op = Op::unit_wait();
         self.unit.wait_while_open(stop);
-        op.record_elapsed(names::WAITED_US);
         op.end(Ok("returned"));
     }
 

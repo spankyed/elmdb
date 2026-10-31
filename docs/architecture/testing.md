@@ -72,10 +72,10 @@ other build), and without it a site is nothing: a release binding holds no point
 ## Diagnostics
 
 The engine reports its slow operations as [`tracing`](https://docs.rs/tracing) spans (`crates/elmdb/src/diagnostics.rs`):
-`rebuild`, `write`, `begin`, `unit_wait` and `sort`, each with its outcome, its elapsed and waited microseconds and its
-counts, under the target `elmdb`. A span is one operation or phase, never one row, and names no entity value, id, query
+`rebuild`, `write`, `begin`, `unit_wait` and `sort`, each with its outcome (`abandoned` for one dropped before it ended),
+its elapsed and waited microseconds and its counts, under the target `elmdb`. A span is one operation or phase, never one row, and names no entity value, id, query
 or path. The engine never installs a collector: the embedding program does, or nothing is collected. With the
-feature, `elmdb::diagnostics::Collector` is one it may install, keeping each span as a JSON object until taken.
+feature, `elmdb::diagnostics::Collector` is one it may install, keeping each span as a JSON object until taken, with its `id` and its parent's `parent_id`.
 
 Diagnostics are off by default, and three checks hold that claim:
 

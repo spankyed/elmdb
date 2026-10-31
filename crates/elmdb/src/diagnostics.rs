@@ -34,13 +34,14 @@ pub mod names {
     pub const SORT: &str = "sort";
 
     /// What every span records as it ends: `committed`, `durable` or `not_durable` (committed, its sync failed) for a
-    /// write or a rebuild, `begun` for a unit, `returned` for a wait, `sorted` for a sort, or `failed`
+    /// write or a rebuild, `begun` for a unit, `returned` for a wait, `sorted` for a sort, `failed`, or `abandoned` for
+    /// one dropped before it could say, by an error returned past it or a panic
     pub const OUTCOME: &str = "outcome";
-    /// A failed operation's `ErrorCode`
+    /// A failed operation's `ErrorCode`, as JavaScript's `error.code` names it
     pub const ERROR: &str = "error";
     /// Microseconds from the span's start to its end
     pub const ELAPSED_US: &str = "elapsed_us";
-    /// Microseconds from the span's start until it held the writer, or the unit it waited on ended
+    /// Microseconds from the span's start until it held the writer
     pub const WAITED_US: &str = "waited_us";
     /// Times a write grew the map after filling it, and ran again
     pub const GROWTHS: &str = "growths";
@@ -121,9 +122,7 @@ impl Op {
         #[cfg(feature = "diagnostics")]
         {
             use tracing::field::Empty;
-            Self::live(tracing::info_span!(
-                target: TARGET, "unit_wait", waited_us = Empty, outcome = Empty, elapsed_us = Empty
-            ))
+            Self::live(tracing::info_span!(target: TARGET, "unit_wait", outcome = Empty, elapsed_us = Empty))
         }
         #[cfg(not(feature = "diagnostics"))]
         Self {}
@@ -186,14 +185,15 @@ impl Op {
 
     /// Ends the span with `outcome`, its elapsed time and, for a failure, its error's code
     #[inline(always)]
-    pub fn end(self, outcome: std::result::Result<&'static str, &Error>) {
+    #[allow(unused_mut)]
+    pub fn end(mut self, outcome: std::result::Result<&'static str, &Error>) {
         #[cfg(feature = "diagnostics")]
-        if let Some((span, started)) = self.live {
+        if let Some((span, started)) = self.live.take() {
             match outcome {
                 Ok(outcome) => span.record(names::OUTCOME, outcome),
                 Err(error) => {
                     span.record(names::OUTCOME, "failed");
-                    span.record(names::ERROR, tracing::field::debug(error.code))
+                    span.record(names::ERROR, error.code.as_str())
                 }
             };
             span.record(names::ELAPSED_US, micros(&started));
@@ -210,7 +210,62 @@ impl Op {
     }
 }
 
+/// A span still live when its operation is dropped ended by no path that could say how: an error returned past it, as
+/// a sort's scratch dropped when its rebuild fails, or a panic. It says so, with its time, rather than closing silent
+#[cfg(feature = "diagnostics")]
+impl Drop for Op {
+    fn drop(&mut self) {
+        if let Some((span, started)) = self.live.take() {
+            span.record(names::OUTCOME, "abandoned");
+            span.record(names::ELAPSED_US, micros(&started));
+        }
+    }
+}
+
 #[cfg(feature = "diagnostics")]
 fn micros(started: &Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+#[cfg(all(test, feature = "diagnostics"))]
+mod tests {
+    use std::sync::Arc;
+
+    use serde_json::Value;
+
+    use super::{Collector, Op, names};
+    use crate::error::{Error, ErrorCode};
+
+    fn heard(collector: &Collector) -> Vec<Value> {
+        collector.take().spans.iter().map(|s| serde_json::from_str(s).unwrap()).collect()
+    }
+
+    #[test]
+    fn an_operation_dropped_before_it_ends_says_it_was_abandoned_and_how_long_it_ran() {
+        let collector = Arc::new(Collector::new(10));
+        tracing::subscriber::with_default(Arc::clone(&collector), || {
+            let sort = Op::sort();
+            sort.record(names::ROWS, || 3);
+            drop(sort);
+        });
+        let spans = heard(&collector);
+        assert_eq!(spans.len(), 1);
+        assert_eq!((&spans[0][names::OUTCOME], &spans[0][names::ROWS]), (&Value::from("abandoned"), &Value::from(3)));
+        assert!(spans[0][names::ELAPSED_US].is_u64(), "{}", spans[0]);
+    }
+
+    #[test]
+    fn an_operation_that_ended_is_not_abandoned_on_drop() {
+        let collector = Arc::new(Collector::new(10));
+        tracing::subscriber::with_default(Arc::clone(&collector), || {
+            Op::write(false).end(Ok("committed"));
+            Op::begin().end(Err(&Error::new(ErrorCode::UnitOpen, "a unit is open")));
+        });
+        let spans = heard(&collector);
+        assert_eq!(spans[0][names::OUTCOME], "committed");
+        assert_eq!(
+            (&spans[1][names::OUTCOME], &spans[1][names::ERROR]),
+            (&Value::from("failed"), &Value::from("UNIT_OPEN"))
+        );
+    }
 }
