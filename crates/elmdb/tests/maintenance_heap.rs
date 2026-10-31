@@ -94,7 +94,8 @@ fn maintenance_heap_bounds() {
     // only those a limit after it keeps, would add some 430 bytes an entity, past the allowance. Strong components hold
     // the same, measured: Tarjan's walk, some 33 bytes a node at its deepest, fits within what building the graph freed
     // A topological order holds the same, measured, its strong components and ready heap within it too. A similar read
-    // keeps the set's ids and a place for each, and the neighbours two steps from `to`: about 112 bytes an entity
+    // straight after a type start holds only what lies two edges from `to`, so it doesn't grow with the type: none an
+    // entity, measured
     let graph = |rows| Fixture::graph(rows, 5);
     // A rank whose terminal answers no scores, over every document with no limit, records none
     for read in

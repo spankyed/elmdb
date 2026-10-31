@@ -390,14 +390,18 @@ impl<R: Read> Query<'_, R> {
 
     /// Whether the start may begin from the entity
     fn admits(&self, id: &str) -> Result<bool> {
-        Ok(match entities::record(self.r, id)? {
-            None => false,
-            Some(rec) => match self.plan.scope {
+        Ok(self.admitted(id)?.is_some())
+    }
+
+    /// The entity's place in creation order when the start may begin from it
+    fn admitted(&self, id: &str) -> Result<Option<u64>> {
+        Ok(entities::record(self.r, id)?
+            .filter(|rec| match self.plan.scope {
                 Scope::Live => !rec.trashed,
                 Scope::WithTrashed => true,
                 Scope::Trashed => rec.trashed,
-            },
-        })
+            })
+            .map(|rec| rec.seq))
     }
 
     /// Visits a type's entities in creation order, in the scope's ranges; false when `visit` stopped it. A walk goes
@@ -696,57 +700,94 @@ impl<R: Read> Query<'_, R> {
                 if !self.alive(to)? {
                     return Ok(true);
                 }
-                let ids = self.collect(before)?;
-                // Each entity's first place in the set, so a repeat is answered once
-                let mut place: HashMap<&str, usize, Fixed> = HashMap::default();
+                // Whether an entity is in the set, and its place there. Straight after a type start that is its type and
+                // the scope, read per candidate: the type's place in the start, then its creation, the order the start
+                // walks. After any other step the set is collected, and each entity has its first place in it
+                let types = if before == 0 { self.start_types() } else { None };
+                let ids = if types.is_some() { Vec::new() } else { self.collect(before)? };
+                let mut first: HashMap<&str, usize, Fixed> = HashMap::default();
                 for (at, id) in ids.iter().enumerate() {
-                    place.entry(id.as_str()).or_insert(at);
+                    first.entry(id.as_str()).or_insert(at);
                 }
-                let ours = self.neighbours(to, kinds, direction.sides())?;
+                let place = |id: &str| -> Result<Option<(usize, u64)>> {
+                    match types {
+                        Some(types) => {
+                            let Some(at) = types.iter().position(|t| t == ids::type_of(id)) else { return Ok(None) };
+                            Ok(self.admitted(id)?.map(|seq| (at, seq)))
+                        }
+                        None => Ok(first.get(id).map(|&at| (at, 0))),
+                    }
+                };
                 let back: &[bool] = match direction {
                     Direction::Out => &[false],
                     Direction::In => &[true],
                     Direction::Both => &[true, false],
                 };
-                // Each entity that shares a neighbour with `to`: how many it shares, and their Adamic-Adar sum, added
-                // in the order `to`'s neighbours were read so the sum is the same bits every time
-                let mut shared: HashMap<String, (usize, f64), Fixed> = HashMap::default();
+                let mut walked = 0usize;
+                let mut ours = Vec::new();
+                self.visit_neighbours(to, kinds, direction.sides(), &mut walked, |far| {
+                    ours.push(far.to_owned());
+                    Ok(())
+                })?;
+                // Each entity of the set that shares a neighbour with `to`: its place, how many it shares, and their
+                // Adamic-Adar sum, added in the order `to`'s neighbours were read so the sum is the same bits every time.
+                // An entity found outside the set is remembered, so it is looked up once
+                let mut shared: HashMap<String, ((usize, u64), usize, f64), Fixed> = HashMap::default();
+                let mut outside: HashSet<String, Fixed> = HashSet::default();
                 for neighbour in &ours {
-                    let linked = self.neighbours(neighbour, kinds, back)?;
-                    let term = algorithms::adamic_adar(linked.len());
-                    for other in linked {
-                        if other == *to || !place.contains_key(other.as_str()) {
+                    let mut degree = 0usize;
+                    let mut found = Vec::new();
+                    self.visit_neighbours(neighbour, kinds, back, &mut walked, |far| {
+                        degree += 1;
+                        if far != to.as_str() && !outside.contains(far) {
+                            found.push(far.to_owned());
+                        }
+                        Ok(())
+                    })?;
+                    let term = algorithms::adamic_adar(degree);
+                    for other in found {
+                        if let Some(entry) = shared.get_mut(&other) {
+                            entry.1 += 1;
+                            entry.2 += term;
                             continue;
                         }
-                        let entry = shared.entry(other).or_insert((0, 0.0));
-                        entry.0 += 1;
-                        entry.1 += term;
+                        match place(&other)? {
+                            Some(at) => {
+                                shared.insert(other, (at, 1, term));
+                            }
+                            None => {
+                                outside.insert(other);
+                            }
+                        }
                     }
                 }
                 let mut scored = Vec::with_capacity(shared.len());
-                for (at, id) in ids.iter().enumerate() {
-                    if place[id.as_str()] != at {
-                        continue;
-                    }
-                    let Some(&(count, sum)) = shared.get(id) else { continue };
+                for (id, (at, count, sum)) in shared {
                     let score = match measure {
                         Similarity::Jaccard => {
-                            let theirs = self.neighbours(id, kinds, direction.sides())?.len();
+                            let mut theirs = 0usize;
+                            self.visit_neighbours(&id, kinds, direction.sides(), &mut walked, |_| {
+                                theirs += 1;
+                                Ok(())
+                            })?;
                             algorithms::jaccard(count, theirs, ours.len())
                         }
                         Similarity::AdamicAdar => sum,
                     };
-                    scored.push((id, score));
+                    scored.push((at, id, score));
                 }
-                // Stable: equal scores keep the set's order
-                scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+                if let Some(stages) = self.stages {
+                    stages.compared(upto, ours.len(), scored.len(), walked);
+                }
+                // Highest first, equal scores in the set's order
+                scored.sort_by(|a, b| b.2.total_cmp(&a.2).then(a.0.cmp(&b.0)));
                 let record = matches!(self.plan.terminal, Terminal::Hits { .. });
-                for (id, score) in scored {
+                for (_, id, score) in scored {
                     if record {
                         let hit = Hit { id: id.clone(), seq: 0, score, terms: Vec::new(), fields: Vec::new() };
                         self.hits.borrow_mut().insert(id.clone(), (hit, "similar".to_owned()));
                     }
-                    if !visit(id)? {
+                    if !visit(&id)? {
                         return Ok(false);
                     }
                 }
@@ -1501,23 +1542,34 @@ impl<R: Read> Query<'_, R> {
         each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
     }
 
-    /// An entity's neighbours: the far ends of its edges of the kinds on the sides given, each once in the order read,
-    /// leaving out itself and any the scope doesn't reach. Read through the plan's reader, so a tracked read is
-    /// written into by a link or an unlink at the entity
-    fn neighbours(&self, id: &str, kinds: &[String], sides: &[bool]) -> Result<Vec<String>> {
-        let mut found = Vec::new();
+    /// Visits an entity's neighbours: the far ends of its edges of the kinds on the sides given, each once in the order
+    /// read, leaving out itself and any the scope doesn't reach, counting into `walked` each edge read. A far end is
+    /// lent, and copied only to tell a repeat. Read through the plan's reader, so a tracked read is written into by a
+    /// link or an unlink at the entity
+    fn visit_neighbours(
+        &self,
+        id: &str,
+        kinds: &[String],
+        sides: &[bool],
+        walked: &mut usize,
+        mut each: impl FnMut(&str) -> Result<()>,
+    ) -> Result<()> {
         let mut seen: HashSet<String, Fixed> = HashSet::default();
         for kind in kinds {
             for &outward in sides {
-                for (_, far) in relations::edges(self.r, id, outward, Some(kind))? {
-                    if far != id && !seen.contains(&far) && self.alive(&far)? {
-                        seen.insert(far.clone());
-                        found.push(far);
+                relations::visit_far_ends(self.r, id, outward, Some(kind), |far| {
+                    *walked += 1;
+                    if far != id && !seen.contains(far) {
+                        seen.insert(far.to_owned());
+                        if self.alive(far)? {
+                            each(far)?;
+                        }
                     }
-                }
+                    Ok(true)
+                })?;
             }
         }
-        Ok(found)
+        Ok(())
     }
 
     /// The set after the first `before` steps as a graph for stage `stage`: its entities once each, in order, numbered
@@ -1625,6 +1677,8 @@ struct Stages {
     nanos: Vec<Cell<u64>>,
     /// Per stage that built a graph: its nodes and edges, and for a rank its rounds and whether it settled
     graph: RefCell<Vec<Option<Graphed>>>,
+    /// Per `similar` stage: the neighbours of `to`, the entities it scored, and the edges it read
+    compared: RefCell<Vec<Option<(usize, usize, usize)>>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
@@ -1660,6 +1714,7 @@ impl Stages {
             index: RefCell::new(vec![None; n]),
             nanos: (0..n).map(|_| Cell::new(0)).collect(),
             graph: RefCell::new(vec![None; n]),
+            compared: RefCell::new(vec![None; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -1709,6 +1764,10 @@ impl Stages {
         }
     }
 
+    fn compared(&self, stage: usize, neighbours: usize, candidates: usize, edges: usize) {
+        self.compared.borrow_mut()[stage] = Some((neighbours, candidates, edges));
+    }
+
     fn cycled(&self, stage: usize, cycles: u32) {
         if let Some(graphed) = &mut self.graph.borrow_mut()[stage] {
             graphed.cycles = Some(cycles);
@@ -1728,6 +1787,7 @@ impl Stages {
         w.array(n as u32);
         let index = self.index.borrow();
         let graph = self.graph.borrow();
+        let compared = self.compared.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -1743,6 +1803,7 @@ impl Stages {
                     2 + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
+            let extra = extra + if compared[at].is_some() { 3 } else { 0 };
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -1765,6 +1826,14 @@ impl Stages {
                     w.str("cycles");
                     w.uint(u64::from(cycles));
                 }
+            }
+            if let Some((neighbours, candidates, edges)) = compared[at] {
+                w.str("neighbours");
+                w.uint(neighbours as u64);
+                w.str("candidates");
+                w.uint(candidates as u64);
+                w.str("edges");
+                w.uint(edges as u64);
             }
             w.str("visited");
             w.uint(received + self.read[at].get());

@@ -211,9 +211,10 @@ pub fn jaccard(shared: usize, a: usize, b: usize) -> f64 {
 }
 
 /// What one shared neighbour of `degree` adds to Adamic and Adar's similarity: 1 / ln(degree). A shared neighbour is
-/// linked with both entities, so its degree is at least 2
+/// linked with both entities, so its degree is at least 2. The logarithm is libm's, a port of musl's, rather than
+/// std's, which calls the platform's maths library and may differ from it in the last bit
 pub fn adamic_adar(degree: usize) -> f64 {
-    1.0 / (degree as f64).ln()
+    1.0 / libm::log(degree as f64)
 }
 
 /// What `rank` found: each node's score, summing to 1, and whether the scores settled within the rounds allowed
