@@ -1,9 +1,28 @@
 # Rank index
 
-Status: designed, 2026-10-31. Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights
-([rank-weights.md](../archive/roadmap/rank-weights.md), elmdb #44). A declared index that holds
-PageRank scores and keeps them current as commits change the graph, so a query reads scores rather than computing
-them.
+Status: built in elmdb, 2026-10-31 ([the readings](../evidence/rank-index.md)); apack's side follows in its own PR.
+Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights ([rank-weights.md](../archive/roadmap/rank-weights.md), elmdb
+#44). A declared index that holds PageRank scores and keeps them current as commits change the graph, so a query reads
+scores rather than computing them. Where the build differs from the design below:
+
+- **No dangling term.** PageRank with dangling walkers returned to the seeds, every node here, is the normalized
+  solution of the system the index keeps, so a read divides by the estimates' sum and nothing holds dangling mass.
+- **The bound** a read reports is `2R / ((1 − α)² n)`, `R` the residuals' sum; a node waits to be pushed when its
+  residual is over `tolerance (1 − α)² / 2`, so once none waits the bound is within the tolerance. The proof is in the
+  readings.
+- **Pushes sweep the queue** in place order from where the last one stopped, kept in the totals; taking the first
+  waiting node each time grew a hub's pushes geometrically.
+- **The drain runs in memory:** a commit pushes 16 nodes, and the index thread drains the rest after commits pause
+  for 5 ms (at most 100 ms), reading the graph once, pushing in memory and writing back each node it moved, in one
+  unit. Pushing through the store a node at a time cost some 10 µs a push.
+- **The score order** (`d/rk`) is keyed on the estimate kept to 16 significant bits, so most of a drain's small moves
+  leave it alone; `ranked` sorts by the estimates themselves, and the order is promised only beyond twice the bound.
+- **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a
+  drain's timing can change where its pushes start, so across histories only the bound and the order are promised.
+- **The hits answer's `rank`** is `{ index, error }`, with no `sequence`: a watch's delivery carries the sequence.
+- **No rebuild of one rank index:** `rebuild()` builds every one, and a schema change rebuilds the one it changes.
+- **Tests:** the model harness is unchanged; the index has its own random histories against `rank`, a crash case and
+  a savepoint case (`engine/tests/rank_index.rs`), so its maintenance isn't in every engine test.
 
 ## Where it starts
 
