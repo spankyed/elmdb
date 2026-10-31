@@ -10,6 +10,7 @@ mod lifecycle;
 mod maintenance;
 mod model;
 mod plans;
+mod ranks;
 mod reads;
 mod schema_versions;
 mod tracked;

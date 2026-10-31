@@ -274,6 +274,30 @@ pub enum Step {
         #[cfg_attr(feature = "codegen", ts(optional))]
         depth: Option<u32>,
     },
+    /// The set's entities by personalized PageRank over the edges of the kinds between two of them, followed the
+    /// direction's ways, highest score first, ties in the set's order; each score is a hit's, which `hits` answers.
+    /// A walker follows an edge with probability `damping` and otherwise jumps back to a seed; with no `seeds` every
+    /// entity is one, which is PageRank. A seed outside the set is ignored, and none inside it answers nothing. Rounds
+    /// stop when the scores move by less than `tolerance` (their L1 distance) or after `iterations`, and a `hits` answer
+    /// says which (`docs/roadmap/graph-algorithms.md`)
+    Rank {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<Direction>", optional))]
+        direction: Direction,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        seeds: Option<Vec<String>>,
+        #[serde(default = "rank_damping")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
+        damping: f64,
+        #[serde(default = "rank_iterations")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<u32>", optional))]
+        iterations: u32,
+        #[serde(default = "rank_tolerance")]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<f64>", optional))]
+        tolerance: f64,
+    },
     /// By the field's value: booleans, numbers, timestamps, strings (by the schema's collation), anything else by its
     /// JSON, then a missing or null value; ties keep the query's order
     OrderBy {
@@ -458,6 +482,15 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(optional))]
         types: Option<Vec<String>>,
     },
+    /// The set's weakly connected components over the edges of the kinds between two of its entities, each edge joining
+    /// its ends whichever way it points: each component's ids in the set's order, largest first, ties by the earlier
+    /// first member; with `counts`, how many in place of the ids
+    Components {
+        kinds: Vec<String>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        counts: bool,
+    },
     /// The ids by the field's value, in the order each value first appears; with `counts`, how many in place of the ids
     GroupBy {
         field: String,
@@ -475,4 +508,18 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         highlights: bool,
     },
+}
+
+/// A rank's defaults: the damping PageRank was defined with, and enough rounds that the scores settle within the
+/// tolerance from any start, the L1 change after `n` rounds being at most 2 × 0.85ⁿ, below 1e-6 by the 89th
+fn rank_damping() -> f64 {
+    0.85
+}
+
+fn rank_iterations() -> u32 {
+    100
+}
+
+fn rank_tolerance() -> f64 {
+    1e-6
 }
