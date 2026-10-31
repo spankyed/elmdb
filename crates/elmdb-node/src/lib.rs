@@ -5,6 +5,8 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 mod exit;
 mod process;
 

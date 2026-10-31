@@ -26,14 +26,16 @@ diff = out / "branch.diff"
 diff.write_bytes(subprocess.check_output(["git", "diff", f"{base}...HEAD"]))
 
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
-crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as_posix())
+crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as_posix(), p["features"])
                 for p in metadata["packages"])
 assert crates, "the workspace names no crate"
 
 missed, timeouts = [], []
-for name, path in crates:
+for name, path, features in crates:
+    # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
+    with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
     run = subprocess.run(["cargo", "mutants", "-j", jobs, "-o", str(out / name), "--in-diff", str(diff),
-                          "--file", f"{path}/**", "--test-package", name, *SUITE_ARGS.get(name, [])])
+                          "--file", f"{path}/**", "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])])
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
     results = out / name / "mutants.out"

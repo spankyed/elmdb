@@ -2,7 +2,8 @@
 
 Status: partial implementation. Criterion maintenance benchmarks are implemented (2026-10-27); stage 1 is built and
 stage 3 was evaluated and declined (2026-10-30), each with its record below; stage 4's first model is built and kept
-(2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 remains planned.
+(2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 is built and kept behind a feature that is off
+by default (2026-10-30, [its record](../evidence/diagnostics.md)).
 The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
@@ -134,6 +135,13 @@ is one small type the store calls instead of a lock and a condition variable
 [verification tooling](verification-tooling.md#8-randomized-concurrency-testing), on the same primitives.
 
 ## 5. Structured operational diagnostics
+
+Status: built, 2026-10-30. `tracing` spans on a rebuild (the recovery operation), the writer's acquisition and a
+unit's begin and wait (the transaction-wait paths) and the sorter, behind elmdb's `diagnostics` feature, off by
+default. Nothing collecting, they cost at most 0.02% of any benchmarked operation's instructions, a gate holds them to
+0.05%, and a Node program collects them through the binding's experimental `collectDiagnostics()`
+([the record](../evidence/diagnostics.md)). Public configuration through the binding, and apack's use of it, are not
+decided; they are proposed apart when a stall needs them.
 
 Evaluate [tracing](https://docs.rs/tracing/latest/tracing/) with one recovery operation and one transaction-wait path.
 Record operation phase, elapsed time, counts, spill bytes and committed-versus-durable outcome where available.

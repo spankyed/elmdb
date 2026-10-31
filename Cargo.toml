@@ -51,6 +51,7 @@ levenshtein_automata = "0.2.1"
 rust-stemmers = "1.2.0"
 hannoy = "0.3.0"
 rand = "0.10.2"
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -684,6 +684,7 @@ dependencies = [
  "shuttle",
  "tempfile",
  "thiserror",
+ "tracing",
  "ts-rs",
  "windows-sys 0.61.2",
  "zstd",
@@ -713,6 +714,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tracing",
  "windows-sys 0.61.2",
 ]
 

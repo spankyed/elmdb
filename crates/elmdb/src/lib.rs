@@ -3,6 +3,7 @@
 #[macro_use]
 mod failpoints;
 mod database;
+pub mod diagnostics;
 pub mod dump;
 pub mod engine;
 mod error;

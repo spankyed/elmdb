@@ -69,6 +69,41 @@ Only elmdb's tests enable `fail`'s `failpoints` feature (a dev-dependency featur
 other build), and without it a site is nothing: a release binding holds no point's name and no `fail` symbol
 (`docs/evidence/verification-tooling.md`).
 
+## Diagnostics
+
+The engine reports its slow operations as [`tracing`](https://docs.rs/tracing) spans (`crates/elmdb/src/diagnostics.rs`):
+`rebuild`, `write`, `begin`, `unit_wait` and `sort`, each with its outcome, its elapsed and waited microseconds and its
+counts, under the target `elmdb`. A span is one operation or phase, never one row, and names no entity value, id, query
+or path. The engine never installs a collector: the embedding program does, or nothing is collected. With the
+feature, `elmdb::diagnostics::Collector` is one it may install, keeping each span as a JSON object until taken.
+
+Diagnostics are off by default, and three checks hold that claim:
+
+- **Off by default.** Without the `diagnostics` feature, `elmdb` doesn't depend on `tracing` and every span compiles to
+  nothing. `cargo xtask check-diagnostics-off` fails when a default build of the workspace has `elmdb` depend on
+  `tracing` itself — a crate turning the feature on by default. `tracing` is in every build regardless, through
+  hannoy, whose own spans are its own.
+- **Close to nothing when nobody collects.** Compiled in with no collector, a span is one cached check of its callsite,
+  and no clock is read and no field computed. `python3 scripts/diagnostics-overhead.py` counts the instruction-count
+  benchmark's operations on one commit without the feature and with it, and fails when a gated case grows more than
+  0.05% or 100 instructions, whichever is more. It refuses a case it doesn't know and a gated case that didn't run. CI's
+  `diagnostics overhead` job runs it on every pull request; from a Mac:
+
+  ```sh
+  python3 scripts/linux.py --apt valgrind --apt python3 --unconfined -- sh -c '
+    cargo install --locked gungraun-runner --version 0.20.0 && python3 scripts/diagnostics-overhead.py'
+  ```
+
+- **The engine never collects for itself.** `tests/diagnostics.rs`, built with the feature, runs every instrumented
+  operation and asserts no collector was installed, then runs them again under a test collector and asserts what it
+  heard, that collecting changed no answer, and that no field names data.
+
+`cargo nextest run -p elmdb --features diagnostics` runs the engine's suite with the spans compiled in, and
+`scripts/mutants-in-diff.py` mutates a crate declaring the feature with it on. The binding's `diagnostics` feature, also
+off by default, adds `collectDiagnostics()` and `takeDiagnostics()`, an experiment installing that collector from Node;
+`crates/elmdb-node/examples/diagnostics.mjs` runs it. Readings and the gates' firing
+cases: `../evidence/diagnostics.md`.
+
 ## Mutation testing
 
 cargo-mutants (`.cargo/mutants.toml`) mutates the engine's source — operators, conditions, a function's body — and runs

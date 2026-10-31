@@ -35,6 +35,7 @@ use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RwLock};
 
 use crate::database::{Database, EngineSchema};
+use crate::diagnostics::Op;
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
 use crate::store::{Commit, Store};
@@ -338,7 +339,9 @@ impl Database {
     /// Deletes derived data and writes what primary data derives, for every index or, with one, that index, in one
     /// durable unit
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
-        self.admin_unit(|t| derive::rebuild(t, index))
+        let op = Op::rebuild(index);
+        let result = op.in_scope(|| self.admin_unit(|t| derive::rebuild(t, index)));
+        op.ended(result, "durable")
     }
 
     /// Deletes what a removed declaration left, in one durable unit; refuses a name the schema still declares

@@ -3,6 +3,8 @@
 //! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`.
 //! - `check-generated`: fails when what `generate` would write differs from what is committed.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
+//! - `check-diagnostics-off`: fails when a default build of the workspace has `elmdb` depend on `tracing` itself,
+//!   which only its `diagnostics` feature may make it do.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -15,7 +17,8 @@ fn main() -> ExitCode {
         Some("generate") => generate::write(&generated_dir()),
         Some("check-generated") => check_generated(),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
-        _ => Err("usage: cargo xtask <generate | check-generated | check-one-lmdb>".to_owned()),
+        Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
+        _ => Err("usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off>".to_owned()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -51,15 +54,7 @@ fn check_generated() -> Result<(), String> {
 /// Every LMDB `-sys` crate in the build, by name and version. Two copies of LMDB linked into one binary share no locks,
 /// and nothing at link time refuses them (heed's `lmdb-master-sys` declares no `links` key), so this does.
 fn check_one_lmdb(root: &Path) -> Result<(), String> {
-    let output = Command::new(env!("CARGO"))
-        .args(["tree", "--workspace", "--edges", "normal,build", "--prefix", "none", "--format", "{p}"])
-        .current_dir(root)
-        .output()
-        .map_err(|e| format!("cargo tree didn't run: {e}"))?;
-    if !output.status.success() {
-        return Err(format!("cargo tree failed:\n{}", String::from_utf8_lossy(&output.stderr)));
-    }
-    let tree = String::from_utf8_lossy(&output.stdout);
+    let tree = dependency_tree(root)?;
     let found = lmdb_sys_crates(&tree);
     match found.len() {
         1 => Ok(()),
@@ -70,6 +65,59 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
             found.join("\n  ")
         )),
     }
+}
+
+/// The workspace's crates at their default features and what they build with, one `<name> v<version>` a line;
+/// development dependencies are left out, being in no build a user gets
+fn dependency_tree(root: &Path) -> Result<String, String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["tree", "--workspace", "--edges", "normal,build", "--prefix", "none", "--format", "{p}"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo tree didn't run: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("cargo tree failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Diagnostics are off by default (`crates/elmdb/src/diagnostics.rs`): without the `diagnostics` feature `elmdb` does
+/// not depend on `tracing`, so its spans compile to nothing. `tracing` is in the build regardless, through hannoy, whose
+/// own spans are its own; what this holds is that no workspace crate turns elmdb's on by default
+fn check_diagnostics_off(root: &Path) -> Result<(), String> {
+    let output = Command::new(env!("CARGO"))
+        .args(["tree", "--workspace", "--edges", "normal,build", "--prefix", "depth", "--format", "{p}"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo tree didn't run: {e}"))?;
+    if !output.status.success() {
+        return Err(format!("cargo tree failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+    }
+    let tree = String::from_utf8_lossy(&output.stdout);
+    let direct = direct_dependencies(&tree, "elmdb");
+    if direct.is_empty() {
+        return Err(format!("cargo tree listed no dependency of elmdb, so this checked nothing:\n{tree}"));
+    }
+    match direct.iter().find(|name| name.as_str() == "tracing") {
+        None => Ok(()),
+        Some(_) => Err("A default build has elmdb depend on tracing, which only its `diagnostics` feature may: a \
+                        workspace crate enables that feature by default"
+            .to_owned()),
+    }
+}
+
+/// The names of `package`'s direct dependencies in a `cargo tree --prefix depth` listing of the workspace
+fn direct_dependencies(tree: &str, package: &str) -> Vec<String> {
+    let mut under = false;
+    let mut found = Vec::new();
+    for line in tree.lines() {
+        if let Some(root) = line.strip_prefix('0') {
+            under = root.split_whitespace().next() == Some(package);
+        } else if under && let Some(child) = line.strip_prefix('1') {
+            found.extend(child.split_whitespace().next().map(str::to_owned));
+        }
+    }
+    found
 }
 
 /// The distinct `<name> v<version>` entries of a `cargo tree` listing whose crate is an LMDB `-sys` crate
@@ -90,7 +138,15 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::lmdb_sys_crates;
+    use super::{direct_dependencies, lmdb_sys_crates};
+
+    #[test]
+    fn names_only_the_packages_own_direct_dependencies() {
+        let tree = "0elmdb v0.0.0 (/x)\n1hannoy v0.3.0\n2tracing v0.1.44\n1heed v0.23.0\n0elmdb-node v0.0.0 (/y)\n1tracing v0.1.44\n";
+        assert_eq!(direct_dependencies(tree, "elmdb"), ["hannoy", "heed"]);
+        assert_eq!(direct_dependencies(tree, "elmdb-node"), ["tracing"]);
+        assert!(direct_dependencies(tree, "elmdb-cli").is_empty());
+    }
 
     #[test]
     fn finds_each_lmdb_sys_crate_once() {
