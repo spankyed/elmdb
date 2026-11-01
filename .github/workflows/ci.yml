@@ -117,6 +117,8 @@ jobs:
           node-version: 23
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+      # The read-only mount check builds offline, so the dependencies are fetched first
+      - run: cargo fetch --locked
       - name: refuse unregistered readers on an actual read-only mount
         run: python3 scripts/check-read-only-mount.py
       - name: prove idle snapshot expiry regression rejects indefinite retention
