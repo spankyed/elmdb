@@ -138,7 +138,8 @@ fn a_stop_ends_the_builder_waiting_pausing_or_working_and_its_waiters() {
         };
         let queuer = {
             let core = Arc::clone(&core);
-            thread::spawn(move || core.queue([index(), rank()]))
+            // The rank index first, so the builder is pausing for it when the stop comes, then an index it works on
+            thread::spawn(move || core.queue([rank(), index()]))
         };
         let waiter = {
             let core = Arc::clone(&core);
