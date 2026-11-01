@@ -56,6 +56,32 @@ group's documents of five `refs` edges each, a rank index over them at the defau
   so twenty changes in two bursts cost 5.8 ms each at 10,000 documents, about half a `rank`, and 53 ms each at
   100,000, about a third of one.
 
+### The tolerance, and the bound from the estimates' sum
+
+`rankIndexChange/<tolerance>` and `rankIndexBurst/<tolerance>` in the same group: 2026-11-01, the same machine at a load
+average of 10 to 16, so a difference under about a tenth is the load. Before is the bound `2R / ((1 − α)² n)`, after is
+`2R / ((1 − α) s)`, read on `34732bd` and `66c9de6`, those commits before they were rebased onto the relation key:
+
+| Documents | Tolerance | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 1e-6 | 19.6 ms | 20.1 ms | 26.9 ms | 27.0 ms |
+| 1,000 | 1e-4 | 19.4 ms | 19.2 ms | 27.7 ms | 27.2 ms |
+| 10,000 | 1e-6 | 74.2 ms | 78.1 ms | 116 ms | 117 ms |
+| 10,000 | 1e-4 | 77.2 ms | 90.0 ms | 112 ms | 117 ms |
+| 100,000 | 1e-6 | 644 ms | 675 ms | 1.11 s | 1.09 s |
+| 100,000 | 1e-5 | 665 ms | 661 ms | 1.12 s | 1.11 s |
+| 100,000 | 1e-4 | 592 ms | 0.14 ms | 1.11 s | 1.11 s |
+
+- **A drain costs its graph, not its pushes:** a hundredfold looser tolerance leaves every drain's cost where it was,
+  since a drain reads every node and edge and writes back every node it moved whatever it then pushes. Pushing less
+  buys a drain nothing measurable.
+- **What the bound buys is no drain at all:** a change whose residuals a commit's pushes bring within the budget leaves
+  nothing to drain. The budget grows with `s`, so the tighter bound reaches that sooner: one change at 100,000
+  documents and a tolerance of 1e-4 costs 0.14 ms rather than 592 ms. Ten changes leave more than the budget, so a
+  burst still drains.
+- **What would make a drain cheaper** is not reading the whole graph for it: pushing through the store while few nodes
+  wait, or a graph kept between drains (`docs/roadmap/rank-index.md`).
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
