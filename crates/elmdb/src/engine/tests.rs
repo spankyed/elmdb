@@ -563,6 +563,15 @@ fn link_merges_on_an_edges_identity_and_a_key_tells_edges_of_one_pair_apart() {
     assert_eq!(link("cites", json!({ "x": 5 })), (none.clone(), false));
     assert_eq!(link("cites", json!({ "n": null })), (none.clone(), false));
     assert_eq!(edges(&db), ["Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|refs|Task-2"]);
+    // A key is read from the info's fields, so a keyed kind's info is a map: 5 and 6 would both hold a null key
+    let lone = json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": 5 });
+    let e = refused(&db, vec![lone]);
+    assert_eq!(e.code, ErrorCode::FieldType, "{}", e.message);
+    assert!(e.message.contains("holds its key (n)"), "{}", e.message);
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": one, "info": [1] })]);
+    assert_eq!(e.code, ErrorCode::FieldType, "{}", e.message);
+    // A kind with no key takes info of any shape its declaration allows
+    assert_eq!(link("refs", json!(5)), (first.clone(), false));
     assert!(db.check().unwrap().is_clean());
 }
 
@@ -669,6 +678,7 @@ fn update_relation_refuses_an_edge_onto_another_edges_identity() {
     let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": rel(3), "info": { "n": 1 } })]);
     assert_eq!(e.code, ErrorCode::DuplicateEdge, "a key changed onto another edge's: {}", e.message);
     assert!(e.message.contains("with the same n"), "{}", e.message);
+    assert!(e.message.contains(&rel(2)), "names the edge it would duplicate: {}", e.message);
     assert_eq!(edges(&db), ["Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|tags|Task-2", "Task-1|tags|Task-3"]);
     // Its own identity is no other edge's: a move away, and info that keeps its key, are allowed
     write(&db, vec![json!({ "op": "updateRelation", "relation": rel(1), "source": "Task-2", "target": "Task-1" })])

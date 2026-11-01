@@ -142,6 +142,12 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 }),
                 None => {}
             }
+            if !def.key.is_empty() && s.info.as_ref().is_some_and(|i| !matches!(i, rmpv::Value::Map(_))) {
+                out.push(Violation {
+                    subject: relation.clone(),
+                    message: format!("a {} relation's info holds its key, so it is a map", s.kind),
+                });
+            }
             pairs
                 .entry((s.kind.clone(), s.source.clone(), s.target.clone()))
                 .or_default()
