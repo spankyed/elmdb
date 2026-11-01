@@ -20,7 +20,7 @@ export interface DatabaseOptions {
   readOnly?: boolean;
   /**
    * Group commit's syncs, on by default: a commit is on disk within a second, and `durable()` waits for one. Off,
-   * nothing is synced, for a database in a temporary directory that a machine's crash can't matter to
+   * periodic syncing is disabled for temporary data. Creating an environment still durably initializes its format
    */
   syncs?: boolean;
 }
@@ -37,7 +37,7 @@ export function openDatabase({ path: dir, schema, readOnly, syncs }: DatabaseOpt
 
 /** Databases opened in temporary directories, each removed when it is disposed or the process exits */
 export interface TemporaryDatabases {
-  /** A new database in a temporary directory of its own, with no syncs; `dispose` closes it and removes the directory */
+  /** A new database in its own temporary directory, with periodic syncing disabled; `dispose` closes it and removes the directory */
   open(schema: EngineSchema): { database: EarsDatabase; dispose(): void };
   /** Closes and removes every database still open */
   disposeAll(): void;
