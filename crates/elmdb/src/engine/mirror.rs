@@ -58,7 +58,12 @@ pub struct EdgeMirror {
     names: FxHashMap<Box<str>, u32>,
     ids: Vec<Box<str>>,
     lists: FxHashMap<(u32, u32, bool), Vec<Entry>>,
+    /// How many names the lists held mentioned when the names were last counted afresh
+    counted: usize,
 }
+
+/// The names kept however few the lists mention, so a small mirror isn't counted afresh every few commits
+const NAMES_KEPT: usize = 1024;
 
 impl EdgeMirror {
     fn name(&mut self, name: &str) -> u32 {
@@ -114,6 +119,23 @@ impl EdgeMirror {
             }
         }
         self.sequence = Some(next);
+        // A name stays once a list mentioned it: the entities deleted and the far ends unfiled leave theirs
+        if self.ids.len() > 2 * self.counted.max(NAMES_KEPT) {
+            self.compact();
+        }
+    }
+
+    /// The names kept again from only those the lists held mention, the lists unchanged but for their numbering
+    fn compact(&mut self) {
+        let ids = std::mem::take(&mut self.ids);
+        let lists = std::mem::take(&mut self.lists);
+        self.names.clear();
+        for ((entity, kind, outward), list) in lists {
+            let key = (self.name(&ids[entity as usize]), self.name(&ids[kind as usize]), outward);
+            let list = list.into_iter().map(|e| Entry { far: self.name(&ids[e.far as usize]), ..e }).collect();
+            self.lists.insert(key, list);
+        }
+        self.counted = self.ids.len();
     }
 
     fn list(&mut self, entity: &str, kind: &str, outward: bool) -> Option<&mut Vec<Entry>> {
@@ -134,11 +156,17 @@ impl EdgeMirror {
         }
     }
 
+    /// An entry unfiled from a list held; a list it empties is dropped, so an entity deleted holds none, and one
+    /// still a node reads its list from the store again
     fn unfile(&mut self, entity: &str, kind: &str, outward: bool, seq: u64) {
-        if let Some(list) = self.list(entity, kind, outward)
-            && let Ok(at) = list.binary_search_by_key(&seq, |e| e.seq)
-        {
+        let (Some(entity), Some(kind)) = (self.known(entity), self.known(kind)) else { return };
+        let key = (entity, kind, outward);
+        let Some(list) = self.lists.get_mut(&key) else { return };
+        if let Ok(at) = list.binary_search_by_key(&seq, |e| e.seq) {
             list.remove(at);
+            if list.is_empty() {
+                self.lists.remove(&key);
+            }
         }
     }
 
@@ -251,7 +279,7 @@ mod tests {
             4,
             Some(&[EdgeDelta::Unfiled { kind: "k".into(), source: "A".into(), target: "B".into(), seq: 5 }]),
         );
-        assert!(m.lists.values().next().unwrap().is_empty());
+        assert_eq!(m.held(), 0, "the list the entry's unfiling empties is dropped");
         // From another base, another process's commit between: emptied
         m.commit(9, 10, Some(&[]));
         assert_eq!((m.sequence(), m.held()), (None, 0));
@@ -259,6 +287,26 @@ mod tests {
         let mut m = mirror();
         m.commit(1, 2, None);
         assert_eq!((m.sequence(), m.held()), (None, 0));
+    }
+
+    #[test]
+    fn names_no_list_mentions_are_let_go_once_they_are_twice_those_counted_and_the_lists_read_the_same() {
+        let mut m = mirror();
+        m.commit(1, 2, Some(&[filed(5)]));
+        // Entities whose lists were read and then emptied, as deleted ones are
+        for (i, seq) in (0..2 * NAMES_KEPT).zip(2u64..) {
+            let entity = format!("X{i}");
+            let key = (m.name(&entity), m.name("k"), true);
+            let far = m.name(&format!("Y{i}"));
+            m.lists.insert(key, vec![Entry { seq: 1, far, weight: None }]);
+            let unfiled = EdgeDelta::Unfiled { kind: "k".into(), source: entity, target: format!("Y{i}"), seq: 1 };
+            m.commit(seq, seq + 1, Some(&[unfiled]));
+        }
+        assert!(m.ids.len() <= 2 * NAMES_KEPT, "{} names kept", m.ids.len());
+        assert_eq!(m.held(), 1);
+        let (a, k) = (m.known("A").unwrap(), m.known("k").unwrap());
+        let list = &m.lists[&(a, k, true)];
+        assert_eq!(list.iter().map(|e| &*m.ids[e.far as usize]).collect::<Vec<_>>(), ["B"]);
     }
 
     #[test]
