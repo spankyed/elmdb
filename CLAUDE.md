@@ -150,7 +150,8 @@ Held by the types and the engine specs, which say more than a rule over names co
 - **A unit is visible as it commits, and durable within the window.** elmdb commits each unit without a sync and
   syncs on group commit, so a commit is on disk within a second; `durable()` resolves once every unit committed before
   it is, and `transact(fn, { durable: true })` commits with the sync (`elmdb/docs/architecture/engine.md`, Durability). `syncs:
-  false` turns syncing off, for a temporary database a crash can't matter to.
+  false` disables periodic group syncing for temporary databases. Opening a new environment still durably
+  initializes its format; temporary-fixture setup therefore has a filesystem cost even with this option.
 - **`NOT_DURABLE` means committed.** A durable unit or admin/schema operation whose sync fails leaves its committed
   data in place. The connection notifies views and refreshes schema declarations before rethrowing this code. A caller
   must not retry it as an uncommitted refusal; `lastCommit()` reports the current sequence without parsing an error
