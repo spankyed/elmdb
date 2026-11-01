@@ -173,7 +173,18 @@ pub fn error_bound(residuals: f64, estimates: f64, nodes: u64, damping: f64) -> 
 /// apart than twice the bound an index reports, far coarser than this, and a `ranked` read sorts by the estimates
 /// themselves
 fn order_key(index: &str, node: &Node) -> Vec<u8> {
-    keys::rank_order(index, f64::from_bits(node.x.to_bits() & !((1u64 << 36) - 1)), node.type_at, node.seq)
+    keys::rank_order(index, f64::from_bits(order_bits(node.x)), node.type_at, node.seq)
+}
+
+/// An estimate's bits as its order key keeps them, the top 28
+fn order_bits(x: f64) -> u64 {
+    x.to_bits() & !((1u64 << 36) - 1)
+}
+
+/// Whether two states of one node have the same place in the score order, read without building either key: most
+/// pushes leave it, and a drain writes back nearly every node
+fn same_order(a: &Node, b: &Node) -> bool {
+    order_bits(a.x) == order_bits(b.x) && (a.type_at, a.seq) == (b.type_at, b.seq)
 }
 
 /// What a read reports of a rank index's `nodes` scores: the step each is rounded to, a power of ten no larger than
@@ -531,7 +542,7 @@ impl<'i, 'a> Change<'i, 'a> {
                 continue;
             }
             if let Some(b) = before {
-                if after.is_none_or(|a| order_key(name, &a) != order_key(name, b)) {
+                if after.is_none_or(|a| !same_order(&a, b)) {
                     t.del(&order_key(name, b))?;
                 }
                 if b.r.abs() > threshold && after.is_none_or(|a| a.r.abs() <= threshold) {
@@ -541,7 +552,7 @@ impl<'i, 'a> Change<'i, 'a> {
             match after {
                 Some(a) => {
                     t.put(&keys::rank_node(name, id), &a.encode())?;
-                    if before.is_none_or(|b| order_key(name, a) != order_key(name, &b)) {
+                    if before.is_none_or(|b| !same_order(a, &b)) {
                         t.put(&order_key(name, a), id.as_bytes())?;
                     }
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
@@ -750,10 +761,9 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         }
         let id = &ids[at];
         t.put(&keys::rank_node(index.name, id), &new.encode())?;
-        let (from, to) = (order_key(index.name, old), order_key(index.name, new));
-        if from != to {
-            t.del(&from)?;
-            t.put(&to, id.as_bytes())?;
+        if !same_order(old, new) {
+            t.del(&order_key(index.name, old))?;
+            t.put(&order_key(index.name, new), id.as_bytes())?;
         }
         let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
         if was && !is {
@@ -1091,5 +1101,19 @@ mod tests {
         assert_eq!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-20))));
         assert_ne!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-10))));
         assert!(order_key("i", &node(1.5)) < order_key("i", &node(1.0)));
+    }
+
+    #[test]
+    fn two_states_have_the_same_order_exactly_when_their_keys_are_the_same() {
+        let node = |x: f64, seq: u64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq };
+        let xs = [0.0, 1.0, 1.0 + 2f64.powi(-20), 1.0 + 2f64.powi(-10), 1.5, 3.0e-7, 123.456, 1e12];
+        for &a in &xs {
+            for &b in &xs {
+                for (sa, sb) in [(7, 7), (7, 8)] {
+                    let (p, q) = (node(a, sa), node(b, sb));
+                    assert_eq!(same_order(&p, &q), order_key("i", &p) == order_key("i", &q), "{a} {sa}, {b} {sb}");
+                }
+            }
+        }
     }
 }
