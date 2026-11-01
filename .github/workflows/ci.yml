@@ -241,7 +241,9 @@ jobs:
           npm exec --yes --package=electron@37.2.4 -- electron --test "crates/elmdb-node/test/**/*.test.mjs"
 
   # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
-  # and run every suite in a node:23-alpine container of the runner's own architecture
+  # and run every suite in a node:23-alpine container of the runner's own architecture. The toolchain, the registry and
+  # the build are cached on the runner and mounted in, and nextest is its released musl binary, checked against the
+  # release's own checksum
   musl:
     name: ${{ matrix.target }}
     needs: changes
@@ -250,14 +252,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nextest-sha256: bf92cb81450872d960ffa13857a83084d557ec0cdc141663d263bb23ef756f97
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nextest-sha256: 94676506ceaed01746d78cfe9ed124ee841b2932fd18d9d10f438a347bd9ba5e
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/musl-cache
+            target
+          key: musl-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: musl-${{ matrix.target }}-
       - name: every suite, in Alpine
+        env:
+          TARGET: ${{ matrix.target }}
+          NEXTEST_SHA256: ${{ matrix.nextest-sha256 }}
         run: |
-          docker run --rm -v "$PWD:/w" -w /w node:23-alpine sh -euc '
+          cache=$RUNNER_TEMP/musl-cache
+          mkdir -p "$cache/rustup" "$cache/registry" "$cache/git"
+          docker run --rm -v "$PWD:/w" -w /w \
+            -v "$cache/rustup:/root/.rustup" \
+            -v "$cache/registry:/root/.cargo/registry" \
+            -v "$cache/git:/root/.cargo/git" \
+            -e TARGET -e NEXTEST_SHA256 -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR \
+            node:23-alpine sh -euc '
             apk add --no-cache bash curl git build-base
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
@@ -265,9 +288,14 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
             git config --global --add safe.directory /w
             rustup show active-toolchain
-            cargo install --locked cargo-nextest@0.9.148
+            archive=cargo-nextest-0.9.148-$TARGET.tar.gz
+            curl --proto "=https" --tlsv1.2 -sSfLO "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/$archive"
+            echo "$NEXTEST_SHA256  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$HOME/.cargo/bin" && rm "$archive"
             cargo nextest run --workspace --profile ci
             npm ci
             npm run build
             npm test
           '
+          # The container writes as root; the cache is saved by the runner's user
+          sudo chown -R "$(id -u):$(id -g)" "$cache" target
