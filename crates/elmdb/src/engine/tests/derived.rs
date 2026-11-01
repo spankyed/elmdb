@@ -136,7 +136,10 @@ fn an_index_added_over_data_builds_in_the_background_and_reads_walk_until_it_has
     assert_eq!(before.as_array().unwrap().len(), 1250);
     db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
-    assert!(status.iter().any(|s| s.entity_type == "Note" && s.index == "byKind" && s.built), "{status:?}");
+    assert!(
+        status.iter().any(|s| s.entity_type.as_deref() == Some("Note") && s.index == "byKind" && s.built),
+        "{status:?}"
+    );
     let (after, visited) = ids_where(&db, "kind", json!("odd"));
     assert_eq!(after, before);
     assert_eq!(visited, 1250, "once built, the index's matches are read, not the type's 2,500 rows");
@@ -270,7 +273,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     )
     .unwrap();
     db.set_schema(Schema::from_json(&notes(fields, indexes)).unwrap()).unwrap();
-    db.wait_for_index_builds().unwrap();
+    // The wait says a build failed, and the status below says why
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
     let status = db.index_status().unwrap();
     let pair = status.iter().find(|s| s.index == "pair").unwrap();
     assert!(!pair.built);
@@ -314,7 +318,8 @@ fn a_unique_index_over_rows_holding_the_same_values_isnt_built_and_says_why() {
         notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } })),
     )
     .unwrap();
-    db.wait_for_index_builds().unwrap();
+    // The wait says a build failed, and the status below says why
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
     let status = db.index_status().unwrap();
     let one = status.iter().find(|s| s.index == "one").unwrap();
     assert!(!one.built);
@@ -923,7 +928,15 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
     reopened.wait_for_index_builds().unwrap();
     let report = reopened.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
-    assert!(reopened.index_status().unwrap().iter().find(|s| s.entity_type == "Task" && s.index == "a").unwrap().built);
+    assert!(
+        reopened
+            .index_status()
+            .unwrap()
+            .iter()
+            .find(|s| s.entity_type.as_deref() == Some("Task") && s.index == "a")
+            .unwrap()
+            .built
+    );
 }
 
 #[test]
