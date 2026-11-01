@@ -1,5 +1,5 @@
 //! Graph algorithms over a projection: the entities of a plan's set as nodes, numbered in set order, and the edges of
-//! the kinds a step names between two of them, as compressed sparse rows (`docs/roadmap/graph-algorithms.md`). Pure:
+//! the kinds a step names between two of them, as compressed sparse rows (`docs/archive/roadmap/graph-algorithms.md`). Pure:
 //! the plan builds the projection from its read, and these answer from it alone.
 //!
 //! Everything here is deterministic: nodes are visited in their numbering, each node's edges in the order the plan

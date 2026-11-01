@@ -84,6 +84,59 @@ fn maintenance(c: &mut Criterion) {
                 b.iter(|| black_box(graph.db.read(black_box(&request)).unwrap()))
             });
         }
+        // The same graph with a rank index: its top ten read from the index, against `rank` and `limit` above; and one
+        // edge linked and unlinked again, each change's commit and drain, against computing the rank afresh
+        let ranked = Fixture::ranked_graph(rows, 5);
+        ranked.assert_graph_read("ranked");
+        let request = ranked.graph_read("ranked");
+        group.bench_function(BenchmarkId::new("ranked", rows), |b| {
+            b.iter(|| black_box(ranked.db.read(black_box(&request)).unwrap()))
+        });
+        let change = |op: &str| elmdb::engine::batch::Batch {
+            ops: vec![
+                serde_json::from_value(serde_json::json!({ "op": op, "source": "Doc-00000000", "kind": "refs",
+                        "target": format!("Doc-{:08}", rows / 2) }))
+                .unwrap(),
+            ],
+            now: Some(1.0),
+        };
+        let (link, unlink) = (change("link"), change("unlink"));
+        group.bench_function(BenchmarkId::new("rankIndexChange", rows), |b| {
+            b.iter(|| {
+                ranked.db.write(black_box(&link), false).unwrap();
+                ranked.db.wait_for_index_builds().unwrap();
+                ranked.db.write(black_box(&unlink), false).unwrap();
+                ranked.db.wait_for_index_builds().unwrap();
+            })
+        });
+        // Ten edges linked, then drained once, and unlinked, then drained once: the drain's work shared by the commits
+        // before it
+        let burst = |op: &str| -> Vec<elmdb::engine::batch::Batch> {
+            (1..=10)
+                .map(|k| elmdb::engine::batch::Batch {
+                    ops: vec![
+                        serde_json::from_value(serde_json::json!({ "op": op, "source": "Doc-00000000", "kind": "refs",
+                            "target": format!("Doc-{:08}", (rows / 2 + k) % rows) }))
+                        .unwrap(),
+                    ],
+                    now: Some(1.0),
+                })
+                .collect()
+        };
+        let (links, unlinks) = (burst("link"), burst("unlink"));
+        group.bench_function(BenchmarkId::new("rankIndexBurst", rows), |b| {
+            b.iter(|| {
+                for batch in &links {
+                    ranked.db.write(black_box(batch), false).unwrap();
+                }
+                ranked.db.wait_for_index_builds().unwrap();
+                for batch in &unlinks {
+                    ranked.db.write(black_box(batch), false).unwrap();
+                }
+                ranked.db.wait_for_index_builds().unwrap();
+            })
+        });
+        black_box(&ranked.directory);
         // The same graph weighted: `rank` by weight, within 1.2× of the unweighted rank above
         let weighted = Fixture::weighted_graph(rows, 5);
         weighted.assert_graph_read("rankWeighted");

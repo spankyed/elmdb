@@ -73,7 +73,8 @@ pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
     keyed(&stored.relations, &given.relations, "relations", &mut out, added_kind, |at, old, new, out| {
         let tightened = !widens_cardinality(old.cardinality, new.cardinality)
             || (new.acyclic && !old.acyclic)
-            || (new.unique && !old.unique)
+            // A key that drops a field can make edges its old key told apart into one identity
+            || !old.key.iter().all(|f| new.key.contains(f))
             || !widens_endpoints(old.endpoints.as_deref(), new.endpoints.as_deref())
             || !widens_field(&old.info, &new.info);
         out.push(at, Change::Changed, if tightened { Effect::Enforced } else { Effect::Applied });
@@ -167,9 +168,37 @@ pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
             }
         }
     }
+    ranks(stored, given, &mut out);
     let mut changes = out.0;
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     changes
+}
+
+/// A rank index added builds, removed drops, and changed rebuilds; so does one whose graph a relation kind's `weighted`
+/// changes, the weights it reads having changed with it. Who declared it changes nothing it holds
+fn ranks(stored: &Schema, given: &Schema, out: &mut Changes) {
+    let graph = |def: &RankDef| RankDef { declared_by: None, ..def.clone() };
+    let reweighted = |def: &RankDef| {
+        def.weights
+            && def.relations.iter().any(|kind| {
+                let weighted = |schema: &Schema| schema.relations.get(kind).is_some_and(|r| r.weighted);
+                weighted(stored) != weighted(given)
+            })
+    };
+    for (name, old) in &stored.ranks {
+        let path = format!("ranks.{name}");
+        match given.ranks.get(name) {
+            None => out.push(&path, Change::Removed, Effect::Drops),
+            Some(new) if graph(new) != graph(old) => out.push(&path, Change::Changed, Effect::Rebuilds),
+            Some(new) if reweighted(new) => out.push(&path, Change::Changed, Effect::Rebuilds),
+            Some(_) => {}
+        }
+    }
+    for name in given.ranks.keys() {
+        if !stored.ranks.contains_key(name) {
+            out.push(&format!("ranks.{name}"), Change::Added, Effect::Builds);
+        }
+    }
 }
 
 struct Changes(Vec<SchemaChange>);

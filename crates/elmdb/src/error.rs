@@ -84,15 +84,20 @@ pub enum ErrorCode {
     Unique,
     /// An operation a unit can't hold, made while one is open, or a second unit begun
     UnitOpen,
-    /// A search naming an index its type doesn't have, or none on a type with no text index or with several
+    /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
+    /// `ranked` step naming no rank index
     UnknownIndex,
+    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
+    IndexBuilding,
+    /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
+    IndexBuildFailed,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
-    /// A relation of a `unique` kind moved onto two ends another edge of its kind already joins
+    /// A relation moved, or its key changed, onto the identity of another edge: the same ends and key values
     DuplicateEdge,
     /// A short code or label numbering whose next number would pass 2^53 - 1, the largest JavaScript holds exactly
     NumbersExhausted,
@@ -147,6 +152,8 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::IndexBuilding => "INDEX_BUILDING",
+            Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
@@ -239,6 +246,9 @@ mod tests {
             ErrorCode::Cycle,
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
+            ErrorCode::UnknownIndex,
+            ErrorCode::IndexBuilding,
+            ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,

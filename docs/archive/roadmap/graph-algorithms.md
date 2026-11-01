@@ -1,8 +1,8 @@
 # Graph algorithms
 
-Status: built, 2026-10-31 ([the readings](../evidence/graph-algorithms.md)): stages 0 to 2, 4 and 5 in elmdb, stage 3
+Status: built, 2026-10-31 ([the readings](../../evidence/graph-algorithms.md)): stages 0 to 2, 4 and 5 in elmdb, stage 3
 in apack; stage 5 has no consumer yet. This plan puts graph algorithms in the engine, as plan steps and answers, rather than leaving each
-caller to read every edge and compute over them in JavaScript. `../architecture/engine.md`, Reads, has them as built.
+caller to read every edge and compute over them in JavaScript. `../../architecture/engine.md`, Reads, has them as built.
 
 ## Why in the engine
 

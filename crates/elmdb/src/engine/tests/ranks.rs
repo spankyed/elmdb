@@ -1,4 +1,4 @@
-//! The graph algorithms as plan steps (`docs/roadmap/graph-algorithms.md`): `rank` and the `weakComponents`,
+//! The graph algorithms as plan steps (`docs/archive/roadmap/graph-algorithms.md`): `rank` and the `weakComponents`,
 //! `strongComponents` and `communities` answers over the set a plan built, case by case, and the graph each builds from
 //! the store against one built by hand from the same random edges.
 

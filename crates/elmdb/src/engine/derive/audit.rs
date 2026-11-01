@@ -88,11 +88,13 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             audit_unique(r, &entity_type, &index, &ids, &mut out)?;
         }
     }
-    // Cardinality counts far ends, not edges (`schema.md`, Relations): a second edge of a kind that isn't unique, to
-    // the same far end, leaves a target one source, as the write that allowed it found
+    // Cardinality counts far ends, not edges (`schema.md`, Relations): a second edge to the same far end, which a key
+    // tells apart, leaves a target one source, as the write that allowed it found
     let mut targets_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
     let mut sources_of: BTreeMap<(String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
-    let mut pairs: BTreeMap<(String, String, String), Vec<String>> = BTreeMap::new();
+    // Each pair's edges with their key values: two holding the same values share an identity
+    type Keyed = Vec<(String, Vec<rmpv::Value>)>;
+    let mut pairs: BTreeMap<(String, String, String), Keyed> = BTreeMap::new();
     let mut graphs: BTreeMap<String, PrimaryGraph> = BTreeMap::new();
     for (key, bytes) in r.scan(&keys::all_relations())? {
         let relation = key_text(&key);
@@ -140,9 +142,16 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 }),
                 None => {}
             }
-            if def.unique {
-                pairs.entry((s.kind.clone(), s.source.clone(), s.target.clone())).or_default().push(relation.clone());
+            if !def.key.is_empty() && s.info.as_ref().is_some_and(|i| !matches!(i, rmpv::Value::Map(_))) {
+                out.push(Violation {
+                    subject: relation.clone(),
+                    message: format!("a {} relation's info holds its key, so it is a map", s.kind),
+                });
             }
+            pairs
+                .entry((s.kind.clone(), s.source.clone(), s.target.clone()))
+                .or_default()
+                .push((relation.clone(), relations::key_values(def, s.info.as_ref())));
             if def.acyclic {
                 graphs
                     .entry(s.kind.clone())
@@ -155,11 +164,26 @@ pub(super) fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         targets_of.entry((s.source.clone(), s.kind.clone())).or_default().insert(s.target.clone());
         sources_of.entry((s.target.clone(), s.kind.clone())).or_default().insert(s.source.clone());
     }
-    for ((kind, source, target), relations) in pairs {
-        if relations.len() > 1 {
+    for ((kind, source, target), edges) in pairs {
+        let mut groups: Vec<(&[rmpv::Value], Vec<&str>)> = Vec::new();
+        for (relation, key) in &edges {
+            let same = |k: &[rmpv::Value]| k.len() == key.len() && k.iter().zip(key).all(|(a, b)| values::same(a, b));
+            match groups.iter_mut().find(|(k, _)| same(k)) {
+                Some((_, held)) => held.push(relation),
+                None => groups.push((key, vec![relation])),
+            }
+        }
+        for (key, held) in groups.into_iter().filter(|(_, held)| held.len() > 1) {
+            let identity = if key.is_empty() {
+                String::new()
+            } else {
+                format!(" with the key {}", key.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "))
+            };
             out.push(Violation {
-                subject: relations.join(", "),
-                message: format!("duplicate {kind} edges join {source} to {target}, which is a unique pair"),
+                subject: held.join(", "),
+                message: format!(
+                    "duplicate {kind} edges join {source} to {target}{identity}, where one edge has an identity"
+                ),
             });
         }
     }

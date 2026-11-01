@@ -103,8 +103,13 @@ A plan is a scope, a start, steps and a terminal:
   (nearest first, each entity once, so a cycle ends the walk; with `depth`, at most that many edges away), and `pathTo`
   (a shortest path from an entity of the set to `to`, following edges `out`, `in` or `both` ways and at most `depth`
   long when given: its entities in order, both ends included, or none; of paths as short, the one found first).
-- **Graph algorithms** (`roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
-  edges of the kinds named between two of them the edges. `rank` orders the set by personalized PageRank, highest
+- **Graph algorithms** (`archive/roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
+  edges of the kinds named between two of them the edges. `ranked` orders the set by the scores a rank index holds
+  (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
+  index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`, and one still building
+  `INDEX_BUILDING`. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
+  those `n` from the index's score order and nothing else. Its scores are hits', and the `hits` answer's `rank` is
+  `{ index, error }`: the bound on the scores' L1 distance from PageRank. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
   `damping` (0.85) and otherwise jumps back to a `seeds` entity, every entity when none are given, which is PageRank.
   Over a kind declared weighted it follows an edge in proportion to its weight among its entity's edges, an edge of a
@@ -164,7 +169,7 @@ an answer:
   creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
 - **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
   further than its answer. A `reverse` straight after `out` or `in` from one entity over one kind reads that entity's
-  edges from the last instead of collecting the walk, an end joined by several edges of a kind that isn't `unique`
+  edges from the last instead of collecting the walk, an end joined by several edges of a keyed kind
   coming at its first edge's place as in the walk, so the last `limit` edges cost the limit and not the list. From
   several entities or kinds, the `reverse` collects the walk.
 - **`orderBy` then `limit` holds the first `limit`**, in order with ties kept as they came, rather than sorting the whole
@@ -177,7 +182,8 @@ included, which is what says whether a filter walked rows an index could have an
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
 `topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, the `weight` of its
-edges added up when it read weights, a rank's `iterations` and whether it `converged`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+edges added up when it read weights, a rank's `iterations` and whether it `converged`, a `ranked` stage's rank index as
+its `index` and the bound on its scores as its `error`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
@@ -219,7 +225,7 @@ The operations:
 - **Operations:** create (a whole row; the engine assigns the id unless an import brings one, the code, `createdAt`
   and `updatedAt`), upsert, set, set many, append to a list, merge into an object, delete a field, remove from a list,
   trash, restore, grant and revoke a role, grant exclusively among entities, link (with info and, for a kind declared
-  weighted, a weight; replace, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
+  weighted, a weight; merging on the edge's identity, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
   info, its weight) and remove one, destroy.
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
   it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
@@ -233,8 +239,8 @@ The operations:
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
-  counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
-  moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
+  counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
+  moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later.
 - **The result** carries what the batch created (ids, codes), the rows asked for back, and the commit's change set.
 
@@ -340,7 +346,7 @@ unit is open.
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
   doesn't declare, a `ref` naming no entity (including nested lists), duplicate unique values, and relations with
-  missing ends, self-links, disallowed endpoint types, invalid/missing info, duplicate unique pairs, excessive
+  missing ends, self-links, disallowed endpoint types, invalid/missing info, two edges with one identity, excessive
   cardinality or cycles in acyclic kinds. Constraint auditing reads primary values/relations even when an index is
   damaged or unbuilt; rebuilding cannot hide these violations. Unique values include values an index cannot store,
   and use the write contract's numeric, map, single-field list and compound equality rules. heed exposes no walk of
@@ -349,6 +355,15 @@ unit is open.
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
   everything leaves such an index unbuilt, as a build does.
+- Rank indexes (`roadmap/rank-index.md`): every write that changes a rank index's graph — a link, an unlink, a weight
+  changed, an entity created, trashed, restored or destroyed — updates the index in its unit by forward push: each
+  node holds an estimate and a residual, a change moves the residuals its edges touch, and pushing a node moves its
+  residual into its estimate and on along its arcs. A commit pushes up to 16 nodes; the rest wait in the index's
+  queue for the index thread, which reads the graph once, pushes in memory until none waits, and writes back each node
+  it moved, in one unit that tells the watches it wrote into. A rank index is built by that thread too: its nodes added
+  1,000 at a time, then pushed. The scores are within `2R / ((1 − α)² n)` of PageRank in L1, `R` the residuals' sum,
+  which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
+  and the next open goes on.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left

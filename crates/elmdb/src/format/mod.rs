@@ -81,10 +81,18 @@ pub enum Prefix {
     VectorJournal,
     /// `d/qn type index` → a vector index's graph: its number among the graphs, and its next item
     VectorGraph,
+    /// `d/ra index entity` → a rank index's node: its estimate, residual and out-weight, and its place
+    RankNode,
+    /// `d/rk index score type seq` → a rank index's nodes in score order, highest first
+    RankOrder,
+    /// `d/rq index type seq` → a rank index's nodes whose residual is over its threshold, waiting to be pushed
+    RankQueue,
+    /// `d/rs index` → a rank index's totals: its nodes, their estimates and residuals summed, and how far it is built
+    RankTotals,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 26] = [
+    pub const ALL: [Prefix; 30] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -111,6 +119,10 @@ impl Prefix {
         Prefix::VectorItemOf,
         Prefix::VectorJournal,
         Prefix::VectorGraph,
+        Prefix::RankNode,
+        Prefix::RankOrder,
+        Prefix::RankQueue,
+        Prefix::RankTotals,
     ];
 
     /// The string the key's first part holds
@@ -142,6 +154,10 @@ impl Prefix {
             Prefix::VectorItemOf => "d/qm",
             Prefix::VectorJournal => "d/qj",
             Prefix::VectorGraph => "d/qn",
+            Prefix::RankNode => "d/ra",
+            Prefix::RankOrder => "d/rk",
+            Prefix::RankQueue => "d/rq",
+            Prefix::RankTotals => "d/rs",
         }
     }
 

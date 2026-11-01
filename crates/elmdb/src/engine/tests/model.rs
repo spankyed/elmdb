@@ -5,7 +5,7 @@
 //! the role index, each entity's edges out and in, and what a text index matches, whether maintained by writes or
 //! derived again by a rebuild.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use serde_json::{Value as Json, json};
@@ -19,6 +19,10 @@ use crate::format::key::{Part, decode as decode_key};
 const IDS: [&str; 6] = ["Task-1", "Task-2", "Task-3", "Task-4", "Note-1", "Note-2"];
 const KEYS: [&str; 3] = ["a", "b", "c"];
 const KINDS: [&str; 2] = ["refs", "blocks"];
+/// The keyed kind: `cites`, keyed by its info's `n`, which the model's edges of it carry from a pool of two
+const KEYED: &str = "cites";
+/// Every kind the derived reads compare
+const ALL_KINDS: [&str; 3] = ["refs", "blocks", KEYED];
 const ROLES: [&str; 2] = ["r1", "r2"];
 /// Every index rebuilt, or one of each kind
 const REBUILDS: [Option<(&str, &str)>; 4] =
@@ -56,6 +60,20 @@ enum Step {
         id: &'static str,
         kind: &'static str,
         target: &'static str,
+    },
+    /// Links by `cites` with the key `n`: the edge holding it, or a new one beside the pair's others
+    LinkKeyed {
+        id: &'static str,
+        target: &'static str,
+        n: u8,
+    },
+    /// Changes the key of the `cites` edge holding `from` to `to`, by its id; refused when there is none, or when
+    /// another edge of the pair holds `to`
+    Rekey {
+        id: &'static str,
+        target: &'static str,
+        from: u8,
+        to: u8,
     },
     Destroy {
         id: &'static str,
@@ -104,7 +122,8 @@ enum Step {
         kind: &'static str,
         target: &'static str,
     },
-    /// Moves the first relation between the ends to another target, by its id; refused when there is none
+    /// Moves the first relation between the ends to another target, by its id; refused when there is none, or when the
+    /// new ends are joined already
     MoveRelation {
         id: &'static str,
         kind: &'static str,
@@ -169,6 +188,8 @@ fn write() -> BoxedStrategy<Step> {
         1 => (id(), key()).prop_map(|(id, key)| Step::Delete { id, key }),
         3 => (id(), kind(), id()).prop_map(|(id, kind, target)| Step::Link { id, kind, target }),
         1 => (id(), kind(), id()).prop_map(|(id, kind, target)| Step::Unlink { id, kind, target }),
+        2 => (id(), id(), 0u8..2).prop_map(|(id, target, n)| Step::LinkKeyed { id, target, n }),
+        1 => (id(), id(), 0u8..2, 0u8..2).prop_map(|(id, target, from, to)| Step::Rekey { id, target, from, to }),
         1 => id().prop_map(|id| Step::Destroy { id }),
         1 => id().prop_map(|id| Step::Trash { id }),
         1 => id().prop_map(|id| Step::Restore { id }),
@@ -235,6 +256,7 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             2 => aimed(aimed_unit(&state.model, true)),
             1 => blind(Just(Step::RefuseNext).boxed()),
             1 => blind(rebuild),
+            1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
     }
@@ -253,6 +275,38 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
     }
 }
 
+/// A move of an edge onto ends another edge of its kind already joins, or a `cites` edge's key changed to the one the
+/// other edge of its pair holds, which the engine refuses and random steps rarely make; blind, since an aimed step must
+/// be one the model takes. Any write when the model holds neither
+fn onto_joined_ends(m: &Model) -> BoxedStrategy<Step> {
+    let edges: Vec<(&'static str, &'static str, &'static str)> =
+        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let onto: Vec<_> = edges
+        .iter()
+        .flat_map(|a| edges.iter().filter(move |b| a.0 == b.0 && a.1 == b.1 && a.2 != b.2).map(move |b| (*a, b.2)))
+        .collect();
+    // And a `cites` edge's key changed to the one the other edge of its pair holds
+    let rekeys: Vec<_> = m
+        .keyed
+        .iter()
+        .filter(|(s, t, n)| m.keyed.contains(&(s.clone(), t.clone(), 1 - n)))
+        .map(|(s, t, n)| Step::Rekey { id: named(&IDS, s), target: named(&IDS, t), from: *n, to: 1 - n })
+        .collect();
+    let mut options: Vec<(u32, BoxedStrategy<Step>)> = Vec::new();
+    if !onto.is_empty() {
+        let moved = prop::sample::select(onto);
+        options
+            .push((1, moved.prop_map(|((id, kind, target), to)| Step::MoveRelation { id, kind, target, to }).boxed()));
+    }
+    if !rekeys.is_empty() {
+        options.push((1, prop::sample::select(rekeys).boxed()));
+    }
+    if options.is_empty() {
+        return write();
+    }
+    prop::strategy::Union::new_weighted(options).boxed()
+}
+
 /// The pool entry a model's string names, so a step built from the model holds the same `&'static str` a blind one does
 fn named(pool: &[&'static str], name: &str) -> &'static str {
     pool.iter().copied().find(|p| *p == name).expect("the model names only the pool's")
@@ -268,7 +322,7 @@ fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
     let missing = ids(&|e| e.is_none());
     let trashed = ids(&|e| e.is_some_and(|e| e.trashed));
     let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.keys().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
     let keys_where = |keep: &dyn Fn(Option<&Json>) -> bool| -> Vec<(&'static str, &'static str)> {
         existing
             .iter()
@@ -319,8 +373,24 @@ fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
     let pairs: Vec<(&'static str, &'static str)> =
         existing.iter().flat_map(|s| existing.iter().filter(move |t| *t != s).map(move |t| (*s, *t))).collect();
     if !pairs.is_empty() {
-        let pair = prop::sample::select(pairs);
+        let pair = prop::sample::select(pairs.clone());
         options.push((3, (pair, kind()).prop_map(|((id, target), kind)| Step::Link { id, kind, target }).boxed()));
+        let pair = prop::sample::select(pairs.clone());
+        options.push((2, (pair, 0u8..2).prop_map(|((id, target), n)| Step::LinkKeyed { id, target, n }).boxed()));
+    }
+    // A `cites` edge onto the key its pair doesn't hold, or onto its own
+    let rekeys: Vec<_> = m
+        .keyed
+        .iter()
+        .flat_map(|(s, t, from)| {
+            (0u8..2)
+                .filter(move |to| to == from || !m.keyed.contains(&(s.clone(), t.clone(), *to)))
+                .map(move |to| (named(&IDS, s), named(&IDS, t), *from, to))
+        })
+        .collect();
+    if !rekeys.is_empty() {
+        let rekey = prop::sample::select(rekeys);
+        options.push((1, rekey.prop_map(|(id, target, from, to)| Step::Rekey { id, target, from, to }).boxed()));
     }
     if !edges.is_empty() {
         let edge = || prop::sample::select(edges.clone());
@@ -370,8 +440,10 @@ struct Entity {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Model {
     entities: BTreeMap<String, Entity>,
-    /// Each edge with how many relations join its ends: a move can make a second
-    edges: BTreeMap<(String, String, String), usize>,
+    /// Each edge by its ends: a kind with no key joins two entities by one edge at most
+    edges: BTreeSet<(String, String, String)>,
+    /// Each `cites` edge by its ends and key: one a pair for each value of `n`
+    keyed: BTreeSet<(String, String, u8)>,
     /// The edges a unit linked, whose targets must exist when it commits
     pending: Vec<(String, String, String)>,
     next_seq: u64,
@@ -423,10 +495,30 @@ impl Model {
                     return Err("self link");
                 }
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                if !self.edges.contains_key(&edge) {
-                    self.edges.insert(edge.clone(), 1);
+                if self.edges.insert(edge.clone()) {
                     self.pending.push(edge);
                 }
+            }
+            Step::LinkKeyed { id, target, n } => {
+                self.exists(id)?;
+                if id == target {
+                    return Err("self link");
+                }
+                if self.keyed.insert((id.to_string(), target.to_string(), *n)) {
+                    self.pending.push((id.to_string(), KEYED.to_owned(), target.to_string()));
+                }
+            }
+            Step::Rekey { id, target, from, to } => {
+                let held = (id.to_string(), target.to_string(), *from);
+                if !self.keyed.contains(&held) {
+                    return Err("no such relation");
+                }
+                let rekeyed = (id.to_string(), target.to_string(), *to);
+                if from != to && self.keyed.contains(&rekeyed) {
+                    return Err("duplicate edge");
+                }
+                self.keyed.remove(&held);
+                self.keyed.insert(rekeyed);
             }
             Step::Unlink { id, kind, target } => {
                 self.exists(id)?;
@@ -498,37 +590,32 @@ impl Model {
             }
             Step::RemoveRelation { id, kind, target } => {
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                match self.edges.get_mut(&edge) {
-                    None => return Err("no such relation"),
-                    Some(n) if *n > 1 => *n -= 1,
-                    Some(_) => {
-                        self.edges.remove(&edge);
-                    }
+                if !self.edges.remove(&edge) {
+                    return Err("no such relation");
                 }
             }
             Step::MoveRelation { id, kind, target, to } => {
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                if !self.edges.contains_key(&edge) {
+                if !self.edges.contains(&edge) {
                     return Err("no such relation");
                 }
                 if id == to {
                     return Err("self link");
                 }
-                match self.edges.get_mut(&edge) {
-                    Some(n) if *n > 1 => *n -= 1,
-                    _ => {
-                        self.edges.remove(&edge);
-                    }
-                }
                 let moved = (id.to_string(), kind.to_string(), to.to_string());
-                *self.edges.entry(moved.clone()).or_insert(0) += 1;
+                if moved != edge && self.edges.contains(&moved) {
+                    return Err("duplicate edge");
+                }
+                self.edges.remove(&edge);
+                self.edges.insert(moved.clone());
                 self.pending.push(moved);
             }
             Step::TakeLabel { .. } => {}
             Step::Destroy { id } => {
                 self.exists(id)?;
                 self.entities.remove(*id);
-                self.edges.retain(|(s, _, t), _| s != id && t != id);
+                self.edges.retain(|(s, _, t)| s != id && t != id);
+                self.keyed.retain(|(s, t, _)| s != id && t != id);
             }
             Step::Trash { id } => {
                 self.exists(id)?;
@@ -568,7 +655,9 @@ impl Model {
     /// The deferred check: every edge the unit linked that still exists has its target
     fn check_pending(&self) -> Result<(), Refusal> {
         for edge in &self.pending {
-            if self.edges.contains_key(edge) && !self.entities.contains_key(&edge.2) {
+            let held = self.edges.contains(edge)
+                || (edge.1 == KEYED && self.keyed.iter().any(|(s, t, _)| *s == edge.0 && *t == edge.2));
+            if held && !self.entities.contains_key(&edge.2) {
                 return Err("link target missing at commit");
             }
         }
@@ -618,6 +707,16 @@ fn relation_between(db: &Database, source: &str, kind: &str, target: &str) -> St
         .unwrap_or_else(|| "Relation-none".to_owned())
 }
 
+/// The `cites` relation between the ends holding the key `n`, or an id no relation has
+fn keyed_between(r: &impl Read, source: &str, target: &str, n: u8) -> String {
+    let key = rmpv::Value::Map(vec![("n".into(), n.into())]);
+    relations::between(r, source, KEYED, target)
+        .unwrap()
+        .into_iter()
+        .find(|relation| relations::get(r, relation).unwrap().is_some_and(|row| row.info.as_ref() == Some(&key)))
+        .unwrap_or_else(|| "Relation-none".to_owned())
+}
+
 /// The engine operation of one write
 fn op_of(db: &Database, step: &Step) -> Json {
     match step {
@@ -633,6 +732,10 @@ fn op_of(db: &Database, step: &Step) -> Json {
         }
         Step::MoveRelation { id, kind, target, to } => {
             json!({ "op": "updateRelation", "relation": relation_between(db, id, kind, target), "target": to })
+        }
+        Step::Rekey { id, target, from, to } => {
+            let relation = db.snapshot(|s| Ok(keyed_between(s, id, target, *from))).unwrap();
+            json!({ "op": "updateRelation", "relation": relation, "info": { "n": to } })
         }
         Step::TakeLabel { id } => {
             json!({ "op": "takeLabel", "type": crate::engine::ids::type_of(id), "base": "Untitled" })
@@ -656,6 +759,10 @@ fn op_of_unit(unit: &mut crate::Unit, step: &Step) -> Json {
         }
         Step::MoveRelation { id, kind, target, to } => {
             json!({ "op": "updateRelation", "relation": found(id, kind, target), "target": to })
+        }
+        Step::Rekey { id, target, from, to } => {
+            let relation = unit.read_with(|s| Ok(keyed_between(s, id, target, *from))).unwrap();
+            json!({ "op": "updateRelation", "relation": relation, "info": { "n": to } })
         }
         other => op_of_plain(other),
     }
@@ -681,6 +788,9 @@ fn op_of_plain(step: &Step) -> Json {
         Step::Delete { id, key } => json!({ "op": "delete", "id": id, "field": key }),
         Step::Link { id, kind, target } => json!({ "op": "link", "source": id, "kind": kind, "target": target }),
         Step::Unlink { id, kind, target } => json!({ "op": "unlink", "source": id, "kind": kind, "target": target }),
+        Step::LinkKeyed { id, target, n } => {
+            json!({ "op": "link", "source": id, "kind": KEYED, "target": target, "info": { "n": n } })
+        }
         Step::Destroy { id } => json!({ "op": "destroy", "id": id }),
         Step::Trash { id } => json!({ "op": "trash", "id": id }),
         Step::Restore { id } => json!({ "op": "restore", "id": id }),
@@ -688,6 +798,7 @@ fn op_of_plain(step: &Step) -> Json {
         Step::Revoke { id, role } => json!({ "op": "revoke", "id": id, "role": role }),
         Step::RemoveRelation { .. }
         | Step::MoveRelation { .. }
+        | Step::Rekey { .. }
         | Step::Unit { .. }
         | Step::RefuseNext
         | Step::Rebuild { .. } => {
@@ -759,15 +870,24 @@ fn state_of(db: &Database) -> State {
             let mut parts = e.split('|').map(str::to_owned);
             (parts.next().unwrap(), parts.next().unwrap(), parts.next().unwrap())
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let mut edges = edges;
+    edges.sort();
     (entities, edges)
 }
 
 fn model_state(m: &Model) -> State {
     let entities =
         m.entities.iter().map(|(id, e)| (id.clone(), (e.fields.clone(), e.trashed, e.roles.clone()))).collect();
-    let edges = m.edges.iter().flat_map(|(edge, n)| std::iter::repeat_n(edge.clone(), *n)).collect();
-    (entities, edges)
+    (entities, all_edges(m))
+}
+
+/// Every edge the model holds by its ends, a `cites` edge once for each key its pair holds, sorted
+fn all_edges(m: &Model) -> Vec<(String, String, String)> {
+    let mut edges: Vec<_> = m.edges.iter().cloned().collect();
+    edges.extend(m.keyed.iter().map(|(s, t, _)| (s.clone(), KEYED.to_owned(), t.clone())));
+    edges.sort();
+    edges
 }
 
 /// The ids under a derived key range, in key order
@@ -798,7 +918,7 @@ fn derived_of(db: &Database) -> BTreeMap<String, Json> {
         }
         out.insert("Task index a".to_owned(), json!(entries));
         for id in IDS {
-            for kind in KINDS {
+            for kind in ALL_KINDS {
                 let far = |outward| {
                     relations::edges(s, id, outward, Some(kind))
                         .unwrap()
@@ -857,9 +977,10 @@ fn derived_from(m: &Model) -> BTreeMap<String, Json> {
     );
     // Far ends in the order linked: the model links in step order, which is each edge's place; recompute from the
     // engine's own order isn't the model's job, so compare as sets of far ends in a stable order
+    let edges = all_edges(m);
     for id in IDS {
-        for kind in KINDS {
-            let all = || m.edges.iter().flat_map(|(edge, n)| std::iter::repeat_n(edge, *n));
+        for kind in ALL_KINDS {
+            let all = || edges.iter();
             let mut outs: Vec<&String> = all().filter(|(s, k, _)| s == id && k == kind).map(|(_, _, t)| t).collect();
             let mut ins: Vec<&String> = all().filter(|(_, k, t)| t == id && k == kind).map(|(s, _, _)| s).collect();
             outs.sort();
@@ -1007,7 +1128,7 @@ fn derived_reads() -> Vec<(String, Json)> {
         }
     }
     for id in IDS {
-        for kind in KINDS {
+        for kind in ALL_KINDS {
             for step in ["out", "in"] {
                 out.push((
                     format!("{id} {step} {kind}"),
@@ -1082,10 +1203,11 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
         let words: Vec<&str> = label.split(' ').collect();
         let value = if IDS.contains(&words[0]) {
             let (id, step, kind) = (words[0], words[1], words[2]);
+            let edges = all_edges(m);
             let mut far: Vec<&String> = if !live(id) {
                 vec![]
             } else {
-                let all = m.edges.keys();
+                let all = edges.iter();
                 let mut ends: Vec<&String> = if step == "out" {
                     all.filter(|(s, k, t)| s == id && k == kind && t != id).map(|(_, _, t)| t).collect()
                 } else {
@@ -1246,13 +1368,15 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 22] = [
+const STEP_KINDS: [&str; 24] = [
     "Create",
     "Set",
     "Append",
     "Delete",
     "Link",
     "Unlink",
+    "LinkKeyed",
+    "Rekey",
     "Destroy",
     "Trash",
     "Restore",
@@ -1279,6 +1403,8 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Delete { .. } => "Delete",
         Step::Link { .. } => "Link",
         Step::Unlink { .. } => "Unlink",
+        Step::LinkKeyed { .. } => "LinkKeyed",
+        Step::Rekey { .. } => "Rekey",
         Step::Destroy { .. } => "Destroy",
         Step::Trash { .. } => "Trash",
         Step::Restore { .. } => "Restore",
@@ -1306,12 +1432,13 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;
     // Each reason `Model::apply` and `Model::step` refuse with
-    const REFUSALS: [&str; 8] = [
+    const REFUSALS: [&str; 9] = [
         "id in use",
         "no such entity",
         "not a list",
         "self link",
         "no such relation",
+        "duplicate edge",
         "link target missing at commit",
         "the unit threw",
         "the store refused the commit",

@@ -1,4 +1,4 @@
-//! Edge weights (`docs/roadmap/rank-weights.md`): a kind declared `weighted` takes a weight on each edge, stored on the
+//! Edge weights (`docs/archive/roadmap/rank-weights.md`): a kind declared `weighted` takes a weight on each edge, stored on the
 //! relation's row only when it isn't 1 and copied into its edge entries; rows answer it, `rank` walks and teleports by
 //! weight and `communities` counts it, and `check()` holds the edge entries to the row.
 
@@ -143,21 +143,21 @@ fn a_weight_that_isnt_a_finite_number_of_at_least_0_or_on_a_kind_not_weighted_is
 }
 
 #[test]
-fn a_weight_is_part_of_an_edge_and_a_unique_kind_relinked_takes_the_new_one() {
+fn a_weight_is_a_property_of_an_edge_which_a_link_to_its_identity_replaces() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     tasks(&db, &["Task-a", "Task-b"]);
     let (first, made) = linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", Some(2.0))]).unwrap());
     assert!(made);
-    // The same weight is the same edge, and no weight matches any edge between the ends
+    // A link giving no weight keeps the edge's; another weight replaces it, on the same edge
+    assert_eq!(linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", None)]).unwrap()), (first.clone(), false));
+    assert_eq!(stored(&db, &first).weight, Some(2.0));
     assert_eq!(
-        linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", Some(2.0))]).unwrap()),
+        linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", Some(3.0))]).unwrap()),
         (first.clone(), false)
     );
-    assert_eq!(linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", None)]).unwrap()), (first.clone(), false));
-    // Another weight is a parallel edge, which adds to the first in a rank
-    let (second, made) = linked(&write(&db, vec![link("Task-a", "weighs", "Task-b", Some(3.0))]).unwrap());
-    assert!(made && second != first);
+    assert_eq!(stored(&db, &first).weight, Some(3.0));
+    assert_eq!(super::edges(&db).iter().filter(|e| e.contains("weighs")).count(), 1);
 
     let (rated, _) = linked(&write(&db, vec![link("Task-a", "rates", "Task-b", Some(2.0))]).unwrap());
     let changes = db.write(&batch(vec![link("Task-a", "rates", "Task-b", Some(5.0))]), false).unwrap().1;
@@ -430,35 +430,31 @@ proptest! {
         let db = open(&dir);
         let names: Vec<String> = (0..NODES).map(name).collect();
         tasks(&db, &names.iter().map(String::as_str).collect::<Vec<_>>());
-        // Each edge as written, once: a second link of the same weight is the edge already there
-        let mut held: Vec<(usize, usize, f64)> = Vec::new();
+        // One edge a pair, in the order its pair was first linked, holding the last weight a link gave it
+        let mut held: Vec<(usize, bool, usize, f64)> = Vec::new();
         for &(s, weighted, t, w) in &edges {
             let (kind, weight) = if weighted { ("weighs", Some(w)) } else { ("refs", None) };
             let (_, made) = linked(&write(&db, vec![link(&name(s), kind, &name(t), weight)]).unwrap());
-            if made {
-                held.push((s, t, if weighted { w } else { 1.0 }));
+            let w = if weighted { w } else { 1.0 };
+            match held.iter_mut().find(|e| (e.0, e.1, e.2) == (s, weighted, t)) {
+                Some(edge) => {
+                    prop_assert!(!made);
+                    edge.3 = w;
+                }
+                None => {
+                    prop_assert!(made);
+                    held.push((s, weighted, t, w));
+                }
             }
         }
-        let refs: Vec<(usize, usize)> = edges.iter().filter(|e| !e.1).map(|e| (e.0, e.2)).collect();
         // The engine reads a node's edges kind by kind, `weighs` before `refs`, each in link order
         let mut graph = Projection::weighted();
         for v in 0..NODES {
-            let mut out: Vec<(u32, f64)> = Vec::new();
-            let weighs = edges.iter().filter(|e| e.1 && e.0 == v);
-            let mut seen: Vec<(usize, f64)> = Vec::new();
-            for &(_, _, t, w) in weighs {
-                if !seen.contains(&(t, w)) {
-                    seen.push((t, w));
-                    out.push((t as u32, w));
-                }
-            }
-            let mut targets: Vec<usize> = Vec::new();
-            for &(_, t) in refs.iter().filter(|e| e.0 == v) {
-                if !targets.contains(&t) {
-                    targets.push(t);
-                    out.push((t as u32, 1.0));
-                }
-            }
+            let out: Vec<(u32, f64)> = [true, false]
+                .iter()
+                .flat_map(|&kind| held.iter().filter(move |e| e.0 == v && e.1 == kind))
+                .map(|e| (e.2 as u32, e.3))
+                .collect();
             graph.weighted_node(out);
         }
         prop_assert_eq!(graph.edges(), held.len());

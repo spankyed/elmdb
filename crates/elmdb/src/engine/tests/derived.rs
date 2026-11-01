@@ -136,7 +136,10 @@ fn an_index_added_over_data_builds_in_the_background_and_reads_walk_until_it_has
     assert_eq!(before.as_array().unwrap().len(), 1250);
     db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
-    assert!(status.iter().any(|s| s.entity_type == "Note" && s.index == "byKind" && s.built), "{status:?}");
+    assert!(
+        status.iter().any(|s| s.entity_type.as_deref() == Some("Note") && s.index == "byKind" && s.built),
+        "{status:?}"
+    );
     let (after, visited) = ids_where(&db, "kind", json!("odd"));
     assert_eq!(after, before);
     assert_eq!(visited, 1250, "once built, the index's matches are read, not the type's 2,500 rows");
@@ -270,7 +273,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     )
     .unwrap();
     db.set_schema(Schema::from_json(&notes(fields, indexes)).unwrap()).unwrap();
-    db.wait_for_index_builds().unwrap();
+    // The wait says a build failed, and the status below says why
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
     let status = db.index_status().unwrap();
     let pair = status.iter().find(|s| s.index == "pair").unwrap();
     assert!(!pair.built);
@@ -314,7 +318,8 @@ fn a_unique_index_over_rows_holding_the_same_values_isnt_built_and_says_why() {
         notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } })),
     )
     .unwrap();
-    db.wait_for_index_builds().unwrap();
+    // The wait says a build failed, and the status below says why
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
     let status = db.index_status().unwrap();
     let one = status.iter().find(|s| s.index == "one").unwrap();
     assert!(!one.built);
@@ -709,10 +714,11 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "$schema": crate::schema::SCHEMA_LANGUAGE,
             "types": {"Node":{"fields":{}}, "Other":{"fields":{}}},
             "relations": {
-                "strict": {"cardinality":"many-to-many", "unique":true, "acyclic":true,
+                "strict": {"cardinality":"many-to-many", "acyclic":true,
                     "endpoints":[{"source":"Node", "target":"Node"}], "info":{"type":"integer"}},
                 "refs": {"cardinality":"many-to-many", "info":{
-                    "type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}}}
+                    "type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}}},
+                "keyed": {"cardinality":"many-to-many", "key":["n"]}
             }
         }),
     )
@@ -743,6 +749,10 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "Node-b",
             Some(rmpv::Value::Array(vec![rmpv::Value::Array(vec!["Node-missing".into()])])),
         ),
+        ("keyedOne", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
+        ("keyedTwo", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
+        ("keyedOther", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 2.into())]))),
+        ("keyedNumber", "keyed", "Node-c", "Node-a", Some(5.into())),
     ];
     damage(&db, |txn, d| {
         for (seq, (id, kind, source, target, info)) in rows.iter().enumerate() {
@@ -762,7 +772,9 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
     let before = db.check().unwrap().violations;
     for (subject, message) in [
         ("Relation-cycle", "cycle"),
-        ("Relation-duplicate", "unique pair"),
+        ("Relation-duplicate", "duplicate strict edges join Node-a to Node-b"),
+        ("Relation-keyedTwo", "with the key 1"),
+        ("Relation-keyedNumber", "holds its key, so it is a map"),
         ("Relation-self", "itself"),
         ("Relation-endpoint", "doesn't join"),
         ("Relation-required", "required info"),
@@ -775,6 +787,7 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "missing {subject}: {message}; {before:?}"
         );
     }
+    assert!(!before.iter().any(|v| v.subject.contains("keyedOther")), "another key value is another edge: {before:?}");
     db.rebuild(None).unwrap();
     assert_eq!(db.check().unwrap().violations, before, "rebuild cannot hide primary violations");
 }
@@ -923,7 +936,15 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
     reopened.wait_for_index_builds().unwrap();
     let report = reopened.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
-    assert!(reopened.index_status().unwrap().iter().find(|s| s.entity_type == "Task" && s.index == "a").unwrap().built);
+    assert!(
+        reopened
+            .index_status()
+            .unwrap()
+            .iter()
+            .find(|s| s.entity_type.as_deref() == Some("Task") && s.index == "a")
+            .unwrap()
+            .built
+    );
 }
 
 #[test]
@@ -977,7 +998,7 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
         let db = with_schema(
             &dir,
             json!({"$schema":crate::schema::SCHEMA_LANGUAGE,
-                "types":{"Node":{"fields":{}}}, "relations":{"links":{"cardinality":cardinality}}
+                "types":{"Node":{"fields":{}}}, "relations":{"links":{"cardinality":cardinality, "key":["n"]}}
             }),
         )
         .unwrap();
@@ -995,7 +1016,8 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
                 kind: "links".into(),
                 source: source.into(),
                 target: target.into(),
-                info: None,
+                // A key value each, so the second a-to-b edge is another edge, not a duplicate of the first
+                info: Some(rmpv::Value::Map(vec![("n".into(), (i as i64).into())])),
                 weight: None,
             });
         }

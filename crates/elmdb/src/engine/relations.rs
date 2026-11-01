@@ -5,7 +5,7 @@
 //! - `d/o source kind seq` → `[relation, target]` and `d/n target kind seq` → `[relation, source]`: each entity's edges
 //!   out and in, by kind, in the order linked, so a walk reads a far end without the row; a third element, the weight,
 //!   when the row holds one, so a weighted graph reads it there too
-//! - `d/b source kind target seq` → relation: the edges between two ends, so a link finds an edge it would repeat
+//! - `d/b source kind target seq` → relation: the edges between two ends, so a link finds the edge with its identity
 //!
 //! A relation is no entity: it holds no fields and no type lists it. The schema's rules for its kind are kept here.
 
@@ -263,15 +263,63 @@ fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Optio
 
 fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
     match info {
+        // A key is read from the info's fields, so info that is no map would hold a null key whatever it was
+        Some(info) if !def.key.is_empty() && !matches!(info, Value::Map(_)) => Err(Error::new(
+            ErrorCode::FieldType,
+            format!("A {kind} relation's info holds its key ({}), so it is a map, not {info}", def.key.join(", ")),
+        )),
         Some(info) => values::check_field("relation", kind, &def.info, info),
         None if def.info.optional => Ok(()),
         None => Err(Error::new(ErrorCode::RequiredField, format!("A {kind} relation's info is required"))),
     }
 }
 
-/// Links `source` to `target`, returning the relation and whether it was linked now. Idempotent on the whole edge:
-/// with no `info`, any edge between the ends is the edge; with one, an edge holding the same info; and with a
-/// `weight`, an edge of that weight too. A `unique` kind keeps one edge per pair, whose info and weight a link replaces
+/// The values of the kind's key in an edge's info, a field the info doesn't hold read as null (and every field of info
+/// that is no map, which only a load brings): with the edge's two ends, what identifies it
+pub fn key_values(def: &RelationDef, info: Option<&Value>) -> Vec<Value> {
+    let entries = match info {
+        Some(Value::Map(entries)) => entries.as_slice(),
+        _ => &[],
+    };
+    def.key
+        .iter()
+        .map(|field| entries.iter().find(|(k, _)| k.as_str() == Some(field)).map_or(Value::Nil, |(_, v)| v.clone()))
+        .collect()
+}
+
+fn same_key(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
+}
+
+/// The edge of `kind` from `source` to `target` holding `key` other than `except`: the one a link to that identity
+/// updates, and the one a move onto it would duplicate
+fn with_identity(
+    t: &impl Read,
+    def: &RelationDef,
+    source: &str,
+    kind: &str,
+    target: &str,
+    key: &[Value],
+    except: Option<&str>,
+) -> Result<Option<String>> {
+    for relation in between(t, source, kind, target)? {
+        if except == Some(relation.as_str()) {
+            continue;
+        }
+        if def.key.is_empty() {
+            return Ok(Some(relation));
+        }
+        let held = get(t, &relation)?.ok_or_else(|| missing_relation(&relation))?;
+        if same_key(&key_values(def, held.info.as_ref()), key) {
+            return Ok(Some(relation));
+        }
+    }
+    Ok(None)
+}
+
+/// Links `source` to `target`, returning the relation and whether it was linked now. An edge is identified by its
+/// ends and the values of its kind's key (`schema.md`, Relations): a link to an identity an edge holds updates that
+/// edge, replacing its info with any given and its weight with any given, and keeps its id and its place
 pub fn link(
     t: &mut Txn<'_, '_>,
     source: &str,
@@ -286,11 +334,9 @@ pub fn link(
     }
     check_info(&def, kind, info.as_ref())?;
     let held_weight = weight_of(&def, kind, weight)?;
-    let existing = between(t, source, kind, target)?;
-    if def.unique
-        && let Some(relation) = existing.first()
-    {
-        let before = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
+    let key = key_values(&def, info.as_ref());
+    if let Some(relation) = with_identity(t, &def, source, kind, target, &key, None)? {
+        let before = get(t, &relation)?.ok_or_else(|| missing_relation(&relation))?;
         let mut stored = before.clone();
         if let Some(info) = info
             && stored.info.as_ref().is_none_or(|i| !values::same(i, &info))
@@ -302,9 +348,10 @@ pub fn link(
         }
         if stored != before {
             if stored.weight != before.weight {
-                file_edges(t, relation, &stored)?;
+                file_edges(t, &relation, &stored)?;
+                super::ranks::edge_changed(t, kind, source, target, Some(before.weight), Some(stored.weight))?;
             }
-            put(t, relation, &stored)?;
+            put(t, &relation, &stored)?;
             t.event(Event::RelationChanged {
                 relation: relation.clone(),
                 kind: kind.to_owned(),
@@ -312,19 +359,7 @@ pub fn link(
                 target: target.to_owned(),
             });
         }
-        return Ok((relation.clone(), false));
-    }
-    for relation in &existing {
-        let held = get(t, relation)?.ok_or_else(|| missing_relation(relation))?;
-        let same_info = match (&info, &held.info) {
-            (None, _) => true,
-            (Some(a), Some(b)) => values::same(a, b),
-            (Some(_), None) => false,
-        };
-        let same_weight = weight.is_none() || held.weight == held_weight;
-        if same_info && same_weight {
-            return Ok((relation.clone(), false));
-        }
+        return Ok((relation, false));
     }
     check_rules(t, &def, kind, source, target, None)?;
     let seq = entities::next_seq(t)?;
@@ -339,6 +374,7 @@ pub fn link(
     };
     put(t, &relation, &stored)?;
     file(t, &relation, &stored)?;
+    super::ranks::edge_changed(t, kind, source, target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.clone(),
         kind: kind.to_owned(),
@@ -354,6 +390,7 @@ pub fn link(
 pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<()> {
     put(t, relation, stored)?;
     file(t, relation, stored)?;
+    super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.to_owned(),
         kind: stored.kind.clone(),
@@ -367,6 +404,7 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
 pub fn remove(t: &mut Txn<'_, '_>, relation: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };
     unfile(t, &stored)?;
+    super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, Some(stored.weight), None)?;
     t.del(&keys::relation(relation))?;
     t.event(Event::Unlinked {
         relation: relation.to_owned(),
@@ -428,26 +466,36 @@ pub fn update(
         next.weight = weight_of(&def, &before.kind, weight)?;
     }
     let moved = next.source != before.source || next.target != before.target;
+    let key = key_values(&def, next.info.as_ref());
+    let other = if moved || !same_key(&key, &key_values(&def, before.info.as_ref())) {
+        with_identity(t, &def, &next.source, &next.kind, &next.target, &key, Some(relation))?
+    } else {
+        None
+    };
+    if let Some(other) = other {
+        // Two edges with one identity would leave a link to it no single edge to update
+        let identity =
+            if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
+        return Err(Error::new(
+            ErrorCode::DuplicateEdge,
+            format!(
+                "updateRelation({relation:?}): {other}, a {} edge{identity}, already joins {} to {}, and an edge's \
+                 ends and key identify it; remove one of them first",
+                next.kind, next.source, next.target
+            ),
+        ));
+    }
     if moved {
-        // A unique kind keeps one edge per pair: a link to a joined pair updates that edge, and a move onto one would
-        // leave two, which no single edge's id could stand for
-        if def.unique && between(t, &next.source, &next.kind, &next.target)?.iter().any(|r| r != relation) {
-            return Err(Error::new(
-                ErrorCode::DuplicateEdge,
-                format!(
-                    "updateRelation({relation:?}): a {} edge already joins {} to {}, and a {} kind keeps one per pair; \
-                     remove one of them first",
-                    next.kind, next.source, next.target, next.kind
-                ),
-            ));
-        }
         check_rules(t, &def, &next.kind, &next.source, &next.target, Some(relation))?;
         unfile(t, &before)?;
+        super::ranks::edge_changed(t, &before.kind, &before.source, &before.target, Some(before.weight), None)?;
         next.seq = entities::next_seq(t)?;
         file(t, relation, &next)?;
+        super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, None, Some(next.weight))?;
         t.defer(Check::Ends { relation: relation.to_owned(), via: "updateRelation" });
     } else if next.weight != before.weight {
         file_edges(t, relation, &next)?;
+        super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
     }
     put(t, relation, &next)?;
     t.event(Event::RelationChanged {

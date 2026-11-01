@@ -1,6 +1,6 @@
 # Graph algorithms: what they answer and what they cost
 
-The evidence for [the graph algorithms](../roadmap/graph-algorithms.md), stages 0 to 2, 4 and 5. 2026-10-31, on
+The evidence for [the graph algorithms](../archive/roadmap/graph-algorithms.md), stages 0 to 2, 4 and 5. 2026-10-31, on
 `session/graph-algorithms` from `f613add`, on an Apple M1 Pro (macOS), Rust 1.99.1, Node 23.11.1.
 
 ## Correct
@@ -164,7 +164,7 @@ members array and its offsets built from a label per node, and `counts` reads th
 - **Heap:** 131 bytes an entity for `rank` and `weakComponents`, from 184, and 126 for `strongComponents` and
   `topological`. The heap test holds them to 192.
 
-## Weights (`roadmap/rank-weights.md`)
+## Weights (`archive/roadmap/rank-weights.md`)
 
 A kind declared weighted carries each edge's weight on its row and in its edge entries, so building the graph reads the
 weight where it reads the far end. A read that takes no weights builds the graph it built before, and `rank` runs the

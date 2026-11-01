@@ -148,22 +148,22 @@ library_benchmark_group!(name = read, benchmarks = [read_bytes]);
 
 #[cfg(target_os = "linux")]
 fn graph_read(read: &str) -> (support::Fixture, Reads) {
-    let fixture = if read == "rankWeighted" {
-        support::Fixture::weighted_graph(ROWS, 5)
-    } else {
-        support::Fixture::graph(ROWS, 5)
+    let fixture = match read {
+        "rankWeighted" => support::Fixture::weighted_graph(ROWS, 5),
+        "ranked" => support::Fixture::ranked_graph(ROWS, 5),
+        _ => support::Fixture::graph(ROWS, 5),
     };
     fixture.assert_graph_read(read);
     let reads = fixture.graph_read(read);
     (fixture, reads)
 }
 
-// A graph read over 1,000 documents of five edges each: the graph built from the store and the algorithm over it, and
-// `rank` again over the same graph weighted
+// A graph read over 1,000 documents of five edges each: the graph built from the store and the algorithm over it,
+// `rank` again over the same graph weighted, and its top ten read from a rank index over it
 #[cfg(target_os = "linux")]
 #[library_benchmark]
 #[benches::read(
-    args = ["weakComponents", "strongComponents", "rank", "rankWeighted", "personalized", "communities", "topological", "similar", "similarAdamicAdar"],
+    args = ["weakComponents", "strongComponents", "rank", "rankWeighted", "ranked", "personalized", "communities", "topological", "similar", "similarAdamicAdar"],
     setup = graph_read
 )]
 fn graph((fixture, reads): (support::Fixture, Reads)) -> (support::Fixture, Vec<u8>) {

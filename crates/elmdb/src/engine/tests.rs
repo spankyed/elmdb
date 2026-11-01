@@ -10,6 +10,7 @@ mod lifecycle;
 mod maintenance;
 mod model;
 mod plans;
+mod rank_index;
 mod ranks;
 mod reads;
 mod schema_versions;
@@ -36,10 +37,12 @@ pub(super) fn schema() -> Schema {
             "refs": { "cardinality": "many-to-many" },
             "blocks": { "cardinality": "many-to-many" },
             "parent_of": { "cardinality": "one-to-many", "acyclic": true },
-            "tags": { "cardinality": "many-to-many", "unique": true },
+            "tags": { "cardinality": "many-to-many" },
+            "cites": { "cardinality": "many-to-many", "key": ["n"] },
+            "holds": { "cardinality": "one-to-many", "key": ["n"] },
             "pins": { "cardinality": "many-to-one", "endpoints": [{ "source": "Note", "target": "Task" }] },
             "weighs": { "cardinality": "many-to-many", "weighted": true },
-            "rates": { "cardinality": "many-to-many", "weighted": true, "unique": true }
+            "rates": { "cardinality": "many-to-many", "weighted": true }
         },
         "types": {
             "Task": {
@@ -518,7 +521,7 @@ fn destroy_removes_the_entity_its_fields_its_relations_and_its_type_when_emptied
 }
 
 #[test]
-fn link_is_idempotent_on_the_whole_edge_and_another_info_is_another_edge() {
+fn link_merges_on_an_edges_identity_and_a_key_tells_edges_of_one_pair_apart() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     write(
@@ -529,8 +532,8 @@ fn link_is_idempotent_on_the_whole_edge_and_another_info_is_another_edge() {
         ],
     )
     .unwrap();
-    let link = |info: Json| {
-        let mut o = json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" });
+    let link = |kind: &str, info: Json| {
+        let mut o = json!({ "op": "link", "source": "Task-1", "kind": kind, "target": "Task-2" });
         if !info.is_null() {
             o["info"] = info
         }
@@ -539,17 +542,37 @@ fn link_is_idempotent_on_the_whole_edge_and_another_info_is_another_edge() {
             other => panic!("{other:?}"),
         }
     };
-    let (first, linked) = link(json!({ "a": 1, "b": 2 }));
+    let info = |id: &str| db.snapshot(|s| Ok(relations::get(s, id)?.unwrap().info)).unwrap().map(|v| v.to_string());
+    // A kind with no key: the ends are the identity, and a link to them updates the edge
+    let (first, linked) = link("refs", json!({ "a": 1, "b": 2 }));
     assert!(linked);
-    assert_eq!(
-        link(json!({ "b": 2, "a": 1 })),
-        (first.clone(), false),
-        "the same fields in another order are the same info"
-    );
-    assert_eq!(link(Json::Null), (first.clone(), false), "no info matches any edge between the ends");
-    let (other, linked) = link(json!({ "a": 9 }));
-    assert!(linked && other != first);
-    assert_eq!(edges(&db).len(), 2);
+    assert_eq!(link("refs", json!({ "b": 2, "a": 1 })), (first.clone(), false));
+    assert_eq!(link("refs", Json::Null), (first.clone(), false), "a link giving no info keeps the edge's");
+    assert_eq!(info(&first).as_deref(), Some(r#"{"a": 1, "b": 2}"#));
+    assert_eq!(link("refs", json!({ "a": 9 })), (first.clone(), false), "other info is the same edge's new info");
+    assert_eq!(info(&first).as_deref(), Some(r#"{"a": 9}"#));
+    // A keyed kind: the ends and the key's values, a field the info doesn't hold being null
+    let (one, linked) = link("cites", json!({ "n": 1, "x": 1 }));
+    assert!(linked);
+    let (two, linked) = link("cites", json!({ "n": 2 }));
+    assert!(linked && two != one);
+    assert_eq!(link("cites", json!({ "x": 2, "n": 1 })), (one.clone(), false));
+    assert_eq!(info(&one).as_deref(), Some(r#"{"x": 2, "n": 1}"#));
+    let (none, linked) = link("cites", Json::Null);
+    assert!(linked && none != one && none != two, "no info holds a null key, which no edge held");
+    assert_eq!(link("cites", json!({ "x": 5 })), (none.clone(), false));
+    assert_eq!(link("cites", json!({ "n": null })), (none.clone(), false));
+    assert_eq!(edges(&db), ["Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|refs|Task-2"]);
+    // A key is read from the info's fields, so a keyed kind's info is a map: 5 and 6 would both hold a null key
+    let lone = json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": 5 });
+    let e = refused(&db, vec![lone]);
+    assert_eq!(e.code, ErrorCode::FieldType, "{}", e.message);
+    assert!(e.message.contains("holds its key (n)"), "{}", e.message);
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": one, "info": [1] })]);
+    assert_eq!(e.code, ErrorCode::FieldType, "{}", e.message);
+    // A kind with no key takes info of any shape its declaration allows
+    assert_eq!(link("refs", json!(5)), (first.clone(), false));
+    assert!(db.check().unwrap().is_clean());
 }
 
 #[test]
@@ -605,7 +628,7 @@ fn an_acyclic_kind_refuses_a_link_closing_a_cycle() {
 }
 
 #[test]
-fn a_unique_kind_keeps_one_edge_per_pair_whose_info_a_link_replaces() {
+fn a_kind_without_a_key_keeps_one_edge_per_pair_whose_info_a_link_replaces() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     write(
@@ -631,7 +654,7 @@ fn a_unique_kind_keeps_one_edge_per_pair_whose_info_a_link_replaces() {
 }
 
 #[test]
-fn a_unique_kind_refuses_moving_an_edge_onto_a_pair_another_joins() {
+fn update_relation_refuses_an_edge_onto_another_edges_identity() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     let ids = ["Task-1", "Task-2", "Task-3"];
@@ -641,17 +664,28 @@ fn a_unique_kind_refuses_moving_an_edge_onto_a_pair_another_joins() {
         vec![
             json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-2" }),
             json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-3" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": { "n": 1 } }),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": { "n": 2 } }),
         ],
     )
     .unwrap();
-    let OpResult::Relation { id: second, .. } = &results[1] else { panic!("{results:?}") };
-    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": second, "target": "Task-2" })]);
+    let rel = |i: usize| match &results[i] {
+        OpResult::Relation { id, .. } => id.clone(),
+        other => panic!("{other:?}"),
+    };
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": rel(1), "target": "Task-2" })]);
     assert_eq!(e.code, ErrorCode::DuplicateEdge, "{}", e.message);
-    assert_eq!(edges(&db), ["Task-1|tags|Task-2", "Task-1|tags|Task-3"]);
-    // Its own pair is no other edge's: a move away and an info change on it are allowed
-    write(&db, vec![json!({ "op": "updateRelation", "relation": second, "source": "Task-2", "target": "Task-1" })])
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": rel(3), "info": { "n": 1 } })]);
+    assert_eq!(e.code, ErrorCode::DuplicateEdge, "a key changed onto another edge's: {}", e.message);
+    assert!(e.message.contains("with the same n"), "{}", e.message);
+    assert!(e.message.contains(&rel(2)), "names the edge it would duplicate: {}", e.message);
+    assert_eq!(edges(&db), ["Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|tags|Task-2", "Task-1|tags|Task-3"]);
+    // Its own identity is no other edge's: a move away, and info that keeps its key, are allowed
+    write(&db, vec![json!({ "op": "updateRelation", "relation": rel(1), "source": "Task-2", "target": "Task-1" })])
         .unwrap();
-    assert_eq!(edges(&db), ["Task-1|tags|Task-2", "Task-2|tags|Task-1"]);
+    write(&db, vec![json!({ "op": "updateRelation", "relation": rel(3), "info": { "n": 2, "y": 1 } })]).unwrap();
+    write(&db, vec![json!({ "op": "updateRelation", "relation": rel(3), "info": { "n": 3 } })]).unwrap();
+    assert_eq!(edges(&db), ["Task-1|cites|Task-2", "Task-1|cites|Task-2", "Task-1|tags|Task-2", "Task-2|tags|Task-1"]);
     assert!(db.check().unwrap().is_clean());
 }
 
@@ -661,24 +695,24 @@ fn cardinality_counts_far_ends_so_check_agrees_with_the_writes_it_allowed() {
     let db = open(&dir);
     let ids = ["Task-1", "Task-2", "Task-3"];
     write(&db, ids.iter().map(|id| json!({ "op": "create", "type": "Task", "id": id })).collect()).unwrap();
-    // A one-to-many kind that isn't unique: a second edge to the same child leaves it one parent
+    // A keyed one-to-many kind: a second edge to the same child leaves it one parent
     write(
         &db,
         vec![
-            json!({ "op": "link", "source": "Task-1", "kind": "parent_of", "target": "Task-2", "info": 1 }),
-            json!({ "op": "link", "source": "Task-1", "kind": "parent_of", "target": "Task-2", "info": 2 }),
+            json!({ "op": "link", "source": "Task-1", "kind": "holds", "target": "Task-2", "info": { "n": 1 } }),
+            json!({ "op": "link", "source": "Task-1", "kind": "holds", "target": "Task-2", "info": { "n": 2 } }),
         ],
     )
     .unwrap();
-    assert_eq!(edges(&db), ["Task-1|parent_of|Task-2", "Task-1|parent_of|Task-2"]);
+    assert_eq!(edges(&db), ["Task-1|holds|Task-2", "Task-1|holds|Task-2"]);
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
     // A second parent is past it, at a write and in the report of rows loaded without the write's checks
-    let e = refused(&db, vec![json!({ "op": "link", "source": "Task-3", "kind": "parent_of", "target": "Task-2" })]);
+    let e = refused(&db, vec![json!({ "op": "link", "source": "Task-3", "kind": "holds", "target": "Task-2" })]);
     assert_eq!(e.code, ErrorCode::Cardinality);
     db.admin_load(&[crate::engine::maintenance::Load::Relation {
         id: "Relation-loaded".into(),
-        kind: "parent_of".into(),
+        kind: "holds".into(),
         source: "Task-3".into(),
         target: "Task-2".into(),
         info: None,
@@ -687,7 +721,7 @@ fn cardinality_counts_far_ends_so_check_agrees_with_the_writes_it_allowed() {
     .unwrap();
     let report = db.check().unwrap();
     assert!(
-        report.violations.iter().any(|v| v.subject == "Task-2" && v.message.contains("2 parent_of sources")),
+        report.violations.iter().any(|v| v.subject == "Task-2" && v.message.contains("2 holds sources")),
         "{report:?}"
     );
 }
@@ -701,8 +735,8 @@ fn unlink_and_remove_relation_remove_edges_and_their_keys_update_relation_moves_
     let results = write(
         &db,
         vec![
-            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2", "info": 1 }),
-            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2", "info": 2 }),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": { "n": 1 } }),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": { "n": 2 } }),
             json!({ "op": "link", "source": "Task-1", "kind": "blocks", "target": "Task-3" }),
         ],
     )
@@ -712,18 +746,18 @@ fn unlink_and_remove_relation_remove_edges_and_their_keys_update_relation_moves_
         _ => String::new(),
     };
     write(&db, vec![json!({ "op": "removeRelation", "relation": rel(0) })]).unwrap();
-    assert_eq!(edges(&db), ["Task-1|blocks|Task-3", "Task-1|refs|Task-2"]);
+    assert_eq!(edges(&db), ["Task-1|blocks|Task-3", "Task-1|cites|Task-2"]);
     assert_eq!(
         refused(&db, vec![json!({ "op": "removeRelation", "relation": rel(0) })]).code,
         ErrorCode::NoSuchRelation
     );
     write(&db, vec![json!({ "op": "updateRelation", "relation": rel(1), "target": "Task-3" })]).unwrap();
-    assert_eq!(edges(&db), ["Task-1|blocks|Task-3", "Task-1|refs|Task-3"]);
+    assert_eq!(edges(&db), ["Task-1|blocks|Task-3", "Task-1|cites|Task-3"]);
     assert_eq!(
         refused(&db, vec![json!({ "op": "updateRelation", "relation": "Relation-x", "target": "Task-3" })]).code,
         ErrorCode::NoSuchRelation
     );
-    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs" })]).unwrap();
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "cites" })]).unwrap();
     assert_eq!(edges(&db), ["Task-1|blocks|Task-3"]);
     write(&db, vec![json!({ "op": "unlink", "source": "Task-1" })]).unwrap();
     assert_eq!(edges(&db), Vec::<String>::new());

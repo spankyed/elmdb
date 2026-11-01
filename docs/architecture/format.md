@@ -21,7 +21,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/xb` type index | that a value index is built; a plan reads only a built one | derived |
 | `d/x` type field value seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
-| `d/b` source kind target seq | the edges between two entities | derived |
+| `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
 | `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
 | `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |
@@ -32,10 +32,17 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
 | `d/qj` type index item | a unit's graph changes, applied as it commits | derived |
 | `d/qn` type index | the index's graph number and next item | derived |
+| `d/ra` index entity | a rank index's node: its estimate, residual and out-weight, three f64, and its place | derived |
+| `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to 16 significant bits | derived |
+| `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
+| `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, how far it is built, where its sweep is | derived |
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` does the same in a scratch transaction and
-compares.
+compares. A rank index's stored bits depend on the order of the commits and pushes that made it, so `check()` holds
+it to what it promises instead: its scores within the bound it reports of PageRank over the same graph, each residual
+and out-weight what the estimates and the edges make them, and its score order, queue and totals what its nodes make
+them.
 
 ## Values
 

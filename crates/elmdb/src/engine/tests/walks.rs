@@ -11,8 +11,9 @@ use crate::engine::plan::{ReadOp, Reads};
 
 const TARGETS: usize = 400;
 
-/// Task-0 linked by `refs` and by `tags` (unique) to Task-1 to Task-400 in order, with Note-1 to Note-40 among them;
-/// Task-7 linked by `refs` a second time, last; Task-13 and Task-200 trashed; Task-401 to Task-420 linking to Task-0
+/// Task-0 linked by `cites` and by `tags`, whose kind has no key, to Task-1 to Task-400 in order, with Note-1 to
+/// Note-40 among them; Task-7 linked by `cites` a second time, last, by another key value; Task-13 and Task-200
+/// trashed; Task-401 to Task-420 linking to Task-0
 fn fixture() -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -29,7 +30,7 @@ fn fixture() -> (tempfile::TempDir, Database) {
     write(&db, ops).unwrap();
     let mut links = Vec::new();
     for i in 1..=TARGETS {
-        for kind in ["refs", "tags"] {
+        for kind in ["cites", "tags"] {
             links.push(json!({ "op": "link", "source": "Task-0", "kind": kind, "target": format!("Task-{i}") }));
             if i % 10 == 0 {
                 links.push(
@@ -38,11 +39,9 @@ fn fixture() -> (tempfile::TempDir, Database) {
             }
         }
     }
-    links.push(
-        json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-7", "info": { "again": true } }),
-    );
+    links.push(json!({ "op": "link", "source": "Task-0", "kind": "cites", "target": "Task-7", "info": { "n": 1 } }));
     for i in 401..=420 {
-        links.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }));
+        links.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "cites", "target": "Task-0" }));
     }
     links.push(json!({ "op": "trash", "id": "Task-13" }));
     links.push(json!({ "op": "trash", "id": "Task-200" }));
@@ -74,7 +73,7 @@ fn kept(db: &Database, from: &[&str], steps: Json) -> Vec<u64> {
 #[test]
 fn a_reverse_after_a_hop_answers_the_walk_reversed_and_a_limit_after_it_reads_only_what_it_keeps() {
     let (_dir, db) = fixture();
-    for (step, kind) in [("out", "refs"), ("out", "tags"), ("in", "refs")] {
+    for (step, kind) in [("out", "cites"), ("out", "tags"), ("in", "cites")] {
         for types in [None, Some(json!(["Task"]))] {
             let mut hop = json!({ "step": step, "kinds": [kind] });
             if let Some(types) = &types {
@@ -102,7 +101,7 @@ fn a_reverse_after_a_hop_answers_the_walk_reversed_and_a_limit_after_it_reads_on
 #[test]
 fn an_end_linked_twice_is_where_its_first_edge_is_and_a_trashed_one_is_left_out() {
     let (_dir, db) = fixture();
-    let hop = json!({ "step": "out", "kinds": ["refs"], "types": ["Task"] });
+    let hop = json!({ "step": "out", "kinds": ["cites"], "types": ["Task"] });
     let last = ids(&db, &["Task-0"], json!([hop, { "step": "reverse" }, { "step": "limit", "n": 3 }]));
     assert_eq!(last, [json!("Task-400"), json!("Task-399"), json!("Task-398")], "Task-7's second edge is the last");
     let all = ids(&db, &["Task-0"], json!([hop, { "step": "reverse" }]));
@@ -114,7 +113,7 @@ fn an_end_linked_twice_is_where_its_first_edge_is_and_a_trashed_one_is_left_out(
 #[test]
 fn a_reverse_after_a_hop_from_several_entities_or_kinds_reverses_the_whole_walk() {
     let (_dir, db) = fixture();
-    for (from, kinds) in [(vec!["Task-0", "Task-401"], json!(["refs"])), (vec!["Task-0"], json!(["refs", "tags"]))] {
+    for (from, kinds) in [(vec!["Task-0", "Task-401"], json!(["cites"])), (vec!["Task-0"], json!(["cites", "tags"]))] {
         let hop = json!({ "step": "out", "kinds": kinds });
         let mut walked = ids(&db, &from, json!([hop]));
         walked.reverse();
@@ -128,7 +127,7 @@ fn a_tracked_reverse_after_a_hop_is_written_into_as_far_back_as_it_read_and_no_f
     let (_dir, db) = fixture();
     let last = json!({ "read": "query", "plan": plan(&["Task-0"],
         json!([{ "step": "out", "kinds": ["tags"] }, { "step": "reverse" }, { "step": "limit", "n": 3 }])) });
-    // `tags` is unique, so the walk reads no edge's ends but through its edges
+    // `tags` has no key, so a pair has one edge and the walk reads no edge's ends but through its edges
     let mut token = 0;
     // A fresh read of the last three for each write, so each asks of what that read reached
     let mut touches = |op: Json| {
@@ -152,10 +151,10 @@ fn a_tracked_reverse_after_a_hop_is_written_into_as_far_back_as_it_read_and_no_f
 fn a_reverse_after_a_hop_in_a_unit_reads_the_unit_s_own_edges() {
     let (_dir, db) = fixture();
     let mut unit = db.begin().unwrap();
-    unit.write(&batch(vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-401" })]))
+    unit.write(&batch(vec![json!({ "op": "link", "source": "Task-0", "kind": "cites", "target": "Task-401" })]))
         .unwrap();
     let op = json!({ "read": "query", "plan": plan(&["Task-0"],
-        json!([{ "step": "out", "kinds": ["refs"] }, { "step": "reverse" }, { "step": "limit", "n": 2 }])) });
+        json!([{ "step": "out", "kinds": ["cites"] }, { "step": "reverse" }, { "step": "limit", "n": 2 }])) });
     let bytes = unit.read(&Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None }).unwrap();
     let answer = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
     assert_eq!(answer[0]["ids"], json!(["Task-401", "Note-40"]));

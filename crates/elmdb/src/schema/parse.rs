@@ -211,8 +211,16 @@ impl Reader {
         let roles = self.named(&mut root, "roles", |r, _, v, path| r.role(v, path));
         let relations = self.named(&mut root, "relations", |r, _, v, path| r.relation(v, path));
         let types = self.named(&mut root, "types", |r, _, v, path| r.entity_type(v, path));
+        let ranks = self.named(&mut root, "ranks", |r, _, v, path| r.rank(v, path));
         self.finish(root);
-        Some(Schema { language: language?, collation: collation?, roles: roles?, relations: relations?, types: types? })
+        Some(Schema {
+            language: language?,
+            collation: collation?,
+            roles: roles?,
+            relations: relations?,
+            types: types?,
+            ranks: ranks?,
+        })
     }
 
     fn role(&mut self, value: &Value, path: &str) -> Option<RoleDef> {
@@ -237,7 +245,10 @@ impl Reader {
             ],
         );
         let acyclic = self.bool_or(&mut object, "acyclic", false);
-        let unique = self.bool_or(&mut object, "unique", false);
+        let key = match object.get("key") {
+            None => Some(Vec::new()),
+            Some(value) => self.strings(value, &object.at("key")),
+        };
         let weighted = self.bool_or(&mut object, "weighted", false);
         let endpoints = match object.get("endpoints") {
             None | Some(Value::Null) => Some(None),
@@ -252,11 +263,50 @@ impl Reader {
             declared_by: declared_by?,
             cardinality: cardinality?,
             acyclic: acyclic?,
-            unique: unique?,
+            key: key?,
             weighted: weighted?,
             endpoints: endpoints?,
             info: info?,
         })
+    }
+
+    fn rank(&mut self, value: &Value, path: &str) -> Option<RankDef> {
+        let mut object = self.object(value, path)?;
+        let declared_by = self.optional_string(&mut object, "declaredBy");
+        let types = self.required_strings(&mut object, "types");
+        let relations = self.required_strings(&mut object, "relations");
+        let direction = self.choice(
+            &mut object,
+            "direction",
+            Some(Direction::Out),
+            &[("out", Direction::Out), ("in", Direction::In), ("both", Direction::Both)],
+        );
+        let weights = self.bool_or(&mut object, "weights", true);
+        let damping = self.number_or(&mut object, "damping", 0.85);
+        let tolerance = self.number_or(&mut object, "tolerance", 1e-6);
+        self.finish(object);
+        Some(RankDef {
+            declared_by: declared_by?,
+            types: types?,
+            relations: relations?,
+            direction: direction?,
+            weights: weights?,
+            damping: damping?,
+            tolerance: tolerance?,
+        })
+    }
+
+    fn number_or(&mut self, object: &mut Object<'_>, key: &'static str, default: f64) -> Option<f64> {
+        match object.get(key) {
+            None => Some(default),
+            Some(value) => match value.as_f64() {
+                Some(n) => Some(n),
+                None => {
+                    self.problem(object.at(key), format!("must be a number, not {}", kind_of(value)));
+                    None
+                }
+            },
+        }
     }
 
     fn endpoints(&mut self, value: &Value, path: &str) -> Option<Vec<Endpoint>> {

@@ -326,6 +326,9 @@ pub fn check(r: &impl Read) -> Result<CheckReport> {
     for message in vector::check_items(r, r.schema())? {
         violations.push(Violation { subject: "vector graph".into(), message });
     }
+    // A rank index's bits depend on the order of the commits that made it, so it is held to what it promises rather
+    // than compared with keys derived again
+    violations.extend(super::ranks::violations(r)?);
     Ok(CheckReport { differences, violations })
 }
 
@@ -495,6 +498,11 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                 t.put(&key, &value)?;
             }
             vector::rebuild_graphs(t)?;
+            // Once the edges and the types' ranges are written again, from which each rank index's nodes are made
+            let names: Vec<String> = t.schema.ranks.keys().cloned().collect();
+            for name in names {
+                super::ranks::rebuild(t, &name)?;
+            }
         }
     }
     Ok(())

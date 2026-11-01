@@ -11,7 +11,7 @@ fn example() -> Value {
       "relations": {
         "contains":   { "cardinality": "one-to-many" },
         "parent_of":  { "cardinality": "one-to-many", "acyclic": true },
-        "references": { "cardinality": "many-to-many", "unique": true,
+        "references": { "cardinality": "many-to-many", "key": ["via"],
                         "endpoints": [{ "source": "Note", "target": "Note" }] }
       },
       "types": {
@@ -167,6 +167,27 @@ fn refuses_the_wrong_language_and_reserved_names() {
 }
 
 #[test]
+fn a_relation_key_names_info_fields_once_on_info_that_is_a_map() {
+    assert_eq!(parse(&example()).unwrap().relations["references"].key, ["via"]);
+    assert!(parse(&example()).unwrap().relations["contains"].key.is_empty(), "no key is one edge a pair");
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["key"] = json!(["via", "via"]))),
+        ["relations.references.key[1]: \"via\" is named twice"]
+    );
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["key"] = json!(["Via"]))),
+        ["relations.references.key[0]: a key field's name is lowerCamelCase, which \"Via\" isn't"]
+    );
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["info"] = json!({ "type": "integer" }))),
+        ["relations.references.key: names info fields, so the kind's info is an object or any"]
+    );
+    let unique = problems(edited(|j| j["relations"]["contains"]["unique"] = json!(true)));
+    assert_eq!(unique.len(), 1, "{unique:?}");
+    assert!(unique[0].starts_with("relations.contains.unique"), "{unique:?}");
+}
+
+#[test]
 fn refuses_short_code_prefixes_that_are_malformed_or_taken() {
     assert_eq!(
         problems(edited(|j| j["types"]["Note"]["shortCode"] = json!({ "prefix": "THR" }))),
@@ -292,7 +313,7 @@ fn the_canonical_form_writes_every_default_and_sorts_keys() {
     .unwrap();
     assert_eq!(
         schema.canonical(),
-        r#"{"$schema":"https://elmdb.dev/schema/1.json","collation":"root","relations":{},"roles":{},"types":{"Note":{"additionalFields":"refuse","declaredBy":null,"fields":{"title":{"nullable":false,"optional":false,"type":"string"}},"indexes":{},"shortCode":null}}}"#
+        r#"{"$schema":"https://elmdb.dev/schema/1.json","collation":"root","ranks":{},"relations":{},"roles":{},"types":{"Note":{"additionalFields":"refuse","declaredBy":null,"fields":{"title":{"nullable":false,"optional":false,"type":"string"}},"indexes":{},"shortCode":null}}}"#
     );
     assert_eq!(Schema::from_canonical(&schema.canonical()).unwrap(), schema);
 }
@@ -474,6 +495,15 @@ mod changes {
             changes(|j| j["relations"]["contains"]["acyclic"] = json!(true)),
             one("relations.contains", Change::Changed, Effect::Enforced)
         );
+        // A key that drops a field can make one identity of edges it told apart; one that adds a field can't
+        assert_eq!(
+            changes(|j| j["relations"]["references"]["key"] = json!([])),
+            one("relations.references", Change::Changed, Effect::Enforced)
+        );
+        assert_eq!(
+            changes(|j| j["relations"]["references"]["key"] = json!(["via", "at"])),
+            one("relations.references", Change::Changed, Effect::Applied)
+        );
         assert_eq!(
             changes(|j| j["relations"]["contains"]["endpoints"] = json!([{ "source": "Thread", "target": "Message" }])),
             one("relations.contains", Change::Changed, Effect::Enforced)
@@ -576,4 +606,106 @@ fn the_canonical_form_is_the_same_whatever_order_a_set_is_listed_in() {
     let mut c = example();
     c["types"]["Message"]["indexes"]["senderByTime"]["fields"] = json!(["timestamp", "sender"]);
     assert_ne!(Schema::from_json(&c).unwrap().hash(), a.hash());
+}
+
+mod ranks {
+    use super::*;
+
+    fn with_rank(rank: Value) -> Value {
+        edited(|j| j["ranks"] = json!({ "noteRank": rank }))
+    }
+
+    #[test]
+    fn a_rank_index_takes_its_defaults_whether_parsed_or_stored() {
+        let parsed = parse(&with_rank(json!({ "types": ["Note"], "relations": ["references"] }))).unwrap();
+        let rank = &parsed.ranks["noteRank"];
+        assert_eq!(
+            (rank.direction, rank.weights, rank.damping, rank.tolerance, rank.declared_by.as_deref()),
+            (Direction::Out, true, 0.85, 1e-6, None)
+        );
+        // A stored schema's defaults are serde's, and read the same
+        let stored: RankDef =
+            serde_json::from_value(json!({ "types": ["Note"], "relations": ["references"] })).unwrap();
+        assert_eq!(&stored, rank);
+        let given = parse(&with_rank(json!({ "types": ["Note"], "relations": ["references"], "direction": "both",
+            "weights": false, "damping": 0.5, "tolerance": 0.01 })))
+        .unwrap();
+        let rank = &given.ranks["noteRank"];
+        assert_eq!((rank.direction, rank.weights, rank.damping, rank.tolerance), (Direction::Both, false, 0.5, 0.01));
+    }
+
+    #[test]
+    fn a_rank_index_is_refused_for_each_thing_it_gets_wrong() {
+        let refused = |rank: Value| problems(with_rank(rank)).join("\n");
+        let ok = json!({ "types": ["Note"], "relations": ["references"] });
+        assert_eq!(refused(ok.clone()), "");
+        let with = |key: &str, value: Value| {
+            let mut rank = ok.clone();
+            rank[key] = value;
+            refused(rank)
+        };
+        assert!(with("types", json!([])).contains("names no type"));
+        assert!(with("types", json!(["Note", "Note"])).contains("named twice"));
+        assert!(with("types", json!(["Nope"])).contains("no such type"));
+        assert!(with("relations", json!([])).contains("names no relation kind"));
+        assert!(with("relations", json!(["references", "references"])).contains("named twice"));
+        assert!(with("relations", json!(["nope"])).contains("no such relation kind"));
+        for damping in [0.0, 1.0, -0.5, 1.5] {
+            assert!(with("damping", json!(damping)).contains("damping"), "{damping}");
+        }
+        assert_eq!(with("damping", json!(0.999)), "");
+        for tolerance in [0.0, -1.0] {
+            assert!(with("tolerance", json!(tolerance)).contains("tolerance"), "{tolerance}");
+        }
+        assert_eq!(with("tolerance", json!(1e-300)), "");
+        let named = |name: &str| problems(edited(|j| j["ranks"] = json!({ name: ok.clone() }))).join("\n");
+        assert!(named("NoteRank").contains("lowerCamelCase"));
+        // An index of a type already holds the name
+        let shared = problems(edited(|j| {
+            j["ranks"] = json!({ "pinned": ok.clone() });
+        }))
+        .join("\n");
+        assert!(shared.contains("already an index of Thread"), "{shared}");
+    }
+
+    #[test]
+    fn a_rank_index_builds_rebuilds_and_drops_with_its_graph() {
+        let stored = parse(&with_rank(json!({ "types": ["Note"], "relations": ["references", "contains"] }))).unwrap();
+        let diffed = |given: Value| -> Vec<(String, Change, Effect)> {
+            let given = parse(&given).unwrap();
+            diff(&stored, &given, &Held::default()).into_iter().map(|c| (c.path, c.change, c.effect)).collect()
+        };
+        let rank = |extra: Value| {
+            let mut rank = json!({ "types": ["Note"], "relations": ["references", "contains"] });
+            rank.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            rank
+        };
+        let at = "ranks.noteRank".to_owned();
+        assert_eq!(diffed(with_rank(rank(json!({})))), []);
+        // Who declared it holds nothing the index holds
+        assert_eq!(diffed(with_rank(rank(json!({ "declaredBy": "a-pack" })))), []);
+        assert_eq!(
+            diffed(with_rank(rank(json!({ "tolerance": 1e-3 })))),
+            [(at.clone(), Change::Changed, Effect::Rebuilds)]
+        );
+        assert_eq!(diffed(edited(|j| j["ranks"] = json!({}))), [(at.clone(), Change::Removed, Effect::Drops)]);
+        let added = parse(&edited(|_| {})).unwrap();
+        let built: Vec<_> =
+            diff(&added, &stored, &Held::default()).into_iter().map(|c| (c.path, c.change, c.effect)).collect();
+        assert!(built.contains(&(at.clone(), Change::Added, Effect::Builds)), "{built:?}");
+        // A kind it reads made weighted rebuilds it; one it doesn't read, or read without weights, doesn't
+        let weighted = |kind: &str, weights: bool| {
+            let mut json = with_rank(rank(json!({ "weights": weights })));
+            json["relations"][kind]["weighted"] = json!(true);
+            json
+        };
+        let changed = diffed(weighted("references", true));
+        assert!(changed.contains(&(at.clone(), Change::Changed, Effect::Rebuilds)), "{changed:?}");
+        let unread = diffed(weighted("parent_of", true));
+        assert!(!unread.iter().any(|c| c.0 == at), "{unread:?}");
+        let stored_unweighed = parse(&with_rank(rank(json!({ "weights": false })))).unwrap();
+        let given = parse(&weighted("references", false)).unwrap();
+        let without = diff(&stored_unweighed, &given, &Held::default());
+        assert!(!without.iter().any(|c| c.path == at), "{without:?}");
+    }
 }
