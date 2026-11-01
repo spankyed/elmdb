@@ -27,6 +27,13 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 filter = "test(/^engine::tests::graph::/)"
 slow-timeout = { period = "10s", terminate-after = 2 }
 
+# A rank index's drain that never reaches its bound never ends, and a test waiting for the index's build waits with it:
+# each of these tests takes about 2 s on an Apple-silicon laptop (2026-11-01), so a hang ends at 20 s rather than at
+# the run's whole deadline, which a mutation run's timeout sets at about three times the clean suite
+[[profile.default.overrides]]
+filter = "test(/^engine::tests::rank_index::/)"
+slow-timeout = { period = "10s", terminate-after = 2 }
+
 # Idle-reader child barriers and expiry must fail promptly if the cache worker stops releasing snapshots.
 [[profile.default.overrides]]
 filter = "test(/^store::(retention_tests|idle_reads)::/)"
