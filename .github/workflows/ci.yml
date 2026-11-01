@@ -1,6 +1,6 @@
 name: CI
 
-# Every push to main runs the Linux checks. A draft pull request runs the fast tier: those, and the binding's suites on
+# Every push to main runs the Linux checks (`checks`, `heap`, `repo`). A draft pull request runs the fast tier: those, and the binding's suites on
 # Apple silicon and Windows. A pull request ready for review, and a dispatch, run the full tier: every target the binding
 # ships for (design.md, Packages), each building the binding and running every suite on it, and the instruction counts.
 # A change to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch
@@ -62,6 +62,8 @@ jobs:
             echo "platforms=[$fast,$rest]" >> "$GITHUB_OUTPUT"
           fi
 
+  # The Linux checks, split three ways so they run beside each other: lint and the suites; the heap test and the
+  # benchmarks' smoke run; the repository's own checks and the binding
   checks:
     name: checks (Linux x64)
     needs: changes
@@ -85,6 +87,16 @@ jobs:
       # The engine's suite with its diagnostics compiled in, and the test of what a collector hears
       - run: cargo nextest run -p elmdb --features diagnostics --profile ci
       - run: cargo test --workspace --doc
+
+  heap:
+    name: heap and benchmark smoke (Linux x64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
       - name: maintenance heap assertions and benchmark smoke
         run: |
           set -o pipefail
@@ -92,7 +104,21 @@ jobs:
           python3 -c 'import pathlib,sys; assert "test maintenance_heap_bounds ... ok" in pathlib.Path(sys.argv[1]).read_text(), "heap test did not execute"' "$RUNNER_TEMP/maintenance-heap.log"
           cargo bench -p elmdb --bench maintenance -- --test
           cargo bench -p elmdb --bench reads -- --test
-          cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"
+
+  repo:
+    name: repository checks and binding (Linux x64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 23
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      # The read-only mount check builds offline, so the dependencies are fetched first
+      - run: cargo fetch --locked
       - name: refuse unregistered readers on an actual read-only mount
         run: python3 scripts/check-read-only-mount.py
       - name: prove idle snapshot expiry regression rejects indefinite retention
@@ -106,6 +132,7 @@ jobs:
       - run: cargo xtask check-sync
       - name: binding
         run: |
+          cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"
           npm ci
           npm run build
           npm run typecheck
@@ -318,7 +345,7 @@ jobs:
   # tier's jobs on a draft)
   ci-pass:
     if: always()
-    needs: [changes, checks, loom, shuttle, instructions, diagnostics, platforms, musl]
+    needs: [changes, checks, heap, repo, loom, shuttle, instructions, diagnostics, platforms, musl]
     runs-on: ubuntu-24.04
     steps:
       - env:
