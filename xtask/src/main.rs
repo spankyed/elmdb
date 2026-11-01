@@ -80,7 +80,6 @@ fn sweep(root: &Path) -> Result<(), String> {
 const UNMODELLED: &[(&str, &str)] = &[
     ("database.rs", "the open store, the schema and the index builder behind the handle: no model of opening yet"),
     ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
-    ("engine/builder.rs", "a background index build or rank drain and its waiters: no model yet"),
     ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
     ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
     ("engine/values.rs", "a per-thread decompression buffer, no shared state"),

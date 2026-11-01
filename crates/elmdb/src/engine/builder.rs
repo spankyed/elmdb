@@ -8,16 +8,19 @@
 //! drain's chunks commit like any other write, telling the watches whose reads they wrote into.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::database::EngineSchema;
 use crate::error::ErrorCode;
 use crate::store::Store;
+use crate::store::sync::{Clock, SystemClock};
+use crate::sync::{Condvar, Mutex};
 
 use super::derive::build_chunk;
 use super::unit::{Txn, UnitState};
+
 
 /// How many entities one unit of a build covers
 const CHUNK: usize = 1000;
@@ -60,12 +63,118 @@ struct State {
     queued_at: HashMap<String, Instant>,
 }
 
+/// What the thread decides, apart from what doing a piece of work means: its queue, the pause a rank index's drain
+/// waits for, stopping, and the waiters. The builder's thread runs it over the store, and the model
+/// (`builder/model.rs`) over a stand-in, on a clock it moves
+struct Core {
+    state: Mutex<State>,
+    changed: Condvar,
+    clock: Box<dyn Clock>,
+}
+
+impl Core {
+    fn new(clock: Box<dyn Clock>) -> Self {
+        Self { state: Mutex::new(State::default()), changed: Condvar::new(), clock }
+    }
+
+    fn lock(&self) -> crate::sync::MutexGuard<'_, State> {
+        self.state.lock().expect("the builder's lock is never poisoned")
+    }
+
+    fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
+        let mut state = self.lock();
+        for index in indexes {
+            if let Work::Rank { name } = &index {
+                state.queued_at.insert(name.clone(), self.clock.now());
+            }
+            if !state.queue.contains(&index) {
+                state.queue.push_back(index);
+            }
+        }
+        self.changed.notify_all();
+    }
+
+    fn stop(&self) {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stopping = true;
+        self.changed.notify_all();
+    }
+
+    fn stopping(&self) -> bool {
+        self.lock().stopping
+    }
+
+    /// Blocks until every queued index is built or has failed, or the builder stops
+    fn wait(&self) {
+        let mut state = self.lock();
+        while (!state.queue.is_empty() || state.busy) && !state.stopping {
+            state = self.changed.wait(state).expect("the builder's lock is never poisoned");
+        }
+    }
+
+    /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop
+    fn run(&self, mut build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()>) {
+        loop {
+            let work = {
+                let mut state = self.lock();
+                loop {
+                    if state.stopping {
+                        return;
+                    }
+                    if let Some(next) = state.queue.pop_front() {
+                        state.busy = true;
+                        state.active = Some(next.clone());
+                        break next;
+                    }
+                    state.busy = false;
+                    self.changed.notify_all();
+                    state = self.changed.wait(state).expect("the builder's lock is never poisoned");
+                }
+            };
+            if let Work::Rank { name } = &work {
+                self.await_quiet(name);
+            }
+            if let Err(e) = build(&work, &|| self.stopping()) {
+                self.lock().failures.push(IndexFailure { work: work.clone(), message: e.message });
+            }
+            let mut state = self.lock();
+            if state.stopping {
+                return;
+            }
+            state.active = None;
+            state.busy = !state.queue.is_empty();
+            self.changed.notify_all();
+        }
+    }
+
+    /// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops. On a
+    /// clock that moves only when a test moves it, the wait is for a wake: a queue, a stop, or the test's tick
+    fn await_quiet(&self, name: &str) {
+        let started = self.clock.now();
+        let mut state = self.lock();
+        loop {
+            let now = self.clock.now();
+            if state.stopping || now.saturating_duration_since(started) >= PATIENCE {
+                return;
+            }
+            let since = state.queued_at.get(name).map_or(QUIET, |at| now.saturating_duration_since(*at));
+            if since >= QUIET {
+                return;
+            }
+            state = if self.clock.is_manual() {
+                self.changed.wait(state).expect("the builder's lock is never poisoned")
+            } else {
+                self.changed.wait_timeout(state, QUIET - since).expect("the builder's lock is never poisoned").0
+            };
+        }
+    }
+}
+
 /// How a drain's chunk commits: the database's own commit, which delivers to the watches it wrote into
 pub type Commits =
     Arc<dyn Fn(&mut dyn FnMut(&mut Txn<'_, '_>) -> crate::Result<bool>) -> crate::Result<bool> + Send + Sync>;
 
 pub struct Builder {
-    shared: Arc<(Mutex<State>, Condvar)>,
+    core: Arc<Core>,
     /// Held to wake the thread when it waits for a unit to end and is stopped
     store: Arc<Store>,
     thread: Option<JoinHandle<()>>,
@@ -73,136 +182,76 @@ pub struct Builder {
 
 impl Builder {
     pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Self {
-        let shared: Arc<(Mutex<State>, Condvar)> = Arc::default();
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
         let thread = {
-            let shared = Arc::clone(&shared);
+            let core = Arc::clone(&core);
             let store = Arc::clone(&store);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
-                .spawn(move || run(&store, &schema, &commits, &shared))
+                .spawn(move || {
+                    core.run(|work, stopping| match work {
+                        Work::Index { entity_type, index } => {
+                            build_index(&store, &schema, entity_type, index, stopping)
+                        }
+                        Work::Rank { name } => build_rank(&store, &schema, &commits, name, stopping),
+                    });
+                })
                 .expect("the index thread starts")
         };
-        Self { shared, store, thread: Some(thread) }
+        Self { core, store, thread: Some(thread) }
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
-        let (lock, changed) = &*self.shared;
-        let mut state = lock.lock().expect("the builder's lock is never poisoned");
-        for index in indexes {
-            if let Work::Rank { name } = &index {
-                state.queued_at.insert(name.clone(), Instant::now());
-            }
-            if !state.queue.contains(&index) {
-                state.queue.push_back(index);
-            }
-        }
-        changed.notify_all();
+        self.core.queue(indexes);
     }
 
     /// What `wait` needs, held apart from the builder so a caller can wait without holding the slot the builder is
     /// kept in, which a schema change and a close take to stop it
     pub fn waiter(&self) -> Waiter {
-        Waiter(Arc::clone(&self.shared))
+        Waiter(Arc::clone(&self.core))
     }
 
     /// Work left after stop joins the worker, including an interrupted chunk's index.
     pub fn pending(&self) -> Vec<Work> {
-        let state = self.shared.0.lock().expect("the builder's lock is never poisoned");
+        let state = self.core.lock();
         state.active.iter().chain(state.queue.iter()).cloned().collect()
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
-        self.shared.0.lock().expect("the builder's lock is never poisoned").failures.clone()
+        self.core.lock().failures.clone()
     }
 
     /// Stops the thread, leaving an index part built for the next open to finish
     pub fn stop(&mut self) {
-        {
-            let (lock, changed) = &*self.shared;
-            lock.lock().expect("the builder's lock is never poisoned").stopping = true;
-            changed.notify_all();
-        }
+        self.core.stop();
         self.store.wake_unit_waiters();
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the index thread doesn't panic");
         }
     }
-}
 
-/// A handle on a builder's progress that outlives the builder: a builder stopped meanwhile ends the wait
-pub struct Waiter(Arc<(Mutex<State>, Condvar)>);
-
-impl Waiter {
-    /// Blocks until every queued index is built or has failed, or the builder stops
-    pub fn wait(&self) {
-        let (lock, changed) = &*self.0;
-        let mut state = lock.lock().expect("the builder's lock is never poisoned");
-        while (!state.queue.is_empty() || state.busy) && !state.stopping {
-            state = changed.wait(state).expect("the builder's lock is never poisoned");
-        }
-    }
-}
-
-impl Builder {
     /// Stops the thread without waiting for it, in a process that is exiting, whose other threads may be gone already
     pub fn abandon(&mut self) {
-        {
-            let (lock, changed) = &*self.shared;
-            lock.lock().unwrap_or_else(std::sync::PoisonError::into_inner).stopping = true;
-            changed.notify_all();
-        }
+        self.core.stop();
         self.store.wake_unit_waiters();
         // Dropping the handle detaches the thread
         self.thread.take();
     }
 }
 
-impl Drop for Builder {
-    fn drop(&mut self) {
-        self.stop();
+/// A handle on a builder's progress that outlives the builder: a builder stopped meanwhile ends the wait
+pub struct Waiter(Arc<Core>);
+
+impl Waiter {
+    /// Blocks until every queued index is built or has failed, or the builder stops
+    pub fn wait(&self) {
+        self.0.wait();
     }
 }
 
-fn run(store: &Store, schema: &EngineSchema, commits: &Commits, shared: &(Mutex<State>, Condvar)) {
-    let (lock, changed) = shared;
-    loop {
-        let work = {
-            let mut state = lock.lock().expect("the builder's lock is never poisoned");
-            loop {
-                if state.stopping {
-                    return;
-                }
-                if let Some(next) = state.queue.pop_front() {
-                    state.busy = true;
-                    state.active = Some(next.clone());
-                    break next;
-                }
-                state.busy = false;
-                changed.notify_all();
-                state = changed.wait(state).expect("the builder's lock is never poisoned");
-            }
-        };
-        let stopping = || lock.lock().expect("the builder's lock is never poisoned").stopping;
-        if let Work::Rank { name } = &work {
-            await_quiet(lock, changed, name);
-        }
-        let outcome = match &work {
-            Work::Index { entity_type, index } => build_index(store, schema, entity_type, index, &stopping),
-            Work::Rank { name } => build_rank(store, schema, commits, name, &stopping),
-        };
-        if let Err(e) = outcome {
-            lock.lock()
-                .expect("the builder's lock is never poisoned")
-                .failures
-                .push(IndexFailure { work: work.clone(), message: e.message });
-        }
-        if stopping() {
-            return;
-        }
-        let mut state = lock.lock().expect("the builder's lock is never poisoned");
-        state.active = None;
-        state.busy = !state.queue.is_empty();
-        changed.notify_all();
+impl Drop for Builder {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -290,20 +339,4 @@ fn build_rank(
             Ok(true)
         })
     })
-}
-
-/// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops
-fn await_quiet(lock: &Mutex<State>, changed: &Condvar, name: &str) {
-    let started = Instant::now();
-    let mut state = lock.lock().expect("the builder's lock is never poisoned");
-    loop {
-        if state.stopping || started.elapsed() >= PATIENCE {
-            return;
-        }
-        let since = state.queued_at.get(name).map_or(QUIET, Instant::elapsed);
-        if since >= QUIET {
-            return;
-        }
-        state = changed.wait_timeout(state, QUIET - since).expect("the builder's lock is never poisoned").0;
-    }
 }
