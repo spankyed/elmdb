@@ -263,14 +263,19 @@ fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Optio
 
 fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
     match info {
+        // A key is read from the info's fields, so info that is no map would hold a null key whatever it was
+        Some(info) if !def.key.is_empty() && !matches!(info, Value::Map(_)) => Err(Error::new(
+            ErrorCode::FieldType,
+            format!("A {kind} relation's info holds its key ({}), so it is a map, not {info}", def.key.join(", ")),
+        )),
         Some(info) => values::check_field("relation", kind, &def.info, info),
         None if def.info.optional => Ok(()),
         None => Err(Error::new(ErrorCode::RequiredField, format!("A {kind} relation's info is required"))),
     }
 }
 
-/// The values of the kind's key in an edge's info, a field the info doesn't hold (or info that is no map) read as null:
-/// with the edge's two ends, what identifies it
+/// The values of the kind's key in an edge's info, a field the info doesn't hold read as null (and every field of info
+/// that is no map, which only a load brings): with the edge's two ends, what identifies it
 pub fn key_values(def: &RelationDef, info: Option<&Value>) -> Vec<Value> {
     let entries = match info {
         Some(Value::Map(entries)) => entries.as_slice(),
@@ -462,17 +467,20 @@ pub fn update(
     }
     let moved = next.source != before.source || next.target != before.target;
     let key = key_values(&def, next.info.as_ref());
-    if (moved || !same_key(&key, &key_values(&def, before.info.as_ref())))
-        && with_identity(t, &def, &next.source, &next.kind, &next.target, &key, Some(relation))?.is_some()
-    {
+    let other = if moved || !same_key(&key, &key_values(&def, before.info.as_ref())) {
+        with_identity(t, &def, &next.source, &next.kind, &next.target, &key, Some(relation))?
+    } else {
+        None
+    };
+    if let Some(other) = other {
         // Two edges with one identity would leave a link to it no single edge to update
         let identity =
             if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
         return Err(Error::new(
             ErrorCode::DuplicateEdge,
             format!(
-                "updateRelation({relation:?}): a {} edge{identity} already joins {} to {}, and an edge's ends and key \
-                 identify it; remove one of them first",
+                "updateRelation({relation:?}): {other}, a {} edge{identity}, already joins {} to {}, and an edge's \
+                 ends and key identify it; remove one of them first",
                 next.kind, next.source, next.target
             ),
         ));

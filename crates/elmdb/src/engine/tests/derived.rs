@@ -752,6 +752,7 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
         ("keyedOne", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
         ("keyedTwo", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
         ("keyedOther", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 2.into())]))),
+        ("keyedNumber", "keyed", "Node-c", "Node-a", Some(5.into())),
     ];
     damage(&db, |txn, d| {
         for (seq, (id, kind, source, target, info)) in rows.iter().enumerate() {
@@ -773,6 +774,7 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
         ("Relation-cycle", "cycle"),
         ("Relation-duplicate", "duplicate strict edges join Node-a to Node-b"),
         ("Relation-keyedTwo", "with the key 1"),
+        ("Relation-keyedNumber", "holds its key, so it is a map"),
         ("Relation-self", "itself"),
         ("Relation-endpoint", "doesn't join"),
         ("Relation-required", "required info"),
