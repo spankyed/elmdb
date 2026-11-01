@@ -79,8 +79,9 @@ average of 10 to 16, so a difference under about a tenth is the load. Before is 
   nothing to drain. The budget grows with `s`, so the tighter bound reaches that sooner: one change at 100,000
   documents and a tolerance of 1e-4 costs 0.14 ms rather than 592 ms. Ten changes leave more than the budget, so a
   burst still drains.
-- **What would make a drain cheaper** is not reading the whole graph for it: pushing through the store while few nodes
-  wait, or a graph kept between drains (`docs/roadmap/rank-index.md`).
+- **What makes a drain cheaper** is fewer rows to read and write, not fewer of them read: a change that leaves a drain
+  moves every node (below, where a drain's work goes). The graph is kept between drains (the edge mirror, below); the
+  node rows are block storage's (`docs/roadmap/rank-index.md`).
 
 ### A node's place in the score order, compared before its keys are built
 
@@ -95,6 +96,37 @@ default tolerance:
 | 100,000 | 625 ms | 584 ms | 1.09 s | 1.03 s |
 
 At 10,000 documents the two builds ran in turn, twice, since one run of each had read 35% apart under a moving load.
+
+### The graph kept between drains
+
+The drains read the graph through the edge mirror (`6604060`), its maps hashed with FxHash (`5d9dbe6`). 2026-11-01, the
+same machine at a load average of 4 to 28, each pair of builds run in turn, at the default tolerance:
+
+| Documents | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|
+| 10,000 | 78.5, 78.2 ms | 63.4, 63.0 ms | 113 ms | 83.1, 83.7 ms |
+| 100,000 | 573, 583 ms | 446, 441 ms | 1.02 s | 737, 739 ms |
+| 100,000, FxHash | 429, 446, 423 ms | 384, 389, 379 ms | 770, 744, 706 ms | 654, 627, 624 ms |
+
+The last row's "before" is the mirror with SipHash. Sampled at 100,000 documents after the mirror, a drain is about a
+third writing back (node rows, 19%; order keys deleted, 8%; their keys, 5%), a quarter reading the node rows, and the
+pushes and the mirror's lookups the rest. The node rows, read and written, are what is left to cut.
+
+What the mirror keeps: about 278 bytes an entity at five edges, some 28 MB at 100,000 documents, where an open database
+without the index keeps none an entity (`tests/maintenance_heap.rs`, `rankIndexKept`, release, dhat, 2026-11-01, Apple
+M1 Pro). Its names are some 91 of that, and each edge is a 24-byte entry at both ends, its weight held as a number no
+weight is when it has none. Each list is filled straight from the store and fitted: left with the room it grew into it
+kept 350, and collected from the buffer the store was read into, which Rust reuses in place, 542. A list a commit
+empties is dropped, and the names are counted afresh from the lists once commits have removed more entries than the
+lists hold, so an entity deleted leaves nothing behind and a drain filling the mirror never counts.
+
+Where a drain's work goes, from its pushes and the nodes it moved, logged from an uncommitted copy at 100,000 documents,
+2026-11-01: one edge changed moves every node. At the default tolerance a drain makes some 940,000 pushes, writes all
+100,000 node rows back and 25,000 order keys. At 1e-4 it makes 9,000 to 93,000 pushes and moves 49,000 to 100,000 nodes,
+and a larger share of order keys, up to 93,000, since each push moves an estimate further. Pushing the largest residual
+first instead of sweeping halved the pushes, moved as many nodes and took three times as long. So a drain is a whole
+rewrite of the index however few edges changed, and reading less of the graph for it saves nothing; fewer rows per
+node, which block storage is, does.
 
 ### What it took to get there
 

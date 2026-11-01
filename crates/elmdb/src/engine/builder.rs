@@ -240,7 +240,10 @@ fn build_index(
                 schema.validate(txn, db)?;
                 let mut state = UnitState::default();
                 let mut t = Txn { txn, db, state: &mut state, schema, now: 0.0 };
-                build_chunk(&mut t, entity_type, index, after, CHUNK)
+                let next = build_chunk(&mut t, entity_type, index, after, CHUNK)?;
+                // An index's chunk files no edge: the mirror moves to its commit unchanged
+                store.deposit(std::mem::take(&mut state.edges));
+                Ok(next)
             },
             false,
         )?;
