@@ -962,9 +962,26 @@ mod units {
         unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } })])).unwrap();
         let changes = unit.commit(false).unwrap();
         assert!(!changes.entities.contains_key("Task-2"), "the rolled-back savepoint's events went with it");
+        assert!(changes.entities["Task-1"].created, "and the events before it stayed: Task-1's creation");
         let r = row(&db, "Task-1").unwrap();
         assert_eq!((r["a"].clone(), r["b"].clone()), (json!([1]), json!(1)));
         assert!(row(&db, "Task-2").is_none());
+        assert_eq!(edges(&db), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_savepoint_rolled_back_keeps_the_checks_deferred_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+        let mut unit = db.begin().unwrap();
+        // A link to a target no entity has: its check waits for the commit
+        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" })]))
+            .unwrap();
+        let depth = unit.savepoint().unwrap();
+        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
+        unit.rollback_to(depth).unwrap();
+        assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::NoSuchEntity, "the check from before it still ran");
         assert_eq!(edges(&db), Vec::<String>::new());
     }
 
