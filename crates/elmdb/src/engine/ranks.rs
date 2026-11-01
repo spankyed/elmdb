@@ -691,8 +691,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let ids: Vec<String> = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
     let mut nodes: Vec<Node> = order.iter().map(|&at| nodes[at]).collect();
     let before = nodes.clone();
-    let place: std::collections::HashMap<&str, usize> =
-        ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
+    let place: rustc_hash::FxHashMap<&str, usize> = ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
     // Each node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order; through the builder's
     // edge mirror when it has one, which holds what the store does at this transaction's sequence
     let mirror = t.state.mirror.clone();

@@ -15,7 +15,7 @@
 //!
 //! `check()` compares every list held with the store's entries.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use crate::error::Result;
 
@@ -55,9 +55,9 @@ pub struct EdgeMirror {
     /// The commit the lists are the store's at; `None` holds nothing
     sequence: Option<u64>,
     /// Every entity and kind name the lists mention, each once
-    names: HashMap<Box<str>, u32>,
+    names: FxHashMap<Box<str>, u32>,
     ids: Vec<Box<str>>,
-    lists: HashMap<(u32, u32, bool), Vec<Entry>>,
+    lists: FxHashMap<(u32, u32, bool), Vec<Entry>>,
 }
 
 impl EdgeMirror {
