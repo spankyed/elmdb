@@ -243,9 +243,12 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 
 ## Platforms
 
-CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linux; on dispatch and pull requests, the
-full matrix — macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding
-and running every suite, the model and crash harnesses included, on it.
+CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linux. A draft pull request runs the fast
+tier, those and macOS arm64 and Windows x64; a pull request ready for review, and a dispatch, run the full matrix —
+macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
+every suite, the model and crash harnesses included, on it, with the instruction counts and the diagnostics overhead.
+`ci-pass` passes when every job passed or was skipped, and is the check `main`'s branch protection requires; a change
+to documentation alone skips everything else.
 
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
