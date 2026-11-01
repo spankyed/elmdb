@@ -17,9 +17,10 @@ fn schema(direction: &str, weights: bool) -> Schema {
         "relations": {
             "refs": { "cardinality": "many-to-many" },
             "weighs": { "cardinality": "many-to-many", "weighted": true },
-            "rates": { "cardinality": "many-to-many", "weighted": true, "unique": true }
+            "rates": { "cardinality": "many-to-many", "weighted": true, "unique": true },
+            "other": { "cardinality": "many-to-many" }
         },
-        "types": { "Task": { "fields": {} }, "Note": { "fields": {} } },
+        "types": { "Task": { "fields": {} }, "Note": { "fields": {} }, "Tag": { "fields": {} } },
         "ranks": {
             "taskRank": { "types": ["Task", "Note"], "relations": ["refs", "weighs", "rates"],
                           "direction": direction, "weights": weights, "tolerance": 1e-9 }
@@ -625,4 +626,311 @@ fn a_drain_killed_part_way_resumes_when_the_database_opens_again() {
     assert!(report.is_clean(), "{report:?}");
     assert!(bound(&db) <= 1e-9, "the drain resumed on open and finished: {}", bound(&db));
     assert!(db.snapshot(|s| ranks::is_built(s, "taskRank")).unwrap());
+}
+
+const UNIT_NODES: usize = 5;
+
+#[derive(Debug, Clone)]
+enum UnitOp {
+    Link(usize, usize, usize, u8),
+    Unlink(usize, usize, usize),
+    Reweigh(usize, usize, u8),
+    Trash(usize),
+    Restore(usize),
+    Destroy(usize),
+    Create(usize),
+}
+
+fn unit_op() -> impl Strategy<Value = UnitOp> {
+    let n = 0..UNIT_NODES + 1;
+    prop_oneof![
+        6 => (n.clone(), 0..4usize, n.clone(), 0..5u8).prop_map(|(s, k, t, w)| UnitOp::Link(s, k, t, w)),
+        2 => (n.clone(), 0..4usize, n.clone()).prop_map(|(s, k, t)| UnitOp::Unlink(s, k, t)),
+        2 => (n.clone(), n.clone(), 0..5u8).prop_map(|(s, t, w)| UnitOp::Reweigh(s, t, w)),
+        1 => n.clone().prop_map(UnitOp::Trash),
+        1 => n.clone().prop_map(UnitOp::Restore),
+        1 => n.clone().prop_map(UnitOp::Destroy),
+        1 => n.prop_map(UnitOp::Create),
+    ]
+}
+
+/// Task-0 to Task-4, and Tag-5: an entity of a type the index doesn't hold
+fn unit_id(n: usize) -> String {
+    if n < UNIT_NODES { format!("Task-{n}") } else { "Tag-5".to_owned() }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// Inside one unit, where no drain runs, every write's own changes keep the index whole: each residual what the
+    /// estimates make it, the order, the queue and the totals what the nodes make them, the bound true
+    #[test]
+    fn every_write_keeps_the_index_whole_with_no_drain_to_tidy_after_it(
+        ops in prop::collection::vec(unit_op(), 1..30),
+        direction in prop_oneof![Just("out"), Just("in"), Just("both")],
+    ) {
+        const KINDS: [&str; 4] = ["refs", "weighs", "rates", "other"];
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_with(&dir, schema(direction, true));
+        let mut creates: Vec<Json> = (0..UNIT_NODES).map(|n| json!({ "op": "create", "type": "Task", "id": unit_id(n) })).collect();
+        creates.push(json!({ "op": "create", "type": "Tag", "id": unit_id(UNIT_NODES) }));
+        write(&db, creates).unwrap();
+        db.wait_for_index_builds().unwrap();
+        let mut unit = db.begin().unwrap();
+        for op in &ops {
+            let json = match *op {
+                UnitOp::Link(s, k, t, w) => {
+                    let mut op = json!({ "op": "link", "source": unit_id(s), "kind": KINDS[k], "target": unit_id(t) });
+                    if k == 1 || k == 2 {
+                        op["weight"] = json!(f64::from(w) / 2.0);
+                    }
+                    op
+                }
+                UnitOp::Unlink(s, k, t) => json!({ "op": "unlink", "source": unit_id(s), "kind": KINDS[k], "target": unit_id(t) }),
+                UnitOp::Reweigh(s, t, w) => json!({ "op": "link", "source": unit_id(s), "kind": "rates", "target": unit_id(t), "weight": f64::from(w) }),
+                UnitOp::Trash(n) => json!({ "op": "trash", "id": unit_id(n) }),
+                UnitOp::Restore(n) => json!({ "op": "restore", "id": unit_id(n) }),
+                UnitOp::Destroy(n) => json!({ "op": "destroy", "id": unit_id(n) }),
+                UnitOp::Create(n) => json!({ "op": "create", "type": if n < UNIT_NODES { "Task" } else { "Tag" }, "id": unit_id(n) }),
+            };
+            // A savepoint around each write, so a refused one leaves the unit as it was
+            let depth = unit.savepoint().unwrap();
+            if unit.write(&super::batch(vec![json])).is_err() {
+                unit.rollback_to(depth).unwrap();
+            } else {
+                unit.release(depth).unwrap();
+            }
+            let violations = unit.read_with(|t| ranks::violations(t)).unwrap();
+            prop_assert!(violations.is_empty(), "after {:?}: {:?}", op, violations.iter().map(|v| &v.message).collect::<Vec<_>>());
+        }
+        unit.abort();
+    }
+}
+
+/// Every node of the index, by id: its estimate and residual
+fn nodes_of(t: &impl crate::engine::unit::Read) -> Vec<(String, f64, f64)> {
+    let mut out = Vec::new();
+    crate::engine::unit::Read::visit(t, &keys::rank_nodes("taskRank"), |key, bytes| {
+        let id = match crate::format::key::decode(key).unwrap().into_iter().nth(2) {
+            Some(crate::format::key::Part::String(id)) => id,
+            other => panic!("{other:?}"),
+        };
+        let n = ranks::Node::decode(bytes).unwrap();
+        out.push((id, n.x, n.r));
+        true
+    })
+    .unwrap();
+    out
+}
+
+#[test]
+fn pushes_sweep_the_queue_from_where_they_stopped_and_wrap_to_its_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..4).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            // Every node waiting again, none with an arc, so a push takes one off the queue and adds none
+            ranks::clear(t, "taskRank")?;
+            assert_eq!(ranks::join_chunk(t, "taskRank", None, 10)?, None);
+            let pushed = |t: &crate::engine::unit::Txn<'_, '_>| -> Vec<String> {
+                nodes_of(t).into_iter().filter(|(_, x, _)| *x > 0.0).map(|(id, ..)| id).collect()
+            };
+            ranks::push(t, "taskRank", 1)?;
+            assert_eq!(pushed(t), ["Task-0"]);
+            ranks::push(t, "taskRank", 2)?;
+            assert_eq!(pushed(t), ["Task-0", "Task-1", "Task-2"], "the next push starts after the last");
+            // The sweep's place survives into a drain, which goes on from it and wraps
+            let mut left = nodes_of(t);
+            left.retain(|(_, x, _)| *x == 0.0);
+            assert_eq!(left.len(), 1);
+            ranks::drain(t, "taskRank", 1)?;
+            assert_eq!(pushed(t).len(), 4, "the drain pushed Task-3, after Task-2");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_build_goes_on_across_chunks_and_types_from_its_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..5).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..4).map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i}") })));
+    ops.push(json!({ "op": "create", "type": "Tag", "id": "Tag-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::clear(t, "taskRank")?;
+            let mut after = None;
+            let mut cursors = Vec::new();
+            while let Some(last) = ranks::join_chunk(t, "taskRank", after, 3)? {
+                cursors.push(last);
+                after = Some(last);
+            }
+            // Three Tasks, then two Tasks and a Note, then three Notes: each cursor later than the one before, the Tag
+            // never a node
+            assert_eq!(cursors.len(), 3, "{cursors:?}");
+            assert!(cursors.windows(2).all(|pair| pair[0] < pair[1]), "{cursors:?}");
+            assert_eq!(cursors[1].0, 1, "the second chunk ended in the second type: {cursors:?}");
+            let ids: Vec<String> = nodes_of(t).into_iter().map(|(id, ..)| id).collect();
+            assert_eq!(ids.len(), 9, "{ids:?}");
+            assert!(!ids.contains(&"Tag-0".to_owned()));
+            assert_eq!(ranks::totals(t, "taskRank")?.stage, ranks::Stage::Pushing);
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn check_reports_each_way_an_index_can_disagree_with_its_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..6).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..6).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "weighs", "target": "Task-0", "weight": i }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let said = |damage: &dyn Fn(&mut heed::RwTxn<'_>, crate::store::Db) -> crate::Result<()>| {
+        db.store().unwrap().write(|txn, d| damage(txn, d), false).unwrap();
+        let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
+        db.rebuild(None).unwrap();
+        assert!(db.check().unwrap().is_clean());
+        said.join("\\n")
+    };
+    let node = |f: fn(&mut ranks::Node)| {
+        move |txn: &mut heed::RwTxn<'_>, d: crate::store::Db| {
+            let key = keys::rank_node("taskRank", "Task-3");
+            let mut n = ranks::Node::decode(d.main.get(txn, &key)?.unwrap())?;
+            f(&mut n);
+            d.main.put(txn, &key, &n.encode())?;
+            Ok(())
+        }
+    };
+    assert!(said(&node(|n| n.w += 1.0)).contains("out-weight"));
+    // A node's queue entry gone, and one queued that waits for nothing
+    let queued = said(&|txn, d| {
+        let n = ranks::Node::decode(d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap())?;
+        d.main.put(txn, &keys::rank_queued("taskRank", n.type_at, n.seq), b"Task-3")?;
+        Ok(())
+    });
+    assert!(queued.contains("queue holds"), "{queued}");
+    // A node more than the types' live entities: one no longer live, still a node
+    let extra = said(&|txn, d| {
+        let n = ranks::Node::decode(d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap())?;
+        d.main.put(txn, &keys::rank_node("taskRank", "Task-9"), &ranks::Node { seq: n.seq + 100, ..n }.encode())?;
+        Ok(())
+    });
+    assert!(extra.contains("live entities"), "{extra}");
+    let order = said(&|txn, d| {
+        let (low, high) = crate::format::key::prefix_range(&keys::rank_orders("taskRank"));
+        let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+        let first = d.main.range(txn, &range)?.next().unwrap()?.0.to_vec();
+        d.main.delete(txn, &first)?;
+        Ok(())
+    });
+    assert!(order.contains("score order"), "{order}");
+    let counted = said(&|txn, d| {
+        let key = keys::rank_totals("taskRank");
+        let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
+        bytes[0..8].copy_from_slice(&99u64.to_le_bytes());
+        d.main.put(txn, &key, &bytes)?;
+        Ok(())
+    });
+    assert!(counted.contains("totals"), "{counted}");
+}
+
+#[test]
+fn the_top_is_read_from_the_index_only_for_its_own_types_in_its_order_and_scores_alike_either_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..6).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..3).map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i}") })));
+    ops.extend(
+        (1..6).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Note-0" })),
+    );
+    ops.push(json!({ "op": "link", "source": "Note-0", "kind": "refs", "target": "Task-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let hits = |start: Json, scope: &str, limit: Option<u32>| {
+        let mut steps = vec![json!({ "step": "ranked", "index": "taskRank" })];
+        if let Some(n) = limit {
+            steps.push(json!({ "step": "limit", "n": n }));
+        }
+        let answer =
+            read(&db, json!({ "scope": scope, "start": start, "steps": steps, "terminal": { "answer": "hits" } }))
+                .unwrap();
+        answer["hits"].as_array().unwrap().iter().map(|h| (h["id"].clone(), h["score"].clone())).collect::<Vec<_>>()
+    };
+    let own = json!({ "from": "types", "types": ["Task", "Note"] });
+    let all = hits(own.clone(), "live", None);
+    // From the index's top: the same entities and scores as ranking the whole set
+    assert_eq!(hits(own, "live", Some(4)), all[..4]);
+    // Its types in another order tie otherwise: ranked over the set, not read from the index's top
+    let reordered = hits(json!({ "from": "types", "types": ["Note", "Task"] }), "live", Some(9));
+    let mut expected = all.clone();
+    expected.sort_by(|a, b| b.1.as_f64().unwrap().total_cmp(&a.1.as_f64().unwrap()));
+    let ties_note_first =
+        reordered.iter().position(|h| h.0 == json!("Note-1")) < reordered.iter().position(|h| h.0 == json!("Task-1"));
+    assert!(ties_note_first, "{reordered:?}");
+    // A set of ids, one named twice, answers each once
+    let named = hits(json!({ "from": "ids", "ids": ["Task-1", "Task-0", "Task-1"] }), "live", None);
+    assert_eq!(named.len(), 2, "{named:?}");
+}
+
+#[test]
+fn two_rank_indexes_keep_apart_and_index_status_names_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut two = serde_json::to_value(schema("out", true)).unwrap();
+    two["ranks"]["noteRank"] = json!({ "types": ["Note"], "relations": ["refs"], "direction": "in" });
+    let db = open_with(&dir, Schema::from_json(&two).unwrap());
+    let mut ops: Vec<Json> =
+        (0..4).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..4).map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i}") })));
+    ops.extend(
+        (1..4).map(|i| json!({ "op": "link", "source": format!("Note-{i}"), "kind": "refs", "target": "Note-0" })),
+    );
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (task, note) = db.snapshot(|s| Ok((ranks::totals(s, "taskRank")?, ranks::totals(s, "noteRank")?))).unwrap();
+    assert_eq!((task.nodes, note.nodes), (8, 4));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let status = db.index_status().unwrap();
+    for name in ["taskRank", "noteRank"] {
+        assert!(
+            status.iter().any(|s| s.entity_type.is_none() && s.index == name && s.built && s.failure.is_none()),
+            "{status:?}"
+        );
+    }
+}
+
+#[test]
+fn a_read_only_open_drains_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open_with(&dir, schema("out", true));
+        write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+            .unwrap();
+        db.wait_for_index_builds().unwrap();
+        // Unbuilt again: an open able to write would build it
+        db.admin_unit_with_checkpoint(|t| ranks::clear(t, "taskRank"), false).unwrap();
+        db.close().unwrap();
+    }
+    let db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    // No build started, so none failed for want of a write, and the index is as the writer left it
+    db.wait_for_index_builds().unwrap();
+    let status = db.index_status().unwrap();
+    assert!(status.iter().any(|s| s.index == "taskRank" && !s.built && s.failure.is_none()), "{status:?}");
 }
