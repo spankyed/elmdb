@@ -368,7 +368,9 @@ samply record --save-only --unstable-presymbolicate -o reads.json.gz -- target/p
 samply load reads.json.gz   # the Firefox Profiler, in a browser
 ```
 
-`profile-reads` repeats one of the read benchmark's reads (`field`, `page`, `page_projected`, `all_rows`) after its
+`profile-rank-drain [DOCUMENTS] [CHANGES]` links and unlinks one edge of the rank index's benchmark graph, each change
+drained on the database's own thread (`elmdb-index` in a sample), which is where a drain's cost splits between reading
+the graph, pushing and writing back. `profile-reads` repeats one of the read benchmark's reads (`field`, `page`, `page_projected`, `all_rows`) after its
 fixture is built; `--unstable-presymbolicate` writes the symbols beside the profile, so it can be read without the
 binary. `read-allocations` counts each read's allocations with dhat. Readings: `docs/evidence/read-allocation-codec.md`.
 

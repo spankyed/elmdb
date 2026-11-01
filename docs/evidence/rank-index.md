@@ -11,11 +11,18 @@ Apple M1 Pro (macOS), Rust 1.99.1, release builds, other sessions' builds runnin
   apart than twice the bound are in `rank`'s order, and `check()` is clean. A scripted graph over three kinds — one
   weighted, one weighted and unique, one plain — holds the same through parallel edges, a weight replaced, an edge
   removed and a node trashed, restored and destroyed, in each direction and without weights.
-- **The bound** is `E = 2R / ((1 − α)² n)`, `R` the residuals' sum: the index's estimates `x̂` and the solution `x`
-  of `x = (1 − α)𝟙 + αPᵀx` differ by `(I − αPᵀ)⁻¹ r`, whose L1 norm is at most `R / (1 − α)` since `P` is
-  substochastic; `x ≥ (1 − α)𝟙` makes `‖x‖₁ ≥ (1 − α) n`; and normalizing two vectors at most doubles their
-  distance over the larger's norm. PageRank with dangling nodes' walkers returned to the seeds — every node here — is
-  `x` normalized, so a read divides by `Σx̂` and the index holds no dangling term.
+- **The bound** is `E = 2R / ((1 − α) s)`, `R` the residuals' sum and `s = Σx̂` the estimates'. The index's estimates
+  `x̂` and the solution `x` of `x = (1 − α)𝟙 + αPᵀx` differ by `(I − αPᵀ)⁻¹ r`, whose L1 norm is at most `R / (1 − α)`
+  since `P` is substochastic. PageRank with dangling nodes' walkers returned to the seeds — every node here — is
+  `x / Σx`, with `x > 0`, and a read answers `x̂ / s`, so the index holds no dangling term; and
+  `‖x̂/s − x/Σx‖₁ ≤ (‖x̂ − x‖₁ + |Σx − s|) / s ≤ 2‖x̂ − x‖₁ / s` whatever the signs in `x̂`, a removed edge's pushes
+  being negative. Over most graphs `s` is near `n`, where the bound is `1/(1 − α)` tighter than `2R / ((1 − α)² n)`,
+  the bound with `‖x‖₁ ≥ (1 − α) n` in place of `s`, which also needed every estimate non-negative.
+- **Pushing ends:** a node waits to be pushed while its residual is over `θ = tol (1 − α)² / (2 + tol)`. With every
+  residual within `θ`, `s ≥ Σx − R / (1 − α) ≥ (1 − α) n − nθ / (1 − α)` since `x ≥ (1 − α)𝟙`, and then
+  `E ≤ 2nθ / ((1 − α) s) ≤ tol`: once none waits, the bound is within the tolerance. Pushes stop sooner, once `R` is
+  within `tol (1 − α) s / 2`; and a drain owes pushes, and an index counts as unfinished, only while a node waits, so
+  rounding can't leave one owing a push it has no node for.
 - **`check()` catches damage:** an estimate moved breaks the residual invariant and the score order; a residual moved
   breaks the invariant; totals altered are reported; a rebuild clears each. Every state the invariant holds in is
   within its bound — the proof above — so the comparison with `rank` is what a wrong bound or a wrong system fails.
@@ -48,6 +55,46 @@ group's documents of five `refs` edges each, a rank index over them at the defau
 - **A burst shares a drain:** a drain waits until 5 ms pass without a commit leaving its index pushes, at most 100 ms,
   so twenty changes in two bursts cost 5.8 ms each at 10,000 documents, about half a `rank`, and 53 ms each at
   100,000, about a third of one.
+
+### The tolerance, and the bound from the estimates' sum
+
+`rankIndexChange/<tolerance>` and `rankIndexBurst/<tolerance>` in the same group: 2026-11-01, the same machine at a load
+average of 10 to 16, so a difference under about a tenth is the load. Before is the bound `2R / ((1 − α)² n)`, after is
+`2R / ((1 − α) s)`, read on `34732bd` and `66c9de6`, those commits before they were rebased onto the relation key:
+
+| Documents | Tolerance | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 1e-6 | 19.6 ms | 20.1 ms | 26.9 ms | 27.0 ms |
+| 1,000 | 1e-4 | 19.4 ms | 19.2 ms | 27.7 ms | 27.2 ms |
+| 10,000 | 1e-6 | 74.2 ms | 78.1 ms | 116 ms | 117 ms |
+| 10,000 | 1e-4 | 77.2 ms | 90.0 ms | 112 ms | 117 ms |
+| 100,000 | 1e-6 | 644 ms | 675 ms | 1.11 s | 1.09 s |
+| 100,000 | 1e-5 | 665 ms | 661 ms | 1.12 s | 1.11 s |
+| 100,000 | 1e-4 | 592 ms | 0.14 ms | 1.11 s | 1.11 s |
+
+- **A drain costs its graph, not its pushes:** a hundredfold looser tolerance leaves every drain's cost where it was,
+  since a drain reads every node and edge and writes back every node it moved whatever it then pushes. Pushing less
+  buys a drain nothing measurable.
+- **What the bound buys is no drain at all:** a change whose residuals a commit's pushes bring within the budget leaves
+  nothing to drain. The budget grows with `s`, so the tighter bound reaches that sooner: one change at 100,000
+  documents and a tolerance of 1e-4 costs 0.14 ms rather than 592 ms. Ten changes leave more than the budget, so a
+  burst still drains.
+- **What would make a drain cheaper** is not reading the whole graph for it: pushing through the store while few nodes
+  wait, or a graph kept between drains (`docs/roadmap/rank-index.md`).
+
+### A node's place in the score order, compared before its keys are built
+
+The write-back built both of a moved node's order keys to find most of them unchanged (`e570eef`), 8% of a drain in a
+sample of 40 drained changes at 100,000 documents (`examples/profile-rank-drain.rs`, `sample` on macOS: about 45%
+reading the graph, 37% writing back, 5% pushing). 2026-11-01, the same machine at a load average of 7 to 15, at the
+default tolerance:
+
+| Documents | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|
+| 10,000 | 77.2, 78.4 ms | 76.9, 77.4 ms | 115 ms | 113 ms |
+| 100,000 | 625 ms | 584 ms | 1.09 s | 1.03 s |
+
+At 10,000 documents the two builds ran in turn, twice, since one run of each had read 35% apart under a moving load.
 
 ### What it took to get there
 

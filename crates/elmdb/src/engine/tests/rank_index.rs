@@ -513,42 +513,42 @@ fn the_same_history_makes_the_same_bits_on_every_platform() {
 }
 
 /// `the_same_history_makes_the_same_bits_on_every_platform`'s estimates, as this code found them on an Apple M1 Pro on
-/// 2026-10-31
+/// 2026-11-01
 const KARATE_HISTORY_BITS: [u64; 34] = [
-    4613673579927068069,
-    4610821908508036123,
-    4611997313766837439,
-    4608420309497010604,
-    4604513055728044608,
-    4607900079068446995,
-    4607548093699430664,
-    4606344388540463962,
-    4607739974523383839,
-    4599412107090191139,
-    4604565980820369076,
-    4599726176833456927,
-    4600744756591145563,
-    4607823236194059252,
-    4601446465954703524,
-    4603085726174101885,
-    4603338583676993566,
-    4599653484846490601,
-    4599428786595022232,
-    4601721342182848666,
-    4600423382344164850,
-    4600698258572450615,
-    4601460709885148090,
-    4608865384605198743,
-    4603221709645513913,
-    4606851536761257854,
-    4602772274932882486,
-    4606406259886980065,
-    4602458881637926739,
-    4606674512061661328,
-    4605137304700223944,
-    4609023951794098492,
-    4613413487410626241,
-    4615005999350120164,
+    4613673579929887182,
+    4610821908511756052,
+    4611997313769011390,
+    4608420309499248142,
+    4604513055730107302,
+    4607900079070249754,
+    4607548093700926650,
+    4606344388543433671,
+    4607739974525420031,
+    4599412107091475773,
+    4604565980822168575,
+    4599726176834817916,
+    4600744756592898767,
+    4607823236196018639,
+    4601446465956955386,
+    4603085726175660378,
+    4603338583678159216,
+    4599653484847848568,
+    4599428786596349597,
+    4601721342185235004,
+    4600423382346096114,
+    4600698258575240285,
+    4601460709888571015,
+    4608865384609143664,
+    4603221709648260067,
+    4606851536766191080,
+    4602772274935013647,
+    4606406259891058125,
+    4602458881641904151,
+    4606674512065789340,
+    4605137304703717078,
+    4609023951797359374,
+    4613413487413652885,
+    4615005999353646894,
 ];
 
 #[test]
@@ -1087,6 +1087,41 @@ fn a_rank_index_over_held_entities_is_left_to_the_builder_and_one_over_none_is_b
     drop(unit);
     db.wait_for_index_builds().unwrap();
     assert!(taskrank(&db));
+}
+
+#[test]
+fn an_index_within_its_tolerance_is_built_though_nodes_still_wait() {
+    // A loose tolerance, so pushes stop with the residuals' sum within the budget and nodes still over the threshold
+    let dir = tempfile::tempdir().unwrap();
+    let mut loose = serde_json::to_value(schema("out", true)).unwrap();
+    loose["ranks"]["taskRank"]["tolerance"] = json!(0.05);
+    let db = open_with(&dir, Schema::from_json(&loose).unwrap());
+    let mut ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    // A ring with chords, around which residual keeps flowing rather than settling in one pass
+    for i in 0..40 {
+        for step in [1, 7] {
+            ops.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs",
+                "target": format!("Task-{}", (i + step) % 40) }));
+        }
+    }
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (totals, queued) = db
+        .snapshot(|s| {
+            let mut n = 0;
+            crate::engine::unit::Read::visit(s, &keys::rank_queue("taskRank"), |_, _| {
+                n += 1;
+                true
+            })?;
+            Ok((ranks::totals(s, "taskRank")?, n))
+        })
+        .unwrap();
+    assert!(queued > 0, "nodes still wait");
+    assert!(totals.error(0.85) <= 0.05, "{}", totals.error(0.85));
+    let status = db.index_status().unwrap();
+    assert!(status.iter().any(|s| s.index == "taskRank" && s.built), "{status:?}");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
 
 #[test]

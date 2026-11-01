@@ -206,6 +206,17 @@ jobs:
         with:
           tool: gungraun-runner@0.20.0
       - run: python3 scripts/instruction-counts.py HEAD^1
+        env:
+          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
+      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: instruction-counts-gungraun
+          path: ${{ runner.temp }}/gungraun
+          if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
 
   # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
   # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
@@ -223,6 +234,17 @@ jobs:
         with:
           tool: gungraun-runner@0.20.0
       - run: python3 scripts/diagnostics-overhead.py
+        env:
+          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
+      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-overhead-gungraun
+          path: ${{ runner.temp }}/gungraun
+          if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
 
   platforms:
     name: ${{ matrix.target }} on Node 22.17.0

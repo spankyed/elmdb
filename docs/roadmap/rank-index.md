@@ -7,9 +7,10 @@ scores rather than computing them. Where the build differs from the design below
 
 - **No dangling term.** PageRank with dangling walkers returned to the seeds, every node here, is the normalized
   solution of the system the index keeps, so a read divides by the estimates' sum and nothing holds dangling mass.
-- **The bound** a read reports is `2R / ((1 − α)² n)`, `R` the residuals' sum; a node waits to be pushed when its
-  residual is over `tolerance (1 − α)² / 2`, so once none waits the bound is within the tolerance. The proof is in the
-  readings.
+- **The bound** a read reports is `2R / ((1 − α) s)`, `R` the residuals' sum and `s` the estimates'; pushes stop once
+  the residuals are within the tolerance's share of it. A node waits to be pushed when its residual is over
+  `tolerance (1 − α)² / (2 + tolerance)`, so once none waits the bound is within the tolerance, though pushes usually
+  stop before that. The proof is in the readings.
 - **Pushes sweep the queue** in place order from where the last one stopped, kept in the totals; taking the first
   waiting node each time grew a hub's pushes geometrically.
 - **The drain runs in memory:** a commit pushes 16 nodes, and the index thread drains the rest after commits pause

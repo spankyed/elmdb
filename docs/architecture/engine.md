@@ -361,8 +361,8 @@ unit is open.
   residual into its estimate and on along its arcs. A commit pushes up to 16 nodes; the rest wait in the index's
   queue for the index thread, which reads the graph once, pushes in memory until none waits, and writes back each node
   it moved, in one unit that tells the watches it wrote into. A rank index is built by that thread too: its nodes added
-  1,000 at a time, then pushed. The scores are within `2R / ((1 − α)² n)` of PageRank in L1, `R` the residuals' sum,
-  which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
+  1,000 at a time, then pushed. The scores are within `2R / ((1 − α) s)` of PageRank in L1, `R` the residuals' sum and
+  `s` the estimates', which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
   and the next open goes on.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
   the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
