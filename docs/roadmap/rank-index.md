@@ -21,8 +21,9 @@ scores rather than computing them. Where the build differs from the design below
   drain's timing can change where its pushes start, so across histories only the bound and the order are promised.
 - **The hits answer's `rank`** is `{ index, error }`, with no `sequence`: a watch's delivery carries the sequence.
 - **No rebuild of one rank index:** `rebuild()` builds every one, and a schema change rebuilds the one it changes.
-- **Tests:** the model harness is unchanged; the index has its own random histories against `rank`, a crash case and
-  a savepoint case (`engine/tests/rank_index.rs`), so its maintenance isn't in every engine test.
+- **Tests:** the index has its own random histories against `rank`, a crash case and a savepoint case
+  (`engine/tests/rank_index.rs`); the model harness declares one and holds it to the model after every step; and the
+  builder that drains it has a Shuttle model (`engine/builder/model.rs`).
 
 ## Where it starts
 

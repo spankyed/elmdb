@@ -182,7 +182,9 @@ caused it. `engine/tests/derived.rs` corrupts derived keys directly and checks t
 `engine/vector/tests.rs`). A rank index has its own specs (`engine/tests/rank_index.rs`): random histories of links,
 unlinks, weights, creates, trashes, restores and destroys, each followed by `check()` and the index held within its
 bound of `rank`; damage `check()` reports; a savepoint rolled back; a drain killed part way through, in a child process,
-resumed on open; and an exact-bits golden of a scripted history, which the CI matrix holds.
+resumed on open; and an exact-bits golden of a scripted history, which the CI matrix holds. The model harness declares
+one too, over every entity and kind of edge its workload writes: after each step it waits for the drain, then holds
+the index's nodes to the model's live entities and its scores within their bound of `rank`.
 
 ## Tracked reads
 
@@ -220,11 +222,21 @@ been dropped once; that listeners ending their own or each other's watch don't w
 racing a tracked read names its token unless the read already saw the write. The engine's reads, LMDB and the
 binding are outside it; `engine/tests/tracked.rs` covers them on real threads.
 
+`engine/builder/model.rs` is the index builder's scheduling, under Shuttle: its `Core` — the queue, a rank index's
+pause for commits to stop, stopping, failures and the waiters behind `waitForIndexBuilds` — with a stand-in for what a
+piece of work does, and a clock the model moves, since Shuttle models no time and its timed waits never time out
+(the clock is `store::sync`'s, waited on without a deadline when manual). It holds that work queued runs after it was
+queued and waits in the queue once; that a waiter returns only once the work queued before it is done; that a stop
+ends the builder waiting, pausing or working, and its waiters; that a failure reaches the waiter its work wakes; and
+that a rank index's drain starts only once its commits have paused. The store, the chunks' units and LMDB are outside
+it, and so is `database.rs`'s slot the builder is kept in; the rank index's own specs and the model harness run the
+builder on real threads.
+
 ```sh
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
   cargo test -p elmdb --release --lib store::unit_slot::model
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
-  cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
+  cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model engine::builder::model
 ```
 
 Each has its own target directory, which keeps its flag from rebuilding the everyday one. In those builds every other
@@ -233,8 +245,9 @@ how many times a thread is preempted in one interleaving; `ELMDB_SHUTTLE_ITERATI
 model, 100,000 by default, and a failure prints its schedule for `shuttle::replay` and its seed for
 `SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands on every pull request; `models.yml` runs them
 on a dispatch, its nightly schedule commented out for now, with deeper bounds (`LOOM_MAX_PREEMPTIONS=4`, ten million Shuttle schedules a model). What mutations showed:
-[`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md) and
-[`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md).
+[`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md),
+[`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md) and
+[`../evidence/shuttle-builder.md`](../evidence/shuttle-builder.md).
 
 ## The binding
 
