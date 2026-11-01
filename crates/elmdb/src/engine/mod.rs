@@ -154,7 +154,7 @@ pub(crate) fn drop_index_data(
     for change in changes.iter().filter(|c| matches!(c.effect, Effect::Drops | Effect::Rebuilds)) {
         let parts: Vec<&str> = change.path.split('.').collect();
         if let ["ranks", name] = parts.as_slice() {
-            for prefix in [keys::rank_nodes(name), keys::rank_orders(name), keys::rank_queue(name)] {
+            for prefix in keys::rank_data(name) {
                 let (low, high) = crate::format::key::prefix_range(&prefix);
                 let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
                 let doomed: Vec<Vec<u8>> =

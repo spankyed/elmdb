@@ -285,18 +285,72 @@ pub fn vector_graphs() -> Vec<u8> {
     Prefix::VectorGraph.key().to_vec()
 }
 
-/// A rank index's node: `d/ra index entity`
-pub fn rank_node(index: &str, entity: &str) -> Vec<u8> {
-    with(Prefix::RankNode, |w| {
+/// A block of a rank index's nodes: `d/ra index block`
+pub fn rank_block(index: &str, block: u32) -> Vec<u8> {
+    with(Prefix::RankBlock, |w| {
+        w.string(index).number(f64::from(block));
+    })
+}
+
+/// Every block of a rank index's nodes
+pub fn rank_blocks(index: &str) -> Vec<u8> {
+    with(Prefix::RankBlock, |w| {
+        w.string(index);
+    })
+}
+
+/// The slot a rank index's node is in: `d/ri index entity`
+pub fn rank_slot(index: &str, entity: &str) -> Vec<u8> {
+    with(Prefix::RankSlot, |w| {
         w.string(index).string(entity);
     })
 }
 
-/// Every node of a rank index
-pub fn rank_nodes(index: &str) -> Vec<u8> {
-    with(Prefix::RankNode, |w| {
+/// The slot of each of a rank index's nodes
+pub fn rank_slots(index: &str) -> Vec<u8> {
+    with(Prefix::RankSlot, |w| {
         w.string(index);
     })
+}
+
+/// The entity a rank index's slot holds: `d/rn index slot`
+pub fn rank_entity(index: &str, slot: u32) -> Vec<u8> {
+    with(Prefix::RankEntity, |w| {
+        w.string(index).number(f64::from(slot));
+    })
+}
+
+/// Every entity a rank index's slots hold, in slot order
+pub fn rank_entities(index: &str) -> Vec<u8> {
+    with(Prefix::RankEntity, |w| {
+        w.string(index);
+    })
+}
+
+/// A rank index's slot a node left: `d/rf index slot`
+pub fn rank_free(index: &str, slot: u32) -> Vec<u8> {
+    with(Prefix::RankFree, |w| {
+        w.string(index).number(f64::from(slot));
+    })
+}
+
+/// A rank index's free slots, lowest first
+pub fn rank_frees(index: &str) -> Vec<u8> {
+    with(Prefix::RankFree, |w| {
+        w.string(index);
+    })
+}
+
+/// Every prefix a rank index's data is under but its totals': what dropping or clearing it deletes
+pub fn rank_data(index: &str) -> [Vec<u8>; 6] {
+    [
+        rank_blocks(index),
+        rank_slots(index),
+        rank_entities(index),
+        rank_frees(index),
+        rank_orders(index),
+        rank_queue(index),
+    ]
 }
 
 /// A rank index's node in score order: the estimate negated, so the highest comes first, then the node's type in the

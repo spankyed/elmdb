@@ -237,20 +237,7 @@ fn check_holds_the_index_to_its_bound_its_residuals_and_its_order() {
     db.wait_for_index_builds().unwrap();
     assert!(db.check().unwrap().is_clean());
     let damage = |f: &dyn Fn(&mut ranks::Node)| {
-        db.store()
-            .unwrap()
-            .write(
-                |txn, d| {
-                    let key = keys::rank_node("taskRank", "Task-3");
-                    let bytes = d.main.get(txn, &key)?.unwrap().to_vec();
-                    let mut node = ranks::Node::decode(&bytes)?;
-                    f(&mut node);
-                    d.main.put(txn, &key, &node.encode())?;
-                    Ok(())
-                },
-                false,
-            )
-            .unwrap();
+        db.store().unwrap().write(|txn, d| ranks::edit_stored(txn, d, "taskRank", "Task-3", f), false).unwrap();
     };
     let subjects = || db.check().unwrap().violations.into_iter().map(|v| v.message).collect::<Vec<_>>();
     // An estimate moved: the residual no longer what the estimates make it, the score order no longer the node's
@@ -321,7 +308,7 @@ fn the_index_builds_over_existing_data_and_rebuilds_when_its_graph_changes() {
         .unwrap()
         .read(|txn, d| {
             let mut n = 0;
-            for prefix in [keys::rank_nodes("taskRank"), keys::rank_orders("taskRank"), keys::rank_queue("taskRank")] {
+            for prefix in keys::rank_data("taskRank") {
                 let (low, high) = crate::format::key::prefix_range(&prefix);
                 let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
                 n += d.main.range(txn, &range)?.count();
@@ -717,17 +704,9 @@ proptest! {
 
 /// Every node of the index, by id: its estimate and residual
 fn nodes_of(t: &impl crate::engine::unit::Read) -> Vec<(String, f64, f64)> {
-    let mut out = Vec::new();
-    crate::engine::unit::Read::visit(t, &keys::rank_nodes("taskRank"), |key, bytes| {
-        let id = match crate::format::key::decode(key).unwrap().into_iter().nth(2) {
-            Some(crate::format::key::Part::String(id)) => id,
-            other => panic!("{other:?}"),
-        };
-        let n = ranks::Node::decode(bytes).unwrap();
-        out.push((id, n.x, n.r));
-        true
-    })
-    .unwrap();
+    let mut out: Vec<_> =
+        ranks::stored(t, "taskRank").unwrap().into_iter().map(|s| (s.id, s.node.x, s.node.r)).collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -819,13 +798,7 @@ fn check_reports_each_way_an_index_can_disagree_with_its_nodes() {
         said.join("\\n")
     };
     let node = |f: fn(&mut ranks::Node)| {
-        move |txn: &mut heed::RwTxn<'_>, d: crate::store::Db| {
-            let key = keys::rank_node("taskRank", "Task-3");
-            let mut n = ranks::Node::decode(d.main.get(txn, &key)?.unwrap())?;
-            f(&mut n);
-            d.main.put(txn, &key, &n.encode())?;
-            Ok(())
-        }
+        move |txn: &mut heed::RwTxn<'_>, d: crate::store::Db| ranks::edit_stored(txn, d, "taskRank", "Task-3", f)
     };
     assert!(said(&node(|n| n.w += 1.0)).contains("out-weight"));
     assert!(said(&node(|n| n.x = f64::NAN)).contains("isn't finite"));
@@ -833,15 +806,16 @@ fn check_reports_each_way_an_index_can_disagree_with_its_nodes() {
     assert!(said(&node(|n| n.w = f64::NAN)).contains("isn't finite"));
     // A node's queue entry gone, and one queued that waits for nothing
     let queued = said(&|txn, d| {
-        let n = ranks::Node::decode(d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap())?;
+        let n = ranks::read_stored(txn, d, "taskRank", "Task-3")?;
         d.main.put(txn, &keys::rank_queued("taskRank", n.type_at, n.seq), b"Task-3")?;
         Ok(())
     });
     assert!(queued.contains("queue holds"), "{queued}");
     // A node more than the types' live entities: one no longer live, still a node
     let extra = said(&|txn, d| {
-        let n = ranks::Node::decode(d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap())?;
-        d.main.put(txn, &keys::rank_node("taskRank", "Task-9"), &ranks::Node { seq: n.seq + 100, ..n }.encode())?;
+        let n = ranks::read_stored(txn, d, "taskRank", "Task-3")?;
+        // A slot in a block of its own, far past those taken
+        ranks::put_stored(txn, d, "taskRank", "Task-9", 10 * ranks::BLOCK, ranks::Node { seq: n.seq + 100, ..n })?;
         Ok(())
     });
     assert!(extra.contains("live entities"), "{extra}");
@@ -940,16 +914,7 @@ fn an_arc_of_a_node_whose_arcs_weighed_nothing_carries_all_it_holds_once_weighed
     // What check() counts the far end's residual from, the zero-weight arc carrying nothing
     db.store()
         .unwrap()
-        .write(
-            |txn, d| {
-                let key = keys::rank_node("taskRank", "Task-1");
-                let mut n = ranks::Node::decode(d.main.get(txn, &key)?.unwrap())?;
-                n.r += 0.5;
-                d.main.put(txn, &key, &n.encode())?;
-                Ok(())
-            },
-            false,
-        )
+        .write(|txn, d| ranks::edit_stored(txn, d, "taskRank", "Task-1", |n| n.r += 0.5), false)
         .unwrap();
     let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
     assert!(said.iter().any(|m| m.contains("Task-1 holds residual")), "{said:?}");
@@ -1141,4 +1106,90 @@ fn a_read_only_open_drains_nothing() {
     db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
     assert!(status.iter().any(|s| s.index == "taskRank" && !s.built && s.failure.is_none()), "{status:?}");
+}
+
+/// Each node's slot, by entity
+fn slots_of(db: &Database) -> std::collections::BTreeMap<String, u32> {
+    db.snapshot(|s| Ok(ranks::stored(s, "taskRank")?.into_iter().map(|n| (n.id, n.slot)).collect())).unwrap()
+}
+
+#[test]
+fn a_node_leaving_frees_its_slot_for_the_next_to_join_and_its_block_keeps_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..5).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(
+        (1..5).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" })),
+    );
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let before = slots_of(&db);
+    assert_eq!(before.values().copied().collect::<std::collections::BTreeSet<_>>(), (0..5).collect());
+    // Trashed, Task-1 leaves its block beside nodes that stay, and its slot is the next to join's
+    write(&db, vec![json!({ "op": "trash", "id": "Task-1" })]).unwrap();
+    assert!(!slots_of(&db).contains_key("Task-1"));
+    assert_within_bound(&db, "out", true);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-9" })]).unwrap();
+    assert_eq!(slots_of(&db)["Task-9"], before["Task-1"]);
+    // No slot free, restored, it takes a slot none has taken
+    write(&db, vec![json!({ "op": "restore", "id": "Task-1" })]).unwrap();
+    assert_eq!(slots_of(&db)["Task-1"], 5);
+    assert_within_bound(&db, "out", true);
+    // A block whose every node left is gone, and its slots free
+    let many: Vec<Json> =
+        (10..10 + ranks::BLOCK).map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i}") })).collect();
+    write(&db, many).unwrap();
+    let last = (10..10 + ranks::BLOCK).map(|i| format!("Note-{i}")).filter(|id| slots_of(&db)[id] >= ranks::BLOCK);
+    let gone: Vec<Json> = last.map(|id| json!({ "op": "destroy", "id": id })).collect();
+    assert!(!gone.is_empty());
+    write(&db, gone).unwrap();
+    let blocks = db
+        .store()
+        .unwrap()
+        .read(|txn, d| {
+            let (low, high) = crate::format::key::prefix_range(&keys::rank_blocks("taskRank"));
+            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+            Ok(d.main.range(txn, &range)?.count())
+        })
+        .unwrap();
+    assert_eq!(blocks, 1, "the second block emptied");
+    assert_within_bound(&db, "out", true);
+}
+
+#[test]
+fn check_reports_slots_and_entities_that_do_not_name_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let ops: Vec<Json> = (0..6).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let said = |damage: &dyn Fn(&mut heed::RwTxn<'_>, crate::store::Db, u32) -> crate::Result<()>| {
+        let slot = slots_of(&db)["Task-3"];
+        db.store().unwrap().write(|txn, d| damage(txn, d, slot), false).unwrap();
+        let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
+        db.rebuild(None).unwrap();
+        assert!(db.check().unwrap().is_clean());
+        said.join("\n")
+    };
+    let unnamed = said(&|txn, d, _| {
+        d.main.delete(txn, &keys::rank_slot("taskRank", "Task-3"))?;
+        Ok(())
+    });
+    assert!(unnamed.contains("its slot record doesn't name") && unnamed.contains("names 5 slots for 6"), "{unnamed}");
+    let nameless = said(&|txn, d, slot| {
+        d.main.delete(txn, &keys::rank_entity("taskRank", slot))?;
+        Ok(())
+    });
+    assert!(nameless.contains("which names no entity"), "{nameless}");
+    let freed = said(&|txn, d, slot| {
+        d.main.put(txn, &keys::rank_free("taskRank", slot), &[])?;
+        Ok(())
+    });
+    assert!(freed.contains("as free, which is taken"), "{freed}");
+    let empty = said(&|txn, d, _| {
+        d.main.put(txn, &keys::rank_entity("taskRank", ranks::BLOCK - 1), b"Task-9")?;
+        Ok(())
+    });
+    assert!(empty.contains("which holds no node"), "{empty}");
 }

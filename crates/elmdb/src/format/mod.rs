@@ -81,8 +81,15 @@ pub enum Prefix {
     VectorJournal,
     /// `d/qn type index` → a vector index's graph: its number among the graphs, and its next item
     VectorGraph,
-    /// `d/ra index entity` → a rank index's node: its estimate, residual and out-weight, and its place
-    RankNode,
+    /// `d/ra index block` → a block of a rank index's nodes, each in its slot: its estimate, residual and out-weight,
+    /// and its place
+    RankBlock,
+    /// `d/ri index entity` → the slot a rank index's node is in
+    RankSlot,
+    /// `d/rn index slot` → the entity a rank index's slot holds
+    RankEntity,
+    /// `d/rf index slot` → a rank index's slot a node left, for the next to join
+    RankFree,
     /// `d/rk index score type seq` → a rank index's nodes in score order, highest first
     RankOrder,
     /// `d/rq index type seq` → a rank index's nodes whose residual is over its threshold, waiting to be pushed
@@ -92,7 +99,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 30] = [
+    pub const ALL: [Prefix; 33] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -119,7 +126,10 @@ impl Prefix {
         Prefix::VectorItemOf,
         Prefix::VectorJournal,
         Prefix::VectorGraph,
-        Prefix::RankNode,
+        Prefix::RankBlock,
+        Prefix::RankSlot,
+        Prefix::RankEntity,
+        Prefix::RankFree,
         Prefix::RankOrder,
         Prefix::RankQueue,
         Prefix::RankTotals,
@@ -154,7 +164,10 @@ impl Prefix {
             Prefix::VectorItemOf => "d/qm",
             Prefix::VectorJournal => "d/qj",
             Prefix::VectorGraph => "d/qn",
-            Prefix::RankNode => "d/ra",
+            Prefix::RankBlock => "d/ra",
+            Prefix::RankSlot => "d/ri",
+            Prefix::RankEntity => "d/rn",
+            Prefix::RankFree => "d/rf",
             Prefix::RankOrder => "d/rk",
             Prefix::RankQueue => "d/rq",
             Prefix::RankTotals => "d/rs",

@@ -36,6 +36,15 @@ use super::{algorithms, entities};
 /// How many nodes a commit pushes per index before leaving the rest to the drain
 pub const COMMIT_PUSHES: usize = 16;
 
+/// How many nodes one record holds: a node takes a slot as it joins, and its block is `slot / BLOCK`. A drain moves
+/// nearly every node, so it writes a record per block rather than per node; a commit's pushes rewrite each block they
+/// touch whole, so a block is kept small (`docs/evidence/rank-index.md`)
+pub const BLOCK: u32 = 64;
+
+/// A node's bytes in its block: whether the slot holds one, its estimate, residual and out-weight, its type's place
+/// and its place
+const ENTRY: usize = 37;
+
 /// A rank index's node as stored
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Node {
@@ -52,29 +61,179 @@ pub struct Node {
 }
 
 impl Node {
-    pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(36);
-        out.extend_from_slice(&self.x.to_le_bytes());
-        out.extend_from_slice(&self.r.to_le_bytes());
-        out.extend_from_slice(&self.w.to_le_bytes());
-        out.extend_from_slice(&self.type_at.to_le_bytes());
-        out.extend_from_slice(&self.seq.to_le_bytes());
-        out
+    fn write_entry(&self, out: &mut [u8]) {
+        out[0] = 1;
+        out[1..9].copy_from_slice(&self.x.to_le_bytes());
+        out[9..17].copy_from_slice(&self.r.to_le_bytes());
+        out[17..25].copy_from_slice(&self.w.to_le_bytes());
+        out[25..29].copy_from_slice(&self.type_at.to_le_bytes());
+        out[29..37].copy_from_slice(&self.seq.to_le_bytes());
     }
 
-    pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
-        let corrupt = || Error::new(ErrorCode::Corrupted, "A rank index's node doesn't read");
-        if bytes.len() != 36 {
-            return Err(corrupt());
-        }
+    /// The node an entry holds, `None` for an empty slot
+    fn read_entry(bytes: &[u8]) -> Result<Option<Self>> {
         let f = |at: usize| f64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"));
-        Ok(Node {
-            x: f(0),
-            r: f(8),
-            w: f(16),
-            type_at: u32::from_le_bytes(bytes[24..28].try_into().expect("four bytes")),
-            seq: u64::from_le_bytes(bytes[28..36].try_into().expect("eight bytes")),
+        match bytes[0] {
+            0 => Ok(None),
+            1 => Ok(Some(Node {
+                x: f(1),
+                r: f(9),
+                w: f(17),
+                type_at: u32::from_le_bytes(bytes[25..29].try_into().expect("four bytes")),
+                seq: u64::from_le_bytes(bytes[29..37].try_into().expect("eight bytes")),
+            })),
+            _ => Err(Error::new(ErrorCode::Corrupted, "A rank index's block holds an entry that doesn't read")),
+        }
+    }
+}
+
+/// A block's entries, one per slot
+fn decode_block(bytes: &[u8]) -> Result<Vec<Option<Node>>> {
+    if bytes.len() != BLOCK as usize * ENTRY {
+        return Err(Error::new(ErrorCode::Corrupted, "A rank index's block doesn't read"));
+    }
+    bytes.as_chunks::<ENTRY>().0.iter().map(|entry| Node::read_entry(entry)).collect()
+}
+
+fn encode_block(entries: &[Option<Node>]) -> Vec<u8> {
+    let mut out = vec![0; BLOCK as usize * ENTRY];
+    for (entry, node) in out.as_chunks_mut::<ENTRY>().0.iter_mut().zip(entries) {
+        if let Some(node) = node {
+            node.write_entry(entry);
+        }
+    }
+    out
+}
+
+/// The block a slot is in, and its place in it
+fn block_of(slot: u32) -> (u32, usize) {
+    (slot / BLOCK, (slot % BLOCK) as usize)
+}
+
+/// A block's entries as stored, every slot empty for a block that isn't
+fn read_block(r: &impl Read, index: &str, block: u32) -> Result<Vec<Option<Node>>> {
+    match r.get(&keys::rank_block(index, block))? {
+        Some(bytes) => decode_block(&bytes),
+        None => Ok(vec![None; BLOCK as usize]),
+    }
+}
+
+/// Writes a block's entries, deleting a block no slot of which holds a node
+fn write_block(t: &mut Txn<'_, '_>, index: &str, block: u32, entries: &[Option<Node>]) -> Result<()> {
+    if entries.iter().all(Option::is_none) {
+        t.del(&keys::rank_block(index, block))
+    } else {
+        t.put(&keys::rank_block(index, block), &encode_block(entries))
+    }
+}
+
+/// The slot an entity's node is in, when it is one
+fn slot_of(r: &impl Read, index: &str, entity: &str) -> Result<Option<u32>> {
+    r.get(&keys::rank_slot(index, entity))?
+        .map(|bytes| {
+            bytes
+                .as_slice()
+                .try_into()
+                .map(u32::from_le_bytes)
+                .map_err(|_| Error::new(ErrorCode::Corrupted, "A rank index's slot doesn't read"))
         })
+        .transpose()
+}
+
+/// A slot for a node joining: the lowest one a node left, or the next never taken
+fn take_slot(t: &mut Txn<'_, '_>, index: &str, next: &mut u32, entity: &str) -> Result<u32> {
+    let mut free = None;
+    t.visit(&keys::rank_frees(index), |key, _| {
+        free = number_part(key, 2).map(|n| n as u32);
+        false
+    })?;
+    let slot = match free {
+        Some(slot) => {
+            t.del(&keys::rank_free(index, slot))?;
+            slot
+        }
+        None => {
+            let slot = *next;
+            *next += 1;
+            slot
+        }
+    };
+    t.put(&keys::rank_slot(index, entity), &slot.to_le_bytes())?;
+    t.put(&keys::rank_entity(index, slot), entity.as_bytes())?;
+    Ok(slot)
+}
+
+/// A key's part at `at` as a number
+fn number_part(key: &[u8], at: usize) -> Option<f64> {
+    match crate::format::key::decode(key).ok()?.into_iter().nth(at)? {
+        crate::format::key::Part::Number(n) => Some(n),
+        _ => None,
+    }
+}
+
+/// A rank index's node as stored: its slot, its entity and the node
+pub struct Stored {
+    pub slot: u32,
+    pub id: String,
+    pub node: Node,
+}
+
+/// A rank index's nodes as stored, in slot order, each slot's entity read from the slot's own record; what doesn't agree
+/// is `problem`'s to say, and the node is left out
+fn stored_with(r: &impl Read, index: &str, mut problem: impl FnMut(String)) -> Result<Vec<Stored>> {
+    let mut entities: BTreeMap<u32, String> = BTreeMap::new();
+    r.visit(&keys::rank_entities(index), |key, id| {
+        match number_part(key, 2) {
+            Some(slot) => {
+                entities.insert(slot as u32, String::from_utf8_lossy(id).into_owned());
+            }
+            None => problem("holds a slot's entity whose key doesn't read".to_owned()),
+        }
+        true
+    })?;
+    let mut out = Vec::new();
+    let mut failed = None;
+    r.visit(&keys::rank_blocks(index), |key, bytes| {
+        let Some(block) = number_part(key, 2).map(|n| n as u32) else {
+            problem("holds a block whose key doesn't read".to_owned());
+            return true;
+        };
+        let entries = match decode_block(bytes) {
+            Ok(entries) => entries,
+            Err(e) => {
+                failed = Some(e);
+                return false;
+            }
+        };
+        for (at, entry) in entries.into_iter().enumerate() {
+            let slot = block * BLOCK + at as u32;
+            match (entry, entities.remove(&slot)) {
+                (Some(node), Some(id)) => out.push(Stored { slot, id, node }),
+                (Some(_), None) => problem(format!("holds a node in slot {slot}, which names no entity")),
+                (None, Some(id)) => problem(format!("names {id} in slot {slot}, which holds no node")),
+                (None, None) => {}
+            }
+        }
+        true
+    })?;
+    if let Some(e) = failed {
+        return Err(e);
+    }
+    for (slot, id) in entities {
+        problem(format!("names {id} in slot {slot}, whose block isn't stored"));
+    }
+    Ok(out)
+}
+
+/// A rank index's nodes as stored, in slot order; an error for slots and entities that don't agree
+pub fn stored(r: &impl Read, index: &str) -> Result<Vec<Stored>> {
+    let mut first = None;
+    let nodes = stored_with(r, index, |message| {
+        first.get_or_insert(message);
+    })?;
+    match first {
+        Some(message) => Err(Error::new(ErrorCode::Corrupted, format!("A rank index {message}"))),
+        None => Ok(nodes),
     }
 }
 
@@ -98,21 +257,24 @@ pub struct Totals {
     /// `R = Σ|r|`
     pub residuals: f64,
     pub stage: Stage,
+    /// The next slot no node has taken
+    pub next_slot: u32,
     /// Where the sweep of the queue is: the place of the node pushed last, which the next push starts after
     pub swept: Option<(u32, u64)>,
 }
 
 impl Totals {
     fn empty() -> Self {
-        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, stage: Stage::Joining, swept: None }
+        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, stage: Stage::Joining, next_slot: 0, swept: None }
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(38);
+        let mut out = Vec::with_capacity(41);
         out.extend_from_slice(&self.nodes.to_le_bytes());
         out.extend_from_slice(&self.estimates.to_le_bytes());
         out.extend_from_slice(&self.residuals.to_le_bytes());
         out.push(self.stage as u8);
+        out.extend_from_slice(&self.next_slot.to_le_bytes());
         if let Some((type_at, seq)) = self.swept {
             out.extend_from_slice(&type_at.to_le_bytes());
             out.extend_from_slice(&seq.to_le_bytes());
@@ -122,13 +284,13 @@ impl Totals {
 
     fn decode(bytes: &[u8]) -> Result<Self> {
         let corrupt = || Error::new(ErrorCode::Corrupted, "A rank index's totals don't read");
-        if bytes.len() != 25 && bytes.len() != 37 {
+        if bytes.len() != 29 && bytes.len() != 41 {
             return Err(corrupt());
         }
-        let swept = (bytes.len() == 37).then(|| {
+        let swept = (bytes.len() == 41).then(|| {
             (
-                u32::from_le_bytes(bytes[25..29].try_into().expect("four bytes")),
-                u64::from_le_bytes(bytes[29..37].try_into().expect("eight bytes")),
+                u32::from_le_bytes(bytes[29..33].try_into().expect("four bytes")),
+                u64::from_le_bytes(bytes[33..41].try_into().expect("eight bytes")),
             )
         });
         let f = |at: usize| f64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"));
@@ -143,6 +305,7 @@ impl Totals {
             estimates: f(8),
             residuals: f(16),
             stage,
+            next_slot: u32::from_le_bytes(bytes[25..29].try_into().expect("four bytes")),
             swept,
         })
     }
@@ -219,7 +382,14 @@ pub fn totals(r: &impl Read, index: &str) -> Result<Totals> {
 
 /// A rank index's node, when the entity is one
 pub fn node(r: &impl Read, index: &str, entity: &str) -> Result<Option<Node>> {
-    r.get(&keys::rank_node(index, entity))?.map(|bytes| Node::decode(&bytes)).transpose()
+    let Some(slot) = slot_of(r, index, entity)? else { return Ok(None) };
+    let (block, at) = block_of(slot);
+    let missing = || Error::new(ErrorCode::Corrupted, format!("A rank index's slot for {entity} holds no node"));
+    let bytes = r.get(&keys::rank_block(index, block))?.ok_or_else(missing)?;
+    if bytes.len() != BLOCK as usize * ENTRY {
+        return Err(Error::new(ErrorCode::Corrupted, "A rank index's block doesn't read"));
+    }
+    Node::read_entry(&bytes[at * ENTRY..(at + 1) * ENTRY])?.ok_or_else(missing).map(Some)
 }
 
 /// One rank index's rules, as a change reads them
@@ -530,14 +700,17 @@ impl<'i, 'a> Change<'i, 'a> {
         self.set(t, id, Some(n))
     }
 
-    /// Writes what changed: each node, its place in score order and in the queue, and the totals
+    /// Writes what changed: each node into its block, a block once however many of its nodes changed, the slots of
+    /// nodes joining and leaving, each node's place in score order and in the queue, and the totals
     fn finish(self, t: &mut Txn<'_, '_>) -> Result<()> {
         if self.totals == self.held && self.nodes.values().all(|(before, after)| before == after) {
             return Ok(());
         }
-        let name = self.index.name;
-        let threshold = self.index.threshold;
-        for (id, (before, after)) in &self.nodes {
+        let Change { index, mut totals, nodes, .. } = self;
+        let name = index.name;
+        let threshold = index.threshold;
+        let mut blocks: BTreeMap<u32, Vec<Option<Node>>> = BTreeMap::new();
+        for (id, (before, after)) in &nodes {
             if before == after {
                 continue;
             }
@@ -549,20 +722,37 @@ impl<'i, 'a> Change<'i, 'a> {
                     t.del(&keys::rank_queued(name, b.type_at, b.seq))?;
                 }
             }
-            match after {
-                Some(a) => {
-                    t.put(&keys::rank_node(name, id), &a.encode())?;
-                    if before.is_none_or(|b| !same_order(a, &b)) {
-                        t.put(&order_key(name, a), id.as_bytes())?;
-                    }
-                    if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
-                        t.put(&keys::rank_queued(name, a.type_at, a.seq), id.as_bytes())?;
-                    }
+            if let Some(a) = after {
+                if before.is_none_or(|b| !same_order(a, &b)) {
+                    t.put(&order_key(name, a), id.as_bytes())?;
                 }
-                None => t.del(&keys::rank_node(name, id))?,
+                if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
+                    t.put(&keys::rank_queued(name, a.type_at, a.seq), id.as_bytes())?;
+                }
             }
+            let slot = if before.is_none() {
+                take_slot(t, name, &mut totals.next_slot, id)?
+            } else {
+                let slot = slot_of(t, name, id)?
+                    .ok_or_else(|| Error::new(ErrorCode::Corrupted, format!("A rank index's node {id} has no slot")))?;
+                if after.is_none() {
+                    t.del(&keys::rank_slot(name, id))?;
+                    t.del(&keys::rank_entity(name, slot))?;
+                    t.put(&keys::rank_free(name, slot), &[])?;
+                }
+                slot
+            };
+            let (block, at) = block_of(slot);
+            let entries = match blocks.entry(block) {
+                std::collections::btree_map::Entry::Occupied(held) => held.into_mut(),
+                std::collections::btree_map::Entry::Vacant(first) => first.insert(read_block(t, name, block)?),
+            };
+            entries[at] = *after;
         }
-        t.put(&keys::rank_totals(name), &self.totals.encode())
+        for (block, entries) in &blocks {
+            write_block(t, name, *block, entries)?;
+        }
+        t.put(&keys::rank_totals(name), &totals.encode())
     }
 }
 
@@ -660,36 +850,11 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let index = Index::new(index, def, schema);
     let held = totals(t, index.name)?;
     // The nodes in place order, which is the sweep's
-    let mut ids: Vec<String> = Vec::new();
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut failed = None;
-    t.visit(&keys::rank_nodes(index.name), |key, bytes| {
-        let id = match crate::format::key::decode(key).ok().and_then(|p| p.into_iter().nth(2)) {
-            Some(crate::format::key::Part::String(id)) => id,
-            _ => {
-                failed = Some(Error::new(ErrorCode::Corrupted, "A rank index's node key doesn't read"));
-                return false;
-            }
-        };
-        match Node::decode(bytes) {
-            Ok(n) => {
-                ids.push(id);
-                nodes.push(n);
-                true
-            }
-            Err(e) => {
-                failed = Some(e);
-                false
-            }
-        }
-    })?;
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by_key(|&at| (nodes[at].type_at, nodes[at].seq));
-    let ids: Vec<String> = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
-    let mut nodes: Vec<Node> = order.iter().map(|&at| nodes[at]).collect();
+    let mut held_nodes = stored(t, index.name)?;
+    held_nodes.sort_by_key(|stored| (stored.node.type_at, stored.node.seq));
+    let slots: Vec<u32> = held_nodes.iter().map(|stored| stored.slot).collect();
+    let mut nodes: Vec<Node> = held_nodes.iter().map(|stored| stored.node).collect();
+    let ids: Vec<String> = held_nodes.into_iter().map(|stored| stored.id).collect();
     let before = nodes.clone();
     let place: std::collections::HashMap<&str, usize> =
         ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
@@ -754,13 +919,15 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let held_estimates: f64 = nodes.iter().map(|node| node.x).sum();
     let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > index.budget(held_estimates)
         && nodes.iter().any(|node| node.r.abs() > threshold);
-    // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
+    // Written back: the blocks of the nodes that moved, their places in score order and in the queue, and the totals
+    // counted afresh
+    let mut moved = std::collections::BTreeSet::new();
     for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
         if old == new {
             continue;
         }
         let id = &ids[at];
-        t.put(&keys::rank_node(index.name, id), &new.encode())?;
+        moved.insert(block_of(slots[at]).0);
         if !same_order(old, new) {
             t.del(&order_key(index.name, old))?;
             t.put(&order_key(index.name, new), id.as_bytes())?;
@@ -772,11 +939,21 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
             t.put(&keys::rank_queued(index.name, new.type_at, new.seq), id.as_bytes())?;
         }
     }
+    if !moved.is_empty() {
+        let by_slot: std::collections::HashMap<u32, usize> =
+            slots.iter().enumerate().map(|(at, slot)| (*slot, at)).collect();
+        for block in moved {
+            let entries: Vec<Option<Node>> =
+                (block * BLOCK..(block + 1) * BLOCK).map(|slot| by_slot.get(&slot).map(|&at| nodes[at])).collect();
+            write_block(t, index.name, block, &entries)?;
+        }
+    }
     let totals = Totals {
         nodes: n as u64,
         estimates: nodes.iter().map(|node| node.x).sum(),
         residuals: nodes.iter().map(|node| node.r.abs()).sum(),
         stage: held.stage,
+        next_slot: held.next_slot,
         swept: swept.or(held.swept),
     };
     t.put(&keys::rank_totals(index.name), &totals.encode())?;
@@ -849,21 +1026,10 @@ pub fn join_chunk(
 pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     let mut totals = totals(t, index)?;
     let (mut nodes, mut estimates, mut residuals) = (0u64, 0.0, 0.0);
-    let mut failed = None;
-    t.visit(&keys::rank_nodes(index), |_, bytes| match Node::decode(bytes) {
-        Ok(n) => {
-            nodes += 1;
-            estimates += n.x;
-            residuals += n.r.abs();
-            true
-        }
-        Err(e) => {
-            failed = Some(e);
-            false
-        }
-    })?;
-    if let Some(e) = failed {
-        return Err(e);
+    for Stored { node, .. } in stored(t, index)? {
+        nodes += 1;
+        estimates += node.x;
+        residuals += node.r.abs();
     }
     totals.nodes = nodes;
     totals.estimates = estimates;
@@ -876,9 +1042,9 @@ pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
 
 /// Deletes a rank index's data
 pub fn clear(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
-    t.clear_prefix(&keys::rank_nodes(index))?;
-    t.clear_prefix(&keys::rank_orders(index))?;
-    t.clear_prefix(&keys::rank_queue(index))?;
+    for prefix in keys::rank_data(index) {
+        t.clear_prefix(&prefix)?;
+    }
     t.del(&keys::rank_totals(index))
 }
 
@@ -928,22 +1094,40 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let index = Index::new(name, def, r.schema());
         let totals = totals(r, name)?;
         let violation = |message: String| Violation { subject: format!("ranks.{name}"), message };
-        let mut nodes: Vec<(String, Node)> = Vec::new();
-        let mut failed = None;
-        r.visit(&keys::rank_nodes(name), |key, bytes| {
-            let id = match crate::format::key::decode(key).ok().and_then(|p| p.into_iter().nth(2)) {
-                Some(crate::format::key::Part::String(id)) => id,
-                _ => return true,
-            };
-            match Node::decode(bytes) {
-                Ok(n) => nodes.push((id, n)),
-                Err(e) => failed = Some(e),
+        let held = stored_with(r, name, |message| out.push(violation(message)))?;
+        // Each slot's node and entity name each other, and a free slot holds neither and was taken once
+        for Stored { slot, id, .. } in &held {
+            if slot_of(r, name, id)? != Some(*slot) {
+                out.push(violation(format!("holds {id} in slot {slot}, which its slot record doesn't name")));
             }
-            failed.is_none()
-        })?;
-        if let Some(e) = failed {
-            return Err(e);
+            if *slot >= totals.next_slot {
+                out.push(violation(format!("holds {id} in slot {slot}, past the next slot {}", totals.next_slot)));
+            }
         }
+        let mut named = 0usize;
+        r.visit(&keys::rank_slots(name), |_, _| {
+            named += 1;
+            true
+        })?;
+        if named != held.len() {
+            out.push(violation(format!("names {named} slots for {} nodes", held.len())));
+        }
+        let taken: std::collections::BTreeSet<u32> = held.iter().map(|stored| stored.slot).collect();
+        let mut frees = Vec::new();
+        r.visit(&keys::rank_frees(name), |key, _| {
+            frees.push(number_part(key, 2).map(|n| n as u32));
+            true
+        })?;
+        for free in frees {
+            match free {
+                Some(slot) if taken.contains(&slot) || slot >= totals.next_slot => {
+                    out.push(violation(format!("lists slot {slot} as free, which is taken or never was")))
+                }
+                Some(_) => {}
+                None => out.push(violation("lists a free slot whose key doesn't read".to_owned())),
+            }
+        }
+        let nodes: Vec<(String, Node)> = held.into_iter().map(|stored| (stored.id, stored.node)).collect();
         if totals.stage == Stage::Joining {
             continue;
         }
@@ -1066,13 +1250,63 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
     Ok(out)
 }
 
+/// A stored node changed in place, as damage to it: its slot's block read, the entry changed and written back
+#[cfg(test)]
+pub(crate) fn edit_stored(
+    txn: &mut heed::RwTxn<'_>,
+    d: crate::store::Db,
+    index: &str,
+    entity: &str,
+    f: impl FnOnce(&mut Node),
+) -> Result<()> {
+    let slot = u32::from_le_bytes(d.main.get(txn, &keys::rank_slot(index, entity))?.unwrap().try_into().unwrap());
+    let (block, at) = block_of(slot);
+    let key = keys::rank_block(index, block);
+    let mut entries = decode_block(d.main.get(txn, &key)?.unwrap())?;
+    f(entries[at].as_mut().expect("a node in its slot"));
+    d.main.put(txn, &key, &encode_block(&entries))?;
+    Ok(())
+}
+
+/// A stored node, read as `edit_stored` finds it
+#[cfg(test)]
+pub(crate) fn read_stored(txn: &heed::RoTxn<'_>, d: crate::store::Db, index: &str, entity: &str) -> Result<Node> {
+    let slot = u32::from_le_bytes(d.main.get(txn, &keys::rank_slot(index, entity))?.unwrap().try_into().unwrap());
+    let (block, at) = block_of(slot);
+    Ok(decode_block(d.main.get(txn, &keys::rank_block(index, block))?.unwrap())?[at].expect("a node in its slot"))
+}
+
+/// A node written into `slot` for `entity`, its slot named both ways, as damage: nothing else is told
+#[cfg(test)]
+pub(crate) fn put_stored(
+    txn: &mut heed::RwTxn<'_>,
+    d: crate::store::Db,
+    index: &str,
+    entity: &str,
+    slot: u32,
+    node: Node,
+) -> Result<()> {
+    let (block, at) = block_of(slot);
+    let key = keys::rank_block(index, block);
+    let mut entries = match d.main.get(txn, &key)? {
+        Some(bytes) => decode_block(bytes)?,
+        None => vec![None; BLOCK as usize],
+    };
+    entries[at] = Some(node);
+    d.main.put(txn, &key, &encode_block(&entries))?;
+    d.main.put(txn, &keys::rank_slot(index, entity), &slot.to_le_bytes())?;
+    d.main.put(txn, &keys::rank_entity(index, slot), entity.as_bytes())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn the_bound_is_twice_the_residuals_over_the_kept_share_and_the_estimates() {
-        let totals = Totals { nodes: 10, estimates: 9.0, residuals: 0.045, stage: Stage::Built, swept: None };
+        let totals =
+            Totals { nodes: 10, estimates: 9.0, residuals: 0.045, stage: Stage::Built, next_slot: 10, swept: None };
         // 2 × 0.045 / (0.15 × 9)
         assert!((totals.error(0.85) - 0.0666_6666_6666_6667).abs() < 1e-12, "{}", totals.error(0.85));
         assert_eq!(Totals { nodes: 0, ..totals }.error(0.85), 0.0);
