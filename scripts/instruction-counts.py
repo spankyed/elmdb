@@ -3,7 +3,8 @@
 `python3 scripts/instruction-counts.py BASE`: `benches/instructions.rs` under Valgrind (`docs/architecture/testing.md`,
 Instruction counts), on BASE checked out beside the tree and then on HEAD, compared with BASE's counts as a baseline.
 A BASE without the benchmark is skipped, and HEAD's counts are reported alone. Exits nonzero only when a benchmark
-fails to build, run or answer; a count that moved is a row in the report, and in GitHub Actions the step summary.
+fails to build, run or answer, a count of 0 being no answer; a count that moved is a row in the report, and in GitHub
+Actions the step summary. `GUNGRAUN_HOME`, when set, names the directory the runs write, which CI keeps on a failure.
 """
 import json
 import os
@@ -19,7 +20,8 @@ base = sys.argv[1]
 root = Path.cwd()
 # Both runs write one fresh directory, so HEAD's finds BASE's baseline and no earlier run's counts; and build into one
 # target, so HEAD's build is incremental
-home = Path(tempfile.mkdtemp(prefix="instruction-counts-"))
+home = Path(os.environ.get("GUNGRAUN_HOME") or tempfile.mkdtemp(prefix="instruction-counts-"))
+home.mkdir(parents=True, exist_ok=True)
 env = {**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")}
 
 
@@ -65,3 +67,6 @@ print(report)
 if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
     with open(summary, "a") as written:
         written.write(report)
+# No operation the benchmark runs costs nothing: a count of 0 is a run Valgrind collected nothing from
+if empty := [name for name, old, new, _ in rows if new == 0 or old == 0]:
+    sys.exit(f"Valgrind counted 0 instructions for {', '.join(f'`{n}`' for n in empty)}: those runs measured nothing")
