@@ -39,7 +39,7 @@ Each on a disposable worktree, never the working tree, 30,000 schedules a model,
 | A failure isn't recorded | `a_failure_is_seen…` fails |
 
 The model harness's rank index, on the same worktree: a trashed entity left in the index fails
-`the_engine_holds_what_the_model_holds_after_every_step` at its first trash.
+`the_engine_holds_what_the_model_holds_after_every_step`, in 12 s.
 
 ## Not modelled
 
