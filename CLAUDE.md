@@ -31,8 +31,11 @@ npm run build && npm run typecheck && npm test   # the binding, from the root pa
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
-- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`, and on every target the binding
-  ships for on a pull request or a dispatch.
+- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
+  tier, adding Apple silicon and Windows; a pull request ready for review runs every target the binding ships for.
+  Open a pull request as a draft while iterating, mark it ready (`gh pr ready`) for the full tier, and merge when
+  `ci-pass`, the one required check, is green. Mutants of the change (`mutants (advisory)`) are read in their
+  summary, not waited on.
 
 The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supported Rust version.
 
