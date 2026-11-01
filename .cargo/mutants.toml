@@ -58,16 +58,16 @@ exclude_re = [
     "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
     # nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the graph held
     # more, so any first ask finds the same k
-    "reads.rs:901:.*replace \\+ with \\* in Query<'_, R>::nearest",
+    "reads.rs:1186:.*replace \\+ with \\* in Query<'_, R>::nearest",
     # orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same order, and
     # EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are its cost
-    "reads.rs:614:.*replace > with < in Query<'_, R>::stage",
-    "reads.rs:615:.*replace - with / in Query<'_, R>::stage",
-    "reads.rs:1101:.*replace >= with < in Query<'_, R>::first_ordered",
-    "reads.rs:1103:.*replace == with != in Query<'_, R>::first_ordered",
+    "reads.rs:893:.*replace > with < in Query<'_, R>::stage",
+    "reads.rs:894:.*replace - with / in Query<'_, R>::stage",
+    "reads.rs:1388:.*replace >= with < in Query<'_, R>::first_ordered",
+    "reads.rs:1390:.*replace == with != in Query<'_, R>::first_ordered",
     # A stage's answer flows only to the stages after it and the terminal, none of which reads it: an id refused is
     # what stops a walk
-    "reads.rs:636:.*delete ! in Query<'_, R>::stage",
+    "reads.rs:915:.*delete ! in Query<'_, R>::stage",
     # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
@@ -83,7 +83,7 @@ exclude_re = [
     "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
     # The spill budget sets when rows go to disk, which no answer shows; the release heap test
     # (tests/maintenance_heap.rs) holds what it bounds
-    "sorted.rs:11:.*replace \\* with",
+    "sorted.rs:12:.*replace \\* with",
     # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
     # own entry under one key
     "derive.rs:.*replace match guard \\*other != id with true in buildable_entry",
@@ -91,9 +91,9 @@ exclude_re = [
     "store/mod.rs:.*replace > with >= in Store::begin",
     # build_chunk's unique check skips the entity's own entry: a write checks a unique value against the rows while the
     # index is unbuilt, so an entity's own entry and another's for the same value are never both in the index
-    "derive.rs:587:.*replace == with != in build_chunk",
+    "derive.rs:594:.*replace == with != in build_chunk",
     # move_file's temporary-attribute check: clearing an attribute a file doesn't have sets the attributes it has
-    "backup.rs:103:.*replace & with \\| in move_file",
+    "backup.rs:101:.*replace & with \\| in move_file",
     # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
     # from-address and pin
     "backup.rs:.*replace \\| with \\^ in move_file",
@@ -114,8 +114,7 @@ exclude_re = [
     # less; the two differ only where an L1 sum of floats lands on the tolerance to the bit
     "algorithms.rs:.*replace < with <= in rank",
     # project's fast path: a start of distinct types hands each entity on once and no step hands one on twice, so
-    # dropping repeats from a set that holds none answers the same, at the cost of marking every id. Anchored by line,
-    # the `!` of `if !distinct` two lines below being one the tests catch
-    "reads.rs:1592:.*replace == with != in Query<'_, R>::project",
-    "reads.rs:1593:.*delete ! in Query<'_, R>::project",
+    # dropping repeats from a set that holds none answers the same, at the cost of marking every id
+    "reads.rs:.*replace == with != in Query<'_, R>::holds_each_once",
+    "reads.rs:.*delete ! in Query<'_, R>::holds_each_once",
 ]
