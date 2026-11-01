@@ -9,9 +9,9 @@
 //! its sum and the index holds no term for that mass.
 //!
 //! **The residual.** Each node holds `r = b + α Pᵀ x̂ − x̂` exactly, as every change below keeps it. The estimate is then
-//! within `R / (1 − α)` of `x` in L1, where `R = Σ|r|`; since `x ≥ b`, the normalized scores are within
-//! `E = 2R / ((1 − α)² n)` of PageRank, which a read reports. A node whose residual is over `ε = tolerance (1 − α)² / 2`
-//! waits in the queue, so once none does, `E` is within the index's tolerance.
+//! within `R / (1 − α)` of `x` in L1, where `R = Σ|r|`; divided by their sum `s` as a read divides them, the scores are
+//! within `E = 2R / ((1 − α) s)` of PageRank, which a read reports (`error_bound`). A node whose residual is over
+//! `θ = tolerance (1 − α)² / (2 + tolerance)` waits in the queue, so once none does, `E` is within the index's tolerance.
 //!
 //! **Pushing** a node adds its residual to its estimate and spreads `α` of it over its arcs by weight.
 //!
