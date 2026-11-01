@@ -96,6 +96,21 @@ default tolerance:
 
 At 10,000 documents the two builds ran in turn, twice, since one run of each had read 35% apart under a moving load.
 
+### The graph kept between drains
+
+The drains read the graph through the edge mirror (`6604060`), its maps hashed with FxHash (`5d9dbe6`). 2026-11-01, the
+same machine at a load average of 4 to 28, each pair of builds run in turn, at the default tolerance:
+
+| Documents | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|
+| 10,000 | 78.5, 78.2 ms | 63.4, 63.0 ms | 113 ms | 83.1, 83.7 ms |
+| 100,000 | 573, 583 ms | 446, 441 ms | 1.02 s | 737, 739 ms |
+| 100,000, FxHash | 429, 446, 423 ms | 384, 389, 379 ms | 770, 744, 706 ms | 654, 627, 624 ms |
+
+The last row's "before" is the mirror with SipHash. Sampled at 100,000 documents after the mirror, a drain is about a
+third writing back (node rows, 19%; order keys deleted, 8%; their keys, 5%), a quarter reading the node rows, and the
+pushes and the mirror's lookups the rest. The node rows, read and written, are what is left to cut.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
