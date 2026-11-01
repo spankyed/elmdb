@@ -1019,3 +1019,38 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bound_is_twice_the_residuals_over_the_kept_share_squared_and_the_nodes() {
+        let totals = Totals { nodes: 10, estimates: 9.0, residuals: 0.045, stage: Stage::Built, swept: None };
+        // 2 × 0.045 / (0.15² × 10)
+        assert!((totals.error(0.85) - 0.4).abs() < 1e-12, "{}", totals.error(0.85));
+        assert_eq!(Totals { nodes: 0, ..totals }.error(0.85), 0.0);
+    }
+
+    #[test]
+    fn a_read_rounds_scores_finer_than_the_bound_over_the_nodes_and_reports_a_bound_that_still_holds() {
+        let (bound, step) = reported(3.2e-7, 1000);
+        // 3.2e-7 over 1,000 nodes is 3.2e-10, so the step is 1e-10, and rounding adds at most 1,000 × 5e-11
+        assert_eq!(step, 1e-10);
+        assert!((3.2e-7 + 1000.0 * 1e-10 / 2.0..=4e-7).contains(&bound), "{bound}");
+        assert_eq!(reported(0.0, 10), (0.0, 0.0));
+        assert_eq!(reported(1e-3, 0), (0.0, 0.0));
+        assert_eq!(rounded(0.123456, 1e-3), 0.123);
+        assert_eq!(rounded(0.1236, 1e-3), 0.124);
+        assert_eq!(rounded(0.123456, 0.0), 0.123456);
+    }
+
+    #[test]
+    fn the_score_order_keeps_sixteen_significant_bits() {
+        let node = |x: f64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq: 7 };
+        // Apart in the 20th bit: the same key; apart in the 10th: another, and the higher estimate first
+        assert_eq!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-20))));
+        assert_ne!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-10))));
+        assert!(order_key("i", &node(1.5)) < order_key("i", &node(1.0)));
+    }
+}
