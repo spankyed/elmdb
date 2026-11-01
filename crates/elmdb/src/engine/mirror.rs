@@ -41,12 +41,26 @@ pub enum EdgeDelta {
     },
 }
 
-/// One entry of a list: its place, its far end's name and its weight when it holds one
+/// One entry of a list: its place, its far end's name and its weight, `NO_WEIGHT` when it holds none
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Entry {
     seq: u64,
     far: u32,
-    weight: Option<f64>,
+    weight: f64,
+}
+
+/// The weight an entry holding none keeps: a weight is from 0 to `relations::MAX_WEIGHT`, so no edge holds this one,
+/// and an entry is 24 bytes where an `Option<f64>` would make it 32
+const NO_WEIGHT: f64 = -1.0;
+
+impl Entry {
+    fn new(seq: u64, far: u32, weight: Option<f64>) -> Self {
+        Entry { seq, far, weight: weight.unwrap_or(NO_WEIGHT) }
+    }
+
+    fn weight(&self) -> Option<f64> {
+        (self.weight != NO_WEIGHT).then_some(self.weight)
+    }
 }
 
 /// The edge entries held, by entity, kind and side, at one commit's sequence
@@ -58,12 +72,16 @@ pub struct EdgeMirror {
     names: FxHashMap<Box<str>, u32>,
     ids: Vec<Box<str>>,
     lists: FxHashMap<(u32, u32, bool), Vec<Entry>>,
-    /// How many names the lists held mentioned when the names were last counted afresh
-    counted: usize,
+    /// How many entries the lists hold
+    entries: usize,
+    /// How many entries commits have unfiled or replaced since the names were last counted afresh: only those can leave
+    /// a name no list mentions, at most two each
+    removed: usize,
 }
 
-/// The names kept however few the lists mention, so a small mirror isn't counted afresh every few commits
-const NAMES_KEPT: usize = 1024;
+/// The entries removed however few the lists hold before the names are counted afresh, so a small mirror isn't counted
+/// every few commits
+const REMOVED_KEPT: usize = 1024;
 
 impl EdgeMirror {
     fn name(&mut self, name: &str) -> u32 {
@@ -119,8 +137,10 @@ impl EdgeMirror {
             }
         }
         self.sequence = Some(next);
-        // A name stays once a list mentioned it: the entities deleted and the far ends unfiled leave theirs
-        if self.ids.len() > 2 * self.counted.max(NAMES_KEPT) {
+        // A name stays once a list mentioned it: the entities deleted and the far ends unfiled leave theirs. Counting
+        // afresh once more entries were removed than the lists hold keeps the names no list mentions within twice the
+        // entries held, and costs each removal a constant share; a drain filling lists removes none, so never counts
+        if self.removed > self.entries.max(REMOVED_KEPT) {
             self.compact();
         }
     }
@@ -135,7 +155,7 @@ impl EdgeMirror {
             let list = list.into_iter().map(|e| Entry { far: self.name(&ids[e.far as usize]), ..e }).collect();
             self.lists.insert(key, list);
         }
-        self.counted = self.ids.len();
+        self.removed = 0;
     }
 
     fn list(&mut self, entity: &str, kind: &str, outward: bool) -> Option<&mut Vec<Entry>> {
@@ -151,8 +171,14 @@ impl EdgeMirror {
         let far = self.name(far);
         let list = self.list(entity, kind, outward).expect("held above");
         match list.binary_search_by_key(&seq, |e| e.seq) {
-            Ok(at) => list[at] = Entry { seq, far, weight },
-            Err(at) => list.insert(at, Entry { seq, far, weight }),
+            Ok(at) => {
+                list[at] = Entry::new(seq, far, weight);
+                self.removed += 1;
+            }
+            Err(at) => {
+                list.insert(at, Entry::new(seq, far, weight));
+                self.entries += 1;
+            }
         }
     }
 
@@ -167,6 +193,8 @@ impl EdgeMirror {
             if list.is_empty() {
                 self.lists.remove(&key);
             }
+            self.entries -= 1;
+            self.removed += 1;
         }
     }
 
@@ -182,16 +210,19 @@ impl EdgeMirror {
     ) -> Result<()> {
         let key = (self.name(entity), self.name(kind), outward);
         if !self.lists.contains_key(&key) {
-            let mut read = Vec::new();
+            // Filled straight from the store, and fitted: a list collected from a buffer of what was read would keep
+            // that buffer, twice an entry's size
+            let mut list = Vec::new();
             relations::visit_placed_far_ends(t, entity, outward, kind, |seq, far, weight| {
-                read.push((seq, far.to_owned(), weight));
+                list.push(Entry::new(seq, self.name(far), weight));
                 Ok(true)
             })?;
-            let list = read.into_iter().map(|(seq, far, weight)| Entry { seq, far: self.name(&far), weight }).collect();
+            list.shrink_to_fit();
+            self.entries += list.len();
             self.lists.insert(key, list);
         }
         for entry in &self.lists[&key] {
-            each(&self.ids[entry.far as usize], entry.weight);
+            each(&self.ids[entry.far as usize], entry.weight());
         }
         Ok(())
     }
@@ -208,7 +239,7 @@ impl EdgeMirror {
                 Ok(true)
             })?;
             let mirrored: Vec<_> =
-                held.iter().map(|e| (e.seq, self.ids[e.far as usize].to_string(), e.weight)).collect();
+                held.iter().map(|e| (e.seq, self.ids[e.far as usize].to_string(), e.weight())).collect();
             if mirrored != stored {
                 let side = if outward { "out" } else { "in" };
                 out.push(format!("the edge mirror holds {entity}'s {kind} edges {side} unlike the store"));
@@ -229,6 +260,7 @@ impl EdgeMirror {
     pub fn lose_an_entry(&mut self) {
         let list = self.lists.values_mut().find(|l| !l.is_empty()).expect("a list holding an entry");
         list.pop();
+        self.entries -= 1;
     }
 }
 
@@ -273,7 +305,7 @@ mod tests {
                 weight: Some(2.0),
             }]),
         );
-        assert_eq!(m.lists.values().next().unwrap()[0].weight, Some(2.0));
+        assert_eq!(m.lists.values().next().unwrap()[0].weight(), Some(2.0));
         m.commit(
             3,
             4,
@@ -289,24 +321,46 @@ mod tests {
         assert_eq!((m.sequence(), m.held()), (None, 0));
     }
 
+    /// A list of one entry for `entity`, out to `far`, as a drain reading it from the store fills one
+    fn fill(m: &mut EdgeMirror, entity: &str, far: &str) {
+        let key = (m.name(entity), m.name("k"), true);
+        let far = m.name(far);
+        m.lists.insert(key, vec![Entry::new(1, far, None)]);
+        m.entries += 1;
+    }
+
     #[test]
-    fn names_no_list_mentions_are_let_go_once_they_are_twice_those_counted_and_the_lists_read_the_same() {
+    fn names_no_list_mentions_are_let_go_once_more_entries_were_removed_than_are_held_and_the_lists_read_the_same() {
         let mut m = mirror();
         m.commit(1, 2, Some(&[filed(5)]));
         // Entities whose lists were read and then emptied, as deleted ones are
-        for (i, seq) in (0..2 * NAMES_KEPT).zip(2u64..) {
-            let entity = format!("X{i}");
-            let key = (m.name(&entity), m.name("k"), true);
-            let far = m.name(&format!("Y{i}"));
-            m.lists.insert(key, vec![Entry { seq: 1, far, weight: None }]);
-            let unfiled = EdgeDelta::Unfiled { kind: "k".into(), source: entity, target: format!("Y{i}"), seq: 1 };
+        for (i, seq) in (0..2 * REMOVED_KEPT).zip(2u64..) {
+            let (entity, far) = (format!("X{i}"), format!("Y{i}"));
+            fill(&mut m, &entity, &far);
+            let unfiled = EdgeDelta::Unfiled { kind: "k".into(), source: entity, target: far, seq: 1 };
             m.commit(seq, seq + 1, Some(&[unfiled]));
         }
-        assert!(m.ids.len() <= 2 * NAMES_KEPT, "{} names kept", m.ids.len());
+        // Two names an emptied list, and at most `REMOVED_KEPT` lists emptied since they were last counted
+        assert!(m.ids.len() <= 2 * REMOVED_KEPT + 8, "{} names kept", m.ids.len());
         assert_eq!(m.held(), 1);
         let (a, k) = (m.known("A").unwrap(), m.known("k").unwrap());
         let list = &m.lists[&(a, k, true)];
         assert_eq!(list.iter().map(|e| &*m.ids[e.far as usize]).collect::<Vec<_>>(), ["B"]);
+    }
+
+    #[test]
+    fn a_drain_filling_lists_leaves_the_names_as_they_are_however_many_it_adds() {
+        let mut m = mirror();
+        for i in 0..4 * REMOVED_KEPT {
+            fill(&mut m, &format!("X{i}"), &format!("Y{i}"));
+        }
+        let names = m.ids.clone();
+        // The drain's own commit, which files nothing, and one that removes one entry
+        m.commit(1, 2, Some(&[]));
+        let unfiled = EdgeDelta::Unfiled { kind: "k".into(), source: "X0".into(), target: "Y0".into(), seq: 1 };
+        m.commit(2, 3, Some(&[unfiled]));
+        assert!(m.ids == names, "the names were counted afresh with nothing to let go");
+        assert_eq!((m.held(), m.entries), (4 * REMOVED_KEPT, 4 * REMOVED_KEPT - 1));
     }
 
     #[test]
