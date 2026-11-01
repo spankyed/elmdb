@@ -1090,6 +1090,41 @@ fn a_rank_index_over_held_entities_is_left_to_the_builder_and_one_over_none_is_b
 }
 
 #[test]
+fn an_index_within_its_tolerance_is_built_though_nodes_still_wait() {
+    // A loose tolerance, so pushes stop with the residuals' sum within the budget and nodes still over the threshold
+    let dir = tempfile::tempdir().unwrap();
+    let mut loose = serde_json::to_value(schema("out", true)).unwrap();
+    loose["ranks"]["taskRank"]["tolerance"] = json!(0.05);
+    let db = open_with(&dir, Schema::from_json(&loose).unwrap());
+    let mut ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    // A ring with chords, around which residual keeps flowing rather than settling in one pass
+    for i in 0..40 {
+        for step in [1, 7] {
+            ops.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs",
+                "target": format!("Task-{}", (i + step) % 40) }));
+        }
+    }
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (totals, queued) = db
+        .snapshot(|s| {
+            let mut n = 0;
+            crate::engine::unit::Read::visit(s, &keys::rank_queue("taskRank"), |_, _| {
+                n += 1;
+                true
+            })?;
+            Ok((ranks::totals(s, "taskRank")?, n))
+        })
+        .unwrap();
+    assert!(queued > 0, "nodes still wait");
+    assert!(totals.error(0.85) <= 0.05, "{}", totals.error(0.85));
+    let status = db.index_status().unwrap();
+    assert!(status.iter().any(|s| s.index == "taskRank" && s.built), "{status:?}");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+#[test]
 fn a_read_only_open_drains_nothing() {
     let dir = tempfile::tempdir().unwrap();
     {
