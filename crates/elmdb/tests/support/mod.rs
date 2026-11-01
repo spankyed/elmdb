@@ -260,7 +260,9 @@ impl Fixture {
             assert!(scores.windows(2).all(|pair| pair[0] >= pair[1]) && scores.iter().all(|s| *s > 0.0));
         } else if read == "ranked" {
             assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
-            assert!(answer["rank"]["error"].as_f64().unwrap() <= 1e-6, "{answer}");
+            // A built index's bound is within the tolerance, 1e-6; a read adds up to half that again for rounding its
+            // scores and reports the sum rounded up to one significant figure
+            assert!(answer["rank"]["error"].as_f64().unwrap() <= 2e-6, "{answer}");
         } else {
             assert_eq!(answer["hits"].as_array().unwrap().len(), 10.min(self.rows));
             assert_eq!(answer["rank"]["converged"], json!(true));
