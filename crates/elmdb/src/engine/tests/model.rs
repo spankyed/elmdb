@@ -5,7 +5,7 @@
 //! the role index, each entity's edges out and in, and what a text index matches, whether maintained by writes or
 //! derived again by a rebuild.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use serde_json::{Value as Json, json};
@@ -104,7 +104,8 @@ enum Step {
         kind: &'static str,
         target: &'static str,
     },
-    /// Moves the first relation between the ends to another target, by its id; refused when there is none
+    /// Moves the first relation between the ends to another target, by its id; refused when there is none, or when the
+    /// new ends are joined already
     MoveRelation {
         id: &'static str,
         kind: &'static str,
@@ -235,6 +236,7 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             2 => aimed(aimed_unit(&state.model, true)),
             1 => blind(Just(Step::RefuseNext).boxed()),
             1 => blind(rebuild),
+            1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
     }
@@ -253,6 +255,21 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
     }
 }
 
+/// A move of an edge onto ends another edge of its kind already joins, which a kind with no key refuses and random moves
+/// rarely make; blind, since an aimed step must be one the model takes. Any write when no two edges share a source and kind
+fn onto_joined_ends(m: &Model) -> BoxedStrategy<Step> {
+    let edges: Vec<(&'static str, &'static str, &'static str)> =
+        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let onto: Vec<_> = edges
+        .iter()
+        .flat_map(|a| edges.iter().filter(move |b| a.0 == b.0 && a.1 == b.1 && a.2 != b.2).map(move |b| (*a, b.2)))
+        .collect();
+    if onto.is_empty() {
+        return write();
+    }
+    prop::sample::select(onto).prop_map(|((id, kind, target), to)| Step::MoveRelation { id, kind, target, to }).boxed()
+}
+
 /// The pool entry a model's string names, so a step built from the model holds the same `&'static str` a blind one does
 fn named(pool: &[&'static str], name: &str) -> &'static str {
     pool.iter().copied().find(|p| *p == name).expect("the model names only the pool's")
@@ -268,7 +285,7 @@ fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
     let missing = ids(&|e| e.is_none());
     let trashed = ids(&|e| e.is_some_and(|e| e.trashed));
     let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.keys().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
     let keys_where = |keep: &dyn Fn(Option<&Json>) -> bool| -> Vec<(&'static str, &'static str)> {
         existing
             .iter()
@@ -370,8 +387,8 @@ struct Entity {
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Model {
     entities: BTreeMap<String, Entity>,
-    /// Each edge with how many relations join its ends: a move can make a second
-    edges: BTreeMap<(String, String, String), usize>,
+    /// Each edge by its ends: a kind with no key joins two entities by one edge at most
+    edges: BTreeSet<(String, String, String)>,
     /// The edges a unit linked, whose targets must exist when it commits
     pending: Vec<(String, String, String)>,
     next_seq: u64,
@@ -423,8 +440,7 @@ impl Model {
                     return Err("self link");
                 }
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                if !self.edges.contains_key(&edge) {
-                    self.edges.insert(edge.clone(), 1);
+                if self.edges.insert(edge.clone()) {
                     self.pending.push(edge);
                 }
             }
@@ -498,37 +514,31 @@ impl Model {
             }
             Step::RemoveRelation { id, kind, target } => {
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                match self.edges.get_mut(&edge) {
-                    None => return Err("no such relation"),
-                    Some(n) if *n > 1 => *n -= 1,
-                    Some(_) => {
-                        self.edges.remove(&edge);
-                    }
+                if !self.edges.remove(&edge) {
+                    return Err("no such relation");
                 }
             }
             Step::MoveRelation { id, kind, target, to } => {
                 let edge = (id.to_string(), kind.to_string(), target.to_string());
-                if !self.edges.contains_key(&edge) {
+                if !self.edges.contains(&edge) {
                     return Err("no such relation");
                 }
                 if id == to {
                     return Err("self link");
                 }
-                match self.edges.get_mut(&edge) {
-                    Some(n) if *n > 1 => *n -= 1,
-                    _ => {
-                        self.edges.remove(&edge);
-                    }
-                }
                 let moved = (id.to_string(), kind.to_string(), to.to_string());
-                *self.edges.entry(moved.clone()).or_insert(0) += 1;
+                if moved != edge && self.edges.contains(&moved) {
+                    return Err("duplicate edge");
+                }
+                self.edges.remove(&edge);
+                self.edges.insert(moved.clone());
                 self.pending.push(moved);
             }
             Step::TakeLabel { .. } => {}
             Step::Destroy { id } => {
                 self.exists(id)?;
                 self.entities.remove(*id);
-                self.edges.retain(|(s, _, t), _| s != id && t != id);
+                self.edges.retain(|(s, _, t)| s != id && t != id);
             }
             Step::Trash { id } => {
                 self.exists(id)?;
@@ -568,7 +578,7 @@ impl Model {
     /// The deferred check: every edge the unit linked that still exists has its target
     fn check_pending(&self) -> Result<(), Refusal> {
         for edge in &self.pending {
-            if self.edges.contains_key(edge) && !self.entities.contains_key(&edge.2) {
+            if self.edges.contains(edge) && !self.entities.contains_key(&edge.2) {
                 return Err("link target missing at commit");
             }
         }
@@ -766,7 +776,7 @@ fn state_of(db: &Database) -> State {
 fn model_state(m: &Model) -> State {
     let entities =
         m.entities.iter().map(|(id, e)| (id.clone(), (e.fields.clone(), e.trashed, e.roles.clone()))).collect();
-    let edges = m.edges.iter().flat_map(|(edge, n)| std::iter::repeat_n(edge.clone(), *n)).collect();
+    let edges = m.edges.iter().cloned().collect();
     (entities, edges)
 }
 
@@ -859,7 +869,7 @@ fn derived_from(m: &Model) -> BTreeMap<String, Json> {
     // engine's own order isn't the model's job, so compare as sets of far ends in a stable order
     for id in IDS {
         for kind in KINDS {
-            let all = || m.edges.iter().flat_map(|(edge, n)| std::iter::repeat_n(edge, *n));
+            let all = || m.edges.iter();
             let mut outs: Vec<&String> = all().filter(|(s, k, _)| s == id && k == kind).map(|(_, _, t)| t).collect();
             let mut ins: Vec<&String> = all().filter(|(_, k, t)| t == id && k == kind).map(|(s, _, _)| s).collect();
             outs.sort();
@@ -1085,7 +1095,7 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
             let mut far: Vec<&String> = if !live(id) {
                 vec![]
             } else {
-                let all = m.edges.keys();
+                let all = m.edges.iter();
                 let mut ends: Vec<&String> = if step == "out" {
                     all.filter(|(s, k, t)| s == id && k == kind && t != id).map(|(_, _, t)| t).collect()
                 } else {
@@ -1306,12 +1316,13 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;
     // Each reason `Model::apply` and `Model::step` refuse with
-    const REFUSALS: [&str; 8] = [
+    const REFUSALS: [&str; 9] = [
         "id in use",
         "no such entity",
         "not a list",
         "self link",
         "no such relation",
+        "duplicate edge",
         "link target missing at commit",
         "the unit threw",
         "the store refused the commit",

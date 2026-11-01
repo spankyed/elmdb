@@ -1600,9 +1600,10 @@ impl<R: Read> Query<'_, R> {
             // collects them
             let sources = self.collect(before)?;
             if let ([from], [kind]) = (sources.as_slice(), kinds) {
-                let unique = relations::definition(self.r, kind)?.unique;
+                // A kind with no key joins two entities by one edge at most, so its far ends need no dedupe
+                let one_per_pair = relations::definition(self.r, kind)?.key.is_empty();
                 self.walked_back.set(Some(before + 1));
-                return self.walk_edges(from, kind, types, outward, Some(unique), &mut reached, visit);
+                return self.walk_edges(from, kind, types, outward, Some(one_per_pair), &mut reached, visit);
             }
             for from in &sources {
                 for kind in kinds {
@@ -1624,8 +1625,8 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// Visits the far ends of `from`'s edges of `kind` a step may reach, each once, in place order, or from the last
-    /// when `backward` says whether the kind is `unique`; false when `visit` stopped the walk. From the last, an end
-    /// joined by several edges of a kind that isn't unique is visited at its first edge's place, where the walk in
+    /// when `backward` says whether the kind joins a pair by one edge at most; false when `visit` stopped the walk. From
+    /// the last, an end joined by several edges of a keyed kind is visited at its first edge's place, where the walk in
     /// place order visits it
     #[allow(clippy::too_many_arguments)]
     fn walk_edges(

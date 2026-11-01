@@ -11,7 +11,7 @@ fn example() -> Value {
       "relations": {
         "contains":   { "cardinality": "one-to-many" },
         "parent_of":  { "cardinality": "one-to-many", "acyclic": true },
-        "references": { "cardinality": "many-to-many", "unique": true,
+        "references": { "cardinality": "many-to-many", "key": ["via"],
                         "endpoints": [{ "source": "Note", "target": "Note" }] }
       },
       "types": {
@@ -164,6 +164,27 @@ fn refuses_the_wrong_language_and_reserved_names() {
         problems(edited(|j| j["types"]["message_part"] = json!({ "fields": {} }))),
         ["types.message_part: a type's name is PascalCase, which \"message_part\" isn't",]
     );
+}
+
+#[test]
+fn a_relation_key_names_info_fields_once_on_info_that_is_a_map() {
+    assert_eq!(parse(&example()).unwrap().relations["references"].key, ["via"]);
+    assert!(parse(&example()).unwrap().relations["contains"].key.is_empty(), "no key is one edge a pair");
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["key"] = json!(["via", "via"]))),
+        ["relations.references.key[1]: \"via\" is named twice"]
+    );
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["key"] = json!(["Via"]))),
+        ["relations.references.key[0]: a key field's name is lowerCamelCase, which \"Via\" isn't"]
+    );
+    assert_eq!(
+        problems(edited(|j| j["relations"]["references"]["info"] = json!({ "type": "integer" }))),
+        ["relations.references.key: names info fields, so the kind's info is an object or any"]
+    );
+    let unique = problems(edited(|j| j["relations"]["contains"]["unique"] = json!(true)));
+    assert_eq!(unique.len(), 1, "{unique:?}");
+    assert!(unique[0].starts_with("relations.contains.unique"), "{unique:?}");
 }
 
 #[test]
@@ -473,6 +494,15 @@ mod changes {
         assert_eq!(
             changes(|j| j["relations"]["contains"]["acyclic"] = json!(true)),
             one("relations.contains", Change::Changed, Effect::Enforced)
+        );
+        // A key that drops a field can make one identity of edges it told apart; one that adds a field can't
+        assert_eq!(
+            changes(|j| j["relations"]["references"]["key"] = json!([])),
+            one("relations.references", Change::Changed, Effect::Enforced)
+        );
+        assert_eq!(
+            changes(|j| j["relations"]["references"]["key"] = json!(["via", "at"])),
+            one("relations.references", Change::Changed, Effect::Applied)
         );
         assert_eq!(
             changes(|j| j["relations"]["contains"]["endpoints"] = json!([{ "source": "Thread", "target": "Message" }])),

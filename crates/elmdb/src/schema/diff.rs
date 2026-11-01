@@ -73,7 +73,8 @@ pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
     keyed(&stored.relations, &given.relations, "relations", &mut out, added_kind, |at, old, new, out| {
         let tightened = !widens_cardinality(old.cardinality, new.cardinality)
             || (new.acyclic && !old.acyclic)
-            || (new.unique && !old.unique)
+            // A key that drops a field can make edges its old key told apart into one identity
+            || !old.key.iter().all(|f| new.key.contains(f))
             || !widens_endpoints(old.endpoints.as_deref(), new.endpoints.as_deref())
             || !widens_field(&old.info, &new.info);
         out.push(at, Change::Changed, if tightened { Effect::Enforced } else { Effect::Applied });

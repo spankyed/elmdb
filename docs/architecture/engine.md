@@ -169,7 +169,7 @@ an answer:
   creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
 - **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
   further than its answer. A `reverse` straight after `out` or `in` from one entity over one kind reads that entity's
-  edges from the last instead of collecting the walk, an end joined by several edges of a kind that isn't `unique`
+  edges from the last instead of collecting the walk, an end joined by several edges of a keyed kind
   coming at its first edge's place as in the walk, so the last `limit` edges cost the limit and not the list. From
   several entities or kinds, the `reverse` collects the walk.
 - **`orderBy` then `limit` holds the first `limit`**, in order with ties kept as they came, rather than sorting the whole
@@ -225,7 +225,7 @@ The operations:
 - **Operations:** create (a whole row; the engine assigns the id unless an import brings one, the code, `createdAt`
   and `updatedAt`), upsert, set, set many, append to a list, merge into an object, delete a field, remove from a list,
   trash, restore, grant and revoke a role, grant exclusively among entities, link (with info and, for a kind declared
-  weighted, a weight; replace, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
+  weighted, a weight; merging on the edge's identity, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
   info, its weight) and remove one, destroy.
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
   it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
@@ -239,8 +239,8 @@ The operations:
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
-  counts every edge, a trashed entity's included, since restoring it would close the cycle), or a unique kind's edge
-  moved onto a pair another edge joins (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
+  counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
+  moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later.
 - **The result** carries what the batch created (ids, codes), the rows asked for back, and the commit's change set.
 
@@ -346,7 +346,7 @@ unit is open.
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
   doesn't declare, a `ref` naming no entity (including nested lists), duplicate unique values, and relations with
-  missing ends, self-links, disallowed endpoint types, invalid/missing info, duplicate unique pairs, excessive
+  missing ends, self-links, disallowed endpoint types, invalid/missing info, two edges with one identity, excessive
   cardinality or cycles in acyclic kinds. Constraint auditing reads primary values/relations even when an index is
   damaged or unbuilt; rebuilding cannot hide these violations. Unique values include values an index cannot store,
   and use the write contract's numeric, map, single-field list and compound equality rules. heed exposes no walk of

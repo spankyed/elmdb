@@ -21,7 +21,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/xb` type index | that a value index is built; a plan reads only a built one | derived |
 | `d/x` type field value seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
-| `d/b` source kind target seq | the edges between two entities | derived |
+| `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
 | `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
 | `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |

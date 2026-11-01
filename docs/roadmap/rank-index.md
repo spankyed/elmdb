@@ -199,7 +199,7 @@ contract.
 ## Verification
 
 - **Against a full recompute:** a model test (proptest-state-machine, as `crates/elmdb/src/engine/tests/model.rs` drives the store) applies
-  random sequences of links, unlinks, weight changes (`updateRelation` and a unique kind's relink), creates, trashes and
+  random sequences of links, unlinks, weight changes (`updateRelation` and a relink), creates, trashes and
   destroys over a weighted kind and an unweighted one, and after each checks the scores against power
   iteration within the reported bound, and the invariant.
 - **The contract across histories:** the same graph built by random permutations of its commits gives scores within

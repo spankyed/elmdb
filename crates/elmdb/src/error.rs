@@ -97,7 +97,7 @@ pub enum ErrorCode {
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
-    /// A relation of a `unique` kind moved onto two ends another edge of its kind already joins
+    /// A relation moved, or its key changed, onto the identity of another edge: the same ends and key values
     DuplicateEdge,
     /// A short code or label numbering whose next number would pass 2^53 - 1, the largest JavaScript holds exactly
     NumbersExhausted,
