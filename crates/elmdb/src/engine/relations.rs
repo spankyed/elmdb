@@ -18,6 +18,7 @@ use crate::schema::{Cardinality, RelationDef};
 use super::changes::Event;
 use super::entities;
 use super::keys;
+use super::mirror::EdgeDelta;
 use super::unit::{Check, Read, Txn};
 use super::{ids, values};
 
@@ -62,7 +63,15 @@ pub const MAX_WEIGHT: f64 = f64::from_bits((1023 + 960) << 52);
 /// that stay where they are is written here alone
 fn file_edges(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
     t.put(&keys::edge(true, &s.source, &s.kind, s.seq), &edge_value(relation, &s.target, s.weight))?;
-    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge_value(relation, &s.source, s.weight))
+    t.put(&keys::edge(false, &s.target, &s.kind, s.seq), &edge_value(relation, &s.source, s.weight))?;
+    t.state.edges.push(EdgeDelta::Filed {
+        kind: s.kind.clone(),
+        source: s.source.clone(),
+        target: s.target.clone(),
+        seq: s.seq,
+        weight: s.weight,
+    });
+    Ok(())
 }
 
 fn file(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
@@ -73,6 +82,12 @@ fn file(t: &mut Txn<'_, '_>, relation: &str, s: &Stored) -> Result<()> {
 fn unfile(t: &mut Txn<'_, '_>, s: &Stored) -> Result<()> {
     t.del(&keys::edge(true, &s.source, &s.kind, s.seq))?;
     t.del(&keys::edge(false, &s.target, &s.kind, s.seq))?;
+    t.state.edges.push(EdgeDelta::Unfiled {
+        kind: s.kind.clone(),
+        source: s.source.clone(),
+        target: s.target.clone(),
+        seq: s.seq,
+    });
     t.del(&keys::between(&s.source, &s.kind, &s.target, s.seq))
 }
 
@@ -143,6 +158,22 @@ pub fn visit_far_ends(
     let mut result = Ok(true);
     t.visit(&keys::edges_of(outward, entity, kind), |_, value| {
         result = far_of(value).and_then(|(far, weight)| each(far, weight));
+        matches!(result, Ok(true))
+    })?;
+    result.map(|_| ())
+}
+
+/// `visit_far_ends` over one kind, each far end with its edge's place
+pub fn visit_placed_far_ends(
+    t: &impl Read,
+    entity: &str,
+    outward: bool,
+    kind: &str,
+    mut each: impl FnMut(u64, &str, Option<f64>) -> Result<bool>,
+) -> Result<()> {
+    let mut result = Ok(true);
+    t.visit(&keys::edges_of(outward, entity, Some(kind)), |key, value| {
+        result = place_of(key).and_then(|seq| far_of(value).and_then(|(far, weight)| each(seq, far, weight)));
         matches!(result, Ok(true))
     })?;
     result.map(|_| ())

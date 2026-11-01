@@ -1124,6 +1124,103 @@ fn an_index_within_its_tolerance_is_built_though_nodes_still_wait() {
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
 
+/// The builder's edge mirror: the graph a drain read, kept by the commits after it, and emptied by any it can't follow
+#[test]
+fn the_drain_reads_the_graph_through_a_mirror_the_commits_keep_and_check_compares() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..30).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..30).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let mirror = db.store().unwrap().mirror();
+    let state = || {
+        let m = mirror.lock();
+        (m.sequence(), m.held())
+    };
+    // A change and its drain: the mirror is at the last commit and holds what the drain read
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (sequence, held) = state();
+    assert_eq!(sequence, Some(db.sequence().unwrap()), "kept to the last commit");
+    assert!(held > 0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // A unit's savepoint rolled back: its entries never reach the mirror, which still follows
+    let mut unit = db.begin().unwrap();
+    unit.write(&super::batch(vec![json!({ "op": "link", "source": "Task-5", "kind": "refs", "target": "Task-20" })]))
+        .unwrap();
+    let depth = unit.savepoint().unwrap();
+    unit.write(&super::batch(vec![json!({ "op": "link", "source": "Task-6", "kind": "refs", "target": "Task-21" })]))
+        .unwrap();
+    unit.rollback_to(depth).unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(state().0, Some(db.sequence().unwrap()));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // check() names a list that strays from the store
+    mirror.lock().lose_an_entry();
+    let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
+    assert!(said.iter().any(|m| m.contains("edge mirror")), "{said:?}");
+    // A write outside the engine's units, and an admin unit, each empty it
+    db.store().unwrap().write(|_, _| Ok(()), false).unwrap();
+    assert_eq!(state(), (None, 0));
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(state().1 > 0, "a drain fills it again");
+    db.rebuild(None).unwrap();
+    assert_eq!(state(), (None, 0), "emptied by the admin unit, whose own drain reads the store");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+/// The child of `another_processs_commit_between_two_drains_empties_the_mirror`: one edge linked at an entity whose
+/// list the parent's mirror holds, its drain finished, and the database closed
+#[test]
+fn child_links_one_edge_the_parents_mirror_holds() {
+    let Some(path) = std::env::var_os("ELMDB_MIRROR_CHILD") else { return };
+    let db =
+        Database::open(path, OpenOptions { schema: Some(schema("out", true)), syncs: false, ..Default::default() })
+            .unwrap();
+    db.write(
+        &super::batch(vec![json!({ "op": "link", "source": "Task-5", "kind": "refs", "target": "Task-25" })]),
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+    println!("linked");
+}
+
+#[test]
+fn another_processs_commit_between_two_drains_empties_the_mirror() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..30).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..30).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.store().unwrap().mirror().lock().held() > 0, "the drain filled the mirror");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "engine::tests::rank_index::child_links_one_edge_the_parents_mirror_holds", "--nocapture"])
+        .env("ELMDB_MIRROR_CHILD", dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("linked"), "{}", String::from_utf8_lossy(&out.stderr));
+    // This process's next commit reads the child's sequence as its base, which isn't the mirror's
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-28" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_within_bound(&db, "out", true);
+}
+
 #[test]
 fn a_read_only_open_drains_nothing() {
     let dir = tempfile::tempdir().unwrap();
