@@ -9,8 +9,11 @@ import { setField } from './ids.ts';
 export interface RelationRules {
   /** A link that would close a cycle through this kind is refused (`CYCLE`) */
   acyclic?: boolean;
-  /** At most one edge of this kind from an entity to another; linking the pair again replaces the edge's info */
-  unique?: boolean;
+  /**
+   * The info fields that, with its two ends, identify an edge; none, the ends alone, so two entities are joined by one
+   * edge of the kind at most. A link to an identity an edge holds updates that edge's info and weight
+   */
+  key?: readonly string[];
   /** Each edge carries a weight, 1 unless a link gives another, which `rank` and `communities` read */
   weighted?: boolean;
 }
@@ -119,7 +122,7 @@ export function toElmdbSchema(schema: EngineSchema): object {
   const relations = Object.fromEntries(Object.entries(schema.relations).map(([kind, rules]) => [kind, {
     cardinality: 'many-to-many',
     ...(rules.acyclic && { acyclic: true }),
-    ...(rules.unique && { unique: true }),
+    ...(rules.key?.length && { key: [...rules.key] }),
     ...(rules.weighted && { weighted: true }),
   }]));
   const roles = Object.fromEntries(schema.roles.map((role) => [role, {}]));

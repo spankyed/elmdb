@@ -504,15 +504,17 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
  * entities — is the kind's declaration (`apack.json` `data.relations`), not a link's
  */
 export interface LinkOptions {
-  /** Stored on the edge, and part of what makes it the same edge as one already there */
+  /**
+   * Stored on the edge, replacing what an edge with the same identity held: the values of the kind's `key` fields are
+   * part of that identity, and the rest of the info is what the edge holds
+   */
   info?: unknown;
 }
 
 /**
  * How `link` makes an edge of a kind declared `weighted`: its info, and its weight, from 0 to 2^960, 1 when none is
- * given. A weight is part of the edge as its info is: on a kind declared `unique` (a weighted kind is unless its
- * declaration says `unique: false`) linking the pair again replaces the weight; on any other, another weight is a
- * second edge, whose weight a `rank` adds to the first's
+ * given. A weight is what the edge holds, never what identifies it: linking the same identity again with another
+ * weight replaces it. A keyed kind's edges of one pair, one per key value, add their weights in a `rank`
  */
 export interface WeightedLinkOptions extends LinkOptions {
   /** The edge's weight, from 0 to 2^960; 1 when none is given */
@@ -645,9 +647,9 @@ export interface WriteBuilder<E extends string = string, D extends EarsSchema = 
   /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
   removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
   /**
-   * Links this entity to `target`. An edge of the kind to the target with the same `info` (or any, when
-   * none is given) is the same edge, and linking it again changes nothing; of a kind declared `unique`, any edge to
-   * the target is, and linking it again with `info` replaces the edge's. A kind declared `weighted` takes a `weight`
+   * Links this entity to `target`. An edge is identified by its ends and the values of its kind's `key` fields in its
+   * `info` (none: the ends alone, one edge a pair), so linking to an identity an edge holds updates that edge, keeping
+   * its id and its place: a given `info` replaces its info and a given `weight` its weight. A kind declared `weighted` takes a `weight`
    * too (`WeightedLinkOptions`), which the compiler refuses for any other kind and the engine at runtime
    * (`VALUE_INVALID`). A kind declared `acyclic` refuses an edge that would close a cycle through it (`CYCLE`).
    */

@@ -57,27 +57,31 @@ describe('links', () => {
     expect(e.query.withTrashed('Task').unlinkedFrom('child').ids()).toEqual([root, loose]);
   });
 
-  it('linking the same edge again changes nothing, keeping its id and its place; another info is another edge', () => {
+  it('a link to the same two ends is the same edge, keeping its id and its place, its info replaced by any the link gives', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b, { info: { x: 1 } }).link('blocks', c);
     const first = e.findRelations({ source: a, target: b })[0].id;
-    e.write(a).link('blocks', b, { info: { x: 1 } });
-    // No info given matches any edge between the ends
     e.write(a).link('blocks', b);
-    expect(e.findRelations().map((r) => r.id)).toEqual([first, expect.any(String)]);
-    expect(e.query.ids(a).out('blocks').ids()).toEqual([b, c]);
+    expect(e.getRelation(first)?.info).toEqual({ x: 1 });
     e.write(a).link('blocks', b, { info: { x: 2 } });
-    expect(e.findRelations({ source: a, target: b })).toHaveLength(2);
+    expect(e.findRelations().map((r) => [r.id, r.info])).toEqual([[first, { x: 2 }], [expect.any(String), undefined]]);
+    expect(e.query.ids(a).out('blocks').ids()).toEqual([b, c]);
   });
 
-  it('an info with the same fields in another order is the same edge', () => {
+  it('a keyed kind joins two ends by one edge per value of its key, a field the info lacks being null', () => {
+    e = engine({ relationRules: { refs: { key: ['handle'] } } });
     const [a, b] = [task('A'), task('B')];
-    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [1, 2], z: 'z' } } });
-    e.write(a).link('blocks', b, { info: { at: { z: 'z', y: [1, 2] }, x: 1 } });
-    expect(e.findRelations()).toHaveLength(1);
-    // A list's order is its value
-    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [2, 1], z: 'z' } } });
-    expect(e.findRelations()).toHaveLength(2);
+    e.write(a).link('refs', b, { info: { handle: 1, label: 'one' } }).link('refs', b, { info: { handle: 2 } });
+    e.write(a).link('refs', b, { info: { label: 'uno', handle: 1 } });
+    expect(edges()).toEqual([[a, 'refs', b, { label: 'uno', handle: 1 }], [a, 'refs', b, { handle: 2 }]]);
+    // No handle is a third identity, which a link with no info and one with a null handle both name
+    e.write(a).link('refs', b).link('refs', b, { info: { handle: null } }).link('refs', b, { info: { label: 'none' } });
+    expect(edges()).toEqual([[a, 'refs', b, { label: 'uno', handle: 1 }], [a, 'refs', b, { handle: 2 }], [a, 'refs', b, { label: 'none' }]]);
+    // A key's value compares as a value: the same fields in another order are the same, a list's order is its value
+    e.write(a).link('refs', b, { info: { handle: { y: [1, 2], z: 'z' } } }).link('refs', b, { info: { handle: { z: 'z', y: [1, 2] } } });
+    expect(e.findRelations()).toHaveLength(4);
+    e.write(a).link('refs', b, { info: { handle: { y: [2, 1], z: 'z' } } });
+    expect(e.findRelations()).toHaveLength(5);
   });
 
   it('refuses options it does not know, which is info passed where the options go', () => {
@@ -121,6 +125,7 @@ describe('links', () => {
   });
 
   it('removeRelation removes that one edge, leaving the other edges between its ends and the ends themselves, and refuses an id no relation has', () => {
+    e = engine({ relationRules: { blocks: { key: ['handle'] } } });
     const [a, b] = [task('A'), task('B')];
     e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
     const [first] = e.findRelations();
@@ -131,13 +136,18 @@ describe('links', () => {
     expect(() => e.removeRelation(first.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
-  it('a kind declared unique keeps one edge between two ends, which linking again replaces the info of; updateRelation moves one, keeping its id, and refuses an id no relation has', () => {
-    e = engine({ relationRules: { refs: { unique: true } } });
+  it('updateRelation moves an edge, keeping its id, refuses one onto another edge\'s identity, and refuses an id no relation has', () => {
+    e = engine({ relationRules: { blocks: { key: ['handle'] } } });
     const [a, b, c] = [task('A'), task('B'), task('C')];
-    e.write(a).link('refs', b, { info: 1 }).link('refs', b, { info: 2 });
-    e.write(a).link('refs', b, { info: 3 });
-    expect(edges()).toEqual([[a, 'refs', b, 3]]);
-    e.write(a).link('refs', b);
+    e.write(a).link('refs', b, { info: 3 }).link('refs', c);
+    const onto = e.findRelations({ target: c })[0].id;
+    expect(() => e.updateRelation(onto, { target: b })).toThrow(expect.objectContaining({ code: 'DUPLICATE_EDGE' }));
+    e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
+    const second = e.findRelations({ kind: 'blocks' })[1].id;
+    expect(() => e.updateRelation(second, { info: { handle: 1 } })).toThrow(expect.objectContaining({ code: 'DUPLICATE_EDGE' }));
+    e.updateRelation(second, { info: { handle: 2, label: 'kept' } });
+    e.removeRelation(onto);
+    e.write(a).unlink('blocks');
     expect(edges()).toEqual([[a, 'refs', b, 3]]);
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { target: c, info: 4 });
@@ -452,8 +462,8 @@ describe('roles', () => {
 });
 
 describe('weighted kinds', () => {
-  // `refers` sets its edges' weights (unique), `mentions` keeps parallel edges whose weights add, `refs` weighs nothing
-  const weighted = () => engine({ relationRules: { refers: { weighted: true, unique: true }, mentions: { weighted: true } } });
+  // `refers` weighs one edge a pair, `mentions` one per `n`, whose weights a rank adds, `refs` weighs nothing
+  const weighted = () => engine({ relationRules: { refers: { weighted: true }, mentions: { weighted: true, key: ['n'] } } });
   const scores = (hits: { id: string; score: number }[]) => new Map(hits.map((h) => [h.id, h.score]));
 
   it('a link takes a weight, 1 unless given, and rows of a weighted kind answer it', () => {
@@ -481,16 +491,17 @@ describe('weighted kinds', () => {
     expect(e.findRelations()[0]).toMatchObject({ weight: 0 });
   });
 
-  it('a unique kind relinked takes the new weight; another kind adds an edge whose weight a rank adds to the first', () => {
+  it('a weight is what an edge holds, which a link to its identity replaces; a keyed kind\'s edges of one pair each hold one', () => {
     e = weighted();
     const [a, b] = [task('a'), task('b')];
     e.write(a).link('refers', b, { weight: 2 });
+    e.write(a).link('refers', b);
     e.write(a).link('refers', b, { weight: 5 });
     expect(e.findRelations({ kind: 'refers' }).map((r) => r.weight)).toEqual([5]);
-    e.write(a).link('mentions', b, { weight: 2 });
-    e.write(a).link('mentions', b, { weight: 2 });
-    e.write(a).link('mentions', b, { weight: 3 });
-    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.weight)).toEqual([2, 3]);
+    e.write(a).link('mentions', b, { info: { n: 1 }, weight: 2 });
+    e.write(a).link('mentions', b, { info: { n: 2 }, weight: 2 });
+    e.write(a).link('mentions', b, { info: { n: 1 }, weight: 3 });
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.weight)).toEqual([3, 2]);
   });
 
   it('updateRelation replaces a weight, with or without a move, and the admin face loads one', () => {
@@ -509,10 +520,10 @@ describe('weighted kinds', () => {
     expect(e.getRelation(loaded)).toMatchObject({ weight: 3 });
     e.admin.updateRelation(loaded, { target: a });
     expect(e.getRelation(loaded)).toMatchObject({ target: a, weight: 3 });
-    // A loaded weight of 1 is the weight a link leaves out, so linking the same edge again finds it
+    // A loaded weight of 1 is the weight a link leaves out
     const one = e.admin.addRelation(a, 'mentions', c, undefined, 1);
     e.write(a).link('mentions', c, { weight: 1 });
-    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.id)).toEqual([one]);
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => [r.id, r.weight])).toEqual([[one, 1]]);
   });
 
   it('rank walks and teleports by weight unless told not to, and EXPLAIN reports the weight it read', () => {
