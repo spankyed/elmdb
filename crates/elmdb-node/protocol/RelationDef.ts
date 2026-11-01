@@ -12,12 +12,14 @@ export type RelationDef = { declaredBy?: string | null, cardinality: Cardinality
  */
 acyclic?: boolean, 
 /**
- * At most one edge of this kind between two entities; linking a pair again updates the edge's info
+ * The info fields that, with its two ends, identify an edge: two entities are joined by at most one edge of the
+ * kind for each value of its key, a missing field holding null. Empty, the default, is one edge per pair. A link
+ * to an edge's identity updates that edge
  */
-unique?: boolean, 
+key?: Array<string>, 
 /**
  * Each edge carries a weight, a number from 0 to 2^960 and 1 when a link gives none, which `rank` and
- * `communities` read
+ * `communities` read; a property of the edge, never part of what identifies it
  */
 weighted?: boolean, 
 /**

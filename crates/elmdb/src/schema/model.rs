@@ -130,12 +130,14 @@ pub struct RelationDef {
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub acyclic: bool,
-    /// At most one edge of this kind between two entities; linking a pair again updates the edge's info
+    /// The info fields that, with its two ends, identify an edge: two entities are joined by at most one edge of the
+    /// kind for each value of its key, a missing field holding null. Empty, the default, is one edge per pair. A link
+    /// to an edge's identity updates that edge
     #[serde(default)]
-    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
-    pub unique: bool,
+    #[cfg_attr(feature = "codegen", ts(as = "Option<Vec<String>>", optional))]
+    pub key: Vec<String>,
     /// Each edge carries a weight, a number from 0 to 2^960 and 1 when a link gives none, which `rank` and
-    /// `communities` read
+    /// `communities` read; a property of the edge, never part of what identifies it
     #[serde(default)]
     #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub weighted: bool,

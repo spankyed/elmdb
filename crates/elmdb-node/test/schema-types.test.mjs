@@ -52,7 +52,7 @@ test('the canonical form a database answers is a Schema, every absent option nul
         declaredBy: null,
         endpoints: null,
         info: { nullable: true, optional: true, type: 'any' },
-        unique: false,
+        key: [],
         weighted: false,
       },
       weighs: {
@@ -61,7 +61,7 @@ test('the canonical form a database answers is a Schema, every absent option nul
         declaredBy: null,
         endpoints: null,
         info: { nullable: true, optional: true, type: 'any' },
-        unique: false,
+        key: [],
         weighted: true,
       },
     },

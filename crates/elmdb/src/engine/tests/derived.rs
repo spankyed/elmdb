@@ -714,10 +714,11 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "$schema": crate::schema::SCHEMA_LANGUAGE,
             "types": {"Node":{"fields":{}}, "Other":{"fields":{}}},
             "relations": {
-                "strict": {"cardinality":"many-to-many", "unique":true, "acyclic":true,
+                "strict": {"cardinality":"many-to-many", "acyclic":true,
                     "endpoints":[{"source":"Node", "target":"Node"}], "info":{"type":"integer"}},
                 "refs": {"cardinality":"many-to-many", "info":{
-                    "type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}}}
+                    "type":"list", "of":{"type":"list", "of":{"type":"ref", "to":["Node"]}}}},
+                "keyed": {"cardinality":"many-to-many", "key":["n"]}
             }
         }),
     )
@@ -748,6 +749,9 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "Node-b",
             Some(rmpv::Value::Array(vec![rmpv::Value::Array(vec!["Node-missing".into()])])),
         ),
+        ("keyedOne", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
+        ("keyedTwo", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 1.into())]))),
+        ("keyedOther", "keyed", "Node-b", "Node-c", Some(rmpv::Value::Map(vec![("n".into(), 2.into())]))),
     ];
     damage(&db, |txn, d| {
         for (seq, (id, kind, source, target, info)) in rows.iter().enumerate() {
@@ -767,7 +771,8 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
     let before = db.check().unwrap().violations;
     for (subject, message) in [
         ("Relation-cycle", "cycle"),
-        ("Relation-duplicate", "unique pair"),
+        ("Relation-duplicate", "duplicate strict edges join Node-a to Node-b"),
+        ("Relation-keyedTwo", "with the key 1"),
         ("Relation-self", "itself"),
         ("Relation-endpoint", "doesn't join"),
         ("Relation-required", "required info"),
@@ -780,6 +785,7 @@ fn relation_audit_uses_primary_rows_for_every_declared_rule_even_after_rebuild()
             "missing {subject}: {message}; {before:?}"
         );
     }
+    assert!(!before.iter().any(|v| v.subject.contains("keyedOther")), "another key value is another edge: {before:?}");
     db.rebuild(None).unwrap();
     assert_eq!(db.check().unwrap().violations, before, "rebuild cannot hide primary violations");
 }
@@ -990,7 +996,7 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
         let db = with_schema(
             &dir,
             json!({"$schema":crate::schema::SCHEMA_LANGUAGE,
-                "types":{"Node":{"fields":{}}}, "relations":{"links":{"cardinality":cardinality}}
+                "types":{"Node":{"fields":{}}}, "relations":{"links":{"cardinality":cardinality, "key":["n"]}}
             }),
         )
         .unwrap();
@@ -1008,7 +1014,8 @@ fn unchecked_cardinality_audit_counts_distinct_far_ends_for_all_four_kinds() {
                 kind: "links".into(),
                 source: source.into(),
                 target: target.into(),
-                info: None,
+                // A key value each, so the second a-to-b edge is another edge, not a duplicate of the first
+                info: Some(rmpv::Value::Map(vec![("n".into(), (i as i64).into())])),
                 weight: None,
             });
         }

@@ -30,7 +30,7 @@ What a database holds and the rules it keeps, declared as data. Built: `crates/e
   "relations": {
     "contains":   { "cardinality": "one-to-many" },
     "parent_of":  { "cardinality": "one-to-many", "acyclic": true },
-    "references": { "cardinality": "many-to-many", "unique": true,
+    "references": { "cardinality": "many-to-many", "key": ["via"],
                     "endpoints": [{ "source": "Note", "target": "Note" }] }
   },
   "types": {
@@ -155,7 +155,6 @@ violations identify the element path. Strings inside `object` and `any` remain o
 "parent_of": {
   "cardinality": "one-to-many",
   "acyclic": true,
-  "unique": true,
   "endpoints": [{ "source": "Collection", "target": "Collection" }, { "source": "Collection", "target": "Document" }],
   "info": { "type": "object", "optional": true }
 }
@@ -167,15 +166,19 @@ violations identify the element path. Strings inside `object` and `any` remain o
   moving a child is an unlink and a link in one batch.
 - `acyclic: true`: a link that would close a cycle through this kind is refused (`CYCLE`). Today's per-call
   `acyclicIn` becomes this.
-- `unique: true`: at most one edge of this kind between two entities, so linking a pair again updates the edge's info,
-  and moving an edge onto a pair another edge joins is refused (`DUPLICATE_EDGE`).
-  Today's per-call `replace` becomes this.
+- `key`: the info fields that, with its two ends, identify an edge. Absent, the ends alone do: two entities are joined
+  by at most one edge of the kind. A key lets a pair be joined by several, one for each value of its fields, as a
+  flow's transitions are one for each pair of handles they join: `"key": ["sourceHandle", "targetHandle"]`. A field
+  the info doesn't hold, or info that is no map, is null. A key names lowerCamelCase fields once each, on a kind whose
+  `info` is an `object` or `any`.
+- **A link merges on the identity**: linking two ends with key values an edge between them holds updates that edge,
+  replacing its info with any the link gives and its weight with any it gives, and keeps the edge's id and its place;
+  otherwise it adds an edge. An edge's info past its key, and its weight, are what the edge holds, never what it is.
+  Moving an edge, or changing its key, onto an identity another edge holds is refused (`DUPLICATE_EDGE`).
 - `weighted: true`: each edge of this kind has a weight, a number from 0 to 2^960 (so no sum of weights reaches
   infinity), 1 when a link gives none. A weight that isn't one, or a weight on a kind not declared weighted, is refused
-  (`VALUE_INVALID`). The weight is part of the edge as its info is: linking a pair again with another weight adds a
-  parallel edge, whose weight adds to the first's in a rank, or on a `unique` kind replaces the weight. A kind whose
-  weights are replaced, a confidence measured again, is declared `unique` too. `rank` and `communities` read it
-  (`engine.md`, Reads: plans).
+  (`VALUE_INVALID`). Linking a pair again with another weight replaces the edge's; a keyed kind's edges of one pair
+  add their weights in a rank. `rank` and `communities` read it (`engine.md`, Reads: plans).
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.
 
@@ -281,7 +284,7 @@ stored one.
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
-| A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic`, `unique` added) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
+| A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic` added, a field dropped from a relation's `key`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
 | A short code prefix changed, a type declared again with another prefix than its stored codes hold, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
 | Anything renamed | not inferred. `admin.renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |
 

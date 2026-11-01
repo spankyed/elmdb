@@ -245,7 +245,10 @@ impl Reader {
             ],
         );
         let acyclic = self.bool_or(&mut object, "acyclic", false);
-        let unique = self.bool_or(&mut object, "unique", false);
+        let key = match object.get("key") {
+            None => Some(Vec::new()),
+            Some(value) => self.strings(value, &object.at("key")),
+        };
         let weighted = self.bool_or(&mut object, "weighted", false);
         let endpoints = match object.get("endpoints") {
             None | Some(Value::Null) => Some(None),
@@ -260,7 +263,7 @@ impl Reader {
             declared_by: declared_by?,
             cardinality: cardinality?,
             acyclic: acyclic?,
-            unique: unique?,
+            key: key?,
             weighted: weighted?,
             endpoints: endpoints?,
             info: info?,

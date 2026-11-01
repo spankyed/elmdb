@@ -151,6 +151,16 @@ impl Validator<'_> {
             }
         }
         self.value_type(&format!("{at}.info"), &relation.info.value, who);
+        if !relation.key.is_empty() && !matches!(relation.info.value, ValueType::Object | ValueType::Any) {
+            self.problem(format!("{at}.key"), "names info fields, so the kind's info is an object or any".into(), who);
+        }
+        let mut seen = BTreeSet::new();
+        for (i, field) in relation.key.iter().enumerate() {
+            self.lower_camel(&format!("{at}.key[{i}]"), field, "key field", who);
+            if !seen.insert(field) {
+                self.problem(format!("{at}.key[{i}]"), format!("\"{field}\" is named twice"), who);
+            }
+        }
     }
 
     fn entity_type(&mut self, name: &str, def: &TypeDef) {

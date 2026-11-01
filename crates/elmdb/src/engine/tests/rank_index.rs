@@ -16,8 +16,8 @@ fn schema(direction: &str, weights: bool) -> Schema {
         "$schema": crate::schema::SCHEMA_LANGUAGE,
         "relations": {
             "refs": { "cardinality": "many-to-many" },
-            "weighs": { "cardinality": "many-to-many", "weighted": true },
-            "rates": { "cardinality": "many-to-many", "weighted": true, "unique": true },
+            "weighs": { "cardinality": "many-to-many", "weighted": true, "key": ["n"] },
+            "rates": { "cardinality": "many-to-many", "weighted": true },
             "other": { "cardinality": "many-to-many" }
         },
         "types": { "Task": { "fields": {} }, "Note": { "fields": {} }, "Tag": { "fields": {} } },
@@ -136,9 +136,10 @@ fn the_index_scores_within_its_bound_of_rank_as_the_graph_changes() {
         )
         .unwrap();
         assert_within_bound(&db, direction, weights);
-        // A parallel edge, a weight replaced, an edge removed
-        write(&db, vec![link("Task-1", "weighs", "Task-2", Some(1.5)), link("Note-a", "rates", "Task-0", Some(2.0))])
-            .unwrap();
+        // A parallel edge, which the key tells apart, a weight replaced, an edge removed
+        let mut parallel = link("Task-1", "weighs", "Task-2", Some(1.5));
+        parallel["info"] = json!({ "n": 2 });
+        write(&db, vec![parallel, link("Note-a", "rates", "Task-0", Some(2.0))]).unwrap();
         write(&db, vec![json!({ "op": "unlink", "source": "Task-2", "kind": "refs", "target": "Task-0" })]).unwrap();
         assert_within_bound(&db, direction, weights);
         // A node leaving with its edges, and coming back with them
@@ -363,6 +364,10 @@ fn json_of(op: &Op) -> Json {
             let mut op = json!({ "op": "link", "source": id(s), "kind": KINDS[k], "target": id(t) });
             if k > 0 {
                 op["weight"] = json!(f64::from(w) / 2.0);
+            }
+            if k == 1 {
+                // Two key values, so a pair is joined by parallel edges as often as one edge's weight is replaced
+                op["info"] = json!({ "n": w % 2 });
             }
             op
         }
@@ -683,6 +688,9 @@ proptest! {
                     let mut op = json!({ "op": "link", "source": unit_id(s), "kind": KINDS[k], "target": unit_id(t) });
                     if k == 1 || k == 2 {
                         op["weight"] = json!(f64::from(w) / 2.0);
+                    }
+                    if k == 1 {
+                        op["info"] = json!({ "n": w % 2 });
                     }
                     op
                 }

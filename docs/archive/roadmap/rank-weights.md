@@ -6,8 +6,8 @@ Where the build differs from the design below:
 - **The weight is stored only when it isn't 1**, on the row and in the edge entries, so an unweighted kind's rows and
   entries, and a weighted kind's edges of weight 1, are the bytes they were. Adding or removing `weighted` rewrites
   nothing.
-- **A weight is part of the edge's identity**, as its info is: linking a pair again with another weight adds a parallel
-  edge, or on a `unique` kind replaces the weight in place; no weight given matches any edge between the ends.
+- **A weight is a property of the edge, never part of what identifies it:** linking a pair again with another weight
+  replaces the edge's (`architecture/schema.md`, Relations: an edge is its ends and its kind's key).
 - **A weight, an edge's or a seed's, is at most 2^960**, so no sum of them a rank adds up reaches infinity and loses
   the walkers it holds; -0 is held as 0.
 - **An id named twice among the seeds adds its weights.**
