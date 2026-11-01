@@ -215,6 +215,8 @@ jobs:
           name: instruction-counts-gungraun
           path: ${{ runner.temp }}/gungraun
           if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
 
   # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
   # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
@@ -241,6 +243,8 @@ jobs:
           name: diagnostics-overhead-gungraun
           path: ${{ runner.temp }}/gungraun
           if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
 
   platforms:
     name: ${{ matrix.target }} on Node 22.17.0
