@@ -39,6 +39,26 @@ fn measure_growth(
     assert!(growth <= per_entity_bytes, "{name} grew {growth} bytes per entity, more than {per_entity_bytes}");
 }
 
+/// What a database built over a fixture of each size keeps allocated while open, and how much that grew per entity
+/// between them: for what it keeps between operations, where a peak would count what each operation frees again
+fn measure_kept_growth(name: &str, per_entity_bytes: usize, sizes: [usize; 2], fixture: impl Fn(usize) -> Fixture) {
+    let kept = sizes.map(|rows| {
+        let _profiler = dhat::Profiler::builder().testing().trim_backtraces(Some(4)).build();
+        let fixture = fixture(rows);
+        let kept = dhat::HeapStats::get().curr_bytes;
+        black_box(&fixture);
+        kept
+    });
+    // A database that keeps nothing at either size measured nothing kept, not a bound held
+    assert!(kept[1] > 0, "{name} kept nothing at {} entities", sizes[1]);
+    let growth = kept[1].saturating_sub(kept[0]) / (sizes[1] - sizes[0]);
+    eprintln!(
+        "{name}/{}..{}: kept_heap_bytes={}..{} growth_per_entity_bytes={growth} allowance_bytes={per_entity_bytes}",
+        sizes[0], sizes[1], kept[0], kept[1]
+    );
+    assert!(growth <= per_entity_bytes, "{name} kept {growth} bytes per entity, more than {per_entity_bytes}");
+}
+
 #[test]
 #[ignore = "dedicated heap gate: cargo test -p elmdb --release --test maintenance_heap -- --ignored --nocapture"]
 fn maintenance_heap_bounds() {
@@ -117,6 +137,12 @@ fn maintenance_heap_bounds() {
     measure_growth("ranked", 16, [5_000, 10_000], ranked, |fixture| {
         black_box(fixture.db.read(&fixture.graph_read("ranked")).unwrap());
     });
+    // An open database keeps nothing an entity without a rank index, measured, and with one the edge mirror its drains
+    // read the graph through, which the build's own drain fills: about 542 bytes an entity at five edges, measured on an
+    // Apple M1 Pro on 2026-11-01. Each edge is an entry at both ends, 32 bytes each, and each entity two lists and its
+    // name held twice
+    measure_kept_growth("graphKept", 16, [5_000, 10_000], graph);
+    measure_kept_growth("rankIndexKept", 640, [5_000, 10_000], ranked);
     // Communities copy the graph into leiden-rs's own: its builder's edge list at 24 bytes an edge, and its CSR holding
     // each edge both ways at 16 bytes a side, some 280 bytes an entity at five edges, beside its partition and the
     // statistics it moves nodes by: about 764 bytes an entity, measured
