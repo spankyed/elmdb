@@ -1,7 +1,7 @@
 //! `PlainMutex` and `PlainCondvar` over Shuttle's primitives, for a build with `--cfg shuttle`
 
 /// A mutex whose lock is never poisoned, over Shuttle's
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct PlainMutex<T>(shuttle::sync::Mutex<T>);
 
 impl<T> PlainMutex<T> {
