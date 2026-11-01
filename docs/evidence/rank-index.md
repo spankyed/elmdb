@@ -112,11 +112,13 @@ The last row's "before" is the mirror with SipHash. Sampled at 100,000 documents
 third writing back (node rows, 19%; order keys deleted, 8%; their keys, 5%), a quarter reading the node rows, and the
 pushes and the mirror's lookups the rest. The node rows, read and written, are what is left to cut.
 
-What the mirror keeps: about 542 bytes an entity at five edges, some 54 MB at 100,000 documents, where an open database
+What the mirror keeps: about 278 bytes an entity at five edges, some 28 MB at 100,000 documents, where an open database
 without the index keeps none an entity (`tests/maintenance_heap.rs`, `rankIndexKept`, release, dhat, 2026-11-01, Apple
-M1 Pro). Each edge is a 32-byte entry at both ends, and each entity two lists and its name held twice. A list a commit
-empties is dropped, and the names are counted afresh from the lists once they are twice those last counted, so an
-entity deleted leaves nothing behind.
+M1 Pro). Its names are some 91 of that, and each edge is a 24-byte entry at both ends, its weight held as a number no
+weight is when it has none. Each list is filled straight from the store and fitted: left with the room it grew into it
+kept 350, and collected from the buffer the store was read into, which Rust reuses in place, 542. A list a commit
+empties is dropped, and the names are counted afresh from the lists once commits have removed more entries than the
+lists hold, so an entity deleted leaves nothing behind and a drain filling the mirror never counts.
 
 Where a drain's work goes, from its pushes and the nodes it moved, logged from an uncommitted copy at 100,000 documents,
 2026-11-01: one edge changed moves every node. At the default tolerance a drain makes some 940,000 pushes, writes all
