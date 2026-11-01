@@ -21,6 +21,8 @@ use crate::sync::{Condvar, Mutex};
 use super::derive::build_chunk;
 use super::unit::{Txn, UnitState};
 
+#[cfg(all(test, shuttle))]
+mod model;
 
 /// How many entities one unit of a build covers
 const CHUNK: usize = 1000;

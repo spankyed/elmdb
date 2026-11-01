@@ -13,6 +13,7 @@ exclude_globs = [
     "crates/elmdb/src/sync/model.rs",
     "crates/elmdb/src/sync/shuttle_primitives.rs",
     "crates/elmdb/src/engine/watch/model.rs",
+    "crates/elmdb/src/engine/builder/model.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
@@ -121,8 +122,9 @@ exclude_re = [
     # again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch and each
     # hears the same
     "engine/mod.rs:75:.*delete ! in drain_commits",
-    # When a drain starts: a pause for commits to stop leaving pushes, which only a drain's cost shows (the bench)
-    "builder.rs:.*in await_quiet",
+    # When a drain starts: a pause for commits to stop leaving pushes, which only a drain's cost shows (the bench); that
+    # it waits for one is the builder's Shuttle model (`engine/builder/model.rs`), which no suite cargo-mutants runs builds
+    "builder.rs:.*in Core::await_quiet",
     # Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep kept in
     # the totals, so the same nodes are pushed in the same order (`draining_in_chunks_makes_the_bits_one_drain_makes`),
     # and the queue `finish` writes is counted from each node's residual, not from what was waiting
