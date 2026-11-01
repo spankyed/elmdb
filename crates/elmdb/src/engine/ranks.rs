@@ -166,6 +166,25 @@ fn order_key(index: &str, node: &Node) -> Vec<u8> {
     keys::rank_order(index, f64::from_bits(node.x.to_bits() & !((1u64 << 36) - 1)), node.type_at, node.seq)
 }
 
+/// What a read reports of a rank index's `nodes` scores: the step each is rounded to, a power of ten no larger than
+/// the bound over the nodes, so rounding them all moves the scores at most half the bound again in L1; and the bound
+/// with that added, rounded up to one significant figure, still a bound. A score that moved less than the step reads the
+/// same, so a watch over it hears a drain only when the drain moved something the step can tell apart
+pub fn reported(error: f64, nodes: u64) -> (f64, f64) {
+    if error.is_nan() || error <= 0.0 || nodes == 0 {
+        return (0.0, 0.0);
+    }
+    let step = 10f64.powf((error / nodes as f64).log10().floor());
+    let bound = error + step * nodes as f64 / 2.0;
+    let figure = 10f64.powf(bound.log10().floor());
+    ((bound / figure).ceil() * figure, step)
+}
+
+/// A score rounded to the step a read reports it at
+pub fn rounded(score: f64, step: f64) -> f64 {
+    if step > 0.0 { (score / step).round() * step } else { score }
+}
+
 /// A rank index's totals, or empty ones for an index nothing has written yet
 pub fn totals(r: &impl Read, index: &str) -> Result<Totals> {
     match r.get(&keys::rank_totals(index))? {
@@ -192,6 +211,12 @@ impl<'a> Index<'a> {
     fn new(name: &'a str, def: &'a RankDef, schema: &'a Schema) -> Self {
         let keep = 1.0 - def.damping;
         Index { name, def, schema, threshold: def.tolerance * keep * keep / 2.0 }
+    }
+
+    /// The residuals' sum at which the bound a read reports is the index's tolerance: pushes stop once the sum is
+    /// within it, though single nodes are still over the threshold, since only the sum is what the bound is of
+    fn budget(&self, nodes: u64) -> f64 {
+        self.threshold * nodes as f64
     }
 
     /// An edge's weight in this index's graph: its own for a kind declared weighted, read with weights; else 1
@@ -581,6 +606,9 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mut change = Change::begin(t, &index)?;
     let mut after = change.totals.swept;
     for _ in 0..limit {
+        if change.totals.residuals <= index.budget(change.totals.nodes) {
+            break;
+        }
         let next = match change.next_waiting(t, after)? {
             None if after.is_some() => change.next_waiting(t, None)?,
             next => next,
@@ -590,7 +618,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         after = Some(place);
     }
     change.totals.swept = after;
-    let waiting = !change.waiting.is_empty() || change.next_waiting(t, None)?.is_some();
+    let waiting = change.totals.residuals > index.budget(change.totals.nodes);
     change.finish(t)?;
     Ok(waiting)
 }
@@ -662,9 +690,11 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         Some(swept) => nodes.partition_point(|node| (node.type_at, node.seq) <= swept),
         None => 0,
     };
+    let budget = index.budget(n as u64);
+    let mut residuals: f64 = nodes.iter().map(|node| node.r.abs()).sum();
     let mut pushes = 0;
     let mut since_push = 0;
-    while pushes < limit && n > 0 && since_push < n {
+    while pushes < limit && n > 0 && since_push < n && residuals > budget {
         if at == n {
             at = 0;
         }
@@ -676,10 +706,13 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         }
         since_push = 0;
         let residual = nodes[u].r;
+        residuals -= residual.abs();
         if nodes[u].w > 0.0 {
             let share = alpha * residual / nodes[u].w;
             for &(v, weight) in &arcs[u] {
+                let held = nodes[v].r.abs();
                 nodes[v].r += share * weight;
+                residuals += nodes[v].r.abs() - held;
             }
         }
         nodes[u].x += residual;
@@ -690,7 +723,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         let last = if at == 0 { n - 1 } else { at - 1 };
         (nodes[last].type_at, nodes[last].seq)
     });
-    let waiting = nodes.iter().any(|node| node.r.abs() > threshold);
+    let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > budget;
     // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
     for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
         if old == new {
@@ -836,16 +869,12 @@ pub fn is_built(r: &impl Read, index: &str) -> Result<bool> {
     Ok(totals(r, index)?.stage == Stage::Built)
 }
 
-/// The rank indexes not built yet, or with nodes waiting to be pushed, for the drain
+/// The rank indexes not built yet, or whose bound is past their tolerance, for the drain
 pub fn unfinished(r: &impl Read) -> Result<Vec<String>> {
     let mut out = Vec::new();
-    for name in r.schema().ranks.keys() {
-        let mut waiting = false;
-        r.visit(&keys::rank_queue(name), |_, _| {
-            waiting = true;
-            false
-        })?;
-        if waiting || !is_built(r, name)? {
+    for (name, def) in &r.schema().ranks {
+        let totals = totals(r, name)?;
+        if totals.stage != Stage::Built || totals.error(def.damping) > def.tolerance {
             out.push(name.clone());
         }
     }

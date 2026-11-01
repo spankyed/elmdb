@@ -129,13 +129,14 @@ pub fn decode_batch(bytes: &[u8]) -> Result<Batch> {
         .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The batch doesn't decode: {e}")))
 }
 
-/// One value index's state
+/// One index's state: a type's, or a rank index
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct IndexStatus {
+    /// The type the index is on; none for a rank index, which spans types
     #[serde(rename = "type")]
-    pub entity_type: String,
+    pub entity_type: Option<String>,
     pub index: String,
     pub built: bool,
     /// Why its build failed, such as a unique index over rows holding the same values
@@ -484,10 +485,22 @@ impl Database {
             ));
         }
         waiter.wait();
-        Ok(())
+        let failures = self.builder().as_ref().map(Builder::failures).unwrap_or_default();
+        if failures.is_empty() {
+            return Ok(());
+        }
+        let named: Vec<String> = failures
+            .iter()
+            .map(|f| match &f.work {
+                Work::Index { entity_type, index } => format!("{entity_type}'s index {index}: {}", f.message),
+                Work::Rank { name } => format!("the rank index {name}: {}", f.message),
+            })
+            .collect();
+        Err(Error::new(ErrorCode::IndexBuildFailed, format!("An index build failed: {}", named.join("; "))))
     }
 
-    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    /// Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when
+    /// a build failed
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let store = self.store()?;
         let schema = self.schema_guard();
@@ -502,12 +515,21 @@ impl Database {
                         matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
                     });
                     out.push(IndexStatus {
-                        entity_type: entity_type.clone(),
+                        entity_type: Some(entity_type.clone()),
                         index: index.name.clone(),
                         built: derive::is_built(&s, entity_type, &index.name)?,
                         failure: failure.map(|f| f.message.clone()),
                     });
                 }
+            }
+            for name in schema.ranks.keys() {
+                let failure = failures.iter().find(|f| matches!(&f.work, Work::Rank { name: n } if n == name));
+                out.push(IndexStatus {
+                    entity_type: None,
+                    index: name.clone(),
+                    built: ranks::is_built(&s, name)?,
+                    failure: failure.map(|f| f.message.clone()),
+                });
             }
             Ok(out)
         })

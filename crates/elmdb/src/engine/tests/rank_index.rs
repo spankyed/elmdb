@@ -509,40 +509,40 @@ fn the_same_history_makes_the_same_bits_on_every_platform() {
 /// `the_same_history_makes_the_same_bits_on_every_platform`'s estimates, as this code found them on an Apple M1 Pro on
 /// 2026-10-31
 const KARATE_HISTORY_BITS: [u64; 34] = [
-    4613673579926782254,
-    4610821908507679268,
-    4611997313766654983,
-    4608420309496835819,
-    4604513055727937687,
-    4607900079068323918,
-    4607548093699354791,
-    4606344388540204292,
-    4607739974523240813,
-    4599412107090191155,
-    4604565980820253274,
-    4599726176833251323,
-    4600744756591145578,
-    4607823236193910293,
-    4601446465954465685,
-    4603085726173937314,
-    4603338583676891793,
-    4599653484846277290,
-    4599428786595022239,
-    4601721342182633847,
-    4600423382344164836,
-    4600698258572450612,
-    4601460709885148115,
-    4608865384604963893,
-    4603221709645400933,
-    4606851536761028675,
-    4602772274932736575,
-    4606406259886602508,
-    4602458881637634411,
-    4606674512061367489,
-    4605137304699968546,
-    4609023951793800059,
-    4613413487410362999,
-    4615005999349841167,
+    4613673579927068069,
+    4610821908508036123,
+    4611997313766837439,
+    4608420309497010604,
+    4604513055728044608,
+    4607900079068446995,
+    4607548093699430664,
+    4606344388540463962,
+    4607739974523383839,
+    4599412107090191139,
+    4604565980820369076,
+    4599726176833456927,
+    4600744756591145563,
+    4607823236194059252,
+    4601446465954703524,
+    4603085726174101885,
+    4603338583676993566,
+    4599653484846490601,
+    4599428786595022232,
+    4601721342182848666,
+    4600423382344164850,
+    4600698258572450615,
+    4601460709885148090,
+    4608865384605198743,
+    4603221709645513913,
+    4606851536761257854,
+    4602772274932882486,
+    4606406259886980065,
+    4602458881637926739,
+    4606674512061661328,
+    4605137304700223944,
+    4609023951794098492,
+    4613413487410626241,
+    4615005999350120164,
 ];
 
 #[test]
@@ -609,20 +609,11 @@ fn a_drain_killed_part_way_resumes_when_the_database_opens_again() {
     // Killed while its drain still has pushes waiting, most likely part way through a chunk
     child.kill().unwrap();
     child.wait().unwrap();
-    let waiting = |db: &Database| {
-        db.snapshot(|s| {
-            let mut n = 0;
-            crate::engine::unit::Read::visit(s, &keys::rank_queue("taskRank"), |_, _| {
-                n += 1;
-                true
-            })?;
-            Ok(n)
-        })
-        .unwrap()
-    };
-    // Read-only, which starts no drain: the kill left pushes waiting
+    // The bound the index's residuals make, against its tolerance of 1e-9
+    let bound = |db: &Database| db.snapshot(|s| Ok(ranks::totals(s, "taskRank")?.error(0.85))).unwrap();
+    // Read-only, which starts no drain: the kill left the bound past the tolerance
     let looked = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
-    assert!(waiting(&looked) > 0, "the child was killed before its drain finished");
+    assert!(bound(&looked) > 1e-9, "the child was killed before its drain finished: {}", bound(&looked));
     looked.close().unwrap();
     let db = Database::open(
         dir.path(),
@@ -632,6 +623,6 @@ fn a_drain_killed_part_way_resumes_when_the_database_opens_again() {
     db.wait_for_index_builds().unwrap();
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
-    assert_eq!(waiting(&db), 0, "the drain resumed on open and finished");
+    assert!(bound(&db) <= 1e-9, "the drain resumed on open and finished: {}", bound(&db));
     assert!(db.snapshot(|s| ranks::is_built(s, "taskRank")).unwrap());
 }

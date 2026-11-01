@@ -1398,7 +1398,8 @@ impl<R: Read> Query<'_, R> {
     /// Every id after the first `upto` steps
     /// A rank index's totals, refusing an index the schema doesn't declare (`UNKNOWN_INDEX`) or one not built yet
     /// (`INDEX_BUILDING`), and recording what a `hits` answer and EXPLAIN say of its scores
-    fn rank_index(&self, stage: usize, index: &str) -> Result<(&crate::schema::RankDef, ranks::Totals)> {
+    /// The index's rules and totals, and the step its scores are reported at
+    fn rank_index(&self, stage: usize, index: &str) -> Result<(&crate::schema::RankDef, ranks::Totals, f64)> {
         let Some(def) = self.r.schema().ranks.get(index) else {
             return Err(Error::new(ErrorCode::UnknownIndex, format!("No rank index is named \"{index}\"")));
         };
@@ -1409,13 +1410,13 @@ impl<R: Read> Query<'_, R> {
                 format!("The rank index {index} is still being built, and has nothing to answer from until it is"),
             ));
         }
-        let error = totals.error(def.damping);
+        let (error, step) = ranks::reported(totals.error(def.damping), totals.nodes);
         self.ranked.replace(Some(Scored::Ranked { index: index.to_owned(), error }));
         if let Some(stages) = self.stages {
             stages.reads_index_at(stage, index);
             stages.rank_error(stage, error);
         }
-        Ok((def, totals))
+        Ok((def, totals, step))
     }
 
     /// Whether `limit` after a `ranked` first step reads the index's top from its score order: the plan starts from
@@ -1428,7 +1429,7 @@ impl<R: Read> Query<'_, R> {
     /// The first `take` of a rank index's nodes in score order, read from the top of its order and no further, each a
     /// hit when the terminal answers them
     fn rank_top(&self, index: &str, take: usize) -> Result<Vec<String>> {
-        let (_, totals) = self.rank_index(1, index)?;
+        let (_, totals, step) = self.rank_index(1, index)?;
         let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
         let mut ids = Vec::with_capacity(take);
         let mut failed = None;
@@ -1448,7 +1449,7 @@ impl<R: Read> Query<'_, R> {
                 let node = ranks::node(self.r, index, id)?.ok_or_else(|| {
                     Error::new(ErrorCode::Corrupted, format!("{id} is in a rank index's order and no node"))
                 })?;
-                self.record_rank_hit(id, node.x / totals.estimates);
+                self.record_rank_hit(id, ranks::rounded(node.x / totals.estimates, step));
             }
         }
         Ok(ids)
@@ -1462,7 +1463,7 @@ impl<R: Read> Query<'_, R> {
     /// `ranked`: the set by the index's scores, highest first, ties in the set's order; an entity that isn't one of the
     /// index's nodes is refused
     fn ranked_by(&self, before: usize, upto: usize, index: &str, visit: &mut Visit<'_>) -> Result<bool> {
-        let (def, totals) = self.rank_index(upto, index)?;
+        let (def, totals, step) = self.rank_index(upto, index)?;
         let mut ids = self.collect(before)?;
         if !self.holds_each_once(before) {
             let mut seen: HashSet<String, Fixed> = HashSet::default();
@@ -1486,7 +1487,7 @@ impl<R: Read> Query<'_, R> {
         let hits = matches!(self.plan.terminal, Terminal::Hits { .. });
         for (id, score) in scored {
             if hits {
-                self.record_rank_hit(&id, score);
+                self.record_rank_hit(&id, ranks::rounded(score, step));
             }
             if !visit(&id)? {
                 return Ok(false);
