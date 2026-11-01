@@ -422,3 +422,4 @@ useful caching and resource cleanup from merely returning correct database answe
 whose expiry operation renews entries indefinitely; the expected retained-snapshot assertion must fire. Its `--case reuse`, `--case close` and `--case drop`
 variants prove the hot-cache and worker-cleanup assertions fire too.
 Manual release measurements and their controls are in [the evidence](../evidence/idle-snapshot-retention.md).
+
