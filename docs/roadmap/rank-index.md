@@ -137,9 +137,9 @@ Pushing then spreads the change only as far as it is large enough to matter.
   unfiled, applied under the write lock as it commits (`crates/elmdb/src/engine/mirror.rs`). A commit that can't say
   what it filed (a write outside the engine's units, an admin unit, a schema change), and another process's commit,
   empty it; `check()` compares what it holds with the store. A list a commit empties is dropped, and the names it
-  holds are counted afresh once they double, so what it keeps follows the graph. The node rows are still read each
-  drain: they are what it changes, and a change that leaves a drain moves nearly all of them, which is what storing
-  them in blocks is for (`docs/evidence/rank-index.md`).
+  holds are counted afresh once commits have removed more entries than it holds, so what it keeps follows the graph.
+  The node rows are still read each drain: they are what it changes, and a change that leaves a drain moves nearly
+  all of them, which is what storing them in blocks is for (`docs/evidence/rank-index.md`).
 - **Determinism:** pushes run in a fixed order (a queue ordered by the node's place), and sums run serially, so the same
   history of commits gives the same bits on every platform.
 

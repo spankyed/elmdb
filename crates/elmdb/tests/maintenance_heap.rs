@@ -138,11 +138,11 @@ fn maintenance_heap_bounds() {
         black_box(fixture.db.read(&fixture.graph_read("ranked")).unwrap());
     });
     // An open database keeps nothing an entity without a rank index, measured, and with one the edge mirror its drains
-    // read the graph through, which the build's own drain fills: about 542 bytes an entity at five edges, measured on an
-    // Apple M1 Pro on 2026-11-01. Each edge is an entry at both ends, 32 bytes each, and each entity two lists and its
-    // name held twice
+    // read the graph through, which the build's own drain fills: about 278 bytes an entity at five edges, measured on an
+    // Apple M1 Pro on 2026-11-01, of which its names are some 91. Each edge is a 24-byte entry at both ends; lists left
+    // with the room they grew into keep 350, and lists collected from the buffer the store was read into keep 542
     measure_kept_growth("graphKept", 16, [5_000, 10_000], graph);
-    measure_kept_growth("rankIndexKept", 640, [5_000, 10_000], ranked);
+    measure_kept_growth("rankIndexKept", 320, [5_000, 10_000], ranked);
     // Communities copy the graph into leiden-rs's own: its builder's edge list at 24 bytes an edge, and its CSR holding
     // each edge both ways at 16 bytes a side, some 280 bytes an entity at five edges, beside its partition and the
     // statistics it moves nodes by: about 764 bytes an entity, measured
