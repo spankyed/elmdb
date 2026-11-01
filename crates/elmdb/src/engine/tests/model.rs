@@ -3,18 +3,21 @@
 //! as plainly as a model can be. The engine must hold what the model holds, refuse what it refuses, and keep every
 //! derived key in step: a type's live and trashed entities in creation order, its count, each value index's entries,
 //! the role index, each entity's edges out and in, and what a text index matches, whether maintained by writes or
-//! derived again by a rebuild.
+//! derived again by a rebuild; and a rank index over the entities and their edges holding the model's live entities,
+//! within the bound it reports of `rank` once its drain is done.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 use serde_json::{Value as Json, json};
 
-use super::{edges as stored_edges, open, row};
-use crate::Database;
+use super::rank_bound::RankIndex;
+use super::{edges as stored_edges, row, schema_json};
 use crate::engine::unit::Read;
 use crate::engine::{entities, keys, relations, values};
 use crate::format::key::{Part, decode as decode_key};
+use crate::schema::Schema;
+use crate::{Database, OpenOptions};
 
 const IDS: [&str; 6] = ["Task-1", "Task-2", "Task-3", "Task-4", "Note-1", "Note-2"];
 const KEYS: [&str; 3] = ["a", "b", "c"];
@@ -1313,6 +1316,20 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
     out
 }
 
+/// The rank index the harness declares, over every entity and kind of edge the workload writes
+const RANKED: RankIndex<'static> =
+    RankIndex { name: "modelRank", types: &["Task", "Note"], kinds: &ALL_KINDS, direction: "both", weights: true };
+
+/// The engine tests' schema with `RANKED` declared
+fn open(dir: &tempfile::TempDir) -> Database {
+    let mut schema = schema_json();
+    schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
+                                              "direction": RANKED.direction, "weights": RANKED.weights,
+                                              "tolerance": 1e-9 } });
+    let schema = Schema::from_json(&schema).unwrap();
+    Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
+}
+
 /// The engine under the model: the prelude written, each step run and its answer compared, and after each the data, every
 /// derived key and every derived read compared with the model's; after the workload, `check()` finds nothing
 struct Engine {
@@ -1351,6 +1368,10 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         assert_eq!(state_of(&engine.db), model_state(&reference.model));
         assert_eq!(sorted_far_ends(derived_of(&engine.db)), derived_from(&reference.model));
         assert_eq!(plans_of(&engine.db), plans_from(&reference.model));
+        // The drain waited for, so no commit of its own takes a refusal the next step armed
+        let live: Vec<String> =
+            reference.model.entities.iter().filter(|(_, e)| !e.trashed).map(|(id, _)| id.clone()).collect();
+        assert_eq!(RANKED.assert_within_bound(&engine.db), live, "the rank index's nodes");
     }
 
     fn teardown(engine: Engine, _: Reference) {
