@@ -1,0 +1,86 @@
+name: mutants (advisory)
+
+# Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and in
+# each job's summary, never failed on (docs/architecture/testing.md, Mutation testing). Linux splits the change's mutants
+# over four runners; Windows mutates only the changed files holding code that compiles on Windows alone, and does
+# nothing when the change has none
+on:
+  pull_request:
+
+concurrency:
+  group: mutants-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: mutants in the change (Linux, shard ${{ matrix.shard }} of 4)
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    steps:
+      # The merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: scope
+        run: |
+          if git diff --name-only HEAD^1 HEAD | grep -qvE '^docs/|\.md$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.scope.outputs.code == 'true'
+        run: rustup show active-toolchain
+      - if: steps.scope.outputs.code == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.scope.outputs.code == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+      - if: steps.scope.outputs.code == 'true'
+        run: python3 scripts/mutants-in-diff.py HEAD^1 2 --shard ${{ matrix.shard }}/4
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scope.outputs.code == 'true'
+        with:
+          name: mutants-in-diff-linux-${{ matrix.shard }}
+          path: target/mutants-in-diff
+          if-no-files-found: ignore
+
+  windows:
+    name: mutants in the change (Windows-only code)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      # The same test mutants-in-diff.py applies, so a change with no Windows-only code installs nothing
+      - id: scope
+        run: |
+          mapfile -t files < <(git diff --name-only --diff-filter=d HEAD^1 HEAD -- '*.rs')
+          if [ ${#files[@]} -gt 0 ] && grep -lE 'cfg\(windows\)|target_os = "windows"' "${files[@]}"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The change holds no Windows-only code to mutate" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.scope.outputs.code == 'true'
+        run: rustup show active-toolchain
+      - if: steps.scope.outputs.code == 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.scope.outputs.code == 'true'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
+      - if: steps.scope.outputs.code == 'true'
+        run: python scripts/mutants-in-diff.py HEAD^1 2 --windows-only
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.scope.outputs.code == 'true'
+        with:
+          name: mutants-in-diff-windows
+          path: target/mutants-in-diff
+          if-no-files-found: ignore

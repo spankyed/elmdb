@@ -1,19 +1,52 @@
 name: CI
 
 # Every push to main runs the Linux checks. Pull requests and a dispatch run the full platform matrix as well: the
-# targets the binding ships for (design.md, Packages), each building the binding and running every suite on it.
+# targets the binding ships for (design.md, Packages), each building the binding and running every suite on it. A change
+# to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch cancels the
+# run before it. Mutants of a pull request's change run beside this, advisory, in mutants.yml.
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Whether the change holds anything but documentation, which no check reads
+  changes:
+    runs-on: ubuntu-24.04
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      # A pull request's merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: diff
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          case "$GITHUB_EVENT_NAME" in
+            pull_request) base=HEAD^1 ;;
+            push) base=$BEFORE; git fetch --depth=1 origin "$base" 2>/dev/null || base= ;;
+            *) base= ;;
+          esac
+          if [ -n "$base" ] && ! git diff --name-only "$base" HEAD | grep -qvE '^docs/|\.md$'; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
   checks:
     name: checks (Linux x64)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +113,8 @@ jobs:
   # The concurrency models, in every interleaving within the bound (docs/architecture/testing.md, Concurrency models)
   loom:
     name: concurrency models (Loom)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: --cfg loom
@@ -94,6 +129,8 @@ jobs:
   # The same slot and watch delivery under random schedules (docs/architecture/testing.md, Concurrency models)
   shuttle:
     name: concurrency models (Shuttle)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     env:
       RUSTFLAGS: --cfg shuttle
@@ -104,42 +141,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
 
-  # Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and
-  # in the summary, not failed on (docs/architecture/testing.md, Mutation testing). On Linux and on Windows, since each
-  # compiles code the other doesn't
-  mutants:
-    name: mutants in the change (${{ matrix.os }})
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: Linux, runner: ubuntu-24.04, python: python3 }
-          - { os: Windows, runner: windows-latest, python: python }
-    runs-on: ${{ matrix.runner }}
-    steps:
-      # The merge commit and its first parent, the base it merges into
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
-      - run: ${{ matrix.python }} scripts/mutants-in-diff.py HEAD^1 2
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mutants-in-diff-${{ matrix.os }}
-          path: target/mutants-in-diff
-          if-no-files-found: ignore
-
   # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
   # the runner's load, so the step summary shows what the change costs. Reported, never a failure
   instructions:
     name: instruction counts (Linux)
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       # The merge commit and its first parent, the base it merges into
@@ -158,7 +165,8 @@ jobs:
   # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
   diagnostics:
     name: diagnostics overhead (Linux)
-    if: github.event_name == 'pull_request'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -172,7 +180,8 @@ jobs:
 
   platforms:
     name: ${{ matrix.target }} on Node ${{ matrix.node }}
-    if: github.event_name != 'push'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
@@ -232,22 +241,46 @@ jobs:
           npm exec --yes --package=electron@37.2.4 -- electron --test "crates/elmdb-node/test/**/*.test.mjs"
 
   # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
-  # and run every suite in a node:23-alpine container of the runner's own architecture
+  # and run every suite in a node:23-alpine container of the runner's own architecture. The toolchain, the registry and
+  # the build are cached on the runner and mounted in, and nextest is its released musl binary, checked against the
+  # release's own checksum
   musl:
     name: ${{ matrix.target }}
-    if: github.event_name != 'push'
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
-          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nextest-sha256: bf92cb81450872d960ffa13857a83084d557ec0cdc141663d263bb23ef756f97
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nextest-sha256: 94676506ceaed01746d78cfe9ed124ee841b2932fd18d9d10f438a347bd9ba5e
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/musl-cache
+            target
+          key: musl-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: musl-${{ matrix.target }}-
       - name: every suite, in Alpine
+        env:
+          TARGET: ${{ matrix.target }}
+          NEXTEST_SHA256: ${{ matrix.nextest-sha256 }}
         run: |
-          docker run --rm -v "$PWD:/w" -w /w node:23-alpine sh -euc '
+          cache=$RUNNER_TEMP/musl-cache
+          mkdir -p "$cache/rustup" "$cache/registry" "$cache/git"
+          docker run --rm -v "$PWD:/w" -w /w \
+            -v "$cache/rustup:/root/.rustup" \
+            -v "$cache/registry:/root/.cargo/registry" \
+            -v "$cache/git:/root/.cargo/git" \
+            -e TARGET -e NEXTEST_SHA256 -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR \
+            node:23-alpine sh -euc '
             apk add --no-cache bash curl git build-base
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
@@ -255,9 +288,14 @@ jobs:
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
             git config --global --add safe.directory /w
             rustup show active-toolchain
-            cargo install --locked cargo-nextest@0.9.148
+            archive=cargo-nextest-0.9.148-$TARGET.tar.gz
+            curl --proto "=https" --tlsv1.2 -sSfLO "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/$archive"
+            echo "$NEXTEST_SHA256  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$HOME/.cargo/bin" && rm "$archive"
             cargo nextest run --workspace --profile ci
             npm ci
             npm run build
             npm test
           '
+          # The container writes as root; the cache is saved by the runner's user
+          sudo chown -R "$(id -u):$(id -g)" "$cache" target
