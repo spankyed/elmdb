@@ -131,6 +131,9 @@ cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -
 cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
 python3 scripts/mutants-in-diff.py main
+# One of four shares of them, or only the changed files with Windows-only code (what CI's runners split)
+python3 scripts/mutants-in-diff.py main 3 --shard 1/4
+python3 scripts/mutants-in-diff.py main 3 --windows-only
 # What the exclusions leave out of a file
 diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
@@ -148,10 +151,13 @@ the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c
 cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
 (`docs/evidence/mutation-baseline.md`, The Windows reading).
 
-CI's `mutants` job runs `scripts/mutants-in-diff.py` on every pull request, against the base it merges into, on Linux
-and on Windows, so a change to code only one of them compiles is mutated where it runs: each missed mutant is annotated
-on its line and listed in the job's summary, and the job fails only when cargo-mutants does. A change to code for the
-other platform shows its mutants as missed there, since the job compiles them to nothing.
+CI's `mutants (advisory)` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull
+request, against the base it merges into, beside the checks rather than in them: each missed mutant is annotated on its
+line and listed in its job's summary, and a job fails only when cargo-mutants does, so a survivor is read, not waited
+on. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). Windows
+mutates only the changed files holding code that compiles on Windows alone (`--windows-only`: `cfg(windows)` or
+`target_os = "windows"`), which Linux compiles to nothing and shows as missed; a change with none installs nothing
+there. A change to documentation alone mutates nothing.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 

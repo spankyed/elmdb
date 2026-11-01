@@ -1,10 +1,16 @@
 """Mutate what a change touches, each crate against its own suite, and report the survivors without failing on them.
 
-`python3 scripts/mutants-in-diff.py BASE [JOBS]`: cargo-mutants over `git diff BASE...HEAD`, what HEAD changed since it
-left BASE, once per workspace crate, since `.cargo/mutants.toml` tests every mutant against the engine's suite and a
-binding's or the CLI's mutant is tested by its own. Exits nonzero only when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass); a
-missed mutant or a timeout is listed, and in GitHub Actions annotated on its line and written to the step summary.
+`python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only]`: cargo-mutants over
+`git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, since `.cargo/mutants.toml` tests
+every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero only
+when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass); a missed mutant or a timeout is listed, and in
+GitHub Actions annotated on its line and written to the step summary.
+
+`--shard K/N` tests the Kth of N shares of the mutants, so N runners split them; each runs the unmutated baseline,
+which is what its timeouts are measured from. `--windows-only` mutates only the changed files holding code that compiles on Windows alone, which a Linux run
+can't build: the rest of the change is Linux's to mutate.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -17,13 +23,30 @@ TESTED = {0, 2, 3}
 # (`docs/evidence/mutation-baseline.md`) and is most of its time
 SUITE_ARGS = {"elmdb": ["--", "--", "--skip", "model::the_engine"]}
 
-base = sys.argv[1]
-jobs = sys.argv[2] if len(sys.argv) > 2 else "3"
+# What marks code that compiles on Windows alone
+WINDOWS_ONLY = ("cfg(windows)", 'target_os = "windows"')
+
+parser = argparse.ArgumentParser()
+parser.add_argument("base")
+parser.add_argument("jobs", nargs="?", default="3")
+parser.add_argument("--shard", help="K/N: the Kth of N shares of the mutants")
+parser.add_argument("--windows-only", action="store_true")
+args = parser.parse_args()
+
 root = Path.cwd()
 out = root / "target/mutants-in-diff"
 out.mkdir(parents=True, exist_ok=True)
 diff = out / "branch.diff"
-diff.write_bytes(subprocess.check_output(["git", "diff", f"{base}...HEAD"]))
+diff.write_bytes(subprocess.check_output(["git", "diff", f"{args.base}...HEAD"]))
+changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}...HEAD"], text=True).split()
+
+
+def windows_only(path):
+    file = root / path
+    return path.endswith(".rs") and file.exists() and any(mark in file.read_text() for mark in WINDOWS_ONLY)
+
+
+scope = [path for path in changed if windows_only(path)] if args.windows_only else None
 
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
 crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as_posix(), p["features"])
@@ -33,12 +56,17 @@ assert crates, "the workspace names no crate"
 # cargo-mutants builds each job's copy of the tree in a directory of its own; a CARGO_TARGET_DIR from the caller would
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
+sharding = ["--shard", args.shard] if args.shard else []
 missed, timeouts = [], []
 for name, path, features in crates:
+    files = [f"{path}/**"] if scope is None else [file for file in scope if file.startswith(f"{path}/")]
+    if not files:
+        continue
     # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
     with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
-    run = subprocess.run(["cargo", "mutants", "-j", jobs, "-o", str(out / name), "--in-diff", str(diff),
-                          "--file", f"{path}/**", "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])],
+    run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), "--in-diff", str(diff),
+                          *(arg for file in files for arg in ("--file", file)), *sharding, "--test-package", name,
+                          *with_features, *SUITE_ARGS.get(name, [])],
                          env=env)
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
@@ -47,7 +75,11 @@ for name, path, features in crates:
         if (results / file).exists():
             found += (results / file).read_text().splitlines()
 
-print(f"{len(missed)} missed, {len(timeouts)} timeouts")
+what = "Windows-only code" if args.windows_only else "the change"
+what += f", shard {args.shard}" if args.shard else ""
+if scope == []:
+    print("The change holds no Windows-only code to mutate")
+print(f"{len(missed)} missed, {len(timeouts)} timeouts ({what})")
 for line in missed:
     print(f"MISSED  {line}")
 for line in timeouts:
@@ -58,7 +90,7 @@ if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
         file, number, _ = line.split(":", 2)
         print(f"::warning file={file},line={number},title=Missed mutant::{line}")
     with open(summary, "a") as written:
-        written.write(f"## Mutants in this change\n\n{len(missed)} missed, {len(timeouts)} timeouts\n\n")
+        written.write(f"## Mutants in {what}\n\n{len(missed)} missed, {len(timeouts)} timeouts\n\n")
         for heading, lines in (("Missed", missed), ("Timeouts", timeouts)):
             if lines:
                 written.write(f"### {heading}\n\n" + "".join(f"- `{line}`\n" for line in lines) + "\n")

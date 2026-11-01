@@ -2,6 +2,7 @@ name: CI
 
 # Every push to main runs the Linux checks. Pull requests and a dispatch run the full platform matrix as well: the
 # targets the binding ships for (design.md, Packages), each building the binding and running every suite on it.
+# Mutants of a pull request's change run beside this, advisory, in mutants.yml.
 on:
   push:
     branches: [main]
@@ -103,37 +104,6 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model
-
-  # Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and
-  # in the summary, not failed on (docs/architecture/testing.md, Mutation testing). On Linux and on Windows, since each
-  # compiles code the other doesn't
-  mutants:
-    name: mutants in the change (${{ matrix.os }})
-    if: github.event_name == 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: Linux, runner: ubuntu-24.04, python: python3 }
-          - { os: Windows, runner: windows-latest, python: python }
-    runs-on: ${{ matrix.runner }}
-    steps:
-      # The merge commit and its first parent, the base it merges into
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
-      - run: ${{ matrix.python }} scripts/mutants-in-diff.py HEAD^1 2
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mutants-in-diff-${{ matrix.os }}
-          path: target/mutants-in-diff
-          if-no-files-found: ignore
 
   # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
   # the runner's load, so the step summary shows what the change costs. Reported, never a failure
