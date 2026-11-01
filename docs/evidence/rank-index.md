@@ -82,6 +82,20 @@ average of 10 to 16, so a difference under about a tenth is the load. Before is 
 - **What would make a drain cheaper** is not reading the whole graph for it: pushing through the store while few nodes
   wait, or a graph kept between drains (`docs/roadmap/rank-index.md`).
 
+### A node's place in the score order, compared before its keys are built
+
+The write-back built both of a moved node's order keys to find most of them unchanged (`e570eef`), 8% of a drain in a
+sample of 40 drained changes at 100,000 documents (`examples/profile-rank-drain.rs`, `sample` on macOS: about 45%
+reading the graph, 37% writing back, 5% pushing). 2026-11-01, the same machine at a load average of 7 to 15, at the
+default tolerance:
+
+| Documents | one change, before | after | ten and ten, before | after |
+|---:|---:|---:|---:|---:|
+| 10,000 | 77.2, 78.4 ms | 76.9, 77.4 ms | 115 ms | 113 ms |
+| 100,000 | 625 ms | 584 ms | 1.09 s | 1.03 s |
+
+At 10,000 documents the two builds ran in turn, twice, since one run of each had read 35% apart under a moving load.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
