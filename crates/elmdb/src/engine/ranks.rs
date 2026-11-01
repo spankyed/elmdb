@@ -147,14 +147,20 @@ impl Totals {
         })
     }
 
-    /// The bound on the L1 distance of the normalized scores from PageRank, `E = 2R / ((1 − α)² n)`
+    /// The bound on the L1 distance of the normalized scores from PageRank, from its residuals and nodes
     pub fn error(&self, damping: f64) -> f64 {
-        if self.nodes == 0 {
-            return 0.0;
-        }
-        let keep = 1.0 - damping;
-        2.0 * self.residuals / (keep * keep * self.nodes as f64)
+        error_bound(self.residuals, self.nodes, damping)
     }
+}
+
+/// `E = 2R / ((1 − α)² n)`, the bound on the L1 distance of an index's normalized scores from PageRank, which its
+/// residuals' sum `R` over its `n` nodes gives (`docs/evidence/rank-index.md`); 0 for no nodes
+pub fn error_bound(residuals: f64, nodes: u64, damping: f64) -> f64 {
+    if nodes == 0 {
+        return 0.0;
+    }
+    let keep = 1.0 - damping;
+    2.0 * residuals / (keep * keep * nodes as f64)
 }
 
 /// A node's place in its index's score order: its estimate kept to 16 significant bits, so a push that moves the
@@ -719,10 +725,8 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         nodes[u].r = 0.0;
         pushes += 1;
     }
-    let swept = (pushes > 0).then(|| {
-        let last = if at == 0 { n - 1 } else { at - 1 };
-        (nodes[last].type_at, nodes[last].seq)
-    });
+    // A push advances the sweep past the node it took, so after any push `at` is at least 1
+    let swept = (pushes > 0).then(|| (nodes[at - 1].type_at, nodes[at - 1].seq));
     let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > budget;
     // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
     for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
@@ -940,6 +944,13 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let keep = 1.0 - alpha;
         let mut inflow = vec![0.0; nodes.len()];
         for (at, (_, n)) in nodes.iter().enumerate() {
+            // No comparison below is true of NaN, so a value that isn't finite would pass every one of them
+            if !(n.x.is_finite() && n.r.is_finite() && n.w.is_finite()) {
+                out.push(violation(format!(
+                    "{} holds an estimate, residual or out-weight that isn't finite",
+                    nodes[at].0
+                )));
+            }
             let w: f64 = arcs[at].iter().map(|(_, w)| w).sum();
             if (w - n.w).abs() > 1e-9 * w.max(1.0) {
                 out.push(violation(format!("{} holds out-weight {} where its arcs weigh {w}", nodes[at].0, n.w)));
@@ -970,7 +981,8 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         })?;
         let mut expected_queued = 0usize;
         for (id, n) in &nodes {
-            if !r.contains(&order_key(name, n))? {
+            // An estimate that isn't finite has no place in the score order, and is reported above
+            if n.x.is_finite() && !r.contains(&order_key(name, n))? {
                 out.push(violation(format!("{id} is missing from the score order")));
             }
             if n.r.abs() > index.threshold {
@@ -1012,7 +1024,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let seeds: Vec<(u32, f64)> = (0..nodes.len() as u32).map(|at| (at, 1.0)).collect();
         let truth = algorithms::rank(&graph, &seeds, alpha, 1_000_000, 1e-13).expect("a seed in a graph of its nodes");
         let distance: f64 = nodes.iter().zip(&truth.scores).map(|((_, n), s)| (n.x / estimates - s).abs()).sum();
-        let bound = Totals { nodes: nodes.len() as u64, estimates, residuals, ..totals }.error(alpha);
+        let bound = error_bound(residuals, nodes.len() as u64, alpha);
         if distance > bound + 1e-9 {
             out.push(violation(format!("its scores are {distance} from PageRank, past the bound {bound} it reports")));
         }

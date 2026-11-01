@@ -770,6 +770,7 @@ fn a_build_goes_on_across_chunks_and_types_from_its_cursor() {
             let mut after = None;
             let mut cursors = Vec::new();
             while let Some(last) = ranks::join_chunk(t, "taskRank", after, 3)? {
+                assert_eq!(ranks::totals(t, "taskRank")?.stage, ranks::Stage::Joining, "joining until the last chunk");
                 cursors.push(last);
                 after = Some(last);
             }
@@ -819,6 +820,9 @@ fn check_reports_each_way_an_index_can_disagree_with_its_nodes() {
         }
     };
     assert!(said(&node(|n| n.w += 1.0)).contains("out-weight"));
+    assert!(said(&node(|n| n.x = f64::NAN)).contains("isn't finite"));
+    assert!(said(&node(|n| n.r = f64::INFINITY)).contains("isn't finite"));
+    assert!(said(&node(|n| n.w = f64::NAN)).contains("isn't finite"));
     // A node's queue entry gone, and one queued that waits for nothing
     let queued = said(&|txn, d| {
         let n = ranks::Node::decode(d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap())?;
@@ -849,6 +853,141 @@ fn check_reports_each_way_an_index_can_disagree_with_its_nodes() {
         Ok(())
     });
     assert!(counted.contains("totals"), "{counted}");
+    // Each of the totals alone: the residuals, which the bound is counted from
+    let residuals = said(&|txn, d| {
+        let key = keys::rank_totals("taskRank");
+        let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
+        bytes[16..24].copy_from_slice(&1.0f64.to_le_bytes());
+        d.main.put(txn, &key, &bytes)?;
+        Ok(())
+    });
+    assert!(residuals.contains("totals"), "{residuals}");
+}
+
+#[test]
+fn a_build_across_types_joins_a_later_type_whose_entities_came_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    // Notes before Tasks, so every Note's place is below the Tasks' that end a chunk
+    let mut ops: Vec<Json> =
+        (0..4).map(|i| json!({ "op": "create", "type": "Note", "id": format!("Note-{i}") })).collect();
+    ops.extend((0..5).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::clear(t, "taskRank")?;
+            let mut after = None;
+            while let Some(last) = ranks::join_chunk(t, "taskRank", after, 2)? {
+                after = Some(last);
+            }
+            assert_eq!(nodes_of(t).len(), 9, "every Task and every Note");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_out_weight_left_by_cancellation_is_counted_again_from_the_arcs() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    // Out-weight 1e20 + 1, which is 1e20 in a double: removing the heavy arc leaves 0 by subtraction, 1 by its arcs
+    write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-0", "kind": "weighs", "target": "Task-1", "weight": 1e20 }),
+            json!({ "op": "link", "source": "Task-0", "kind": "weighs", "target": "Task-2", "weight": 1.0 }),
+        ],
+    )
+    .unwrap();
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-0", "kind": "weighs", "target": "Task-1" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let w = db.snapshot(|s| Ok(ranks::node(s, "taskRank", "Task-0")?.unwrap().w)).unwrap();
+    assert_eq!(w, 1.0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+#[test]
+fn an_arc_of_a_node_whose_arcs_weighed_nothing_carries_all_it_holds_once_weighed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..2).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    let rate = |w: f64| json!({ "op": "link", "source": "Task-0", "kind": "rates", "target": "Task-1", "weight": w });
+    write(&db, vec![rate(0.0)]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(db.snapshot(|s| Ok(ranks::node(s, "taskRank", "Task-0")?.unwrap().w)).unwrap(), 0.0);
+    write(&db, vec![rate(2.0)]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(db.snapshot(|s| Ok(ranks::node(s, "taskRank", "Task-0")?.unwrap().w)).unwrap(), 2.0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // And back to nothing, the arc kept; built again, so the drain pushes the node whose arcs weigh nothing
+    write(&db, vec![rate(0.0)]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // What check() counts the far end's residual from, the zero-weight arc carrying nothing
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                let key = keys::rank_node("taskRank", "Task-1");
+                let mut n = ranks::Node::decode(d.main.get(txn, &key)?.unwrap())?;
+                n.r += 0.5;
+                d.main.put(txn, &key, &n.encode())?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
+    assert!(said.iter().any(|m| m.contains("Task-1 holds residual")), "{said:?}");
+}
+
+#[test]
+fn a_reported_error_adds_the_rounding_of_every_score_and_keeps_one_figure() {
+    // 0.9e-6 over 40 nodes: each score kept to 1e-8, whose rounding adds up to 2e-7, so 1.1e-6, kept as 2e-6
+    let (bound, step) = ranks::reported(0.9e-6, 40);
+    assert!((bound - 2e-6).abs() < 1e-18 && (step - 1e-8).abs() < 1e-22, "{bound} {step}");
+    assert_eq!(ranks::reported(0.0, 40), (0.0, 0.0));
+    assert_eq!(ranks::reported(1e-6, 0), (0.0, 0.0));
+}
+
+#[test]
+fn draining_in_chunks_makes_the_bits_one_drain_makes() {
+    let bits = |chunk: usize| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_with(&dir, schema("both", true));
+        let mut ops: Vec<Json> =
+            (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        let edges = crate::engine::algorithms::tests::KARATE_EDGES;
+        let weights = crate::engine::algorithms::tests::KARATE_WEIGHTS;
+        ops.extend(edges.iter().zip(weights).map(|(&(a, b), w)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": w })));
+        write(&db, ops).unwrap();
+        db.wait_for_index_builds().unwrap();
+        db.admin_unit_with_checkpoint(
+            |t| {
+                // Joined again and drained from nothing, `chunk` pushes at a time, each drain taking up the sweep
+                ranks::clear(t, "taskRank")?;
+                assert_eq!(ranks::join_chunk(t, "taskRank", None, 100)?, None);
+                while ranks::drain(t, "taskRank", chunk)? {}
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        db.snapshot(|s| {
+            (0..34).map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.unwrap().x.to_bits())).collect()
+        })
+        .unwrap()
+    };
+    let whole: Vec<u64> = bits(usize::MAX);
+    for chunk in [1, 7, 33] {
+        assert_eq!(bits(chunk), whole, "drained {chunk} pushes at a time");
+    }
 }
 
 #[test]
@@ -914,6 +1053,32 @@ fn two_rank_indexes_keep_apart_and_index_status_names_each() {
             "{status:?}"
         );
     }
+}
+
+#[test]
+fn a_rank_index_over_held_entities_is_left_to_the_builder_and_one_over_none_is_built_at_open() {
+    let taskrank = |db: &Database| {
+        db.index_status().unwrap().into_iter().find(|s| s.index == "taskRank").map(|s| s.built).unwrap()
+    };
+    // Over none: nothing to join, so the open that declares it builds it, and a read finds it built at once
+    let empty = tempfile::tempdir().unwrap();
+    assert!(taskrank(&open_with(&empty, schema("out", true))), "built by the open");
+    // Over 20,000 tasks: the open leaves the join to the builder, which a unit begun at once holds off
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut plain = serde_json::to_value(schema("out", true)).unwrap();
+        plain.as_object_mut().unwrap().remove("ranks");
+        let db = open_with(&dir, Schema::from_json(&plain).unwrap());
+        write(&db, (0..20_000).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+            .unwrap();
+        db.close().unwrap();
+    }
+    let db = open_with(&dir, schema("out", true));
+    let unit = db.begin().unwrap();
+    assert!(!taskrank(&db), "the open joined 20,000 nodes inside its own commit");
+    drop(unit);
+    db.wait_for_index_builds().unwrap();
+    assert!(taskrank(&db));
 }
 
 #[test]
