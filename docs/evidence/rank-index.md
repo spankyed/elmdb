@@ -11,11 +11,18 @@ Apple M1 Pro (macOS), Rust 1.99.1, release builds, other sessions' builds runnin
   apart than twice the bound are in `rank`'s order, and `check()` is clean. A scripted graph over three kinds — one
   weighted, one weighted and unique, one plain — holds the same through parallel edges, a weight replaced, an edge
   removed and a node trashed, restored and destroyed, in each direction and without weights.
-- **The bound** is `E = 2R / ((1 − α)² n)`, `R` the residuals' sum: the index's estimates `x̂` and the solution `x`
-  of `x = (1 − α)𝟙 + αPᵀx` differ by `(I − αPᵀ)⁻¹ r`, whose L1 norm is at most `R / (1 − α)` since `P` is
-  substochastic; `x ≥ (1 − α)𝟙` makes `‖x‖₁ ≥ (1 − α) n`; and normalizing two vectors at most doubles their
-  distance over the larger's norm. PageRank with dangling nodes' walkers returned to the seeds — every node here — is
-  `x` normalized, so a read divides by `Σx̂` and the index holds no dangling term.
+- **The bound** is `E = 2R / ((1 − α) s)`, `R` the residuals' sum and `s = Σx̂` the estimates'. The index's estimates
+  `x̂` and the solution `x` of `x = (1 − α)𝟙 + αPᵀx` differ by `(I − αPᵀ)⁻¹ r`, whose L1 norm is at most `R / (1 − α)`
+  since `P` is substochastic. PageRank with dangling nodes' walkers returned to the seeds — every node here — is
+  `x / Σx`, with `x > 0`, and a read answers `x̂ / s`, so the index holds no dangling term; and
+  `‖x̂/s − x/Σx‖₁ ≤ (‖x̂ − x‖₁ + |Σx − s|) / s ≤ 2‖x̂ − x‖₁ / s` whatever the signs in `x̂`, a removed edge's pushes
+  being negative. Over most graphs `s` is near `n`, where the bound is `1/(1 − α)` tighter than `2R / ((1 − α)² n)`,
+  the bound with `‖x‖₁ ≥ (1 − α) n` in place of `s`, which also needed every estimate non-negative.
+- **Pushing ends:** a node waits to be pushed while its residual is over `θ = tol (1 − α)² / (2 + tol)`. With every
+  residual within `θ`, `s ≥ Σx − R / (1 − α) ≥ (1 − α) n − nθ / (1 − α)` since `x ≥ (1 − α)𝟙`, and then
+  `E ≤ 2nθ / ((1 − α) s) ≤ tol`: once none waits, the bound is within the tolerance. Pushes stop sooner, once `R` is
+  within `tol (1 − α) s / 2`; and a drain owes pushes, and an index counts as unfinished, only while a node waits, so
+  rounding can't leave one owing a push it has no node for.
 - **`check()` catches damage:** an estimate moved breaks the residual invariant and the score order; a residual moved
   breaks the invariant; totals altered are reported; a rebuild clears each. Every state the invariant holds in is
   within its bound — the proof above — so the comparison with `rank` is what a wrong bound or a wrong system fails.
