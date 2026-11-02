@@ -48,8 +48,8 @@ group's documents of five `refs` edges each, a rank index over them at the defau
 - **A read** of the top ten reads ten keys: 7 to 8 µs at every size, 145 to 17,900 times faster than `rank`. The
   heap test holds it to no growth with the graph (`tests/maintenance_heap.rs`, `ranked`: 4,449 bytes at 5,000 and
   10,000 documents).
-- **A change** moves nearly every score a little, as an edge in a well-connected graph does to PageRank, so a drain
-  reads the graph once — what a `rank` read costs — pushes in memory, about 10 ms a million pushes, and writes back
+- **A change** moves nearly every score a little, as an edge in a graph whose links are spread does to PageRank, so a
+  drain reads the graph once — what a `rank` read costs — pushes in memory, about 10 ms a million pushes, and writes back
   every node it moved. One change drained alone costs a few times a `rank`; a lone change also waits out the drain's
   5 ms pause twice in the column above.
 - **A burst shares a drain:** a drain waits until 5 ms pass without a commit leaving its index pushes, at most 100 ms,
@@ -72,8 +72,8 @@ average of 10 to 16, so a difference under about a tenth is the load. Before is 
 | 100,000 | 1e-5 | 665 ms | 661 ms | 1.12 s | 1.11 s |
 | 100,000 | 1e-4 | 592 ms | 0.14 ms | 1.11 s | 1.11 s |
 
-- **A drain costs its graph, not its pushes:** a hundredfold looser tolerance leaves every drain's cost where it was,
-  since a drain reads every node and edge and writes back every node it moved whatever it then pushes. Pushing less
+- **A drain over spread links costs its graph, not its pushes:** a hundredfold looser tolerance leaves every drain's
+  cost where it was, since it reads every node and edge and writes back every node it moved whatever it then pushes. Pushing less
   buys a drain nothing measurable.
 - **What the bound buys is no drain at all:** a change whose residuals a commit's pushes bring within the budget leaves
   nothing to drain. The budget grows with `s`, so the tighter bound reaches that sooner: one change at 100,000
@@ -124,36 +124,37 @@ Where a drain's work goes, from its pushes and the nodes it moved, logged from a
 2026-11-01: one edge changed moves every node. At the default tolerance a drain makes some 940,000 pushes, writes all
 100,000 node rows back and 25,000 order keys. At 1e-4 it makes 9,000 to 93,000 pushes and moves 49,000 to 100,000 nodes,
 and a larger share of order keys, up to 93,000, since each push moves an estimate further. Pushing the largest residual
-first instead of sweeping halved the pushes, moved as many nodes and took three times as long. So a drain is a whole
-rewrite of the index however few edges changed, and reading less of the graph for it saves nothing; fewer rows per
-node, which block storage is, does.
+first instead of sweeping halved the pushes, moved as many nodes and took three times as long. So over those links a
+drain is a whole rewrite of the index however few edges changed, and reading less of the graph for it saves nothing.
 
 ### A drain reads what its pushes reach
 
 A drain reads the queue, then each node and its arcs the first time a push reaches it, and reads every node in one pass
-once a quarter of them are reached; its totals are kept by its pushes and counted from the nodes once as many pushes as
-nodes have added to them. What one change reaches depends on the graph, measured with `examples/profile-rank-drain.rs`
-at 100,000 documents and five links each: where each document links others spread across the graph (the benchmarks'
+once a quarter of them are read or would be; its totals are kept by the changes to its nodes and counted from them once
+as many changes as nodes have added to them. What one change reaches depends on the graph, read from a counter in an
+uncommitted copy at 100,000 documents and five links each: where each document links others spread across the graph (the benchmarks'
 graph), a change pushes about 940,000 times and moves every node; where each links the five after it, about 560 pushes
 move about 575 nodes.
 
-2026-11-02, the same machine at a load average of 7 to 9, the edge mirror's build before and this one after, run in
-turn, at the default tolerance:
+2026-11-02, the same machine, main and this branch run in turn twice each at a load average falling from 35 to 5, the two
+runs' medians, at the default tolerance:
 
-| Documents | Links | one change, before | after | ten and ten, before | after |
+| Documents | Links | one change, main | this | ten and ten, main | this |
 |---:|---|---:|---:|---:|---:|
-| 10,000 | spread | 59.3 ms | 61.7 ms | 75.7 ms | 76.7 ms |
-| 100,000 | spread | 407 ms | 433 ms | 712 ms | 593 ms |
-| 10,000 | near | 23.9 ms | 15.9 ms | | |
-| 100,000 | near | 128 ms | 16.5 ms | | |
+| 10,000 | spread | 60.3, 60.9 ms | 61.6, 60.0 ms | 78.0, 78.2 ms | 74.7, 76.8 ms |
+| 100,000 | spread | 404, 392 ms | 457, 426 ms | 670, 718 ms | 605, 594 ms |
+| 10,000 | near | 25.6, 25.6 ms | 18.0, 15.8 ms | | |
+| 100,000 | near | 146, 137 ms | 18.6, 16.4 ms | | |
 
-The near rows' before are 2026-11-01's, at a load of 4 to 9. `ranked` is unchanged, 8.0 and 8.4 µs. Over near links a
-change costs its commits and the drain's 5 ms wait for them to pause, twice, whatever the graph's size. Over spread
-links a drain reads every node, and from then walks them in place order comparing each residual as it reaches it, as the
-drain over the whole graph did; the 4 to 6% left on one change is reading the node rows into the map by id that a drain
-reading only some of them needs, and arcs read as each node is first pushed. A first cut kept a bitset of the waiting up
-to date on every arc a push crosses even then, which made the pushes three times as dear, 33 ms to 9 ms over a change's
-940,000.
+`ranked` is unchanged, 7.9 to 8.4 µs. Over near links a change costs its commits and the drain's 5 ms wait for them to
+pause, twice, whatever the graph's size. Over spread links a drain reads every node, and from then walks them in place
+order comparing each residual as it reaches it, as the drain over the whole graph did: one change costs 7 to 13% more
+here and a burst about 14% less, neither of them taken apart further.
+
+The two sweeps are two loops and two arc reads because that is what this cost took. Sharing one body, a change's arc read
+over spread links took 100 ms where it takes 55 apart, at 100,000 documents, and one change 525 ms; a bitset of the waiting
+kept up on every arc a push crosses made the pushes three times as dear. That set is a map by place in the sweep over a
+few nodes, since a place is a number from the store's one sequence and a bitset by place is sized by that.
 
 How long a drain holds the write lock follows what it reaches: over near links, the some 575 nodes it reads and writes.
 Over spread links a drain still holds it for the whole drain, and splitting it into shorter units would write every node again in each,
