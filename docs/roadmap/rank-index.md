@@ -14,8 +14,10 @@ scores rather than computing them. Where the build differs from the design below
 - **Pushes sweep the queue** in place order from where the last one stopped, kept in the totals; taking the first
   waiting node each time grew a hub's pushes geometrically.
 - **The drain runs in memory:** a commit pushes 16 nodes, and the index thread drains the rest after commits pause
-  for 5 ms (at most 100 ms), in one unit: it reads the queue, reads each node and its arcs the first time a push
-  reaches it, pushes in memory and writes back each node it moved. A drain costs the nodes its pushes reach, not the
+  for 5 ms (at most 100 ms): on a read snapshot it reads the queue, reads each node and its arcs the first time a push
+  reaches it and pushes in memory, then under the write lock writes back each node it moved. A commit that changed the
+  index meanwhile has the drain computed again under the lock, and while one is computed commits leave that index's
+  pushes to it. A drain costs the nodes its pushes reach, not the
   graph, until a quarter of the nodes are read or would be, when it reads them all in one pass. Pushing through the store
   a node at a time cost some 10 µs a push.
 - **The totals are kept, not counted:** each change to a node adds to the estimates' and residuals' sums, and a drain
@@ -143,7 +145,8 @@ Pushing then spreads the change only as far as it is large enough to matter.
   a kind once a drain has read them, and every commit made through the engine hands it the entries it filed and
   unfiled, applied under the write lock as it commits (`crates/elmdb/src/engine/mirror.rs`). A commit that can't say
   what it filed (a write outside the engine's units, an admin unit, a schema change), and another process's commit,
-  empty it; `check()` compares what it holds with the store. A list a commit empties is dropped, and the names it
+  empty it; `check()` compares what it holds with the store. A drain at a snapshot older than the mirror keeps nothing
+  it reads and may read a list held, since a commit changing one of its index's edges has the drain computed again. A list a commit empties is dropped, and the names it
   holds are counted afresh once commits have removed more entries than it holds, so what it keeps follows the graph.
   A drain reads the node rows its pushes reach; over a graph whose links are spread, one change reaches nearly
   every node, and over one whose links stay near, a few hundred (`docs/evidence/rank-index.md`).

@@ -156,9 +156,36 @@ over spread links took 100 ms where it takes 55 apart, at 100,000 documents, and
 kept up on every arc a push crosses made the pushes three times as dear. That set is a map by place in the sweep over a
 few nodes, since a place is a number from the store's one sequence and a bitset by place is sized by that.
 
-How long a drain holds the write lock follows what it reaches: over near links, the some 575 nodes it reads and writes.
-Over spread links a drain still holds it for the whole drain, and splitting it into shorter units would write every node again in each,
-since every unit's pushes reach nearly all of them; what would shorten it is deriving off the write lock.
+Pushing only the nodes over a level that halves down to the threshold, so residual piles up before it is pushed, does not
+pay here. On a disposable copy on 2026-11-02, at a load average of 18 to 36, so the times are rough and the push counts
+exact: pushes fell by 30 to 50% (100,000 documents: 940,000 to 1.3 million down to about 660,000; 10,000: a mean of 127,000
+down to 64,000), and one change over spread links went from 497 to 576 ms at 100,000 and from 63 to 67 ms at 10,000, a
+burst from 645 to 760 ms. Pushes are about 10 ms of a drain of some 215 ms, by phase timers on a copy at 100,000 documents,
+and the writes about 100 ms, so fewer pushes save little and the repeat passes over every node cost more than that.
+
+### A drain computed outside the write lock
+
+A drain is computed on a read snapshot and written under the write lock, computed again there if a commit changed the
+index meanwhile. What a small write waits for while one change after another drains, from `examples/rank-write-stall.rs`
+at 100,000 documents and five spread links each, twenty changes linked and unlinked, a write every 2 ms; 2026-11-02, this
+Mac, a load average of 5 to 7, the two sides in turn, two runs each:
+
+| The write | Writes made, before | after | p50, before | after | p99, before | after | Slowest, before | after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A field | 1,473, 1,484 | 4,825, 3,312 | 418, 382 µs | 92, 103 µs | 214, 207 ms | 1.2, 105 ms | 445, 252 ms | 160, 225 ms |
+| An edge the index reads | 131, 147 | 3,282, 3,130 | 237, 227 ms | 170, 202 µs | 469, 489 ms | 235, 238 ms | 523, 492 ms | 528, 328 ms |
+
+The slowest write stays near what the drain's writes hold the lock for, and a recount when one is due. An edge write every
+2 ms changes the index under most drains, so they are computed twice; the write still waits only for the second.
+
+The benchmarks don't move, on the same day at a load of 4 to 8: one change over spread links at 100,000 went from 392 to
+385 ms and a burst from 543 to 547 ms, 10,000 from 57.3 to 57.8 ms and 70.5 to 69.4 ms. One change over near links at
+100,000 read 18.5, 22.7 and 21.6 ms before and 22.5, 18.0 and 21.2 ms after, the same within what runs differ by.
+
+A commit made while a drain is computed moves the mirror past the drain's snapshot, and the drain then answers from the
+lists held and reads only the rest from the store. The twenty changes took 13.3 to 14.3 s before, and 13.4 to 18.0 s after
+with or without that read of lists held, the runs differing by more than it does; the writer makes three times the commits
+in those runs, which is part of what they pay for. That the read saves time is from reading the code, not from a figure.
 
 ### What it took to get there
 
