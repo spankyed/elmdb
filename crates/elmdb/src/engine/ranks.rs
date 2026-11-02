@@ -183,24 +183,45 @@ pub fn error_bound(residuals: f64, estimates: f64, nodes: u64, damping: f64) -> 
     2.0 * residuals / ((1.0 - damping) * estimates)
 }
 
-/// A node's place in its index's score order: its estimate kept to 16 significant bits, so a push that moves the
-/// estimate less than that leaves the order's entry as it is. An edge changed moves nearly every estimate a little;
-/// rewriting each one's entry would be most of what a drain writes. The order is promised only between scores further
-/// apart than twice the bound an index reports, far coarser than this, and a `ranked` read sorts by the estimates
-/// themselves
-fn order_key(index: &str, node: &Node) -> Vec<u8> {
-    keys::rank_order(index, f64::from_bits(order_bits(node.x)), node.type_at, node.seq)
+/// How many times the tolerance one cell of a rank index's score order spans, as a share of the scores in it. An estimate
+/// moves in proportion to the tolerance, so this is about how many drains an estimate stays in its cell, at any tolerance
+const CELL_TOLERANCES: f64 = 256.0;
+
+/// The significant bits of an estimate a rank index's score order keeps: enough that a cell spans `CELL_TOLERANCES` times
+/// the tolerance. A changed tolerance rebuilds the index, so no key outlives the bits it was written with
+pub fn order_precision(tolerance: f64) -> u32 {
+    (1.0 / (CELL_TOLERANCES * tolerance)).log2().ceil().clamp(4.0, 52.0) as u32
 }
 
-/// An estimate's bits as its order key keeps them, the top 28
-fn order_bits(x: f64) -> u64 {
-    x.to_bits() & !((1u64 << 36) - 1)
+/// A node's place in its index's score order: its cell, then its own place. An edge changed moves nearly every estimate a
+/// little, and a push that leaves an estimate in its cell leaves the order's entry as it is, so a cell's width is how much
+/// of a drain's writes are the order's. The order is promised between scores further apart than twice the larger of the
+/// tolerance and the bound an index reports. A cell can be wider than that only for a score over about `2 /
+/// CELL_TOLERANCES` of the estimates' sum, which few nodes can have, and a read of the top reads through those
+fn order_key(index: &str, precision: u32, node: &Node) -> Vec<u8> {
+    keys::rank_order(index, f64::from_bits(order_bits(node.x, precision)), node.type_at, node.seq)
+}
+
+/// An estimate's bits as its order key keeps them: sign, exponent and `precision` bits of the fraction
+fn order_bits(x: f64, precision: u32) -> u64 {
+    x.to_bits() & !((1u64 << (52 - precision)) - 1)
+}
+
+/// Whether two estimates are in one cell of a score order kept to `precision`
+pub fn same_cell(a: f64, b: f64, precision: u32) -> bool {
+    order_bits(a, precision) == order_bits(b, precision)
+}
+
+/// Whether a cell of a score order kept to `precision` holding `x` is wider than `width`
+pub fn cell_wider_than(x: f64, precision: u32, width: f64) -> bool {
+    let low = order_bits(x, precision);
+    (f64::from_bits(low + (1u64 << (52 - precision))) - f64::from_bits(low)).abs() > width
 }
 
 /// Whether two states of one node have the same place in the score order, read without building either key: most
 /// pushes leave it, and a drain over a graph whose links are spread writes back nearly every node
-fn same_order(a: &Node, b: &Node) -> bool {
-    order_bits(a.x) == order_bits(b.x) && (a.type_at, a.seq) == (b.type_at, b.seq)
+fn same_order(a: &Node, b: &Node, precision: u32) -> bool {
+    same_cell(a.x, b.x, precision) && (a.type_at, a.seq) == (b.type_at, b.seq)
 }
 
 /// What a read reports of a rank index's `nodes` scores: the step each is rounded to, a power of ten no larger than
@@ -247,12 +268,20 @@ struct Index<'a> {
     /// within it, the estimates sum to at least `(1 − α) n − nθ / (1 − α)`, over which the bound is within the
     /// tolerance (`docs/evidence/rank-index.md`), so once no node waits no push is owed
     threshold: f64,
+    /// The significant bits of an estimate its score order keeps
+    precision: u32,
 }
 
 impl<'a> Index<'a> {
     fn new(name: &'a str, def: &'a RankDef, schema: &'a Schema) -> Self {
         let keep = 1.0 - def.damping;
-        Index { name, def, schema, threshold: def.tolerance * keep * keep / (2.0 + def.tolerance) }
+        Index {
+            name,
+            def,
+            schema,
+            threshold: def.tolerance * keep * keep / (2.0 + def.tolerance),
+            precision: order_precision(def.tolerance),
+        }
     }
 
     /// The residuals' sum at which the bound a read reports is the index's tolerance, over estimates that sum to
@@ -565,13 +594,14 @@ impl<'i, 'a> Change<'i, 'a> {
         let owed = self.held.residuals > self.index.budget(self.held.estimates);
         t.state.rank_owed_before.entry(name.to_owned()).or_insert(owed);
         let threshold = self.index.threshold;
+        let precision = self.index.precision;
         for (id, (before, after)) in &self.nodes {
             if before == after {
                 continue;
             }
             if let Some(b) = before {
-                if after.is_none_or(|a| !same_order(&a, b)) {
-                    t.del(&order_key(name, b))?;
+                if after.is_none_or(|a| !same_order(&a, b, precision)) {
+                    t.del(&order_key(name, precision, b))?;
                 }
                 if b.r.abs() > threshold && after.is_none_or(|a| a.r.abs() <= threshold) {
                     t.del(&keys::rank_queued(name, b.type_at, b.seq))?;
@@ -580,8 +610,8 @@ impl<'i, 'a> Change<'i, 'a> {
             match after {
                 Some(a) => {
                     t.put(&keys::rank_node(name, id), &a.encode())?;
-                    if before.is_none_or(|b| !same_order(a, &b)) {
-                        t.put(&order_key(name, a), id.as_bytes())?;
+                    if before.is_none_or(|b| !same_order(a, &b, precision)) {
+                        t.put(&order_key(name, precision, a), id.as_bytes())?;
                     }
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
                         t.put(&keys::rank_queued(name, a.type_at, a.seq), id.as_bytes())?;
@@ -704,6 +734,7 @@ pub struct Drained {
     read_at: u64,
     reached: Reached,
     threshold: f64,
+    precision: u32,
     totals: Totals,
     waiting: bool,
 }
@@ -736,17 +767,17 @@ impl Drained {
     /// Writes what was computed: the nodes that moved, their places in score order and in the queue, and the totals.
     /// Whether any still wait
     fn write(&self, t: &mut Txn<'_, '_>) -> Result<bool> {
-        let Drained { index, reached, threshold, totals, waiting, .. } = self;
-        let threshold = *threshold;
+        let Drained { index, reached, threshold, precision, totals, waiting, .. } = self;
+        let (threshold, precision) = (*threshold, *precision);
         for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
             if old == new {
                 continue;
             }
             let id = &reached.ids[at];
             t.put(&keys::rank_node(index, id), &new.encode())?;
-            if !same_order(old, new) {
-                t.del(&order_key(index, old))?;
-                t.put(&order_key(index, new), id.as_bytes())?;
+            if !same_order(old, new, precision) {
+                t.del(&order_key(index, precision, old))?;
+                t.put(&order_key(index, precision, new), id.as_bytes())?;
             }
             let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
             if was && !is {
@@ -854,7 +885,15 @@ pub fn plan(
         swept: sweep.after.or(held.swept),
         ..held
     };
-    Ok(Some(Drained { index: index.name.to_owned(), read_at: held.written_at, reached, threshold, totals, waiting }))
+    Ok(Some(Drained {
+        index: index.name.to_owned(),
+        read_at: held.written_at,
+        reached,
+        threshold,
+        precision: index.precision,
+        totals,
+        waiting,
+    }))
 }
 
 /// A drain's pushes so far
@@ -1411,7 +1450,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let mut expected_queued = 0usize;
         for (id, n) in &nodes {
             // An estimate that isn't finite has no place in the score order, and is reported above
-            if n.x.is_finite() && !r.contains(&order_key(name, n))? {
+            if n.x.is_finite() && !r.contains(&order_key(name, order_precision(def.tolerance), n))? {
                 out.push(violation(format!("{id} is missing from the score order")));
             }
             if n.r.abs() > index.threshold {
@@ -1498,23 +1537,56 @@ mod tests {
     }
 
     #[test]
-    fn the_score_order_keeps_sixteen_significant_bits() {
+    fn the_score_order_keeps_the_bits_its_tolerance_calls_for() {
+        assert_eq!(order_precision(1e-6), 12);
+        assert_eq!(order_precision(1e-4), 6);
+        // Past where a fraction's bits end, and looser than a cell can usefully be
+        assert_eq!(order_precision(1e-300), 52);
+        assert_eq!(order_precision(0.5), 4);
+    }
+
+    #[test]
+    fn a_cell_is_wider_than_a_width_by_the_gap_its_bits_leave_at_its_score() {
+        // At 1 and 12 bits a cell spans 2^-12; at 2, twice that; a score's own place in it doesn't matter
+        let span = 2f64.powi(-12);
+        for x in [1.0, 1.0 + span / 2.0] {
+            assert!(cell_wider_than(x, 12, span * 0.99), "{x}");
+            assert!(!cell_wider_than(x, 12, span), "{x}");
+        }
+        assert!(cell_wider_than(2.0, 12, span * 1.99));
+        assert!(!cell_wider_than(2.0, 12, span * 2.0));
+        // No bit of the fraction left to widen past: the gap between two neighbouring numbers
+        assert!(!cell_wider_than(1.0, 52, f64::EPSILON));
+    }
+
+    #[test]
+    fn the_score_order_keeps_as_many_bits_as_it_is_given() {
         let node = |x: f64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq: 7 };
-        // Apart in the 20th bit: the same key; apart in the 10th: another, and the higher estimate first
-        assert_eq!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-20))));
-        assert_ne!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-10))));
-        assert!(order_key("i", &node(1.5)) < order_key("i", &node(1.0)));
+        for precision in [4, 12, 16, 52] {
+            let key = |x: f64| order_key("i", precision, &node(x));
+            // Apart past the bits kept: one key. Apart in the last bit kept: another, and the higher estimate first
+            if precision < 52 {
+                assert_eq!(key(1.0), key(1.0 + 2f64.powi(-(precision as i32) - 1)), "{precision}");
+            }
+            assert!(key(1.0 + 2f64.powi(-(precision as i32))) < key(1.0), "{precision}");
+        }
     }
 
     #[test]
     fn two_states_have_the_same_order_exactly_when_their_keys_are_the_same() {
         let node = |x: f64, seq: u64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq };
         let xs = [0.0, 1.0, 1.0 + 2f64.powi(-20), 1.0 + 2f64.powi(-10), 1.5, 3.0e-7, 123.456, 1e12];
-        for &a in &xs {
-            for &b in &xs {
-                for (sa, sb) in [(7, 7), (7, 8)] {
-                    let (p, q) = (node(a, sa), node(b, sb));
-                    assert_eq!(same_order(&p, &q), order_key("i", &p) == order_key("i", &q), "{a} {sa}, {b} {sb}");
+        for precision in [4, 12, 16, 52] {
+            for &a in &xs {
+                for &b in &xs {
+                    for (sa, sb) in [(7, 7), (7, 8)] {
+                        let (p, q) = (node(a, sa), node(b, sb));
+                        assert_eq!(
+                            same_order(&p, &q, precision),
+                            order_key("i", precision, &p) == order_key("i", precision, &q),
+                            "{a} {sa}, {b} {sb}, {precision}"
+                        );
+                    }
                 }
             }
         }

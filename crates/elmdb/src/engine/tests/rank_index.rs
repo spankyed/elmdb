@@ -109,12 +109,13 @@ fn ranked_reads_the_top_alone_and_refuses_what_it_cannot_answer() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("out", true));
     let mut ops: Vec<Json> =
-        (0..20).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        // Enough that the third's score is too small a share for its cell to be wider than the order promises
+        (0..500).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
     ops.extend(
-        (1..20).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" })),
+        (1..500).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" })),
     );
     ops.extend(
-        (2..20).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-1" })),
+        (2..500).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-1" })),
     );
     write(&db, ops).unwrap();
     write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-a" })]).unwrap();
@@ -143,7 +144,7 @@ fn ranked_reads_the_top_alone_and_refuses_what_it_cannot_answer() {
     // Ranked over a set the index doesn't hold entirely: a type it doesn't cover is refused
     let refused = read(
         &db,
-        json!({ "start": { "from": "ids", "ids": ["Task-0", "Task-404"] },
+        json!({ "start": { "from": "ids", "ids": ["Task-0", "Task-9999"] },
         "steps": [{ "step": "ranked", "index": "taskRank" }], "terminal": { "answer": "ids" } }),
     );
     assert_eq!(refused.unwrap()["ids"], json!(["Task-0"]), "an id no entity has is no member of the set");
@@ -348,6 +349,178 @@ proptest! {
             assert_within_bound(&db, direction, true);
         }
     }
+}
+
+/// `schema("out", true)` at a tolerance
+fn at_tolerance(tolerance: f64) -> Schema {
+    let mut at = serde_json::to_value(schema("out", true)).unwrap();
+    at["ranks"]["taskRank"]["tolerance"] = json!(tolerance);
+    Schema::from_json(&at).unwrap()
+}
+
+/// The ids a read of the ranked set answers, in its order, `limit` of them or all; what it answers as `hits` or `ids`
+fn ranked_ids(db: &Database, limit: Option<usize>, answer: &str) -> Vec<String> {
+    let mut steps = vec![json!({ "step": "ranked", "index": "taskRank" })];
+    if let Some(n) = limit {
+        steps.push(json!({ "step": "limit", "n": n }));
+    }
+    let start = json!({ "from": "types", "types": ["Task", "Note"] });
+    let read = read(db, json!({ "start": start, "steps": steps, "terminal": { "answer": answer } })).unwrap();
+    if answer == "hits" {
+        read["hits"].as_array().unwrap().iter().map(|h| h["id"].as_str().unwrap().to_owned()).collect()
+    } else {
+        read["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect()
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, failure_persistence: None, ..ProptestConfig::default() })]
+
+    /// The promise of `ranks::order_key`, at tolerances that keep few bits and many: a top read answers no node above one
+    /// scoring further than twice the larger of the tolerance and the bound above it, and leaves out no such node
+    #[test]
+    fn a_top_read_holds_the_order_promised_at_any_tolerance(
+        ops in prop::collection::vec(op(), 1..30),
+        tolerance in prop_oneof![Just(1e-2), Just(1e-4), Just(1e-6)],
+        take in 1usize..8,
+        answer in prop_oneof![Just("hits"), Just("ids")],
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_with(&dir, at_tolerance(tolerance));
+        write(&db, (0..NODES).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}") })).collect()).unwrap();
+        for op in &ops {
+            let _ = write(&db, vec![json_of(op)]);
+        }
+        db.wait_for_index_builds().unwrap();
+        let (scores, bound) = indexed(&db);
+        let score = |id: &str| scores.iter().find(|(held, _)| held == id).unwrap().1;
+        let promised = 2.0 * tolerance.max(bound);
+        let top = ranked_ids(&db, Some(take), answer);
+        prop_assert_eq!(top.len(), take.min(scores.len()));
+        for (at, id) in top.iter().enumerate() {
+            for later in &top[at + 1..] {
+                prop_assert!(score(later) - score(id) <= promised, "{later} above {id}: {scores:?}");
+            }
+            for (other, held) in scores.iter().filter(|(other, _)| !top.contains(other)) {
+                prop_assert!(held - score(id) <= promised, "{other} left out for {id}: {scores:?}");
+            }
+        }
+    }
+}
+
+/// `Task-0` and `Task-1` scored apart by less than a cell of the index's order, `Task-1` created after and scoring higher,
+/// in a graph of few enough nodes that the cell is wider than the order promises
+fn two_hubs_in_one_wide_cell(dir: &tempfile::TempDir) -> Database {
+    let db = open_with(dir, at_tolerance(1e-5));
+    let task = |i: usize| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") });
+    let refs = |from: usize, to: usize| json!({ "op": "link", "source": format!("Task-{from}"), "kind": "refs", "target": format!("Task-{to}") });
+    let mut ops: Vec<Json> = (0..106).map(task).collect();
+    ops.extend((2..22).map(|leaf| refs(leaf, 0)));
+    ops.extend((22..42).map(|leaf| refs(leaf, 1)));
+    // One leaf more for the second hub, a sixty-fourth of it, its rest spread over nodes that stay low
+    ops.push(refs(42, 1));
+    ops.extend((43..106).map(|dud| refs(42, dud)));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db
+}
+
+#[test]
+fn a_top_read_reads_through_a_cell_wider_than_the_order_promises() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = two_hubs_in_one_wide_cell(&dir);
+    // What the case is of: the higher score placed second by the order, inside one cell, wider than promised
+    let schema = db.schema().unwrap();
+    let (estimates, x0, x1) = db
+        .store()
+        .unwrap()
+        .read(|txn, d| {
+            let snapshot = crate::engine::unit::Snapshot { txn, db: d, schema: &schema };
+            Ok((
+                ranks::totals(&snapshot, "taskRank")?.estimates,
+                ranks::node(&snapshot, "taskRank", "Task-0")?.unwrap().x,
+                ranks::node(&snapshot, "taskRank", "Task-1")?.unwrap().x,
+            ))
+        })
+        .unwrap();
+    let precision = ranks::order_precision(1e-5);
+    assert!(x1 > x0, "{x0} {x1}");
+    assert!(ranks::same_cell(x0, x1, precision), "{x0} {x1}");
+    assert!(ranks::cell_wider_than(x0, precision, 2.0 * 1e-5 * estimates), "{x0} {estimates}");
+    // Taking one straddles the cell, and the second hub is the answer whether or not scores are shown
+    for answer in ["hits", "ids"] {
+        assert_eq!(ranked_ids(&db, Some(1), answer), ["Task-1"], "{answer}");
+        assert_eq!(ranked_ids(&db, Some(2), answer), ["Task-1", "Task-0"], "{answer}");
+    }
+}
+
+#[test]
+fn check_holds_the_order_to_the_bits_the_tolerance_calls_for() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, at_tolerance(1e-6));
+    let mut ops: Vec<Json> =
+        (0..8).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..8).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean());
+    // One node's entry written with more bits than this index's tolerance keeps
+    let kept = |x: f64, bits: u32| f64::from_bits(x.to_bits() & !((1u64 << (52 - bits)) - 1));
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                let bytes = d.main.get(txn, &keys::rank_node("taskRank", "Task-3"))?.unwrap().to_vec();
+                let node = ranks::Node::decode(&bytes)?;
+                let precision = ranks::order_precision(1e-6);
+                let held = keys::rank_order("taskRank", kept(node.x, precision), node.type_at, node.seq);
+                let finer = keys::rank_order("taskRank", kept(node.x, precision + 8), node.type_at, node.seq);
+                assert_ne!(held, finer, "{}", node.x);
+                assert!(d.main.delete(txn, &held)?);
+                d.main.put(txn, &finer, b"Task-3")?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let said = db.check().unwrap().violations.into_iter().map(|v| v.message).collect::<Vec<_>>();
+    assert!(said.iter().any(|m| m.contains("score order")), "{said:?}");
+}
+
+#[test]
+fn a_watch_over_the_top_is_delivered_only_what_changes_its_answer() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, at_tolerance(1e-6));
+    let mut ops: Vec<Json> =
+        (0..200).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..200).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i / 2) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let top = Reads {
+        reads: vec![
+            serde_json::from_value::<ReadOp>(json!({ "read": "query", "plan": {
+                "start": { "from": "types", "types": ["Task", "Note"] },
+                "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 3 }],
+                "terminal": { "answer": "ids" } } }))
+            .unwrap(),
+        ],
+        track: None,
+    };
+    let heard: Arc<Mutex<Vec<Vec<u8>>>> = Arc::default();
+    let into = Arc::clone(&heard);
+    db.watch(top, Box::new(move |answer| into.lock().unwrap().push(answer.as_ref().unwrap().to_vec()))).unwrap();
+    // Far from the top, each drained: the three at the top stay
+    for op in ["link", "unlink", "link", "unlink"] {
+        write(&db, vec![json!({ "op": op, "source": "Task-198", "kind": "refs", "target": "Task-199" })]).unwrap();
+        db.wait_for_index_builds().unwrap();
+    }
+    let heard = heard.lock().unwrap();
+    assert_eq!(heard.len(), 1, "only the first read's answer: {heard:?}");
 }
 
 #[test]
