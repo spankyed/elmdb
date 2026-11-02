@@ -1186,7 +1186,7 @@ fn a_node_a_push_takes_under_the_threshold_no_longer_waits_in_a_drain_reading_on
                 bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
                 t.put(&key, &bytes)?;
                 let (queued, _) = queued_and_bits(t)?;
-                assert!(queued >= 2 && queued <= 100, "{queued} queued reads every node");
+                assert!((2..=100).contains(&queued), "{queued} queued reads every node");
                 if by_drain {
                     ranks::drain(t, "taskRank", 90)?;
                 } else {
