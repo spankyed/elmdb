@@ -126,6 +126,11 @@ exclude_re = [
     # Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep kept in
     # the totals, so the same nodes are pushed in the same order (`draining_in_chunks_makes_the_bits_one_drain_makes`),
     # and the queue `finish` writes is counted from each node's residual, not from what was waiting
+    # The edge mirror's count of removals against what it holds: one removal at the bound only moves when the names are
+    # counted afresh by one commit
+    "mirror.rs:143:.*replace > with >= in EdgeMirror::commit",
+    # The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
+    "mirror.rs:54:.*delete -",
     "ranks.rs:307:.*in Change<'i, 'a>::get",
     "ranks.rs:322:.*replace > with >= in Change<'i, 'a>::set",
     "ranks.rs:640:.*replace match guard after.is_some\\(\\) with (true|false) in push",
