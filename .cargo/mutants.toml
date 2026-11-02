@@ -158,6 +158,8 @@ exclude_re = [
     # them too
     "ranks.rs:560:.*replace == with != in Change<'i, 'a>::finish",
     # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
+    "ranks.rs:748:.*replace > with >= in Drained::write",
+    "ranks.rs:1179:.*replace > with >= in owes_work",
     "ranks.rs:(573|583):.*replace > with >= in Change<'i, 'a>::finish",
     "ranks.rs:(808|845|846):.*replace > with >= in plan",
     "ranks.rs:1041:.*replace > with >= in Reached::sweep_all",
@@ -167,6 +169,9 @@ exclude_re = [
     # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
     # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
     "ranks.rs:1305:.*replace && with \\|\\| in unfinished",
+    # A drain written, then drained again in its unit: it stopped at the budget or with nothing waiting, so this one finds
+    # nothing to push, and one that stopped at its limit takes up the sweep where the next unit would
+    "builder.rs:370:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
     # The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
     # (`draining_in_chunks_makes_the_bits_one_drain_makes`)
     "ranks.rs:808:.*replace < with <= in plan",
