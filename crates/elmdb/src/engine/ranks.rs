@@ -98,10 +98,10 @@ pub struct Totals {
     pub estimates: f64,
     /// `R = Σ|r|`
     pub residuals: f64,
-    /// The pushes made since `estimates` and `residuals` were counted from the nodes: each push adds to both, and
-    /// rounding with it, so `settle` counts them afresh once there have been as many as nodes, a full count's cost
-    /// spread over the pushes that called for it
-    pub pushes: u64,
+    /// The changes to a node's estimate or residual since `estimates` and `residuals` were counted from the nodes: each
+    /// adds its rounding to both, so `settle` counts them afresh once `Index::count_due` says, a full count's cost spread
+    /// over the changes that called for it
+    pub moved: u64,
     pub stage: Stage,
     /// Where the sweep of the queue is: the place of the node pushed last, which the next push starts after
     pub swept: Option<(u32, u64)>,
@@ -109,7 +109,7 @@ pub struct Totals {
 
 impl Totals {
     fn empty() -> Self {
-        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, pushes: 0, stage: Stage::Joining, swept: None }
+        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, moved: 0, stage: Stage::Joining, swept: None }
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -117,7 +117,7 @@ impl Totals {
         out.extend_from_slice(&self.nodes.to_le_bytes());
         out.extend_from_slice(&self.estimates.to_le_bytes());
         out.extend_from_slice(&self.residuals.to_le_bytes());
-        out.extend_from_slice(&self.pushes.to_le_bytes());
+        out.extend_from_slice(&self.moved.to_le_bytes());
         out.push(self.stage as u8);
         if let Some((type_at, seq)) = self.swept {
             out.extend_from_slice(&type_at.to_le_bytes());
@@ -148,7 +148,7 @@ impl Totals {
             nodes: u64::from_le_bytes(bytes[0..8].try_into().expect("eight bytes")),
             estimates: f(8),
             residuals: f(16),
-            pushes: u64::from_le_bytes(bytes[24..32].try_into().expect("eight bytes")),
+            moved: u64::from_le_bytes(bytes[24..32].try_into().expect("eight bytes")),
             stage,
             swept,
         })
@@ -253,6 +253,14 @@ impl<'a> Index<'a> {
         self.def.tolerance * (1.0 - self.def.damping) * estimates.max(0.0) / 2.0
     }
 
+    /// Whether the totals are due to be counted from the nodes: once as many changes as nodes have added their rounding
+    /// to them, or sooner when a tolerance is so tight their worst-case rounding would reach a tenth of the budget
+    fn count_due(&self, totals: &Totals) -> bool {
+        let keep = 1.0 - self.def.damping;
+        let tight = self.def.tolerance * keep / (20.0 * f64::EPSILON);
+        totals.moved > 0 && (totals.moved >= totals.nodes || totals.moved as f64 >= tight)
+    }
+
     /// An edge's weight in this index's graph: its own for a kind declared weighted, read with weights; else 1
     fn weight(&self, kind: &str, weight: Option<f64>) -> f64 {
         let weighted = self.def.weights && self.schema.relations.get(kind).is_some_and(|k| k.weighted);
@@ -324,6 +332,7 @@ impl<'i, 'a> Change<'i, 'a> {
         let residual = |n: Option<Node>| n.map_or(0.0, |n| n.r.abs());
         self.totals.estimates += estimate(to) - estimate(from);
         self.totals.residuals += residual(to) - residual(from);
+        self.totals.moved += 1;
         self.nodes.get_mut(id).expect("read above").1 = to;
         if let Some(n) = to.or(from) {
             if to.is_some_and(|n| n.r.abs() > self.index.threshold) {
@@ -649,7 +658,6 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         };
         let Some((place, id)) = next else { break };
         change.push(t, &id)?;
-        change.totals.pushes += 1;
         after = Some(place);
     }
     change.totals.swept = after;
@@ -705,6 +713,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     // The node pushed last, while every node is read
     let mut last: Option<usize> = None;
     let mut pushes = 0;
+    let mut moved = 0u64;
     while pushes < limit && residuals > index.budget(estimates) {
         if !reached.all && reached.nodes.len() as u64 > most {
             reached.read_all(t, &index)?;
@@ -758,6 +767,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
                 node.r += share * weight;
                 let now = node.r.abs();
                 residuals += now - held;
+                moved += 1;
                 if !*all && (now > threshold) != (held > threshold) {
                     waiting.set((node.type_at, node.seq), now > threshold);
                 }
@@ -772,6 +782,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         after = Some(place);
         last = Some(u);
         pushes += 1;
+        moved += 1;
     }
     drop(graph);
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
@@ -799,8 +810,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
             t.put(&keys::rank_queued(index.name, new.type_at, new.seq), id.as_bytes())?;
         }
     }
-    let totals =
-        Totals { estimates, residuals, pushes: held.pushes + pushes as u64, swept: after.or(held.swept), ..held };
+    let totals = Totals { estimates, residuals, moved: held.moved + moved, swept: after.or(held.swept), ..held };
     t.put(&keys::rank_totals(index.name), &totals.encode())?;
     Ok(waiting)
 }
@@ -1075,7 +1085,10 @@ pub fn push_at_commit(t: &mut Txn<'_, '_>) -> Result<Vec<String>> {
     let names: Vec<String> = t.schema.ranks.keys().cloned().collect();
     let mut waiting = Vec::new();
     for name in names {
-        if push(t, &name, COMMIT_PUSHES)? {
+        // Pushes left, or changes enough since the totals were counted: a drain with none to push still counts them
+        let owed = push(t, &name, COMMIT_PUSHES)?;
+        let def = &t.schema.ranks[&name];
+        if owed || Index::new(&name, def, t.schema).count_due(&totals(t, &name)?) {
             waiting.push(name);
         }
     }
@@ -1131,11 +1144,13 @@ pub fn join_chunk(
     Ok(if taken.len() < limit { None } else { last })
 }
 
-/// After a drain empties the queue: the index built, and its totals counted again from the nodes when its first build
-/// ends or as many pushes as it has nodes have added their rounding since the last count
+/// After a drain owes no more pushes: the index built, and its totals counted again from the nodes when its first build
+/// ends or `Index::count_due` says
 pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     let mut totals = totals(t, index)?;
-    if totals.stage == Stage::Built && totals.pushes < totals.nodes {
+    let def = t.schema.ranks.get(index);
+    let due = def.is_none_or(|def| Index::new(index, def, t.schema).count_due(&totals));
+    if totals.stage == Stage::Built && !due {
         return Ok(());
     }
     let (mut nodes, mut estimates, mut residuals) = (0u64, 0.0, 0.0);
@@ -1158,7 +1173,7 @@ pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     totals.nodes = nodes;
     totals.estimates = estimates;
     totals.residuals = residuals;
-    totals.pushes = 0;
+    totals.moved = 0;
     if totals.stage == Stage::Pushing {
         totals.stage = Stage::Built;
     }
@@ -1363,8 +1378,7 @@ mod tests {
 
     #[test]
     fn the_bound_is_twice_the_residuals_over_the_kept_share_and_the_estimates() {
-        let totals =
-            Totals { nodes: 10, estimates: 9.0, residuals: 0.045, pushes: 0, stage: Stage::Built, swept: None };
+        let totals = Totals { nodes: 10, estimates: 9.0, residuals: 0.045, moved: 0, stage: Stage::Built, swept: None };
         // 2 × 0.045 / (0.15 × 9)
         assert!((totals.error(0.85) - 0.0666_6666_6666_6667).abs() < 1e-12, "{}", totals.error(0.85));
         assert_eq!(Totals { nodes: 0, ..totals }.error(0.85), 0.0);

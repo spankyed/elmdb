@@ -1000,7 +1000,7 @@ fn draining_in_chunks_makes_the_bits_one_drain_makes() {
 }
 
 #[test]
-fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them() {
+fn the_totals_are_counted_afresh_once_as_many_changes_as_nodes_have_added_to_them() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("both", true));
     let mut ops: Vec<Json> =
@@ -1010,8 +1010,8 @@ fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them
     ));
     write(&db, ops).unwrap();
     db.wait_for_index_builds().unwrap();
-    // The estimates' sum off by less than `check()` tells, and `pushes` pushes made since the last count
-    let settled = |pushes: u64| {
+    // The estimates' sum off by less than `check()` tells, and `moved` changes made since the last count
+    let settled = |moved: u64| {
         let found = std::cell::Cell::new((f64::NAN, u64::MAX));
         db.admin_unit_with_checkpoint(
             |t| {
@@ -1019,7 +1019,7 @@ fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them
                 let mut bytes = t.get(&key)?.unwrap();
                 let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
                 bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
-                bytes[24..32].copy_from_slice(&pushes.to_le_bytes());
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
                 t.put(&key, &bytes)?;
                 ranks::settle(t, "taskRank")?;
                 let mut counted = 0.0;
@@ -1028,7 +1028,7 @@ fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them
                     true
                 })?;
                 let totals = ranks::totals(t, "taskRank")?;
-                found.set((totals.estimates - counted, totals.pushes));
+                found.set((totals.estimates - counted, totals.moved));
                 Ok(())
             },
             false,
@@ -1036,13 +1036,77 @@ fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them
         .unwrap();
         found.get()
     };
-    let (off, pushes) = settled(33);
-    assert!(off > 0.0 && pushes == 33, "fewer pushes than nodes counted the totals afresh: {off} {pushes}");
-    assert_eq!(settled(34), (0.0, 0), "as many pushes as nodes left the totals uncounted");
+    let (off, moved) = settled(33);
+    assert!(off > 0.0 && moved == 33, "fewer changes than nodes counted the totals afresh: {off} {moved}");
+    assert_eq!(settled(34), (0.0, 0), "as many changes as nodes left the totals uncounted");
 }
 
 #[test]
-fn a_drains_pushes_count_toward_the_totals_being_counted_afresh() {
+fn a_commit_past_the_changes_a_count_waits_for_is_left_to_the_builder() {
+    // A loose tolerance, so a commit owes no pushes and only the count can call for the builder
+    let dir = tempfile::tempdir().unwrap();
+    let mut loose = serde_json::to_value(schema("out", true)).unwrap();
+    loose["ranks"]["taskRank"]["tolerance"] = json!(0.5);
+    let db = open_with(&dir, Schema::from_json(&loose).unwrap());
+    let ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let left_to_builder = |moved: u64| {
+        let found = std::cell::Cell::new(false);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
+                t.put(&key, &bytes)?;
+                found.set(!ranks::push_at_commit(t)?.is_empty());
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    assert!(!left_to_builder(0), "nothing moved, and nothing owed");
+    assert!(!left_to_builder(39), "fewer changes than nodes");
+    assert!(left_to_builder(40), "as many changes as nodes");
+}
+
+#[test]
+fn a_tight_tolerance_counts_the_totals_before_their_rounding_reaches_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tight = serde_json::to_value(schema("out", true)).unwrap();
+    tight["ranks"]["taskRank"]["tolerance"] = json!(1e-13);
+    let db = open_with(&dir, Schema::from_json(&tight).unwrap());
+    let ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let settled = |moved: u64| {
+        let found = std::cell::Cell::new(u64::MAX);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::settle(t, "taskRank")?;
+                found.set(ranks::totals(t, "taskRank")?.moved);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    // At 1e-13 and a damping of 0.85, a tenth of the budget is 3.4 changes' worst rounding
+    assert_eq!(settled(3), 3);
+    assert_eq!(settled(4), 0);
+}
+
+#[test]
+fn a_drains_changes_count_toward_the_totals_being_counted_afresh() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("out", true));
     let n = 200u64;
@@ -1053,49 +1117,35 @@ fn a_drains_pushes_count_toward_the_totals_being_counted_afresh() {
     ));
     write(&db, ops).unwrap();
     db.wait_for_index_builds().unwrap();
-    // The estimates' sum off by less than `check()` tells, with more pushes owed before a count than a commit makes
-    let left = n - ranks::COMMIT_PUSHES as u64 - 1;
-    db.store()
-        .unwrap()
-        .write(
-            |txn, d| {
+    // From `from` changes, what one drain leaves the count at: the node's leaving is what it pushes
+    let drained = |from: u64, id: &str| {
+        let found = std::cell::Cell::new(0);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, id, false)?;
                 let key = keys::rank_totals("taskRank");
-                let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
-                let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
-                bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
-                bytes[24..32].copy_from_slice(&left.to_le_bytes());
-                d.main.put(txn, &key, &bytes)?;
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&from.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::drain(t, "taskRank", usize::MAX)?;
+                found.set(ranks::totals(t, "taskRank")?.moved);
                 Ok(())
             },
             false,
         )
         .unwrap();
-    // A link far along the chain: the commit's pushes leave some to the drain, whose pushes complete the count
-    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-150" })]).unwrap();
-    db.wait_for_index_builds().unwrap();
-    let (totals, counted) = db
-        .snapshot(|s| {
-            let mut counted = 0.0;
-            s.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
-                counted += ranks::Node::decode(bytes).unwrap().x;
-                true
-            })?;
-            Ok((ranks::totals(s, "taskRank")?, counted))
-        })
-        .unwrap();
-    assert_eq!(totals.estimates, counted, "the drain's pushes left the totals uncounted ({} since)", totals.pushes);
-    // From a count, the next drain's pushes are what is counted since
-    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-120" })]).unwrap();
-    db.wait_for_index_builds().unwrap();
-    let since = db.snapshot(|s| Ok(ranks::totals(s, "taskRank")?.pushes)).unwrap();
-    assert!(since > 0 && since < n, "{since} pushes counted since the last count");
+        found.get()
+    };
+    let from_nothing = drained(0, "Task-100");
+    assert!(from_nothing > 1, "a drain's {from_nothing} changes");
+    assert!(drained(5, "Task-150") > 5, "a drain added nothing to the count");
 }
 
 #[test]
 fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
     // A node leaving takes residual from its neighbours, so some that waited no longer do; the drain's sweep and the
     // commit's, through the store, push the same nodes in the same order, and only nodes still waiting: the same
-    // estimates, as many pushes, ending at the same place
+    // estimates, ending at the same place
     let bits = |by_drain: bool| {
         let dir = tempfile::tempdir().unwrap();
         let db = open_with(&dir, schema("both", true));
@@ -1128,7 +1178,7 @@ fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
                         .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
                         .collect::<crate::Result<Vec<_>>>()?;
                     let totals = ranks::totals(s, "taskRank")?;
-                    Ok((estimates, totals.pushes, totals.swept))
+                    Ok((estimates, totals.swept))
                 })
                 .unwrap(),
             );
