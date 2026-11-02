@@ -1447,6 +1447,40 @@ fn a_commit_that_leaves_the_index_alone_writes_nothing_to_it_and_still_hands_it_
 }
 
 #[test]
+fn a_commit_that_changes_an_index_already_owing_pushes_leaves_them_to_the_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    // Owing pushes as the commit finds it, with no builder told
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1.0;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                d.main.put(txn, &key, &bytes)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let swept = ranks::totals(&*t, "taskRank")?.swept;
+            let (_, nodes) = queued_and_bits(t)?;
+            assert_eq!(ranks::push_at_commit(t)?, ["taskRank"], "owed, so handed to the builder");
+            assert_eq!(ranks::totals(&*t, "taskRank")?.swept, swept, "it made pushes");
+            assert_eq!(queued_and_bits(t)?.1, nodes);
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
 fn a_commit_that_changes_the_index_makes_its_pushes_and_a_run_owing_nothing_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let db = near_links(&dir, 400, 5, 0);

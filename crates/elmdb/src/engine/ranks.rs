@@ -561,6 +561,9 @@ impl<'i, 'a> Change<'i, 'a> {
             return Ok(());
         }
         let name = self.index.name;
+        // The first change of the unit began from the totals as it found them
+        let owed = self.held.residuals > self.index.budget(self.held.estimates);
+        t.state.rank_owed_before.entry(name.to_owned()).or_insert(owed);
         let threshold = self.index.threshold;
         for (id, (before, after)) in &self.nodes {
             if before == after {
@@ -1148,9 +1151,10 @@ impl Reached {
     }
 }
 
-/// A commit's own pushes, up to `COMMIT_PUSHES` for each rank index it changed; the indexes it leaves owing pushes or a
-/// count, for the drain. A commit that didn't change an index writes nothing to it, so it never disturbs a drain being
-/// computed outside the write lock, and whether it pushes follows from the history alone
+/// A commit's own pushes, up to `COMMIT_PUSHES` for each rank index it changed that owed none before it; the indexes it
+/// leaves owing pushes or a count, for the drain. One that owed some has a drain coming that will do them over what it
+/// pushed. A commit that didn't change an index writes nothing to it, so it never disturbs a drain being computed outside
+/// the write lock. Whether a commit pushes follows from the history alone
 pub fn push_at_commit(t: &mut Txn<'_, '_>) -> Result<Vec<String>> {
     let names: Vec<String> = t.schema.ranks.keys().cloned().collect();
     let sequence = super::mirror::stored_sequence(&*t)?;
@@ -1159,7 +1163,8 @@ pub fn push_at_commit(t: &mut Txn<'_, '_>) -> Result<Vec<String>> {
         let def = &t.schema.ranks[&name];
         let held = totals(&*t, &name)?;
         // Every commit before this one stamped a lower sequence, so only this one's writes leave this number
-        let owed = if held.written_at == sequence {
+        let changed = held.written_at == sequence;
+        let owed = if changed && !t.state.rank_owed_before.get(&name).copied().unwrap_or(false) {
             push(t, &name, COMMIT_PUSHES)?
         } else {
             held.residuals > Index::new(&name, def, t.schema).budget(held.estimates)
