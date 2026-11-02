@@ -2,6 +2,7 @@
 //! savepoint, the checks a unit defers to its commit, and the log of what it changed.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use heed::RwTxn;
 
@@ -9,6 +10,7 @@ use crate::error::Result;
 use crate::format::key::prefix_range;
 use crate::schema::Schema;
 use crate::store::Db;
+use crate::sync::PlainMutex;
 
 use super::changes::Event;
 
@@ -26,6 +28,7 @@ struct Level {
     recorded: HashSet<Vec<u8>>,
     events: usize,
     checks: usize,
+    edges: usize,
 }
 
 /// What a unit carries from one call to the next: its savepoints, deferred checks and events
@@ -36,6 +39,10 @@ pub struct UnitState {
     levels: Vec<Level>,
     pub(super) checks: Vec<Check>,
     pub(super) events: Vec<Event>,
+    /// The edge entries the unit filed and unfiled, in order, which its commit hands the store for the edge mirror
+    pub(crate) edges: Vec<super::mirror::EdgeDelta>,
+    /// The edge mirror a drain reads its graph through, when the unit is one of the builder's
+    pub(crate) mirror: Option<Arc<PlainMutex<super::mirror::EdgeMirror>>>,
     /// Every key the unit wrote, while tracked reads are filed for a commit to be matched against; `None` when none
     /// were as the unit began, and its commit is then heard as writing everything. A savepoint rolled back keeps its
     /// keys, which can only name a token that didn't need to be, never miss one
@@ -54,7 +61,12 @@ impl UnitState {
 
     /// Opens a savepoint, returning its depth
     pub fn savepoint(&mut self) -> usize {
-        self.levels.push(Level { events: self.events.len(), checks: self.checks.len(), ..Default::default() });
+        self.levels.push(Level {
+            events: self.events.len(),
+            checks: self.checks.len(),
+            edges: self.edges.len(),
+            ..Default::default()
+        });
         self.levels.len()
     }
 
@@ -379,6 +391,7 @@ impl Txn<'_, '_> {
             }
             self.state.events.truncate(level.events);
             self.state.checks.truncate(level.checks);
+            self.state.edges.truncate(level.edges);
         }
         Ok(())
     }

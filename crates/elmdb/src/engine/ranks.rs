@@ -691,24 +691,36 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let ids: Vec<String> = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
     let mut nodes: Vec<Node> = order.iter().map(|&at| nodes[at]).collect();
     let before = nodes.clone();
-    let place: std::collections::HashMap<&str, usize> =
-        ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
-    // Each node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order
+    let place: rustc_hash::FxHashMap<&str, usize> = ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
+    // Each node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order; through the builder's
+    // edge mirror when it has one, which holds what the store does at this transaction's sequence
+    let mirror = t.state.mirror.clone();
+    let mut graph = mirror.as_ref().map(|m| m.lock());
+    if let Some(graph) = graph.as_mut() {
+        graph.at(super::mirror::stored_sequence(t)?);
+    }
     let mut arcs: Vec<Vec<(usize, f64)>> = Vec::with_capacity(ids.len());
     for id in &ids {
         let mut out = Vec::new();
         for kind in &def.relations {
             for &outward in def.direction.sides() {
-                relations::visit_far_ends(t, id, outward, Some(kind), |far, weight| {
+                let mut arc = |far: &str, weight: Option<f64>| {
                     if let Some(&to) = place.get(far) {
                         out.push((to, index.weight(kind, weight)));
                     }
-                    Ok(true)
-                })?;
+                };
+                match graph.as_mut() {
+                    Some(graph) => graph.visit_far_ends(t, id, outward, kind, arc)?,
+                    None => relations::visit_far_ends(t, id, outward, Some(kind), |far, weight| {
+                        arc(far, weight);
+                        Ok(true)
+                    })?,
+                }
             }
         }
         arcs.push(out);
     }
+    drop(graph);
     let threshold = index.threshold;
     let alpha = def.damping;
     let n = nodes.len();

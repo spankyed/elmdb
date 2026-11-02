@@ -359,8 +359,10 @@ unit is open.
   changed, an entity created, trashed, restored or destroyed — updates the index in its unit by forward push: each
   node holds an estimate and a residual, a change moves the residuals its edges touch, and pushing a node moves its
   residual into its estimate and on along its arcs. A commit pushes up to 16 nodes; the rest wait in the index's
-  queue for the index thread, which reads the graph once, pushes in memory until none waits, and writes back each node
-  it moved, in one unit that tells the watches it wrote into. A rank index is built by that thread too: its nodes added
+  queue for the index thread, which reads its nodes and their edges, pushes in memory until none waits, and writes back
+  each node it moved, in one unit that tells the watches it wrote into. The edges come through an edge mirror on the
+  store that the commits keep, each one handing it the entries it filed and unfiled; a commit that can't, or another
+  process's, empties it, and `check()` compares it with the store. A rank index is built by that thread too: its nodes added
   1,000 at a time, then pushed. The scores are within `2R / ((1 − α) s)` of PageRank in L1, `R` the residuals' sum and
   `s` the estimates', which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
   and the next open goes on.
