@@ -1181,7 +1181,7 @@ fn a_node_a_push_takes_under_the_threshold_no_longer_waits_in_a_drain_reading_on
                 // The sweep from the first place, and the sum past any budget, so pushes end only when no node waits
                 let key = keys::rank_totals("taskRank");
                 let mut bytes = t.get(&key)?.unwrap();
-                bytes.truncate(33);
+                bytes.truncate(41);
                 let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
                 bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
                 t.put(&key, &bytes)?;
