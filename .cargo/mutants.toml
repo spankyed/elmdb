@@ -120,12 +120,17 @@ exclude_re = [
     # The rank index (`docs/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches run
     # again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch and each
     # hears the same
-    "engine/mod.rs:75:.*delete ! in drain_commits",
+    "engine/mod.rs:76:.*delete ! in drain_commits",
     # When a drain starts: a pause for commits to stop leaving pushes, which only a drain's cost shows (the bench)
     "builder.rs:.*in await_quiet",
     # Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep kept in
     # the totals, so the same nodes are pushed in the same order (`draining_in_chunks_makes_the_bits_one_drain_makes`),
     # and the queue `finish` writes is counted from each node's residual, not from what was waiting
+    # The edge mirror's count of removals against what it holds: one removal at the bound only moves when the names are
+    # counted afresh by one commit
+    "mirror.rs:143:.*replace > with >= in EdgeMirror::commit",
+    # The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
+    "mirror.rs:54:.*delete -",
     "ranks.rs:314:.*in Change<'i, 'a>::get",
     "ranks.rs:329:.*replace > with >= in Change<'i, 'a>::set",
     "ranks.rs:647:.*replace match guard after.is_some\\(\\) with (true|false) in push",

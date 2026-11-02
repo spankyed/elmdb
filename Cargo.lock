@@ -2962,6 +2962,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "elmdb",
+ "regex",
  "schemars",
  "serde_json",
  "tempfile",

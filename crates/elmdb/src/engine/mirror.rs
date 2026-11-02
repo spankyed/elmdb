@@ -74,8 +74,8 @@ pub struct EdgeMirror {
     lists: FxHashMap<(u32, u32, bool), Vec<Entry>>,
     /// How many entries the lists hold
     entries: usize,
-    /// How many entries commits have unfiled or replaced since the names were last counted afresh: only those can leave
-    /// a name no list mentions, at most two each
+    /// How many entries commits have unfiled since the names were last counted afresh: only those can leave a name no
+    /// list mentions, at most two each
     removed: usize,
 }
 
@@ -171,10 +171,8 @@ impl EdgeMirror {
         let far = self.name(far);
         let list = self.list(entity, kind, outward).expect("held above");
         match list.binary_search_by_key(&seq, |e| e.seq) {
-            Ok(at) => {
-                list[at] = Entry::new(seq, far, weight);
-                self.removed += 1;
-            }
+            // The same edge, its place being its identity, so the same far end
+            Ok(at) => list[at] = Entry::new(seq, far, weight),
             Err(at) => {
                 list.insert(at, Entry::new(seq, far, weight));
                 self.entries += 1;
@@ -346,6 +344,20 @@ mod tests {
         let (a, k) = (m.known("A").unwrap(), m.known("k").unwrap());
         let list = &m.lists[&(a, k, true)];
         assert_eq!(list.iter().map(|e| &*m.ids[e.far as usize]).collect::<Vec<_>>(), ["B"]);
+    }
+
+    #[test]
+    fn one_commit_removing_more_entries_than_are_held_lets_their_names_go() {
+        let mut m = mirror();
+        let mut unfiled = Vec::new();
+        for i in 0..2 * REMOVED_KEPT {
+            let (entity, far) = (format!("X{i}"), format!("Y{i}"));
+            fill(&mut m, &entity, &far);
+            unfiled.push(EdgeDelta::Unfiled { kind: "k".into(), source: entity, target: far, seq: 1 });
+        }
+        m.commit(1, 2, Some(&unfiled));
+        assert_eq!((m.held(), m.entries), (1, 0));
+        assert_eq!(m.ids.len(), 2, "A and k, the names the list left mentions");
     }
 
     #[test]
