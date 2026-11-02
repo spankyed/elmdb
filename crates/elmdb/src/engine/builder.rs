@@ -284,9 +284,25 @@ fn build_rank(
             Ok(done)
         })?;
     }
+    let mirror = store.mirror();
     chunks(store, stopping, || {
+        // Computed outside the write lock, so commits go on meanwhile; only what it writes holds them up
+        let planning = store.plan_rank(name);
+        let planned = store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            let s = super::unit::Snapshot { txn, db, schema };
+            super::ranks::plan(&s, schema, name, DRAIN_PUSHES, Some(&mirror))
+        })?;
+        #[cfg(test)]
+        store.rank_planned();
         commits(&mut |t| {
-            if super::ranks::drain(t, name, DRAIN_PUSHES)? {
+            planning.end();
+            // A commit wrote the index meanwhile: drained again, here, from what it left
+            let waiting = match &planned {
+                Some(drained) if !super::ranks::stale(t, drained)? => super::ranks::apply(t, drained)?,
+                _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
+            };
+            if waiting {
                 return Ok(false);
             }
             super::ranks::settle(t, name)?;

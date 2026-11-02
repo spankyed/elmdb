@@ -469,7 +469,7 @@ impl Database {
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
                 vector::flush(&mut t)?;
-                ranks::push_at_commit(&mut t)
+                ranks::push_at_commit(&mut t, store.rank_planning().as_deref())
             },
             !recycle,
         )?;
@@ -617,7 +617,7 @@ impl Database {
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
-                let waiting = ranks::push_at_commit(&mut t)?;
+                let waiting = ranks::push_at_commit(&mut t, store.rank_planning().as_deref())?;
                 store.deposit(std::mem::take(&mut state.edges));
                 Ok((results, ChangeSet::of(&state.events), state.written.take(), waiting))
             },
@@ -778,10 +778,11 @@ impl Unit {
     /// Commits the unit, after its deferred checks; a check that fails aborts the whole unit. `durable` waits for the
     /// commit's sync
     pub fn commit(mut self, durable: bool) -> Result<ChangeSet> {
+        let planning = self.store.rank_planning();
         let checked = self.view(0.0).and_then(|mut t| {
             run_checks(&t)?;
             vector::flush(&mut t)?;
-            ranks::push_at_commit(&mut t)
+            ranks::push_at_commit(&mut t, planning.as_deref())
         });
         let waiting = match checked {
             Ok(waiting) => waiting,

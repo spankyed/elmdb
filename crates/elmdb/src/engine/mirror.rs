@@ -196,16 +196,35 @@ impl EdgeMirror {
         }
     }
 
-    /// Visits the entity's entries of `kind` out (or in), in place order, as `relations::visit_far_ends` does: from the
-    /// list held, or from the store, the list then held. Every entry is visited
+    /// Visits the entity's entries of `kind` out (or in), in place order, as `relations::visit_far_ends` does, for a reader
+    /// whose stored sequence is `at`: from the list held, or from the store, the list then held. Every entry is visited.
+    ///
+    /// A mirror not at the reader's sequence keeps nothing the reader reads, which would file an older commit's entries as
+    /// its own. It still answers from a list it holds, which commits since the reader's snapshot may have changed: that
+    /// reader is a drain computed outside the write lock, and a commit changing an edge of its index writes the index,
+    /// so `ranks::stale` has the drain computed again
     pub fn visit_far_ends(
         &mut self,
         t: &impl Read,
+        at: u64,
         entity: &str,
         outward: bool,
         kind: &str,
         mut each: impl FnMut(&str, Option<f64>),
     ) -> Result<()> {
+        if self.sequence != Some(at) {
+            let held = self.known(entity).zip(self.known(kind)).and_then(|(e, k)| self.lists.get(&(e, k, outward)));
+            if let Some(list) = held {
+                for entry in list {
+                    each(&self.ids[entry.far as usize], entry.weight());
+                }
+                return Ok(());
+            }
+            return relations::visit_placed_far_ends(t, entity, outward, kind, |_, far, weight| {
+                each(far, weight);
+                Ok(true)
+            });
+        }
         let key = (self.name(entity), self.name(kind), outward);
         if !self.lists.contains_key(&key) {
             // Filled straight from the store, and fitted: a list collected from a buffer of what was read would keep
