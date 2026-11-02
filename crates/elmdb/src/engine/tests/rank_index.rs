@@ -7,6 +7,7 @@ use serde_json::{Value as Json, json};
 
 use super::rank_bound::{RankIndex, read};
 use crate::engine::plan::{ReadOp, Reads};
+use crate::engine::unit::Read as _;
 use crate::engine::{keys, ranks};
 use crate::error::ErrorCode;
 use crate::schema::Schema;
@@ -947,6 +948,443 @@ fn draining_in_chunks_makes_the_bits_one_drain_makes() {
     for chunk in [1, 7, 33] {
         assert_eq!(bits(chunk), whole, "drained {chunk} pushes at a time");
     }
+}
+
+#[test]
+fn the_totals_are_counted_afresh_once_as_many_changes_as_nodes_have_added_to_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The estimates' sum off by less than `check()` tells, and `moved` changes made since the last count
+    let settled = |moved: u64| {
+        let found = std::cell::Cell::new((f64::NAN, u64::MAX));
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
+                bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::settle(t, "taskRank")?;
+                let mut counted = 0.0;
+                t.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+                    counted += ranks::Node::decode(bytes).unwrap().x;
+                    true
+                })?;
+                let totals = ranks::totals(t, "taskRank")?;
+                found.set((totals.estimates - counted, totals.moved));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    let (off, moved) = settled(33);
+    assert!(off > 0.0 && moved == 33, "fewer changes than nodes counted the totals afresh: {off} {moved}");
+    assert_eq!(settled(34), (0.0, 0), "as many changes as nodes left the totals uncounted");
+}
+
+/// A ring of `nodes` tasks each linking the `degree` after it, built at a tolerance whose drains stay near a change, its
+/// sequence starting from `from`
+fn near_links(dir: &tempfile::TempDir, nodes: usize, degree: usize, from: u64) -> Database {
+    let mut near = serde_json::to_value(schema("out", true)).unwrap();
+    near["ranks"]["taskRank"]["tolerance"] = json!(1e-6);
+    let db = open_with(dir, Schema::from_json(&near).unwrap());
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                d.main.put(txn, &keys::sequence("seq"), &crate::engine::values::encode(&from.into()))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let mut ops: Vec<Json> =
+        (0..nodes).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    for i in 0..nodes {
+        for step in 1..=degree {
+            ops.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs",
+                "target": format!("Task-{}", (i + step) % nodes) }));
+        }
+    }
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db
+}
+
+/// How many nodes are queued, and each node's bits
+fn queued_and_bits(t: &impl crate::engine::unit::Read) -> crate::Result<(u64, Vec<(u64, u64)>)> {
+    let mut queued = 0;
+    t.visit(&keys::rank_queue("taskRank"), |_, _| {
+        queued += 1;
+        true
+    })?;
+    let mut nodes = Vec::new();
+    t.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+        let n = ranks::Node::decode(bytes).unwrap();
+        nodes.push((n.x.to_bits(), n.r.to_bits()));
+        true
+    })?;
+    Ok((queued, nodes))
+}
+
+#[test]
+fn a_drain_reading_nodes_one_at_a_time_makes_the_pushes_the_commits_would() {
+    // After `limit` pushes of one sweep or the other: a push no sweep makes would spend one of them and show here. The
+    // history ends with a node leaving and coming back at the place the sweep stopped, so that place waits again. The
+    // sum held past any budget, where it says, so pushes end only when no node waits
+    let after = |nodes: usize, degree: usize, limit: usize, by_drain: bool, exhaust: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = near_links(&dir, nodes, degree, 0);
+        let found = std::cell::RefCell::new(Vec::new());
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let swept = ranks::totals(t, "taskRank")?.swept;
+                let mut at_swept = None;
+                t.visit(&keys::rank_nodes("taskRank"), |key, bytes| {
+                    let n = ranks::Node::decode(bytes).unwrap();
+                    if Some((n.type_at, n.seq)) == swept {
+                        let parts = crate::format::key::decode(key).unwrap();
+                        if let Some(crate::format::key::Part::String(id)) = parts.into_iter().nth(2) {
+                            at_swept = Some(id);
+                        }
+                    }
+                    true
+                })?;
+                let at_swept = at_swept.unwrap_or_else(|| "Task-7".to_owned());
+                ranks::liveness(t, "Task-200", false)?;
+                ranks::liveness(t, &at_swept, false)?;
+                ranks::liveness(t, &at_swept, true)?;
+                if exhaust {
+                    let key = keys::rank_totals("taskRank");
+                    let mut bytes = t.get(&key)?.unwrap();
+                    let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
+                    bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                    t.put(&key, &bytes)?;
+                }
+                let (queued, before) = queued_and_bits(t)?;
+                assert!(queued > 0 && queued <= nodes as u64 / 4, "{queued} queued reads every node");
+                if by_drain {
+                    ranks::drain(t, "taskRank", limit)?;
+                } else {
+                    ranks::push(t, "taskRank", limit)?;
+                }
+                let (_, bits) = queued_and_bits(t)?;
+                let moved = bits.iter().zip(&before).filter(|(a, b)| a != b).count();
+                let totals = ranks::totals(t, "taskRank")?;
+                found.borrow_mut().push((bits, totals.swept, moved));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.into_inner().remove(0)
+    };
+    // Five links each reach a quarter of the nodes within a few pushes, and a whole drain reads them all
+    for limit in [1, 3, 8, 21, 1000] {
+        let (drained, swept, moved) = after(400, 5, limit, true, false);
+        let (committed, swept_by_commit, _) = after(400, 5, limit, false, false);
+        assert_eq!(drained, committed, "five links, after {limit} pushes");
+        assert_eq!(swept, swept_by_commit, "five links, after {limit} pushes");
+        if limit == 1000 {
+            assert!(moved > 100, "{moved} nodes moved by a whole drain, which never read them all");
+        } else {
+            assert!(moved > 0 && moved <= 100, "{moved} nodes moved by {limit} pushes");
+        }
+    }
+    // One link each, around a ring long enough that fronts of residual die out within a quarter of its nodes: pushed until
+    // none waits, read one at a time throughout, the sweep wrapping to its start as each front ends
+    for limit in [21, 89, 144, 233, 377, 1000] {
+        let (drained, swept, moved) = after(1600, 1, limit, true, true);
+        let (committed, swept_by_commit, _) = after(1600, 1, limit, false, true);
+        assert_eq!(drained, committed, "one link, after {limit} pushes");
+        assert_eq!(swept, swept_by_commit, "one link, after {limit} pushes");
+        assert!(moved > 0 && moved <= 400, "{moved} nodes moved by {limit} pushes");
+    }
+}
+
+#[test]
+fn a_node_a_push_takes_under_the_threshold_no_longer_waits_in_a_drain_reading_one_at_a_time() {
+    // Around a ring of single links, a node holding negative residual and the one after it holding a little more than the
+    // threshold: the first's push takes the second under it, so no sweep should push the second
+    let after = |by_drain: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = near_links(&dir, 400, 1, 0);
+        let threshold = 1e-6 * 0.15 * 0.15 / (2.0 + 1e-6);
+        let found = std::cell::RefCell::new(Vec::new());
+        db.admin_unit_with_checkpoint(
+            |t| {
+                for (id, r) in [("Task-10", -2.0 * threshold), ("Task-11", 1.5 * threshold)] {
+                    let mut n = ranks::node(t, "taskRank", id)?.unwrap();
+                    n.r = r;
+                    t.put(&keys::rank_node("taskRank", id), &n.encode())?;
+                    t.put(&keys::rank_queued("taskRank", n.type_at, n.seq), id.as_bytes())?;
+                }
+                // The sweep from the first place, and the sum past any budget, so pushes end only when no node waits
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes.truncate(33);
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                t.put(&key, &bytes)?;
+                let (queued, _) = queued_and_bits(t)?;
+                assert!((2..=100).contains(&queued), "{queued} queued reads every node");
+                if by_drain {
+                    ranks::drain(t, "taskRank", 90)?;
+                } else {
+                    ranks::push(t, "taskRank", 90)?;
+                }
+                let second = ranks::node(t, "taskRank", "Task-11")?.unwrap();
+                assert!(second.r != 0.0 && second.r.abs() <= threshold, "the second was pushed: {}", second.r);
+                let (_, bits) = queued_and_bits(t)?;
+                found.borrow_mut().push((bits, ranks::totals(t, "taskRank")?.swept));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.into_inner().remove(0)
+    };
+    assert_eq!(after(true), after(false));
+}
+
+#[test]
+fn a_drain_costs_what_it_reaches_however_high_the_stores_sequence() {
+    // A node's place holds the store's sequence as it was made, 2⁴⁰ here, which nothing a drain keeps is sized by
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 1 << 40);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let (queued, _) = queued_and_bits(t)?;
+            assert!(queued > 0 && queued <= 100, "{queued} queued reads every node");
+            while ranks::drain(t, "taskRank", usize::MAX)? {}
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_drain_ends_when_its_held_sum_is_past_the_budget_and_nothing_waits() {
+    // The held sum off by more than any push can lower: every waiting node is pushed, and then none is left to push
+    let inflated = |db: &Database| {
+        let done = std::cell::Cell::new(true);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, "Task-20", false)?;
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                t.put(&key, &bytes)?;
+                done.set(ranks::drain(t, "taskRank", usize::MAX)?);
+                let (queued, _) = queued_and_bits(t)?;
+                assert_eq!(queued, 0, "a node still waits");
+                // Nothing queued to read, and the sum still off
+                assert!(!ranks::drain(t, "taskRank", usize::MAX)?, "owed a push with no node queued");
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        done.get()
+    };
+    // Few waiting, read one at a time
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!inflated(&near_links(&dir, 400, 5, 0)), "owed a push with none to make, reading one at a time");
+    // A small graph, where a quarter of the nodes is soon passed and all are read
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!inflated(&near_links(&dir, 40, 5, 0)), "owed a push with none to make, reading every node");
+}
+
+#[test]
+fn a_commit_past_the_changes_a_count_waits_for_is_left_to_the_builder() {
+    // A loose tolerance, so a commit owes no pushes and only the count can call for the builder
+    let dir = tempfile::tempdir().unwrap();
+    let mut loose = serde_json::to_value(schema("out", true)).unwrap();
+    loose["ranks"]["taskRank"]["tolerance"] = json!(0.5);
+    let db = open_with(&dir, Schema::from_json(&loose).unwrap());
+    let ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let left_to_builder = |moved: u64| {
+        let found = std::cell::Cell::new(false);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
+                t.put(&key, &bytes)?;
+                found.set(!ranks::push_at_commit(t)?.is_empty());
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    assert!(!left_to_builder(0), "nothing moved, and nothing owed");
+    assert!(!left_to_builder(39), "fewer changes than nodes");
+    assert!(left_to_builder(40), "as many changes as nodes");
+    // A node's leaving and coming back are changes the count takes in
+    db.admin_unit_with_checkpoint(
+        |t| {
+            let key = keys::rank_totals("taskRank");
+            let mut bytes = t.get(&key)?.unwrap();
+            bytes[24..32].copy_from_slice(&0u64.to_le_bytes());
+            t.put(&key, &bytes)?;
+            ranks::liveness(t, "Task-3", false)?;
+            ranks::liveness(t, "Task-3", true)?;
+            assert!(ranks::totals(t, "taskRank")?.moved >= 2);
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_commit_to_an_index_with_no_nodes_is_left_to_nobody() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, vec![json!({ "op": "create", "type": "Tag", "id": "Tag-1" })]).unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            assert_eq!(ranks::totals(t, "taskRank")?.nodes, 0);
+            assert!(ranks::push_at_commit(t)?.is_empty(), "nothing to count, and no drain owed");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_tight_tolerance_counts_the_totals_before_their_rounding_reaches_its_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut tight = serde_json::to_value(schema("out", true)).unwrap();
+    tight["ranks"]["taskRank"]["tolerance"] = json!(1e-13);
+    let db = open_with(&dir, Schema::from_json(&tight).unwrap());
+    let ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let settled = |moved: u64| {
+        let found = std::cell::Cell::new(u64::MAX);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&moved.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::settle(t, "taskRank")?;
+                found.set(ranks::totals(t, "taskRank")?.moved);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    // At 1e-13 and a damping of 0.85, a tenth of the budget is 3.4 changes' worst rounding
+    assert_eq!(settled(3), 3);
+    assert_eq!(settled(4), 0);
+}
+
+#[test]
+fn a_drains_changes_count_toward_the_totals_being_counted_afresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let n = 200u64;
+    let mut ops: Vec<Json> =
+        (0..n).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..n - 1).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i + 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // From `from` changes, what `limit` pushes of a drain leave the count at
+    let drained = |from: u64, id: &str, limit: usize| {
+        let found = std::cell::Cell::new(0);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, id, false)?;
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes[24..32].copy_from_slice(&from.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::drain(t, "taskRank", limit)?;
+                found.set(ranks::totals(t, "taskRank")?.moved);
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    // Each push changes its node and its one far end, but for the chain's end, which has none
+    let moved = drained(5, "Task-100", 3);
+    assert!((5 + 5..=5 + 6).contains(&moved), "three pushes took the count from 5 to {moved}");
+}
+
+#[test]
+fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
+    // A node leaving takes residual from its neighbours, so some that waited no longer do; the drain's sweep and the
+    // commit's, through the store, push the same nodes in the same order, and only nodes still waiting: the same
+    // estimates, ending at the same place
+    let bits = |by_drain: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_with(&dir, schema("both", true));
+        let mut ops: Vec<Json> =
+            (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        let edges = crate::engine::algorithms::tests::KARATE_EDGES;
+        let weights = crate::engine::algorithms::tests::KARATE_WEIGHTS;
+        ops.extend(edges.iter().zip(weights).map(|(&(a, b), w)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": w })));
+        write(&db, ops).unwrap();
+        db.wait_for_index_builds().unwrap();
+        // The hubs leave one at a time and the first comes back, each change settled before the next
+        let mut bits = Vec::new();
+        for (id, live) in [("Task-33", false), ("Task-0", false), ("Task-32", false), ("Task-33", true)] {
+            db.admin_unit_with_checkpoint(
+                |t| {
+                    ranks::liveness(t, id, live)?;
+                    if by_drain {
+                        while ranks::drain(t, "taskRank", usize::MAX)? {}
+                    } else {
+                        while ranks::push(t, "taskRank", ranks::COMMIT_PUSHES)? {}
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+            bits.push(
+                db.snapshot(|s| {
+                    let estimates = (0..34)
+                        .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
+                        .collect::<crate::Result<Vec<_>>>()?;
+                    let totals = ranks::totals(s, "taskRank")?;
+                    Ok((estimates, totals.swept))
+                })
+                .unwrap(),
+            );
+        }
+        bits
+    };
+    let drained = bits(true);
+    assert_eq!(drained, bits(false));
 }
 
 #[test]

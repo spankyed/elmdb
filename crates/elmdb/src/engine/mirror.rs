@@ -1,8 +1,8 @@
 //! What a rank index's drain reads of the graph, kept between drains: each entity's edge entries out and in of a kind
 //! (`d/o`, `d/n`, `docs/architecture/format.md`), in place order, as the store holds them at one commit.
 //!
-//! A drain reads every node's edges of its index's kinds, the most of what it costs (`docs/evidence/rank-index.md`),
-//! though a commit between two drains moves a few. The mirror holds an entity's entries once a drain has read them, and
+//! A drain reads the edges of its index's kinds of every node its pushes reach, which over a graph whose links are spread
+//! is nearly every node (`docs/evidence/rank-index.md`), though a commit between two drains moves a few. The mirror holds an entity's entries once a drain has read them, and
 //! every commit made through the engine hands the store the entries it filed and unfiled (`EdgeDelta`), which the store
 //! applies under its write lock as it commits, so a list the mirror holds is the store's at the mirror's sequence:
 //!
