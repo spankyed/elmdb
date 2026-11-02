@@ -455,6 +455,45 @@ fn a_top_read_reads_through_a_cell_wider_than_the_order_promises() {
 }
 
 #[test]
+fn a_top_read_through_narrow_cells_reads_only_its_limit_and_scores_alike_either_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, at_tolerance(1e-6));
+    // A ring: scores alike, each too small a share of their sum for a cell to be wider than the order promises
+    let mut ops: Vec<Json> =
+        (0..300).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..300).map(|i| {
+        json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", (i + 1) % 300) })
+    }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let plan = |answer: &str, explain: bool| Reads {
+        reads: vec![
+            serde_json::from_value::<ReadOp>(json!({ "read": "query", "explain": explain, "plan": {
+                "start": { "from": "types", "types": ["Task", "Note"] },
+                "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 3 }],
+                "terminal": { "answer": answer } } }))
+            .unwrap(),
+        ],
+        track: None,
+    };
+    let answer = |reads: &Reads| {
+        let bytes = db.read(reads).unwrap();
+        serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0].clone()
+    };
+    let explained = answer(&plan("ids", true));
+    assert_eq!(explained["visited"], json!(3), "three of the order's keys and no more: {explained}");
+    // Scores shown are the nodes' own, the same as ranking the whole set
+    let (scores, _) = indexed(&db);
+    let hits = answer(&plan("hits", false));
+    let hits = hits["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    for hit in hits {
+        let held = scores.iter().find(|(id, _)| id == hit["id"].as_str().unwrap()).unwrap().1;
+        assert_eq!(hit["score"].as_f64().unwrap(), held, "{hit}");
+    }
+}
+
+#[test]
 fn check_holds_the_order_to_the_bits_the_tolerance_calls_for() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, at_tolerance(1e-6));
