@@ -1143,25 +1143,35 @@ impl Reached {
     }
 }
 
-/// A commit's own pushes, up to `COMMIT_PUSHES` per rank index; the indexes left with nodes waiting, for the drain. The
-/// index a drain is being computed for outside the write lock (`planning`) takes none: that drain is about to make them,
-/// and pushing here would write the index under it. Whatever the commit itself changed in the index still writes it, so
-/// the drain is computed again
-pub fn push_at_commit(t: &mut Txn<'_, '_>, planning: Option<&str>) -> Result<Vec<String>> {
+/// A commit's own pushes, up to `COMMIT_PUSHES` for each rank index it changed; the indexes it leaves owing pushes or a
+/// count, for the drain. A commit that didn't change an index writes nothing to it, so it never disturbs a drain being
+/// computed outside the write lock, and whether it pushes follows from the history alone
+pub fn push_at_commit(t: &mut Txn<'_, '_>) -> Result<Vec<String>> {
     let names: Vec<String> = t.schema.ranks.keys().cloned().collect();
+    let sequence = super::mirror::stored_sequence(&*t)?;
     let mut waiting = Vec::new();
     for name in names {
-        if planning == Some(name.as_str()) {
-            continue;
-        }
-        // Pushes left, or changes enough since the totals were counted: a drain with none to push still counts them
-        let owed = push(t, &name, COMMIT_PUSHES)?;
         let def = &t.schema.ranks[&name];
-        if owed || Index::new(&name, def, t.schema).count_due(&totals(t, &name)?) {
+        let held = totals(&*t, &name)?;
+        // Every commit before this one stamped a lower sequence, so only this one's writes leave this number
+        let owed = if held.written_at == sequence {
+            push(t, &name, COMMIT_PUSHES)?
+        } else {
+            held.residuals > Index::new(&name, def, t.schema).budget(held.estimates)
+        };
+        if owed || Index::new(&name, def, t.schema).count_due(&totals(&*t, &name)?) {
             waiting.push(name);
         }
     }
     Ok(waiting)
+}
+
+/// Whether a rank index owes the builder anything: its build, pushes or a count of its totals
+pub fn owes_work(r: &impl Read, index: &str) -> Result<bool> {
+    let Some(def) = r.schema().ranks.get(index) else { return Ok(false) };
+    let index = Index::new(index, def, r.schema());
+    let totals = totals(r, index.name)?;
+    Ok(totals.stage != Stage::Built || totals.residuals > index.budget(totals.estimates) || index.count_due(&totals))
 }
 
 /// One chunk of a rank index's build: adds up to `limit` of its types' live entities after `after` (a type's place among

@@ -317,11 +317,15 @@ fn build_rank(
     name: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
-    let joined = store.read(|txn, db| {
+    let (joined, owes) = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let s = super::unit::Snapshot { txn, db, schema };
-        Ok(super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining)
+        Ok((super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining, super::ranks::owes_work(&s, name)?))
     })?;
+    // A commit that left the index alone queues it while a drain is computed; that drain has done what it owed
+    if !owes {
+        return Ok(());
+    }
     if !joined {
         let mut after = None;
         chunks(store, stopping, || {
@@ -338,7 +342,6 @@ fn build_rank(
     let mirror = store.mirror();
     chunks(store, stopping, || {
         // Computed outside the write lock, so commits go on meanwhile; only what it writes holds them up
-        let planning = store.plan_rank(name);
         let planned = store.read(|txn, db| {
             schema.validate(txn, db)?;
             let s = super::unit::Snapshot { txn, db, schema };
@@ -347,7 +350,6 @@ fn build_rank(
         #[cfg(test)]
         store.rank_planned();
         commits(&mut |t| {
-            planning.end();
             // A commit wrote the index meanwhile: drained again, here, from what it left
             let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
             let waiting = match applied {

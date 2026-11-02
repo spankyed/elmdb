@@ -124,22 +124,6 @@ impl Commit {
     }
 }
 
-/// A drain being computed outside the write lock. Ended under the write lock that will write it, so every commit before
-/// that sees it and every commit after doesn't; dropped when the drain never gets there
-pub(crate) struct RankPlanning(Arc<PlainMutex<Option<String>>>);
-
-impl RankPlanning {
-    pub(crate) fn end(&self) {
-        *self.0.lock() = None;
-    }
-}
-
-impl Drop for RankPlanning {
-    fn drop(&mut self) {
-        self.end();
-    }
-}
-
 pub struct Store {
     path: PathBuf,
     read_only: bool,
@@ -155,8 +139,6 @@ pub struct Store {
     sequence: AtomicU64,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
-    /// The rank index a drain is being computed for outside the write lock, whose pushes commits leave to it
-    rank_planning: Arc<PlainMutex<Option<String>>>,
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
     #[cfg(test)]
     rank_planned: PlainMutex<Option<Box<dyn FnOnce() + Send>>>,
@@ -316,7 +298,6 @@ impl Store {
             idle,
             sequence: AtomicU64::new(sequence),
             mirror: Arc::default(),
-            rank_planning: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
             deposited: PlainMutex::default(),
@@ -573,17 +554,6 @@ impl Store {
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror
     pub(crate) fn deposit(&self, entries: Vec<EdgeDelta>) {
         *self.deposited.lock() = Some(entries);
-    }
-
-    /// Commits leave `index`'s pushes to a drain being computed for it, until `RankPlanning::end`
-    pub(crate) fn plan_rank(&self, index: &str) -> RankPlanning {
-        *self.rank_planning.lock() = Some(index.to_owned());
-        RankPlanning(Arc::clone(&self.rank_planning))
-    }
-
-    /// The rank index a drain is being computed for, if any: a writer asks under the write lock
-    pub(crate) fn rank_planning(&self) -> Option<String> {
-        self.rank_planning.lock().clone()
     }
 
     #[cfg(test)]

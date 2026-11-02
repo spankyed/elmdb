@@ -418,7 +418,7 @@ fn a_commit_pushes_its_budget_and_leaves_the_rest_to_the_drain() {
             ranks::clear(t, "taskRank")?;
             assert_eq!(ranks::join_chunk(t, "taskRank", None, 2000)?, None);
             assert_eq!(queued(t), 1000);
-            let waiting = ranks::push_at_commit(t, None)?;
+            let waiting = ranks::push_at_commit(t)?;
             assert_eq!(waiting, ["taskRank"]);
             assert_eq!(queued(t), 1000 - ranks::COMMIT_PUSHES);
             Ok(())
@@ -1227,7 +1227,7 @@ fn a_commit_past_the_changes_a_count_waits_for_is_left_to_the_builder() {
                 let mut bytes = t.get(&key)?.unwrap();
                 bytes[24..32].copy_from_slice(&moved.to_le_bytes());
                 t.put(&key, &bytes)?;
-                found.set(!ranks::push_at_commit(t, None)?.is_empty());
+                found.set(!ranks::push_at_commit(t)?.is_empty());
                 Ok(())
             },
             false,
@@ -1263,7 +1263,7 @@ fn a_commit_to_an_index_with_no_nodes_is_left_to_nobody() {
     db.admin_unit_with_checkpoint(
         |t| {
             assert_eq!(ranks::totals(t, "taskRank")?.nodes, 0);
-            assert!(ranks::push_at_commit(t, None)?.is_empty(), "nothing to count, and no drain owed");
+            assert!(ranks::push_at_commit(t)?.is_empty(), "nothing to count, and no drain owed");
             Ok(())
         },
         false,
@@ -1365,7 +1365,6 @@ fn with_a_commit_during_a_drain(
     write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
     db.wait_for_index_builds().unwrap();
     assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "no drain ran for the link");
-    assert_eq!(db.store().unwrap().rank_planning(), None, "commits take their pushes again once the drain is written");
     let state = db
         .snapshot(|s| {
             let estimates = (0..34)
@@ -1406,6 +1405,71 @@ fn a_rebuild_while_a_drain_is_being_computed_has_the_drain_done_again_from_it() 
     assert_within_bound(&db, "both", true);
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
+fn a_commit_that_leaves_the_index_alone_writes_nothing_to_it_and_still_hands_it_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    write(&db, vec![json!({ "op": "create", "type": "Tag", "id": "Tag-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // Past the budget: the sum as a commit it didn't come from finds it
+    db.admin_unit_with_checkpoint(
+        |t| {
+            let key = keys::rank_totals("taskRank");
+            let mut bytes = t.get(&key)?.unwrap();
+            let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1.0;
+            bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+            bytes[32..40].copy_from_slice(&0u64.to_le_bytes());
+            t.put(&key, &bytes)?;
+            let before = t.get(&key)?;
+            let (_, nodes) = queued_and_bits(t)?;
+            assert_eq!(ranks::push_at_commit(t)?, ["taskRank"], "pushes owed go to the builder");
+            assert_eq!(t.get(&key)?, before, "and nothing is written");
+            assert_eq!(queued_and_bits(t)?.1, nodes);
+            // Within it, and no count due: nothing to hand on
+            let mut within = before.clone().unwrap();
+            let residuals = f64::from_le_bytes(within[16..24].try_into().unwrap()) - 1.0;
+            within[16..24].copy_from_slice(&residuals.to_le_bytes());
+            within[24..32].copy_from_slice(&0u64.to_le_bytes());
+            t.put(&key, &within)?;
+            assert!(ranks::push_at_commit(t)?.is_empty());
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_commit_that_changes_the_index_makes_its_pushes_and_a_run_owing_nothing_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let queued = |t: &crate::engine::unit::Txn<'_, '_>| queued_and_bits(t).map(|(queued, _)| queued);
+            let swept = ranks::totals(&*t, "taskRank")?.swept;
+            let before = queued(t)?;
+            ranks::push_at_commit(t)?;
+            assert!(ranks::totals(&*t, "taskRank")?.swept != swept || queued(t)? != before, "it made no pushes");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let store = db.store().unwrap();
+    let sequence = store.sequence();
+    db.snapshot(|s| {
+        assert!(!ranks::owes_work(s, "taskRank")?, "drained, and counted if due");
+        Ok(())
+    })
+    .unwrap();
+    // A run queued now finds nothing owed: a commit would raise the sequence
+    db.builders().unwrap().unwrap().queue(vec![crate::engine::Work::Rank { name: "taskRank".to_owned() }]);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(store.sequence(), sequence, "a run owing nothing committed");
 }
 
 #[test]
@@ -1528,15 +1592,6 @@ fn a_mirror_past_a_drains_snapshot_answers_from_its_lists_and_keeps_nothing_the_
         Ok(())
     })
     .unwrap();
-}
-
-#[test]
-fn commits_take_their_pushes_again_when_a_drain_being_computed_stops_early() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open_with(&dir, schema("both", true));
-    let store = db.store().unwrap();
-    drop(store.plan_rank("taskRank"));
-    assert_eq!(store.rank_planning(), None);
 }
 
 #[test]
