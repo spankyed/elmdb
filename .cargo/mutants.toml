@@ -169,7 +169,7 @@ exclude_re = [
     "ranks.rs:1270:.*replace && with \\|\\| in unfinished",
     # Whether a drain is computed again under the lock when it needn't be: the same bits from the same state, so only
     # its cost shows (`examples/rank-write-stall.rs`)
-    "builder.rs:302:.*replace match guard !super::ranks::stale\\(t, drained\\)\\? with false",
+    "builder.rs:353:.*replace match guard !super::ranks::stale\\(t, drained\\)\\? with false",
     "ranks.rs:702:.*replace stale -> Result<bool> with Ok\\(true\\)",
     # `EdgeMirror::at` at the sequence it holds already leaves it as it is
     "ranks.rs:724:.*replace < with <= in plan",
