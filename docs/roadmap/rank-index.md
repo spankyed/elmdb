@@ -14,8 +14,12 @@ scores rather than computing them. Where the build differs from the design below
 - **Pushes sweep the queue** in place order from where the last one stopped, kept in the totals; taking the first
   waiting node each time grew a hub's pushes geometrically.
 - **The drain runs in memory:** a commit pushes 16 nodes, and the index thread drains the rest after commits pause
-  for 5 ms (at most 100 ms), reading the graph once, pushing in memory and writing back each node it moved, in one
-  unit. Pushing through the store a node at a time cost some 10 µs a push.
+  for 5 ms (at most 100 ms), in one unit: it reads the queue, reads each node and its arcs the first time a push
+  reaches it, pushes in memory and writes back each node it moved. A drain costs the nodes its pushes reach, not the
+  graph. Pushing through the store a node at a time cost some 10 µs a push.
+- **The totals are kept, not counted:** each push adds to the estimates' and residuals' sums, and a drain that empties
+  the queue counts them afresh from the nodes only once as many pushes as nodes have added their rounding since the
+  last count, so a count's cost is spread over the pushes that called for it.
 - **The score order** (`d/rk`) is keyed on the estimate kept to 16 significant bits, so most of a drain's small moves
   leave it alone; `ranked` sorts by the estimates themselves, and the order is promised only beyond twice the bound.
 - **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a
@@ -138,8 +142,8 @@ Pushing then spreads the change only as far as it is large enough to matter.
   what it filed (a write outside the engine's units, an admin unit, a schema change), and another process's commit,
   empty it; `check()` compares what it holds with the store. A list a commit empties is dropped, and the names it
   holds are counted afresh once commits have removed more entries than it holds, so what it keeps follows the graph.
-  The node rows are still read each drain: they are what it changes, and a change that leaves a drain moves nearly
-  all of them, which is what storing them in blocks is for (`docs/evidence/rank-index.md`).
+  A drain reads the node rows its pushes reach; over a graph whose links are spread, one change reaches nearly
+  every node, and over one whose links stay near, a few hundred (`docs/evidence/rank-index.md`).
 - **Determinism:** pushes run in a fixed order (a queue ordered by the node's place), and sums run serially, so the same
   history of commits gives the same bits on every platform.
 

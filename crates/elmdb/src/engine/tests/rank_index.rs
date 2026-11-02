@@ -6,6 +6,7 @@ use proptest::prelude::*;
 use serde_json::{Value as Json, json};
 
 use crate::engine::plan::{ReadOp, Reads};
+use crate::engine::unit::Read as _;
 use crate::engine::{keys, ranks};
 use crate::error::ErrorCode;
 use crate::schema::Schema;
@@ -996,6 +997,48 @@ fn draining_in_chunks_makes_the_bits_one_drain_makes() {
     for chunk in [1, 7, 33] {
         assert_eq!(bits(chunk), whole, "drained {chunk} pushes at a time");
     }
+}
+
+#[test]
+fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The estimates' sum off by less than `check()` tells, and `pushes` pushes made since the last count
+    let settled = |pushes: u64| {
+        let found = std::cell::Cell::new((f64::NAN, u64::MAX));
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
+                bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
+                bytes[24..32].copy_from_slice(&pushes.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::settle(t, "taskRank")?;
+                let mut counted = 0.0;
+                t.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+                    counted += ranks::Node::decode(bytes).unwrap().x;
+                    true
+                })?;
+                let totals = ranks::totals(t, "taskRank")?;
+                found.set((totals.estimates - counted, totals.pushes));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    let (off, pushes) = settled(33);
+    assert!(off > 0.0 && pushes == 33, "fewer pushes than nodes counted the totals afresh: {off} {pushes}");
+    assert_eq!(settled(34), (0.0, 0), "as many pushes as nodes left the totals uncounted");
 }
 
 #[test]

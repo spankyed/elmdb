@@ -144,6 +144,26 @@ fn maintenance(c: &mut Criterion) {
             });
             black_box(&fixture.directory);
         }
+        // One change over a graph whose links stay near, which reaches the documents around it
+        let local = Fixture::ranked_local_graph(rows, 5);
+        let change = |op: &str| elmdb::engine::batch::Batch {
+            ops: vec![
+                serde_json::from_value(serde_json::json!({ "op": op, "source": "Doc-00000000", "kind": "refs",
+                        "target": format!("Doc-{:08}", rows / 2) }))
+                .unwrap(),
+            ],
+            now: Some(1.0),
+        };
+        let (link, unlink) = (change("link"), change("unlink"));
+        group.bench_function(BenchmarkId::new("rankIndexChange/local", rows), |b| {
+            b.iter(|| {
+                local.db.write(black_box(&link), false).unwrap();
+                local.db.wait_for_index_builds().unwrap();
+                local.db.write(black_box(&unlink), false).unwrap();
+                local.db.wait_for_index_builds().unwrap();
+            })
+        });
+        black_box(&local.directory);
         // The same graph weighted: `rank` by weight, within 1.2× of the unweighted rank above
         let weighted = Fixture::weighted_graph(rows, 5);
         weighted.assert_graph_read("rankWeighted");
