@@ -141,7 +141,7 @@ impl Fixture {
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, false, None)
+        Self::graph_of(rows, degree, false, None, false)
     }
 
     /// The same graph with a rank index over it, `docRank`, its pushes drained: `ranked`'s workload, and what a change
@@ -154,7 +154,16 @@ impl Fixture {
     /// The same graph with a rank index kept to `tolerance`
     #[allow(dead_code)]
     pub fn ranked_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
-        let fixture = Self::graph_of(rows, degree, false, Some(tolerance));
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), false);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
+    }
+
+    /// A graph whose links stay near: each document refers to the `degree` after it, so a change's pushes reach the
+    /// documents around it rather than the whole graph, as they do over the spread links above. Ranked at 1e-6
+    #[allow(dead_code)]
+    pub fn ranked_local_graph(rows: usize, degree: usize) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(1e-6), true);
         fixture.db.wait_for_index_builds().unwrap();
         fixture
     }
@@ -162,11 +171,11 @@ impl Fixture {
     /// The same graph with `refs` declared weighted, each edge weighing 1 to 4 by arithmetic: `rankWeighted`'s workload
     #[allow(dead_code)]
     pub fn weighted_graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, true, None)
+        Self::graph_of(rows, degree, true, None, false)
     }
 
     #[allow(dead_code)]
-    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: Option<f64>) -> Self {
+    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: Option<f64>, local: bool) -> Self {
         let ranks = match ranked {
             Some(tolerance) => json!({"docRank":{"types":["Doc"],"relations":["refs"],"tolerance":tolerance}}),
             None => json!({}),
@@ -190,7 +199,8 @@ impl Fixture {
             })
             .collect();
         for i in 0..rows {
-            let mut targets: Vec<usize> = (1..=degree).map(|j| (i * 31 + j * 977) % rows).filter(|&t| t != i).collect();
+            let target = |j: usize| if local { (i + j) % rows } else { (i * 31 + j * 977) % rows };
+            let mut targets: Vec<usize> = (1..=degree).map(target).filter(|&t| t != i).collect();
             targets.sort_unstable();
             targets.dedup();
             for t in targets {

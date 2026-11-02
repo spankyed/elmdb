@@ -128,6 +128,34 @@ first instead of sweeping halved the pushes, moved as many nodes and took three 
 rewrite of the index however few edges changed, and reading less of the graph for it saves nothing; fewer rows per
 node, which block storage is, does.
 
+### A drain reads what its pushes reach
+
+A drain reads the queue, then each node and its arcs the first time a push reaches it, and reads every node in one pass
+once a quarter of them are reached; its totals are kept by its pushes and counted from the nodes once as many pushes as
+nodes have added to them. What one change reaches depends on the graph, measured with `examples/profile-rank-drain.rs`
+at 100,000 documents and five links each: where each document links others spread across the graph (the benchmarks'
+graph), a change pushes about 940,000 times and moves every node; where each links the five after it, about 560 pushes
+move about 575 nodes.
+
+2026-11-01, the same machine at a load average of 4 to 9, the edge mirror's build before and this one after, run in
+turn, at the default tolerance:
+
+| Documents | Links | one change, before | after | ten and ten, before | after |
+|---:|---|---:|---:|---:|---:|
+| 10,000 | spread | 56.2 ms | 63.0 ms | 73.2 ms | 75.6 ms |
+| 100,000 | spread | 374 ms | 450 ms | 612 ms | 620 ms |
+| 10,000 | near | 23.9 ms | 21.3 ms | | |
+| 100,000 | near | 128 ms | 21.1 ms | | |
+
+`ranked` is unchanged, 7.6 and 8.1 µs. Over near links a change costs its commits and the drain's 5 ms wait for them to
+pause, twice, whatever the graph's size. Over spread links a drain reading every node pays for numbering what it
+reached and for the queue's bitset over a sweep of the nodes in order, 12 to 20% on one change and nothing measurable
+on a burst; the profile's remainder is reading the node rows into the maps a drain that reads only some of them needs.
+
+How long a drain holds the write lock follows what it reaches: over near links, the some 575 nodes it reads and writes.
+Over spread links a drain still holds it for the whole drain, and splitting it into shorter units would write every node again in each,
+since every unit's pushes reach nearly all of them; what would shorten it is deriving off the write lock.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting

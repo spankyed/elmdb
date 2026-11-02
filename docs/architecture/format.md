@@ -35,7 +35,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/ra` index entity | a rank index's node: its estimate, residual and out-weight, three f64, and its place | derived |
 | `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to 16 significant bits | derived |
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
-| `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, how far it is built, where its sweep is | derived |
+| `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the pushes since those were counted, how far it is built, where its sweep is | derived |
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` does the same in a scratch transaction and

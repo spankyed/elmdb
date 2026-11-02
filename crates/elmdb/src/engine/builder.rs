@@ -23,8 +23,8 @@ use super::unit::{Txn, UnitState};
 const CHUNK: usize = 1000;
 
 /// How long a rank index's drain waits after the last commit that left it pushes, so that a burst of commits shares
-/// one drain: each drain reads the whole graph and writes back every node it moved, whatever the commits before it
-/// changed. Reads go on meanwhile, reporting the bound on their scores as it stands
+/// one drain: each drain reads and writes back the nodes its pushes reach, which over a graph whose links are spread
+/// is nearly all of them, however few the commits before it changed. Reads go on meanwhile, reporting the bound on their scores as it stands
 const QUIET: Duration = Duration::from_millis(5);
 
 /// The longest a drain waits for commits to pause, so a steady stream of them is still drained

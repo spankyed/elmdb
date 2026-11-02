@@ -6,6 +6,7 @@ use proptest::prelude::*;
 use serde_json::{Value as Json, json};
 
 use crate::engine::plan::{ReadOp, Reads};
+use crate::engine::unit::Read as _;
 use crate::engine::{keys, ranks};
 use crate::error::ErrorCode;
 use crate::schema::Schema;
@@ -996,6 +997,143 @@ fn draining_in_chunks_makes_the_bits_one_drain_makes() {
     for chunk in [1, 7, 33] {
         assert_eq!(bits(chunk), whole, "drained {chunk} pushes at a time");
     }
+}
+
+#[test]
+fn the_totals_are_counted_afresh_once_as_many_pushes_as_nodes_have_added_to_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The estimates' sum off by less than `check()` tells, and `pushes` pushes made since the last count
+    let settled = |pushes: u64| {
+        let found = std::cell::Cell::new((f64::NAN, u64::MAX));
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
+                bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
+                bytes[24..32].copy_from_slice(&pushes.to_le_bytes());
+                t.put(&key, &bytes)?;
+                ranks::settle(t, "taskRank")?;
+                let mut counted = 0.0;
+                t.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+                    counted += ranks::Node::decode(bytes).unwrap().x;
+                    true
+                })?;
+                let totals = ranks::totals(t, "taskRank")?;
+                found.set((totals.estimates - counted, totals.pushes));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.get()
+    };
+    let (off, pushes) = settled(33);
+    assert!(off > 0.0 && pushes == 33, "fewer pushes than nodes counted the totals afresh: {off} {pushes}");
+    assert_eq!(settled(34), (0.0, 0), "as many pushes as nodes left the totals uncounted");
+}
+
+#[test]
+fn a_drains_pushes_count_toward_the_totals_being_counted_afresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let n = 200u64;
+    let mut ops: Vec<Json> =
+        (0..n).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((0..n - 1).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i + 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The estimates' sum off by less than `check()` tells, with more pushes owed before a count than a commit makes
+    let left = n - ranks::COMMIT_PUSHES as u64 - 1;
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
+                let estimates = f64::from_le_bytes(bytes[8..16].try_into().unwrap()) + 1e-12;
+                bytes[8..16].copy_from_slice(&estimates.to_le_bytes());
+                bytes[24..32].copy_from_slice(&left.to_le_bytes());
+                d.main.put(txn, &key, &bytes)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    // A link far along the chain: the commit's pushes leave some to the drain, whose pushes complete the count
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-150" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (totals, counted) = db
+        .snapshot(|s| {
+            let mut counted = 0.0;
+            s.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+                counted += ranks::Node::decode(bytes).unwrap().x;
+                true
+            })?;
+            Ok((ranks::totals(s, "taskRank")?, counted))
+        })
+        .unwrap();
+    assert_eq!(totals.estimates, counted, "the drain's pushes left the totals uncounted ({} since)", totals.pushes);
+    // From a count, the next drain's pushes are what is counted since
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-120" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let since = db.snapshot(|s| Ok(ranks::totals(s, "taskRank")?.pushes)).unwrap();
+    assert!(since > 0 && since < n, "{since} pushes counted since the last count");
+}
+
+#[test]
+fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
+    // A node leaving takes residual from its neighbours, so some that waited no longer do; the drain's sweep and the
+    // commit's, through the store, push the same nodes in the same order, and only nodes still waiting
+    let bits = |by_drain: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open_with(&dir, schema("both", true));
+        let mut ops: Vec<Json> =
+            (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        let edges = crate::engine::algorithms::tests::KARATE_EDGES;
+        let weights = crate::engine::algorithms::tests::KARATE_WEIGHTS;
+        ops.extend(edges.iter().zip(weights).map(|(&(a, b), w)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": w })));
+        write(&db, ops).unwrap();
+        db.wait_for_index_builds().unwrap();
+        // The hubs leave one at a time and the first comes back, each change settled before the next
+        let mut bits = Vec::new();
+        for (id, live) in [("Task-33", false), ("Task-0", false), ("Task-32", false), ("Task-33", true)] {
+            db.admin_unit_with_checkpoint(
+                |t| {
+                    ranks::liveness(t, id, live)?;
+                    if by_drain {
+                        while ranks::drain(t, "taskRank", usize::MAX)? {}
+                    } else {
+                        while ranks::push(t, "taskRank", ranks::COMMIT_PUSHES)? {}
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+            bits.push(
+                db.snapshot(|s| {
+                    (0..34)
+                        .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
+                        .collect::<crate::Result<Vec<_>>>()
+                })
+                .unwrap(),
+            );
+        }
+        bits
+    };
+    let drained: Vec<Vec<Option<u64>>> = bits(true);
+    assert_eq!(drained, bits(false));
 }
 
 #[test]

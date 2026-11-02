@@ -97,6 +97,10 @@ pub struct Totals {
     pub estimates: f64,
     /// `R = Σ|r|`
     pub residuals: f64,
+    /// The pushes made since `estimates` and `residuals` were counted from the nodes: each push adds to both, and
+    /// rounding with it, so `settle` counts them afresh once there have been as many as nodes, a full count's cost
+    /// spread over the pushes that called for it
+    pub pushes: u64,
     pub stage: Stage,
     /// Where the sweep of the queue is: the place of the node pushed last, which the next push starts after
     pub swept: Option<(u32, u64)>,
@@ -104,14 +108,15 @@ pub struct Totals {
 
 impl Totals {
     fn empty() -> Self {
-        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, stage: Stage::Joining, swept: None }
+        Totals { nodes: 0, estimates: 0.0, residuals: 0.0, pushes: 0, stage: Stage::Joining, swept: None }
     }
 
     fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(38);
+        let mut out = Vec::with_capacity(45);
         out.extend_from_slice(&self.nodes.to_le_bytes());
         out.extend_from_slice(&self.estimates.to_le_bytes());
         out.extend_from_slice(&self.residuals.to_le_bytes());
+        out.extend_from_slice(&self.pushes.to_le_bytes());
         out.push(self.stage as u8);
         if let Some((type_at, seq)) = self.swept {
             out.extend_from_slice(&type_at.to_le_bytes());
@@ -122,17 +127,17 @@ impl Totals {
 
     fn decode(bytes: &[u8]) -> Result<Self> {
         let corrupt = || Error::new(ErrorCode::Corrupted, "A rank index's totals don't read");
-        if bytes.len() != 25 && bytes.len() != 37 {
+        if bytes.len() != 33 && bytes.len() != 45 {
             return Err(corrupt());
         }
-        let swept = (bytes.len() == 37).then(|| {
+        let swept = (bytes.len() == 45).then(|| {
             (
-                u32::from_le_bytes(bytes[25..29].try_into().expect("four bytes")),
-                u64::from_le_bytes(bytes[29..37].try_into().expect("eight bytes")),
+                u32::from_le_bytes(bytes[33..37].try_into().expect("four bytes")),
+                u64::from_le_bytes(bytes[37..45].try_into().expect("eight bytes")),
             )
         });
         let f = |at: usize| f64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"));
-        let stage = match bytes[24] {
+        let stage = match bytes[32] {
             0 => Stage::Joining,
             1 => Stage::Pushing,
             2 => Stage::Built,
@@ -142,6 +147,7 @@ impl Totals {
             nodes: u64::from_le_bytes(bytes[0..8].try_into().expect("eight bytes")),
             estimates: f(8),
             residuals: f(16),
+            pushes: u64::from_le_bytes(bytes[24..32].try_into().expect("eight bytes")),
             stage,
             swept,
         })
@@ -642,6 +648,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         };
         let Some((place, id)) = next else { break };
         change.push(t, &id)?;
+        change.totals.pushes += 1;
         after = Some(place);
     }
     change.totals.swept = after;
@@ -650,128 +657,112 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     Ok(waiting)
 }
 
-/// Drains a rank index in memory: its nodes and their arcs read once, pushed in the same sweep `push` makes until none
-/// waits or `limit` pushes are made, and the nodes whose estimate or residual moved written back once. Reading the
-/// graph costs what one `rank` read does; a push in memory then costs what an arc costs, where a push through the
-/// store costs its reads and writes. Whether any still wait
+/// Drains a rank index in memory: the nodes waiting to be pushed, read from its queue, pushed in the sweep `push`
+/// makes until none waits or `limit` pushes are made, each node and its arcs read once as the pushes first reach it,
+/// and the nodes whose estimate or residual moved written back once. A drain costs the nodes its pushes reach, not the
+/// graph: a change whose residual spreads to a few hundred nodes reads and writes those. Whether any still wait
 pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let schema = t.schema;
     let Some(def) = schema.ranks.get(index) else { return Ok(false) };
     let index = Index::new(index, def, schema);
     let held = totals(t, index.name)?;
-    // The nodes in place order, which is the sweep's
-    let mut ids: Vec<String> = Vec::new();
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut failed = None;
-    t.visit(&keys::rank_nodes(index.name), |key, bytes| {
-        let id = match crate::format::key::decode(key).ok().and_then(|p| p.into_iter().nth(2)) {
-            Some(crate::format::key::Part::String(id)) => id,
-            _ => {
-                failed = Some(Error::new(ErrorCode::Corrupted, "A rank index's node key doesn't read"));
-                return false;
-            }
-        };
-        match Node::decode(bytes) {
-            Ok(n) => {
-                ids.push(id);
-                nodes.push(n);
-                true
-            }
-            Err(e) => {
-                failed = Some(e);
-                false
-            }
-        }
-    })?;
-    if let Some(e) = failed {
-        return Err(e);
-    }
-    let mut order: Vec<usize> = (0..nodes.len()).collect();
-    order.sort_by_key(|&at| (nodes[at].type_at, nodes[at].seq));
-    let ids: Vec<String> = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
-    let mut nodes: Vec<Node> = order.iter().map(|&at| nodes[at]).collect();
-    let before = nodes.clone();
-    let place: rustc_hash::FxHashMap<&str, usize> = ids.iter().enumerate().map(|(at, id)| (id.as_str(), at)).collect();
-    // Each node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order; through the builder's
-    // edge mirror when it has one, which holds what the store does at this transaction's sequence
+    // Arcs through the builder's edge mirror when it has one, which holds what the store does at this transaction's
+    // sequence
     let mirror = t.state.mirror.clone();
     let mut graph = mirror.as_ref().map(|m| m.lock());
     if let Some(graph) = graph.as_mut() {
         graph.at(super::mirror::stored_sequence(t)?);
     }
-    let mut arcs: Vec<Vec<(usize, f64)>> = Vec::with_capacity(ids.len());
-    for id in &ids {
-        let mut out = Vec::new();
-        for kind in &def.relations {
-            for &outward in def.direction.sides() {
-                let mut arc = |far: &str, weight: Option<f64>| {
-                    if let Some(&to) = place.get(far) {
-                        out.push((to, index.weight(kind, weight)));
-                    }
-                };
-                match graph.as_mut() {
-                    Some(graph) => graph.visit_far_ends(t, id, outward, kind, arc)?,
-                    None => relations::visit_far_ends(t, id, outward, Some(kind), |far, weight| {
-                        arc(far, weight);
-                        Ok(true)
-                    })?,
+    let mut reached = Reached::default();
+    // A drain reaching a quarter of the nodes reads them all in one pass, cheaper than one read each. A drain stops once
+    // the residuals' sum is within its budget, so the queue it leaves can be most of the nodes
+    let most = held.nodes / 4;
+    let mut queued = 0u64;
+    t.visit(&keys::rank_queue(index.name), |_, _| {
+        queued += 1;
+        queued <= most
+    })?;
+    if queued > most {
+        reached.read_all(t, &index)?;
+    } else {
+        // Every node waiting is queued, so reading the queue's reaches all of them; a node read later waits only if a
+        // push here put it over the threshold
+        let mut ids = Vec::new();
+        t.visit(&keys::rank_queue(index.name), |_, id| {
+            ids.push(String::from_utf8_lossy(id).into_owned());
+            true
+        })?;
+        for id in &ids {
+            reached.node(t, &index, id)?;
+        }
+    }
+    let threshold = index.threshold;
+    let alpha = def.damping;
+    let mut residuals = held.residuals;
+    let mut estimates = held.estimates;
+    let mut after = held.swept;
+    // The node pushed last, while every node is read
+    let mut last: Option<usize> = None;
+    let mut pushes = 0;
+    while pushes < limit && residuals > index.budget(estimates) {
+        if !reached.all && reached.nodes.len() as u64 > most {
+            reached.read_all(t, &index)?;
+            // Numbered again: the sweep takes up after the place pushed last
+            last = None;
+        }
+        // The next waiting node after the one pushed last, from the queue's start again once past its end
+        let u = if reached.all {
+            let from = match (last, after) {
+                (Some(u), _) => u + 1,
+                (None, Some(place)) => reached.nodes.partition_point(|n| (n.type_at, n.seq) <= place),
+                (None, None) => 0,
+            };
+            match reached.waiting.from(0, from as u64).or_else(|| reached.waiting.first()) {
+                Some((_, u)) => u as usize,
+                None => break,
+            }
+        } else {
+            match after.and_then(|place| reached.waiting.after(place)).or_else(|| reached.waiting.first()) {
+                Some(place) => reached.by_place[&place],
+                None => break,
+            }
+        };
+        let place = (reached.nodes[u].type_at, reached.nodes[u].seq);
+        let arcs = reached.arcs(t, &index, graph.as_deref_mut(), u)?;
+        let residual = reached.nodes[u].r;
+        residuals -= residual.abs();
+        if reached.nodes[u].w > 0.0 {
+            let share = alpha * residual / reached.nodes[u].w;
+            for &(v, weight) in &arcs {
+                let node = &mut reached.nodes[v];
+                let held = node.r.abs();
+                node.r += share * weight;
+                let now = node.r.abs();
+                residuals += now - held;
+                if (now > threshold) != (held > threshold) {
+                    let key = if reached.all { (0, v as u64) } else { (node.type_at, node.seq) };
+                    reached.waiting.set(key, now > threshold);
                 }
             }
         }
-        arcs.push(out);
-    }
-    drop(graph);
-    let threshold = index.threshold;
-    let alpha = def.damping;
-    let n = nodes.len();
-    // The sweep starts after the place pushed last
-    let mut at = match held.swept {
-        Some(swept) => nodes.partition_point(|node| (node.type_at, node.seq) <= swept),
-        None => 0,
-    };
-    let mut residuals: f64 = nodes.iter().map(|node| node.r.abs()).sum();
-    // Each push adds its residual to the estimates, which the budget grows with
-    let mut estimates: f64 = nodes.iter().map(|node| node.x).sum();
-    let mut pushes = 0;
-    let mut since_push = 0;
-    while pushes < limit && n > 0 && since_push < n && residuals > index.budget(estimates) {
-        if at == n {
-            at = 0;
-        }
-        let u = at;
-        at += 1;
-        if nodes[u].r.abs() <= threshold {
-            since_push += 1;
-            continue;
-        }
-        since_push = 0;
-        let residual = nodes[u].r;
-        residuals -= residual.abs();
-        if nodes[u].w > 0.0 {
-            let share = alpha * residual / nodes[u].w;
-            for &(v, weight) in &arcs[u] {
-                let held = nodes[v].r.abs();
-                nodes[v].r += share * weight;
-                residuals += nodes[v].r.abs() - held;
-            }
-        }
-        nodes[u].x += residual;
+        reached.arcs[u] = Some(arcs);
+        reached.nodes[u].x += residual;
         estimates += residual;
-        nodes[u].r = 0.0;
+        reached.nodes[u].r = 0.0;
+        reached.waiting.set(if reached.all { (0, u as u64) } else { place }, false);
+        after = Some(place);
+        last = Some(u);
         pushes += 1;
     }
-    // A push advances the sweep past the node it took, so after any push `at` is at least 1
-    let swept = (pushes > 0).then(|| (nodes[at - 1].type_at, nodes[at - 1].seq));
+    drop(graph);
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
-    let held_estimates: f64 = nodes.iter().map(|node| node.x).sum();
-    let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > index.budget(held_estimates)
-        && nodes.iter().any(|node| node.r.abs() > threshold);
-    // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
-    for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
+    let waiting = residuals > index.budget(estimates) && reached.waiting.first().is_some();
+    // Written back: the nodes that moved, their places in score order and in the queue, and the totals
+    for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
         if old == new {
             continue;
         }
-        let id = &ids[at];
+        let id = &reached.ids[at];
         t.put(&keys::rank_node(index.name, id), &new.encode())?;
         if !same_order(old, new) {
             t.del(&order_key(index.name, old))?;
@@ -784,15 +775,285 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
             t.put(&keys::rank_queued(index.name, new.type_at, new.seq), id.as_bytes())?;
         }
     }
-    let totals = Totals {
-        nodes: n as u64,
-        estimates: nodes.iter().map(|node| node.x).sum(),
-        residuals: nodes.iter().map(|node| node.r.abs()).sum(),
-        stage: held.stage,
-        swept: swept.or(held.swept),
-    };
+    let totals =
+        Totals { estimates, residuals, pushes: held.pushes + pushes as u64, swept: after.or(held.swept), ..held };
     t.put(&keys::rank_totals(index.name), &totals.encode())?;
     Ok(waiting)
+}
+
+/// The nodes a drain's pushes have reached, each read once: as read, as pushed, and its arcs once it is pushed
+#[derive(Default)]
+struct Reached {
+    /// Each entity read, and its place here when it is a node
+    at: rustc_hash::FxHashMap<String, Option<usize>>,
+    /// Each node read, by its place in the index
+    by_place: rustc_hash::FxHashMap<(u32, u64), usize>,
+    ids: Vec<String>,
+    before: Vec<Node>,
+    nodes: Vec<Node>,
+    /// A node's arcs to other nodes, `(node, weight)`, read the first time it is pushed
+    arcs: Vec<Option<Vec<(usize, f64)>>>,
+    /// The nodes reached whose residual is over the threshold, every node waiting, the queue having been read: by their
+    /// places, or once every node is read and numbered in place order, by their numbers here
+    waiting: Places,
+    /// Whether every node is read
+    all: bool,
+}
+
+impl Reached {
+    /// The entity's place here, read from the store the first time; `None` when it isn't a node
+    fn node(&mut self, t: &impl Read, index: &Index<'_>, id: &str) -> Result<Option<usize>> {
+        if let Some(&at) = self.at.get(id) {
+            return Ok(at);
+        }
+        let read = if self.all { None } else { node(t, index.name, id)? };
+        Ok(match read {
+            Some(n) => Some(self.add(index, id.to_owned(), n)),
+            None => {
+                self.at.insert(id.to_owned(), None);
+                None
+            }
+        })
+    }
+
+    fn add(&mut self, index: &Index<'_>, id: String, n: Node) -> usize {
+        let at = self.nodes.len();
+        self.at.insert(id.clone(), Some(at));
+        if !self.all {
+            self.by_place.insert((n.type_at, n.seq), at);
+        }
+        self.ids.push(id);
+        self.before.push(n);
+        self.nodes.push(n);
+        self.arcs.push(None);
+        if n.r.abs() > index.threshold {
+            self.waiting.set((n.type_at, n.seq), true);
+        }
+        at
+    }
+
+    /// Every node not yet read, in one pass over the index's nodes; an entity read after this that isn't here is no node
+    fn read_all(&mut self, t: &impl Read, index: &Index<'_>) -> Result<()> {
+        let mut read = Vec::new();
+        let mut failed = None;
+        t.visit(&keys::rank_nodes(index.name), |key, bytes| {
+            let id = match crate::format::key::decode(key).ok().and_then(|p| p.into_iter().nth(2)) {
+                Some(crate::format::key::Part::String(id)) => id,
+                _ => {
+                    failed = Some(Error::new(ErrorCode::Corrupted, "A rank index's node key doesn't read"));
+                    return false;
+                }
+            };
+            if self.at.contains_key(&id) {
+                return true;
+            }
+            match Node::decode(bytes) {
+                Ok(n) => {
+                    read.push((id, n));
+                    true
+                }
+                Err(e) => {
+                    failed = Some(e);
+                    false
+                }
+            }
+        })?;
+        if let Some(e) = failed {
+            return Err(e);
+        }
+        self.all = true;
+        // Swept by number from here on, so no node is looked up by its place
+        self.by_place = Default::default();
+        self.at.reserve(read.len());
+        self.ids.reserve(read.len());
+        self.before.reserve(read.len());
+        self.nodes.reserve(read.len());
+        self.arcs.reserve(read.len());
+        for (id, n) in read {
+            self.add(index, id, n);
+        }
+        self.in_place_order(index);
+        Ok(())
+    }
+
+    /// Every node numbered again in place order, the sweep's, so pushes sweeping it read the nodes and their arcs in
+    /// the order they are stored here
+    fn in_place_order(&mut self, index: &Index<'_>) {
+        let mut order: Vec<usize> = (0..self.nodes.len()).collect();
+        order.sort_unstable_by_key(|&at| (self.nodes[at].type_at, self.nodes[at].seq));
+        let mut renumbered = vec![0; order.len()];
+        for (to, &from) in order.iter().enumerate() {
+            renumbered[from] = to;
+        }
+        let mut ids = std::mem::take(&mut self.ids);
+        let mut arcs = std::mem::take(&mut self.arcs);
+        self.ids = order.iter().map(|&at| std::mem::take(&mut ids[at])).collect();
+        self.before = order.iter().map(|&at| self.before[at]).collect();
+        self.nodes = order.iter().map(|&at| self.nodes[at]).collect();
+        self.arcs = order
+            .iter()
+            .map(|&at| arcs[at].take().map(|list| list.into_iter().map(|(v, w)| (renumbered[v], w)).collect()))
+            .collect();
+        for at in self.at.values_mut().flatten() {
+            *at = renumbered[*at];
+        }
+        self.waiting = Places::default();
+        for (at, n) in self.nodes.iter().enumerate() {
+            if n.r.abs() > index.threshold {
+                self.waiting.set((0, at as u64), true);
+            }
+        }
+    }
+
+    /// A node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order, those to a node; taken
+    /// out for the push, which puts them back
+    fn arcs(
+        &mut self,
+        t: &impl Read,
+        index: &Index<'_>,
+        mut graph: Option<&mut super::mirror::EdgeMirror>,
+        u: usize,
+    ) -> Result<Vec<(usize, f64)>> {
+        if let Some(arcs) = self.arcs[u].take() {
+            return Ok(arcs);
+        }
+        // A far end already read is taken by its place here; one not read yet is named, read once the visit is done
+        enum Far {
+            Read(usize, f64),
+            Unread(String, f64),
+        }
+        let id = std::mem::take(&mut self.ids[u]);
+        if self.all {
+            // Every node is read: a far end not here is no node
+            let mut arcs = Vec::new();
+            for kind in &index.def.relations {
+                for &outward in index.def.direction.sides() {
+                    let at = &self.at;
+                    let mut arc = |far: &str, weight: Option<f64>| {
+                        if let Some(Some(v)) = at.get(far) {
+                            arcs.push((*v, index.weight(kind, weight)));
+                        }
+                    };
+                    let visited = match graph.as_deref_mut() {
+                        Some(graph) => graph.visit_far_ends(t, &id, outward, kind, arc),
+                        None => relations::visit_far_ends(t, &id, outward, Some(kind), |far, weight| {
+                            arc(far, weight);
+                            Ok(true)
+                        }),
+                    };
+                    if let Err(e) = visited {
+                        self.ids[u] = id;
+                        return Err(e);
+                    }
+                }
+            }
+            self.ids[u] = id;
+            return Ok(arcs);
+        }
+        let mut found: Vec<Far> = Vec::new();
+        for kind in &index.def.relations {
+            for &outward in index.def.direction.sides() {
+                let at = &self.at;
+                let mut arc = |far: &str, weight: Option<f64>| {
+                    let weight = index.weight(kind, weight);
+                    match at.get(far) {
+                        Some(Some(v)) => found.push(Far::Read(*v, weight)),
+                        Some(None) => {}
+                        None => found.push(Far::Unread(far.to_owned(), weight)),
+                    }
+                };
+                let visited = match graph.as_deref_mut() {
+                    Some(graph) => graph.visit_far_ends(t, &id, outward, kind, arc),
+                    None => relations::visit_far_ends(t, &id, outward, Some(kind), |far, weight| {
+                        arc(far, weight);
+                        Ok(true)
+                    }),
+                };
+                if let Err(e) = visited {
+                    self.ids[u] = id;
+                    return Err(e);
+                }
+            }
+        }
+        self.ids[u] = id;
+        let mut arcs = Vec::with_capacity(found.len());
+        for far in found {
+            match far {
+                Far::Read(v, weight) => arcs.push((v, weight)),
+                Far::Unread(far, weight) => {
+                    if let Some(v) = self.node(t, index, &far)? {
+                        arcs.push((v, weight));
+                    }
+                }
+            }
+        }
+        Ok(arcs)
+    }
+}
+
+/// A set of places, a bit per entity place under each type's: what a drain's sweep takes the next waiting node from,
+/// a word at a time
+#[derive(Default)]
+struct Places {
+    bits: Vec<Vec<u64>>,
+}
+
+impl Places {
+    #[inline]
+    fn set(&mut self, (type_at, seq): (u32, u64), on: bool) {
+        let (t, word, bit) = (type_at as usize, (seq / 64) as usize, seq % 64);
+        if self.bits.len() <= t {
+            self.bits.resize_with(t + 1, Vec::new);
+        }
+        let words = &mut self.bits[t];
+        if words.len() <= word {
+            if !on {
+                return;
+            }
+            words.resize(word + 1, 0);
+        }
+        if on {
+            words[word] |= 1 << bit;
+        } else {
+            words[word] &= !(1 << bit);
+        }
+    }
+
+    /// The first place at or after `seq` under type `t` and after it under the types following
+    #[inline]
+    fn from(&self, type_at: u32, seq: u64) -> Option<(u32, u64)> {
+        for t in type_at as usize..self.bits.len() {
+            let start = if t == type_at as usize { seq } else { 0 };
+            let words = &self.bits[t];
+            let mut word = (start / 64) as usize;
+            if word >= words.len() {
+                continue;
+            }
+            let mut w = words[word] & (u64::MAX << (start % 64));
+            loop {
+                if w != 0 {
+                    return Some((t as u32, word as u64 * 64 + u64::from(w.trailing_zeros())));
+                }
+                word += 1;
+                if word >= words.len() {
+                    break;
+                }
+                w = words[word];
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn first(&self) -> Option<(u32, u64)> {
+        self.from(0, 0)
+    }
+
+    /// An entity's place is below 2⁶⁴ − 1, so the next one is its successor
+    #[inline]
+    fn after(&self, (type_at, seq): (u32, u64)) -> Option<(u32, u64)> {
+        self.from(type_at, seq + 1)
+    }
 }
 
 /// A commit's own pushes, up to `COMMIT_PUSHES` per rank index; the indexes left with nodes waiting, for the drain
@@ -856,10 +1117,13 @@ pub fn join_chunk(
     Ok(if taken.len() < limit { None } else { last })
 }
 
-/// After a drain empties the queue: the totals counted again from the nodes, which incremental sums drift from, and the
-/// index built
+/// After a drain empties the queue: the index built, and its totals counted again from the nodes when its first build
+/// ends or as many pushes as it has nodes have added their rounding since the last count
 pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     let mut totals = totals(t, index)?;
+    if totals.stage == Stage::Built && totals.pushes < totals.nodes {
+        return Ok(());
+    }
     let (mut nodes, mut estimates, mut residuals) = (0u64, 0.0, 0.0);
     let mut failed = None;
     t.visit(&keys::rank_nodes(index), |_, bytes| match Node::decode(bytes) {
@@ -880,6 +1144,7 @@ pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     totals.nodes = nodes;
     totals.estimates = estimates;
     totals.residuals = residuals;
+    totals.pushes = 0;
     if totals.stage == Stage::Pushing {
         totals.stage = Stage::Built;
     }
@@ -1084,7 +1349,8 @@ mod tests {
 
     #[test]
     fn the_bound_is_twice_the_residuals_over_the_kept_share_and_the_estimates() {
-        let totals = Totals { nodes: 10, estimates: 9.0, residuals: 0.045, stage: Stage::Built, swept: None };
+        let totals =
+            Totals { nodes: 10, estimates: 9.0, residuals: 0.045, pushes: 0, stage: Stage::Built, swept: None };
         // 2 × 0.045 / (0.15 × 9)
         assert!((totals.error(0.85) - 0.0666_6666_6666_6667).abs() < 1e-12, "{}", totals.error(0.85));
         assert_eq!(Totals { nodes: 0, ..totals }.error(0.85), 0.0);
