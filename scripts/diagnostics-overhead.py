@@ -28,7 +28,9 @@ GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes",
 REPORTED = {"text_rebuild"}
 
 root = Path.cwd()
-home = Path(tempfile.mkdtemp(prefix="diagnostics-overhead-"))
+# `GUNGRAUN_HOME`, when set, names the directory the runs write, which CI keeps on a failure
+home = Path(os.environ.get("GUNGRAUN_HOME") or tempfile.mkdtemp(prefix="diagnostics-overhead-"))
+home.mkdir(parents=True, exist_ok=True)
 env = {**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")}
 
 
@@ -57,6 +59,11 @@ lines = ["| Operation | Without | With, nothing collecting | Change | Bound |", 
 for function, given, old, new in rows:
     if old is None:
         failures.append(f"`{function} {given}` has no count without the feature to compare with")
+        continue
+    # No operation the benchmark runs costs nothing: a count of 0 is a measurement that collected nothing
+    if old == 0 or new == 0:
+        failures.append(f"`{function} {given}` counted {old:,} instructions without the feature and {new:,} with it: "
+                        "Valgrind collected nothing in a run, so there is nothing to compare")
         continue
     allowed = max(FLOOR, int(old * SHARE))
     grew = new - old

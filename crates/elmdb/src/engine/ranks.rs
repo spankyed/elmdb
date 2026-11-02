@@ -9,9 +9,9 @@
 //! its sum and the index holds no term for that mass.
 //!
 //! **The residual.** Each node holds `r = b + α Pᵀ x̂ − x̂` exactly, as every change below keeps it. The estimate is then
-//! within `R / (1 − α)` of `x` in L1, where `R = Σ|r|`; since `x ≥ b`, the normalized scores are within
-//! `E = 2R / ((1 − α)² n)` of PageRank, which a read reports. A node whose residual is over `ε = tolerance (1 − α)² / 2`
-//! waits in the queue, so once none does, `E` is within the index's tolerance.
+//! within `R / (1 − α)` of `x` in L1, where `R = Σ|r|`; divided by their sum `s` as a read divides them, the scores are
+//! within `E = 2R / ((1 − α) s)` of PageRank, which a read reports (`error_bound`). A node whose residual is over
+//! `θ = tolerance (1 − α)² / (2 + tolerance)` waits in the queue, so once none does, `E` is within the index's tolerance.
 //!
 //! **Pushing** a node adds its residual to its estimate and spreads `α` of it over its arcs by weight.
 //!
@@ -147,20 +147,24 @@ impl Totals {
         })
     }
 
-    /// The bound on the L1 distance of the normalized scores from PageRank, from its residuals and nodes
+    /// The bound on the L1 distance of the normalized scores from PageRank, from its residuals, estimates and nodes
     pub fn error(&self, damping: f64) -> f64 {
-        error_bound(self.residuals, self.nodes, damping)
+        error_bound(self.residuals, self.estimates, self.nodes, damping)
     }
 }
 
-/// `E = 2R / ((1 − α)² n)`, the bound on the L1 distance of an index's normalized scores from PageRank, which its
-/// residuals' sum `R` over its `n` nodes gives (`docs/evidence/rank-index.md`); 0 for no nodes
-pub fn error_bound(residuals: f64, nodes: u64, damping: f64) -> f64 {
+/// `E = 2R / ((1 − α) s)`, the bound on the L1 distance of an index's normalized scores from PageRank, which its
+/// residuals' sum `R` and its estimates' sum `s` give (`docs/evidence/rank-index.md`): the estimates are within
+/// `R / (1 − α)` of the solution, and dividing them by `s`, as a read does, at most doubles that over `s`, whatever their
+/// signs. 0 for no nodes; none, infinite, for estimates that sum to nothing, which a read can't divide by
+pub fn error_bound(residuals: f64, estimates: f64, nodes: u64, damping: f64) -> f64 {
     if nodes == 0 {
         return 0.0;
     }
-    let keep = 1.0 - damping;
-    2.0 * residuals / (keep * keep * nodes as f64)
+    if estimates <= 0.0 {
+        return f64::INFINITY;
+    }
+    2.0 * residuals / ((1.0 - damping) * estimates)
 }
 
 /// A node's place in its index's score order: its estimate kept to 16 significant bits, so a push that moves the
@@ -169,7 +173,18 @@ pub fn error_bound(residuals: f64, nodes: u64, damping: f64) -> f64 {
 /// apart than twice the bound an index reports, far coarser than this, and a `ranked` read sorts by the estimates
 /// themselves
 fn order_key(index: &str, node: &Node) -> Vec<u8> {
-    keys::rank_order(index, f64::from_bits(node.x.to_bits() & !((1u64 << 36) - 1)), node.type_at, node.seq)
+    keys::rank_order(index, f64::from_bits(order_bits(node.x)), node.type_at, node.seq)
+}
+
+/// An estimate's bits as its order key keeps them, the top 28
+fn order_bits(x: f64) -> u64 {
+    x.to_bits() & !((1u64 << 36) - 1)
+}
+
+/// Whether two states of one node have the same place in the score order, read without building either key: most
+/// pushes leave it, and a drain writes back nearly every node
+fn same_order(a: &Node, b: &Node) -> bool {
+    order_bits(a.x) == order_bits(b.x) && (a.type_at, a.seq) == (b.type_at, b.seq)
 }
 
 /// What a read reports of a rank index's `nodes` scores: the step each is rounded to, a power of ten no larger than
@@ -179,6 +194,9 @@ fn order_key(index: &str, node: &Node) -> Vec<u8> {
 pub fn reported(error: f64, nodes: u64) -> (f64, f64) {
     if error.is_nan() || error <= 0.0 || nodes == 0 {
         return (0.0, 0.0);
+    }
+    if error.is_infinite() {
+        return (error, 0.0);
     }
     let step = 10f64.powf((error / nodes as f64).log10().floor());
     let bound = error + step * nodes as f64 / 2.0;
@@ -209,20 +227,23 @@ struct Index<'a> {
     name: &'a str,
     def: &'a RankDef,
     schema: &'a Schema,
-    /// The residual over which a node waits to be pushed, `tolerance (1 − α)² / 2`
+    /// The residual over which a node waits to be pushed, `tolerance (1 − α)² / (2 + tolerance)`: with every residual
+    /// within it, the estimates sum to at least `(1 − α) n − nθ / (1 − α)`, over which the bound is within the
+    /// tolerance (`docs/evidence/rank-index.md`), so once no node waits no push is owed
     threshold: f64,
 }
 
 impl<'a> Index<'a> {
     fn new(name: &'a str, def: &'a RankDef, schema: &'a Schema) -> Self {
         let keep = 1.0 - def.damping;
-        Index { name, def, schema, threshold: def.tolerance * keep * keep / 2.0 }
+        Index { name, def, schema, threshold: def.tolerance * keep * keep / (2.0 + def.tolerance) }
     }
 
-    /// The residuals' sum at which the bound a read reports is the index's tolerance: pushes stop once the sum is
-    /// within it, though single nodes are still over the threshold, since only the sum is what the bound is of
-    fn budget(&self, nodes: u64) -> f64 {
-        self.threshold * nodes as f64
+    /// The residuals' sum at which the bound a read reports is the index's tolerance, over estimates that sum to
+    /// `estimates`: pushes stop once the sum is within it, though single nodes are still over the threshold, since only
+    /// the sum is what the bound is of
+    fn budget(&self, estimates: f64) -> f64 {
+        self.def.tolerance * (1.0 - self.def.damping) * estimates.max(0.0) / 2.0
     }
 
     /// An edge's weight in this index's graph: its own for a kind declared weighted, read with weights; else 1
@@ -521,7 +542,7 @@ impl<'i, 'a> Change<'i, 'a> {
                 continue;
             }
             if let Some(b) = before {
-                if after.is_none_or(|a| order_key(name, &a) != order_key(name, b)) {
+                if after.is_none_or(|a| !same_order(&a, b)) {
                     t.del(&order_key(name, b))?;
                 }
                 if b.r.abs() > threshold && after.is_none_or(|a| a.r.abs() <= threshold) {
@@ -531,7 +552,7 @@ impl<'i, 'a> Change<'i, 'a> {
             match after {
                 Some(a) => {
                     t.put(&keys::rank_node(name, id), &a.encode())?;
-                    if before.is_none_or(|b| order_key(name, a) != order_key(name, &b)) {
+                    if before.is_none_or(|b| !same_order(a, &b)) {
                         t.put(&order_key(name, a), id.as_bytes())?;
                     }
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
@@ -612,7 +633,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mut change = Change::begin(t, &index)?;
     let mut after = change.totals.swept;
     for _ in 0..limit {
-        if change.totals.residuals <= index.budget(change.totals.nodes) {
+        if change.totals.residuals <= index.budget(change.totals.estimates) {
             break;
         }
         let next = match change.next_waiting(t, after)? {
@@ -624,7 +645,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         after = Some(place);
     }
     change.totals.swept = after;
-    let waiting = change.totals.residuals > index.budget(change.totals.nodes);
+    let waiting = change.totals.residuals > index.budget(change.totals.estimates);
     change.finish(t)?;
     Ok(waiting)
 }
@@ -696,11 +717,12 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         Some(swept) => nodes.partition_point(|node| (node.type_at, node.seq) <= swept),
         None => 0,
     };
-    let budget = index.budget(n as u64);
     let mut residuals: f64 = nodes.iter().map(|node| node.r.abs()).sum();
+    // Each push adds its residual to the estimates, which the budget grows with
+    let mut estimates: f64 = nodes.iter().map(|node| node.x).sum();
     let mut pushes = 0;
     let mut since_push = 0;
-    while pushes < limit && n > 0 && since_push < n && residuals > budget {
+    while pushes < limit && n > 0 && since_push < n && residuals > index.budget(estimates) {
         if at == n {
             at = 0;
         }
@@ -722,12 +744,16 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
             }
         }
         nodes[u].x += residual;
+        estimates += residual;
         nodes[u].r = 0.0;
         pushes += 1;
     }
     // A push advances the sweep past the node it took, so after any push `at` is at least 1
     let swept = (pushes > 0).then(|| (nodes[at - 1].type_at, nodes[at - 1].seq));
-    let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > budget;
+    // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
+    let held_estimates: f64 = nodes.iter().map(|node| node.x).sum();
+    let waiting = nodes.iter().map(|node| node.r.abs()).sum::<f64>() > index.budget(held_estimates)
+        && nodes.iter().any(|node| node.r.abs() > threshold);
     // Written back: the nodes that moved, their places in score order and in the queue, and the totals counted afresh
     for (at, (old, new)) in before.iter().zip(&nodes).enumerate() {
         if old == new {
@@ -735,10 +761,9 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         }
         let id = &ids[at];
         t.put(&keys::rank_node(index.name, id), &new.encode())?;
-        let (from, to) = (order_key(index.name, old), order_key(index.name, new));
-        if from != to {
-            t.del(&from)?;
-            t.put(&to, id.as_bytes())?;
+        if !same_order(old, new) {
+            t.del(&order_key(index.name, old))?;
+            t.put(&order_key(index.name, new), id.as_bytes())?;
         }
         let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
         if was && !is {
@@ -878,7 +903,16 @@ pub fn unfinished(r: &impl Read) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for (name, def) in &r.schema().ranks {
         let totals = totals(r, name)?;
-        if totals.stage != Stage::Built || totals.error(def.damping) > def.tolerance {
+        // Past the tolerance with a node queued to push: the drain's own test of whether it owes pushes
+        let queued = || -> Result<bool> {
+            let mut any = false;
+            r.visit(&keys::rank_queue(name), |_, _| {
+                any = true;
+                false
+            })?;
+            Ok(any)
+        };
+        if totals.stage != Stage::Built || (totals.error(def.damping) > def.tolerance && queued()?) {
             out.push(name.clone());
         }
     }
@@ -1024,7 +1058,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let seeds: Vec<(u32, f64)> = (0..nodes.len() as u32).map(|at| (at, 1.0)).collect();
         let truth = algorithms::rank(&graph, &seeds, alpha, 1_000_000, 1e-13).expect("a seed in a graph of its nodes");
         let distance: f64 = nodes.iter().zip(&truth.scores).map(|((_, n), s)| (n.x / estimates - s).abs()).sum();
-        let bound = error_bound(residuals, nodes.len() as u64, alpha);
+        let bound = error_bound(residuals, estimates, nodes.len() as u64, alpha);
         if distance > bound + 1e-9 {
             out.push(violation(format!("its scores are {distance} from PageRank, past the bound {bound} it reports")));
         }
@@ -1037,11 +1071,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_bound_is_twice_the_residuals_over_the_kept_share_squared_and_the_nodes() {
+    fn the_bound_is_twice_the_residuals_over_the_kept_share_and_the_estimates() {
         let totals = Totals { nodes: 10, estimates: 9.0, residuals: 0.045, stage: Stage::Built, swept: None };
-        // 2 × 0.045 / (0.15² × 10)
-        assert!((totals.error(0.85) - 0.4).abs() < 1e-12, "{}", totals.error(0.85));
+        // 2 × 0.045 / (0.15 × 9)
+        assert!((totals.error(0.85) - 0.0666_6666_6666_6667).abs() < 1e-12, "{}", totals.error(0.85));
         assert_eq!(Totals { nodes: 0, ..totals }.error(0.85), 0.0);
+        assert_eq!(Totals { estimates: 0.0, ..totals }.error(0.85), f64::INFINITY, "nothing a read could divide by");
+        assert_eq!(Totals { estimates: -1.0, ..totals }.error(0.85), f64::INFINITY);
     }
 
     #[test]
@@ -1052,6 +1088,7 @@ mod tests {
         assert!((3.2e-7 + 1000.0 * 1e-10 / 2.0..=4e-7).contains(&bound), "{bound}");
         assert_eq!(reported(0.0, 10), (0.0, 0.0));
         assert_eq!(reported(1e-3, 0), (0.0, 0.0));
+        assert_eq!(reported(f64::INFINITY, 10), (f64::INFINITY, 0.0));
         assert_eq!(rounded(0.123456, 1e-3), 0.123);
         assert_eq!(rounded(0.1236, 1e-3), 0.124);
         assert_eq!(rounded(0.123456, 0.0), 0.123456);
@@ -1064,5 +1101,19 @@ mod tests {
         assert_eq!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-20))));
         assert_ne!(order_key("i", &node(1.0)), order_key("i", &node(1.0 + 2f64.powi(-10))));
         assert!(order_key("i", &node(1.5)) < order_key("i", &node(1.0)));
+    }
+
+    #[test]
+    fn two_states_have_the_same_order_exactly_when_their_keys_are_the_same() {
+        let node = |x: f64, seq: u64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq };
+        let xs = [0.0, 1.0, 1.0 + 2f64.powi(-20), 1.0 + 2f64.powi(-10), 1.5, 3.0e-7, 123.456, 1e12];
+        for &a in &xs {
+            for &b in &xs {
+                for (sa, sb) in [(7, 7), (7, 8)] {
+                    let (p, q) = (node(a, sa), node(b, sb));
+                    assert_eq!(same_order(&p, &q), order_key("i", &p) == order_key("i", &q), "{a} {sa}, {b} {sb}");
+                }
+            }
+        }
     }
 }

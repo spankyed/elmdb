@@ -10,6 +10,9 @@
 //! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
 //!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
 //!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
+//! - `check-mutant-exclusions`: fails when an `exclude_re` in `.cargo/mutants.toml` matches none of the mutants
+//!   cargo-mutants lists: each names a mutant by its line, so an edit above it leaves the exclusion naming nothing, the
+//!   mutant it was written for reported again, and the line free for another mutant to be skipped unread.
 //! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
 //!   testing.md`, The build directory).
 
@@ -28,8 +31,9 @@ fn main() -> ExitCode {
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => sweep(&workspace_root()),
         Some("check-sync") => check_sync(&workspace_root()),
+        Some("check-mutant-exclusions") => check_mutant_exclusions(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | sweep>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | check-mutant-exclusions | sweep>"
                 .to_owned(),
         ),
     };
@@ -116,6 +120,80 @@ fn check_sync(root: &Path) -> Result<(), String> {
         message += &format!("UNMODELLED lists files that no longer lock outside crate::sync: {stale:?}; remove them\n");
     }
     Err(message.trim_end().to_owned())
+}
+
+fn check_mutant_exclusions(root: &Path) -> Result<(), String> {
+    let config = root.join(".cargo/mutants.toml");
+    let text = std::fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
+    let exclusions = exclude_res(&text)?;
+    // Every mutant, the configuration's exclusions and globs not applied, so each exclusion is tried against them all;
+    // uncoloured, since CI's `CARGO_TERM_COLOR=always` would wrap each name's parts in escapes no pattern matches
+    let output = Command::new("cargo")
+        .args(["mutants", "--list", "--no-config", "--colors", "never"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| {
+            format!("cargo mutants --list: {e}; install cargo-mutants, as .github/workflows/mutants.yml pins it")
+        })?;
+    if !output.status.success() {
+        return Err(format!("cargo mutants --list failed: {}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let listed = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let mutants: Vec<&str> = listed.lines().filter(|line| !line.is_empty()).collect();
+    if mutants.is_empty() {
+        return Err("cargo mutants --list listed no mutants, so no exclusion could be tried".to_owned());
+    }
+    // A pattern naming several lines, `file.rs:(12|34):`, is tried a line at a time, so one line still matching doesn't
+    // hide another that has moved
+    let lines = regex::Regex::new(r"\.rs:\(([0-9|]+)\):").expect("a valid pattern");
+    let mut unmatched = Vec::new();
+    for exclusion in &exclusions {
+        let each: Vec<String> = match lines.captures(exclusion) {
+            Some(found) => found[1]
+                .split('|')
+                .map(|line| lines.replace(exclusion, format!(".rs:{line}:").as_str()).into_owned())
+                .collect(),
+            None => vec![exclusion.clone()],
+        };
+        for one in each {
+            let pattern = regex::Regex::new(&one).map_err(|e| format!("exclude_re {exclusion:?}: {e}"))?;
+            if !mutants.iter().any(|mutant| pattern.is_match(mutant)) {
+                unmatched.push(one);
+            }
+        }
+    }
+    if unmatched.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "these exclude_re in .cargo/mutants.toml match none of the {} mutants listed, most likely since the line they \
+         name moved: {unmatched:#?}; point each at the line its mutant is on now, or remove it",
+        mutants.len()
+    ))
+}
+
+/// The patterns of `exclude_re`, each a TOML basic string on a line of its own as the file writes them; an empty list
+/// is an error, since that is a file this no longer reads
+fn exclude_res(text: &str) -> Result<Vec<String>, String> {
+    let start = 1 + text.find("\nexclude_re = [").ok_or("no exclude_re list in .cargo/mutants.toml")?;
+    let body = &text[start..];
+    let end = body.find("\n]").ok_or("exclude_re's list doesn't close")?;
+    let mut patterns = Vec::new();
+    for line in body[..end].lines().skip(1).map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let quoted = line.strip_suffix(',').unwrap_or(line);
+        let inner = quoted
+            .strip_prefix('"')
+            .and_then(|l| l.strip_suffix('"'))
+            .ok_or_else(|| format!("exclude_re holds a line this doesn't read: {line}"))?;
+        patterns.push(inner.replace("\\\\", "\\").replace("\\\"", "\""));
+    }
+    if patterns.is_empty() {
+        return Err("exclude_re in .cargo/mutants.toml holds no pattern this could read".to_owned());
+    }
+    Ok(patterns)
 }
 
 /// The engine files, relative to `source`, holding a lock, a condition variable or a thread-local of `std`'s or

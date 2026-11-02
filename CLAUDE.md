@@ -25,6 +25,7 @@ cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
+cargo xtask check-mutant-exclusions  # every exclude_re in .cargo/mutants.toml still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
 ```
 
