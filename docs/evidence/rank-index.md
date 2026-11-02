@@ -80,8 +80,9 @@ average of 10 to 16, so a difference under about a tenth is the load. Before is 
   documents and a tolerance of 1e-4 costs 0.14 ms rather than 592 ms. Ten changes leave more than the budget, so a
   burst still drains.
 - **What makes a drain cheaper** is fewer rows to read and write, not fewer of them read: a change that leaves a drain
-  moves every node (below, where a drain's work goes). The graph is kept between drains (the edge mirror, below); the
-  node rows are block storage's (`docs/roadmap/rank-index.md`).
+  moves every node (below, where a drain's work goes). The graph is kept between drains (the edge mirror, below). Fewer node rows, in blocks of 64 slots,
+  didn't pay on this base (2026-11-02, #55): top-k reads about 60% slower, a burst 5 to 8% slower, and one change at
+  100,000 no faster.
 
 ### A node's place in the score order, compared before its keys are built
 
