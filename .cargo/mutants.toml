@@ -145,12 +145,15 @@ exclude_re = [
     "ranks.rs:542:.*replace == with != in Change<'i, 'a>::finish",
     # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
     "ranks.rs:(555|565):.*replace > with >= in Change<'i, 'a>::finish",
-    "ranks.rs:(708|732|761|778|780):.*replace > with >= in drain",
+    "ranks.rs:(708|732|761|762|778|780):.*replace > with >= in drain",
     "ranks.rs:849:.*replace > with >= in Reached::add",
     # The guard against a drain owing pushes with no node to push: every residual within the threshold leaves the bound
     # within the tolerance (`docs/evidence/rank-index.md`, Pushing ends), so the residuals are over the budget only with
     # a node waiting, and the guard decides only a sum rounding puts on the budget's edge
-    "ranks.rs:778:.*replace > with (<|>=) in drain",
+    "ranks.rs:(778|780):.*replace > with (<|>=) in drain",
+    # The sweep's count of the nodes it passed over, which ends a turn finding none waiting: over the budget there is
+    # one waiting, by the same proof, so the turn always ends at a node first
+    "ranks.rs:736:.*replace \\+= with \\*= in drain",
     "ranks.rs:1206:.*replace > with >= in unfinished",
     # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
     # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
@@ -169,6 +172,12 @@ exclude_re = [
     # a drain (`a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves`), and pushing it would keep the
     # invariant and the bound, only pushing one the commit's sweep wouldn't
     "ranks.rs:761:.*replace > with == in drain",
+    # The set of the waiting kept up only until every node is read: setting a bit to what it already holds, or setting
+    # bits nothing reads once every node is, changes nothing; and a node pushed left marked is pushed again with no
+    # residual, which moves no value, only the count of pushes. A drain reads one node at a time only when the queue is
+    # under a quarter of the nodes, which no test graph small enough to be quick leaves after a change
+    "ranks.rs:761:.*replace && with \\|\\| in drain",
+    "ranks.rs:769:.*delete ! in drain",
     # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
     # moves a value far past them, so a tolerance off by a factor answers the same
     "ranks.rs:(1280|1292|1330|1331):.*in violations",

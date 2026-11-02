@@ -1094,7 +1094,8 @@ fn a_drains_pushes_count_toward_the_totals_being_counted_afresh() {
 #[test]
 fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
     // A node leaving takes residual from its neighbours, so some that waited no longer do; the drain's sweep and the
-    // commit's, through the store, push the same nodes in the same order, and only nodes still waiting
+    // commit's, through the store, push the same nodes in the same order, and only nodes still waiting: the same
+    // estimates, as many pushes, ending at the same place
     let bits = |by_drain: bool| {
         let dir = tempfile::tempdir().unwrap();
         let db = open_with(&dir, schema("both", true));
@@ -1123,16 +1124,18 @@ fn a_drain_pushes_what_the_commits_pushes_would_after_a_node_leaves() {
             .unwrap();
             bits.push(
                 db.snapshot(|s| {
-                    (0..34)
+                    let estimates = (0..34)
                         .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
-                        .collect::<crate::Result<Vec<_>>>()
+                        .collect::<crate::Result<Vec<_>>>()?;
+                    let totals = ranks::totals(s, "taskRank")?;
+                    Ok((estimates, totals.pushes, totals.swept))
                 })
                 .unwrap(),
             );
         }
         bits
     };
-    let drained: Vec<Vec<Option<u64>>> = bits(true);
+    let drained = bits(true);
     assert_eq!(drained, bits(false));
 }
 
