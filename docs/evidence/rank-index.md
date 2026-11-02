@@ -186,14 +186,25 @@ Mac, a load average of 5 to 7, the two sides in turn, two runs each:
 The slowest write stays near what the drain's writes hold the lock for, and a recount when one is due. An edge write every
 2 ms changes the index under most drains, so they are computed twice; the write still waits only for the second.
 
-The benchmarks don't move, on the same day at a load of 4 to 8: one change over spread links at 100,000 went from 392 to
-385 ms and a burst from 543 to 547 ms, 10,000 from 57.3 to 57.8 ms and 70.5 to 69.4 ms. One change over near links at
-100,000 read 18.5, 22.7 and 21.6 ms before and 22.5, 18.0 and 21.2 ms after, the same within what runs differ by.
+That table is commits asking a shared flag whether a drain was being computed, and leaving its pushes to it. A commit now
+pushes an index only if it changed it and the index owed none before it, which depends on the history alone. Against the
+flag on 2026-11-02, the two sides in turn, two runs each, a load average of 5 to 10:
 
-A commit made while a drain is computed moves the mirror past the drain's snapshot, and the drain then answers from the
-lists held and reads only the rest from the store. The twenty changes took 13.3 to 14.3 s before, and 13.4 to 18.0 s after
-with or without that read of lists held, the runs differing by more than it does; the writer makes three times the commits
-in those runs, which is part of what they pay for. That the read saves time is from reading the code, not from a figure.
+| The write | Writes made, flag | now | p50, flag | now | p90, flag | now | p99, flag | now | Slowest, flag | now |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A field | 3,386, 3,323 | 2,771, 3,203 | 90, 81 µs | 67, 61 µs | 468, 442 µs | 113, 103 µs | 103, 102 ms | 103, 103 ms | 211, 153 ms | 157, 153 ms |
+| An edge the index reads | 2,950, 3,193 | 3,524, 3,802 | 168, 164 µs | 139, 143 µs | 558, 551 µs | 443, 426 µs | 239, 227 ms | 197, 195 ms | 302, 532 ms | 298, 323 ms |
+
+With a commit pushing whenever it changed the index, drain owed or not, an edge write's p50 was 482 to 529 µs and its p90
+617 to 714 µs: 16 pushes through the store, which the coming drain covers. One change over spread links at 100,000 is
+unmoved, 421 and 415 ms against 418 and 415, and at 10,000, 60.1 and 59.6 ms against 60.6 and 62.9. A burst is 579 and 580 ms
+against 533 and 520 at 100,000, and 70.8 and 72.8 against 64.7 and 65.2 at 10,000. Near links at 100,000 are 28.1 and 24.2 ms
+against 24.7 and 24.2, higher than earlier the same day on both sides.
+
+The mirror keeps what a drain reads until an edge changes after the drain's snapshot. From a counter in a disposable copy,
+with a field write every 2 ms through twenty changes at 100,000: the first drain reads 100,000 lists from the store and
+every drain after it reads none. Only the write lock resets the mirror, so a drain starting between a commit and its deltas
+can't empty it.
 
 ### What it took to get there
 
