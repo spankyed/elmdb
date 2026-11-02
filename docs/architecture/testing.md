@@ -187,7 +187,8 @@ unlinks, weights, creates, trashes, restores and destroys, each followed by `che
 bound of `rank`; damage `check()` reports; a savepoint rolled back; a drain killed part way through, in a child process,
 resumed on open; and an exact-bits golden of a scripted history, which the CI matrix holds. The model harness declares
 one too, over every entity and kind of edge its workload writes: after each step it waits for the drain, then holds
-the index's nodes to the model's live entities and its scores within their bound of `rank`.
+the index's nodes to the model's live entities and its scores within their bound of `rank`, and the bound itself within
+the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
 ## Tracked reads
 
@@ -229,9 +230,10 @@ binding are outside it; `engine/tests/tracked.rs` covers them on real threads.
 pause for commits to stop, stopping, failures and the waiters behind `waitForIndexBuilds` — with a stand-in for what a
 piece of work does, and a clock the model moves, since Shuttle models no time and its timed waits never time out
 (the clock is `store::sync`'s, waited on without a deadline when manual). It holds that work queued runs after it was
-queued and waits in the queue once; that a waiter returns only once the work queued before it is done; that a stop
-ends the builder waiting, pausing or working, and its waiters; that a failure reaches the waiter its work wakes; and
-that a rank index's drain starts only once its commits have paused. The store, the chunks' units and LMDB are outside
+queued and waits in the queue once; that work queued while it runs runs again; that a waiter returns only once the work
+queued before it is done; that a stop ends the builder waiting, pausing or working, and its waiters; that a failure
+reaches the waiter its work wakes; that a rank index's drain starts only once its commits have paused; and that commits
+that never pause hold it back no longer than the cap. The store, the chunks' units and LMDB are outside
 it, and so is `database.rs`'s slot the builder is kept in; the rank index's own specs and the model harness run the
 builder on real threads.
 
