@@ -10,6 +10,7 @@ mod lifecycle;
 mod maintenance;
 mod model;
 mod plans;
+mod rank_bound;
 mod rank_index;
 mod ranks;
 mod reads;
@@ -30,7 +31,12 @@ use crate::schema::Schema;
 use crate::{Database, OpenOptions};
 
 pub(super) fn schema() -> Schema {
-    Schema::from_json(&json!({
+    Schema::from_json(&schema_json()).unwrap()
+}
+
+/// `schema()`'s declaration, for a suite that adds to it
+pub(super) fn schema_json() -> Json {
+    json!({
         "$schema": crate::schema::SCHEMA_LANGUAGE,
         "roles": { "r1": {}, "r2": {} },
         "relations": {
@@ -76,8 +82,7 @@ pub(super) fn schema() -> Schema {
             "Doc": { "fields": { "title": { "type": "string" }, "body": { "type": "string", "optional": true } } },
             "Bag": { "additionalFields": "allow", "fields": {} }
         }
-    }))
-    .unwrap()
+    })
 }
 
 pub(super) fn open(dir: &tempfile::TempDir) -> Database {

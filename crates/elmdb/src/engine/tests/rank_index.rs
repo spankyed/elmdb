@@ -5,6 +5,7 @@
 use proptest::prelude::*;
 use serde_json::{Value as Json, json};
 
+use super::rank_bound::{RankIndex, read};
 use crate::engine::plan::{ReadOp, Reads};
 use crate::engine::{keys, ranks};
 use crate::error::ErrorCode;
@@ -37,69 +38,19 @@ fn write(db: &Database, ops: Vec<Json>) -> crate::Result<()> {
     db.write(&super::batch(ops), false).map(|_| ())
 }
 
-fn read(db: &Database, plan: Json) -> crate::Result<Json> {
-    let reads = Reads {
-        reads: vec![serde_json::from_value::<ReadOp>(json!({ "read": "query", "plan": plan })).unwrap()],
-        track: None,
-    };
-    db.read(&reads)
-        .map(|bytes| serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap()[0].clone())
-}
-
-/// `id → score` from a `hits` answer, and the answer's `rank` record
-fn scores(answer: &Json) -> (Vec<(String, f64)>, Json) {
-    let hits = answer["hits"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap()));
-    (hits.collect(), answer["rank"].clone())
+/// `taskRank` against `rank` in a direction, with or without weights
+fn task_rank(direction: &str, weights: bool) -> RankIndex<'_> {
+    RankIndex { name: "taskRank", types: &["Task", "Note"], kinds: &["refs", "weighs", "rates"], direction, weights }
 }
 
 /// The index's scores and bound, after its pushes are done
 fn indexed(db: &Database) -> (Vec<(String, f64)>, f64) {
-    db.wait_for_index_builds().unwrap();
-    let answer = read(
-        db,
-        json!({ "start": { "from": "types", "types": ["Task", "Note"] },
-        "steps": [{ "step": "ranked", "index": "taskRank" }], "terminal": { "answer": "hits" } }),
-    )
-    .unwrap();
-    let (mut found, rank) = scores(&answer);
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    (found, rank["error"].as_f64().unwrap())
+    task_rank("out", true).indexed(db)
 }
 
-/// `rank` over the same graph, every entity a seed, run far past the index's tolerance
-fn computed(db: &Database, direction: &str, weights: bool) -> Vec<(String, f64)> {
-    let answer = read(
-        db,
-        json!({ "start": { "from": "types", "types": ["Task", "Note"] },
-        "steps": [{ "step": "rank", "kinds": ["refs", "weighs", "rates"], "direction": direction, "weights": weights,
-                   "iterations": 100000, "tolerance": 1e-14 }],
-        "terminal": { "answer": "hits" } }),
-    )
-    .unwrap();
-    let (mut found, _) = scores(&answer);
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    found
-}
-
-/// The index's scores against `rank`'s: the same entities, within the bound the index reports, and in `rank`'s order
-/// wherever two differ by more than twice it
+/// The index within its bound of `rank`, and `check()` clean
 fn assert_within_bound(db: &Database, direction: &str, weights: bool) {
-    let (found, error) = indexed(db);
-    let truth = computed(db, direction, weights);
-    assert_eq!(found.iter().map(|f| &f.0).collect::<Vec<_>>(), truth.iter().map(|t| &t.0).collect::<Vec<_>>());
-    let distance: f64 = found.iter().zip(&truth).map(|(f, t)| (f.1 - t.1).abs()).sum();
-    assert!(distance <= error + 1e-12, "{distance} past the bound {error}: {found:?} against {truth:?}");
-    for (a, ta) in found.iter().zip(&truth) {
-        for (b, tb) in found.iter().zip(&truth) {
-            if ta.1 - tb.1 > 2.0 * error + 1e-12 {
-                assert!(a.1 > b.1, "{} above {} by rank, not by the index", a.0, b.0);
-            }
-        }
-    }
+    task_rank(direction, weights).assert_within_bound(db);
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
 }
