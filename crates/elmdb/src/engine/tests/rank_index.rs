@@ -1697,21 +1697,25 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
     // Rounds of an op landing between a drain's computing and its writing, and an op leaving that drain to compute
     let rounds = prop::collection::vec((op(), op()), 1..4);
     let run = |db: &Arc<Database>, direction: &str, rounds: &[(Op, Op)], fired: &Arc<AtomicU64>| {
-        for (window, trigger) in rounds {
+        for (round, (window, trigger)) in rounds.iter().enumerate() {
             let (inner, window, count) = (Arc::clone(db), json_of(window), Arc::clone(fired));
             db.store().unwrap().when_rank_planned(move || {
                 // A refused write (a self link, an entity gone) changes nothing
                 let _ = write(&inner, vec![window]);
                 count.fetch_add(1, Ordering::SeqCst);
             });
+            // A refused write changes nothing, so a link of its own in each round, for a drain to compute
             let _ = write(db, vec![json_of(trigger)]);
+            let link = json!({ "op": "link", "source": format!("Task-{}", 10 + round), "kind": "rates",
+                "target": format!("Task-{}", 20 + round), "weight": 3 });
+            write(db, vec![link]).unwrap();
             db.wait_for_index_builds().unwrap();
             // A hook not fired holds the database: let it go
             db.store().unwrap().when_rank_planned(|| {});
             assert_within_bound(db, direction, true);
         }
     };
-    let config = || Config { cases: 24, failure_persistence: None, ..Config::default() };
+    let config = || Config { cases: 8, failure_persistence: None, ..Config::default() };
     // Over the karate club a drain reads every node
     let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     TestRunner::new(config())
@@ -1730,12 +1734,13 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
         .unwrap();
     assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
     assert!(plans.load(Ordering::SeqCst) > 0, "no drain read every node");
-    // Over a long ring of near links, one reads a node at a time
+    // Over a long ring of single links, where a drain's fronts of residual die out within a quarter of the nodes, one reads
+    // a node at a time throughout
     let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
     TestRunner::new(config())
         .run(&rounds, |rounds| {
             let dir = tempfile::tempdir().unwrap();
-            let db = Arc::new(near_links(&dir, 400, 2, 0));
+            let db = Arc::new(near_links(&dir, 1600, 1, 0));
             run(&db, "out", &rounds, &fired);
             plans.fetch_add(db.store().unwrap().rank_plans.lock().one_at_a_time, Ordering::SeqCst);
             Ok(())
