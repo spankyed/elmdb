@@ -141,14 +141,20 @@ impl Fixture {
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, false, false)
+        Self::graph_of(rows, degree, false, None)
     }
 
     /// The same graph with a rank index over it, `docRank`, its pushes drained: `ranked`'s workload, and what a change
     /// costs an index kept current
     #[allow(dead_code)]
     pub fn ranked_graph(rows: usize, degree: usize) -> Self {
-        let fixture = Self::graph_of(rows, degree, false, true);
+        Self::ranked_graph_at(rows, degree, 1e-6)
+    }
+
+    /// The same graph with a rank index kept to `tolerance`
+    #[allow(dead_code)]
+    pub fn ranked_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance));
         fixture.db.wait_for_index_builds().unwrap();
         fixture
     }
@@ -156,12 +162,15 @@ impl Fixture {
     /// The same graph with `refs` declared weighted, each edge weighing 1 to 4 by arithmetic: `rankWeighted`'s workload
     #[allow(dead_code)]
     pub fn weighted_graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, true, false)
+        Self::graph_of(rows, degree, true, None)
     }
 
     #[allow(dead_code)]
-    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: bool) -> Self {
-        let ranks = if ranked { json!({"docRank":{"types":["Doc"],"relations":["refs"]}}) } else { json!({}) };
+    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: Option<f64>) -> Self {
+        let ranks = match ranked {
+            Some(tolerance) => json!({"docRank":{"types":["Doc"],"relations":["refs"],"tolerance":tolerance}}),
+            None => json!({}),
+        };
         let schema = Schema::from_json(&json!({
             "$schema": SCHEMA_LANGUAGE,
             "types":{"Doc":{"fields":{"body":{"type":"string"}}}},

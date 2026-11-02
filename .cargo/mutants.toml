@@ -121,49 +121,63 @@ exclude_re = [
     # The rank index (`docs/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches run
     # again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch and each
     # hears the same
-    "engine/mod.rs:75:.*delete ! in drain_commits",
-    # When a drain starts: a pause for commits to stop leaving pushes, which only a drain's cost shows (the bench); that
-    # it waits for one is the builder's Shuttle model (`engine/builder/model.rs`), which no suite cargo-mutants runs builds
+    "engine/mod.rs:76:.*delete ! in drain_commits",
+    # When a drain starts: a pause for commits to stop leaving pushes, which in a suite here only a drain's cost shows
+    # (the bench); that it waits for quiet, and no longer than its cap, is the builder's Shuttle model
+    # (`engine/builder/model.rs`), which no suite cargo-mutants runs builds
     "builder.rs:.*Core::await_quiet",
-    # Whether a piece of work is told to stop: the builder also checks between pieces, so the suite ends either way, and
-    # a stop that never reaches the work is the Shuttle model's (`a_stop_ends…` deadlocks), which no suite here builds
+    # Whether a piece of work is told to stop: the builder also checks between pieces, so the suite here ends either way;
+    # a stop that never reaches the work underway is the Shuttle model's (`a_stop_ends_the_work_underway…` never ends)
     "builder.rs:.*replace Core::stopping -> bool with false",
     # Busy after a piece of work whether or not more waits: a waiter waits while the queue holds work whatever it says,
     # and the loop's next turn sets it from the queue before anything reads it otherwise
     "builder.rs:.*delete ! in Core::run",
-    # Abandoning the builder as the process exits: no thread, test or later code is left to see whether it stopped
+    # Abandoning the builder as the process exits: without it `Drop` stops the thread and joins it, which matters only
+    # where a join at exit could hang, and no test here runs a process to its exit
     "builder.rs:.*replace Builder::abandon with \\(\\)",
     # Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep kept in
     # the totals, so the same nodes are pushed in the same order (`draining_in_chunks_makes_the_bits_one_drain_makes`),
     # and the queue `finish` writes is counted from each node's residual, not from what was waiting
-    "ranks.rs:286:.*in Change<'i, 'a>::get",
-    "ranks.rs:301:.*replace > with >= in Change<'i, 'a>::set",
-    "ranks.rs:619:.*replace match guard after.is_some\\(\\) with (true|false) in push",
-    "ranks.rs:627:.*replace > with >= in push",
+    # The edge mirror's count of removals against what it holds: one removal at the bound only moves when the names are
+    # counted afresh by one commit
+    "mirror.rs:143:.*replace > with >= in EdgeMirror::commit",
+    # The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
+    "mirror.rs:54:.*delete -",
+    "ranks.rs:307:.*in Change<'i, 'a>::get",
+    "ranks.rs:322:.*replace > with >= in Change<'i, 'a>::set",
+    "ranks.rs:640:.*replace match guard after.is_some\\(\\) with (true|false) in push",
+    "ranks.rs:648:.*replace > with >= in push",
     # A node whose arcs weighed nothing takes an arc of weight 0 or doesn't, which carries nothing either way; its
     # out-weight is counted again from its arcs when the subtraction leaves too little to trust, and counting it again
     # more or less often answers the same arcs; a node left with no out-weight keeps its estimate or hands it to its
     # residual, and both hold the invariant
-    "ranks.rs:401:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
-    "ranks.rs:405:.*replace \\* with (\\+|/) in Change<'i, 'a>::reweigh_arc",
-    "ranks.rs:408:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
+    "ranks.rs:422:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
+    "ranks.rs:426:.*replace \\* with (\\+|/) in Change<'i, 'a>::reweigh_arc",
+    "ranks.rs:429:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
     # finish's shortcut: nothing changed, so nothing to write; the totals change only with a node, whose writes put
     # them too
-    "ranks.rs:514:.*replace == with != in Change<'i, 'a>::finish",
+    "ranks.rs:535:.*replace == with != in Change<'i, 'a>::finish",
     # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
-    "ranks.rs:(527|537):.*replace > with >= in Change<'i, 'a>::finish",
-    "ranks.rs:(703|743):.*replace (>|<) with (>=|<=) in drain",
-    "ranks.rs:881:.*replace > with >= in unfinished",
+    "ranks.rs:(548|558):.*replace > with >= in Change<'i, 'a>::finish",
+    "ranks.rs:(737|767|780):.*replace (>|<) with (>=|<=) in drain",
+    # The guard against a drain owing pushes with no node to push: every residual within the threshold leaves the bound
+    # within the tolerance (`docs/evidence/rank-index.md`, Pushing ends), so the residuals are over the budget only with
+    # a node waiting, and the guard decides only a sum rounding puts on the budget's edge
+    "ranks.rs:768:.*replace > with (<|>=) in drain",
+    "ranks.rs:927:.*replace > with >= in unfinished",
+    # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
+    # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
+    "ranks.rs:927:.*replace && with \\|\\| in unfinished",
     # The drain's loop control, its running sum of the residuals and its count of nodes passed since a push, only decides
     # when it stops: what it reports waiting, and the totals settle writes, are counted again from the nodes, and a
     # drain stopped early is drained again from its sweep
-    "ranks.rs:703:.*replace < with <= in drain",
-    "ranks.rs:(710|721):.*replace \\+= with (\\*=|-=) in drain",
+    "ranks.rs:737:.*replace < with <= in drain",
+    "ranks.rs:(744|755):.*replace \\+= with (\\*=|-=) in drain",
     # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
     # moves a value far past them, so a tolerance off by a factor answers the same
-    "ranks.rs:(955|967|988|1005|1006):.*in violations",
+    "ranks.rs:(1001|1013|1034|1051|1052):.*in violations",
     # check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the bound's
     # proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which the invariant
     # checks above it catch first
-    "ranks.rs:(1017|1028):.*in violations",
+    "ranks.rs:(1063|1074):.*in violations",
 ]

@@ -26,8 +26,10 @@ use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
 
 use crate::diagnostics::{Op, names};
+use crate::engine::mirror::{EdgeDelta, EdgeMirror};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
+use crate::sync::PlainMutex;
 use idle_reads::IdleReads;
 use sync::{Durable, GroupCommit, Policy, Syncer, SystemClock};
 use unit_slot::UnitSlot;
@@ -135,6 +137,11 @@ pub struct Store {
     idle: IdleReads,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
+    /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
+    mirror: Arc<PlainMutex<EdgeMirror>>,
+    /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
+    /// write outside the engine's units, whose commit then empties the mirror
+    deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
 }
 
 /// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
@@ -287,6 +294,8 @@ impl Store {
             unit: UnitSlot::new(),
             idle,
             sequence: AtomicU64::new(sequence),
+            mirror: Arc::default(),
+            deposited: PlainMutex::default(),
         })
     }
 
@@ -488,6 +497,8 @@ impl Store {
                 continue;
             };
             op.record_elapsed(names::WAITED_US);
+            // Only what this write hands over reaches its commit, not what an aborted one left
+            *self.deposited.lock() = None;
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -529,7 +540,20 @@ impl Store {
         failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
         txn.commit()?;
         self.sequence.fetch_max(next, Ordering::AcqRel);
+        // Still this process's one writer, so commits reach the mirror in their order
+        let entries = self.deposited.lock().take();
+        self.mirror.lock().commit(last, next, entries.as_deref());
         Ok(next)
+    }
+
+    /// The edge entries the write about to commit filed and unfiled, for the edge mirror
+    pub(crate) fn deposit(&self, entries: Vec<EdgeDelta>) {
+        *self.deposited.lock() = Some(entries);
+    }
+
+    /// What rank drains read the graph through
+    pub(crate) fn mirror(&self) -> Arc<PlainMutex<EdgeMirror>> {
+        Arc::clone(&self.mirror)
     }
 
     /// The last commit's sequence, or 0 before the first: the stored one, which another process's commit may have

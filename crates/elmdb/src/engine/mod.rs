@@ -16,6 +16,7 @@ mod entities;
 mod ids;
 mod keys;
 pub mod maintenance;
+pub(crate) mod mirror;
 mod numbering;
 pub mod plan;
 mod ranks;
@@ -77,8 +78,10 @@ pub(crate) fn drain_commits(
             |txn, db| {
                 schema.validate(txn, db)?;
                 let mut state = UnitState::new(logging);
+                state.mirror = Some(store.mirror());
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now: now_ms() };
                 let done = chunk(&mut t)?;
+                store.deposit(std::mem::take(&mut state.edges));
                 Ok((done, state.written.take()))
             },
             false,
@@ -352,7 +355,9 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
                 |txn, db| {
                     schema.validate(txn, db)?;
                     let mut state = UnitState::default();
-                    settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })
+                    let unbuilt = settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })?;
+                    store.deposit(std::mem::take(&mut state.edges));
+                    Ok(unbuilt)
                 },
                 true,
             )
@@ -390,9 +395,22 @@ impl Database {
     pub fn check(&self) -> Result<derive::CheckReport> {
         let store = self.store()?;
         let schema = self.schema_guard();
+        let mirror = store.mirror();
         store.read(|txn, db| {
             schema.validate(txn, db)?;
-            derive::check(&unit::Snapshot { txn, db, schema: &schema })
+            let snapshot = unit::Snapshot { txn, db, schema: &schema };
+            let mut report = derive::check(&snapshot)?;
+            // The edge mirror, compared with the store only where both are at one commit's state
+            let graph = mirror.lock();
+            if graph.sequence() == Some(mirror::stored_sequence(&snapshot)?) {
+                report.violations.extend(
+                    graph
+                        .differences(&snapshot)?
+                        .into_iter()
+                        .map(|message| derive::Violation { subject: "edge mirror".to_owned(), message }),
+                );
+            }
+            Ok(report)
         })
     }
 
@@ -600,6 +618,7 @@ impl Database {
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
                 let waiting = ranks::push_at_commit(&mut t)?;
+                store.deposit(std::mem::take(&mut state.edges));
                 Ok((results, ChangeSet::of(&state.events), state.written.take(), waiting))
             },
             durable,
@@ -773,6 +792,7 @@ impl Unit {
         };
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
+        self.store.deposit(std::mem::take(&mut self.state.edges));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.store.end_unit();

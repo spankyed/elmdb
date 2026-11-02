@@ -464,42 +464,42 @@ fn the_same_history_makes_the_same_bits_on_every_platform() {
 }
 
 /// `the_same_history_makes_the_same_bits_on_every_platform`'s estimates, as this code found them on an Apple M1 Pro on
-/// 2026-10-31
+/// 2026-11-01
 const KARATE_HISTORY_BITS: [u64; 34] = [
-    4613673579927068069,
-    4610821908508036123,
-    4611997313766837439,
-    4608420309497010604,
-    4604513055728044608,
-    4607900079068446995,
-    4607548093699430664,
-    4606344388540463962,
-    4607739974523383839,
-    4599412107090191139,
-    4604565980820369076,
-    4599726176833456927,
-    4600744756591145563,
-    4607823236194059252,
-    4601446465954703524,
-    4603085726174101885,
-    4603338583676993566,
-    4599653484846490601,
-    4599428786595022232,
-    4601721342182848666,
-    4600423382344164850,
-    4600698258572450615,
-    4601460709885148090,
-    4608865384605198743,
-    4603221709645513913,
-    4606851536761257854,
-    4602772274932882486,
-    4606406259886980065,
-    4602458881637926739,
-    4606674512061661328,
-    4605137304700223944,
-    4609023951794098492,
-    4613413487410626241,
-    4615005999350120164,
+    4613673579929887182,
+    4610821908511756052,
+    4611997313769011390,
+    4608420309499248142,
+    4604513055730107302,
+    4607900079070249754,
+    4607548093700926650,
+    4606344388543433671,
+    4607739974525420031,
+    4599412107091475773,
+    4604565980822168575,
+    4599726176834817916,
+    4600744756592898767,
+    4607823236196018639,
+    4601446465956955386,
+    4603085726175660378,
+    4603338583678159216,
+    4599653484847848568,
+    4599428786596349597,
+    4601721342185235004,
+    4600423382346096114,
+    4600698258575240285,
+    4601460709888571015,
+    4608865384609143664,
+    4603221709648260067,
+    4606851536766191080,
+    4602772274935013647,
+    4606406259891058125,
+    4602458881641904151,
+    4606674512065789340,
+    4605137304703717078,
+    4609023951797359374,
+    4613413487413652885,
+    4615005999353646894,
 ];
 
 #[test]
@@ -1038,6 +1038,138 @@ fn a_rank_index_over_held_entities_is_left_to_the_builder_and_one_over_none_is_b
     drop(unit);
     db.wait_for_index_builds().unwrap();
     assert!(taskrank(&db));
+}
+
+#[test]
+fn an_index_within_its_tolerance_is_built_though_nodes_still_wait() {
+    // A loose tolerance, so pushes stop with the residuals' sum within the budget and nodes still over the threshold
+    let dir = tempfile::tempdir().unwrap();
+    let mut loose = serde_json::to_value(schema("out", true)).unwrap();
+    loose["ranks"]["taskRank"]["tolerance"] = json!(0.05);
+    let db = open_with(&dir, Schema::from_json(&loose).unwrap());
+    let mut ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    // A ring with chords, around which residual keeps flowing rather than settling in one pass
+    for i in 0..40 {
+        for step in [1, 7] {
+            ops.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs",
+                "target": format!("Task-{}", (i + step) % 40) }));
+        }
+    }
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (totals, queued) = db
+        .snapshot(|s| {
+            let mut n = 0;
+            crate::engine::unit::Read::visit(s, &keys::rank_queue("taskRank"), |_, _| {
+                n += 1;
+                true
+            })?;
+            Ok((ranks::totals(s, "taskRank")?, n))
+        })
+        .unwrap();
+    assert!(queued > 0, "nodes still wait");
+    assert!(totals.error(0.85) <= 0.05, "{}", totals.error(0.85));
+    let status = db.index_status().unwrap();
+    assert!(status.iter().any(|s| s.index == "taskRank" && s.built), "{status:?}");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+/// The builder's edge mirror: the graph a drain read, kept by the commits after it, and emptied by any it can't follow
+#[test]
+fn the_drain_reads_the_graph_through_a_mirror_the_commits_keep_and_check_compares() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..30).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..30).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let mirror = db.store().unwrap().mirror();
+    let state = || {
+        let m = mirror.lock();
+        (m.sequence(), m.held())
+    };
+    // A change and its drain: the mirror is at the last commit and holds what the drain read
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (sequence, held) = state();
+    assert_eq!(sequence, Some(db.sequence().unwrap()), "kept to the last commit");
+    assert!(held > 0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // A unit's savepoint rolled back: its entries never reach the mirror, which still follows
+    let mut unit = db.begin().unwrap();
+    unit.write(&super::batch(vec![json!({ "op": "link", "source": "Task-5", "kind": "refs", "target": "Task-20" })]))
+        .unwrap();
+    let depth = unit.savepoint().unwrap();
+    unit.write(&super::batch(vec![json!({ "op": "link", "source": "Task-6", "kind": "refs", "target": "Task-21" })]))
+        .unwrap();
+    unit.rollback_to(depth).unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(state().0, Some(db.sequence().unwrap()));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    // check() names a list that strays from the store
+    mirror.lock().lose_an_entry();
+    let said: Vec<String> = db.check().unwrap().violations.into_iter().map(|v| v.message).collect();
+    assert!(said.iter().any(|m| m.contains("edge mirror")), "{said:?}");
+    // A write outside the engine's units, and an admin unit, each empty it
+    db.store().unwrap().write(|_, _| Ok(()), false).unwrap();
+    assert_eq!(state(), (None, 0));
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(state().1 > 0, "a drain fills it again");
+    db.rebuild(None).unwrap();
+    assert_eq!(state(), (None, 0), "emptied by the admin unit, whose own drain reads the store");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+/// The child of `another_processs_commit_between_two_drains_empties_the_mirror`: one edge linked at an entity whose
+/// list the parent's mirror holds, its drain finished, and the database closed
+#[test]
+fn child_links_one_edge_the_parents_mirror_holds() {
+    let Some(path) = std::env::var_os("ELMDB_MIRROR_CHILD") else { return };
+    let db =
+        Database::open(path, OpenOptions { schema: Some(schema("out", true)), syncs: false, ..Default::default() })
+            .unwrap();
+    db.write(
+        &super::batch(vec![json!({ "op": "link", "source": "Task-5", "kind": "refs", "target": "Task-25" })]),
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+    println!("linked");
+}
+
+#[test]
+fn another_processs_commit_between_two_drains_empties_the_mirror() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..30).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend((1..30).map(
+        |i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", i - 1) }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-29" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.store().unwrap().mirror().lock().held() > 0, "the drain filled the mirror");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "engine::tests::rank_index::child_links_one_edge_the_parents_mirror_holds", "--nocapture"])
+        .env("ELMDB_MIRROR_CHILD", dir.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("linked"), "{}", String::from_utf8_lossy(&out.stderr));
+    // This process's next commit reads the child's sequence as its base, which isn't the mirror's
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-28" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_within_bound(&db, "out", true);
 }
 
 #[test]
