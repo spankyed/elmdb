@@ -137,20 +137,23 @@ at 100,000 documents and five links each: where each document links others sprea
 graph), a change pushes about 940,000 times and moves every node; where each links the five after it, about 560 pushes
 move about 575 nodes.
 
-2026-11-01, the same machine at a load average of 4 to 9, the edge mirror's build before and this one after, run in
+2026-11-02, the same machine at a load average of 7 to 9, the edge mirror's build before and this one after, run in
 turn, at the default tolerance:
 
 | Documents | Links | one change, before | after | ten and ten, before | after |
 |---:|---|---:|---:|---:|---:|
-| 10,000 | spread | 56.2 ms | 63.0 ms | 73.2 ms | 75.6 ms |
-| 100,000 | spread | 374 ms | 450 ms | 612 ms | 620 ms |
-| 10,000 | near | 23.9 ms | 21.3 ms | | |
-| 100,000 | near | 128 ms | 21.1 ms | | |
+| 10,000 | spread | 59.3 ms | 61.7 ms | 75.7 ms | 76.7 ms |
+| 100,000 | spread | 407 ms | 433 ms | 712 ms | 593 ms |
+| 10,000 | near | 23.9 ms | 15.9 ms | | |
+| 100,000 | near | 128 ms | 16.5 ms | | |
 
-`ranked` is unchanged, 7.6 and 8.1 µs. Over near links a change costs its commits and the drain's 5 ms wait for them to
-pause, twice, whatever the graph's size. Over spread links a drain reading every node pays for numbering what it
-reached and for the queue's bitset over a sweep of the nodes in order, 12 to 20% on one change and nothing measurable
-on a burst; the profile's remainder is reading the node rows into the maps a drain that reads only some of them needs.
+The near rows' before are 2026-11-01's, at a load of 4 to 9. `ranked` is unchanged, 8.0 and 8.4 µs. Over near links a
+change costs its commits and the drain's 5 ms wait for them to pause, twice, whatever the graph's size. Over spread
+links a drain reads every node, and from then walks them in place order comparing each residual as it reaches it, as the
+drain over the whole graph did; the 4 to 6% left on one change is reading the node rows into the map by id that a drain
+reading only some of them needs, and arcs read as each node is first pushed. A first cut kept a bitset of the waiting up
+to date on every arc a push crosses even then, which made the pushes three times as dear, 33 ms to 9 ms over a change's
+940,000.
 
 How long a drain holds the write lock follows what it reaches: over near links, the some 575 nodes it reads and writes.
 Over spread links a drain still holds it for the whole drain, and splitting it into shorter units would write every node again in each,
