@@ -756,7 +756,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     }
     drop(graph);
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
-    let waiting = residuals > index.budget(estimates) && reached.waiting.count > 0;
+    let waiting = residuals > index.budget(estimates) && reached.waiting.first().is_some();
     // Written back: the nodes that moved, their places in score order and in the queue, and the totals
     for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
         if old == new {
@@ -954,13 +954,11 @@ impl Reached {
         for kind in &index.def.relations {
             for &outward in index.def.direction.sides() {
                 let at = &self.at;
-                let all = self.all;
                 let mut arc = |far: &str, weight: Option<f64>| {
                     let weight = index.weight(kind, weight);
                     match at.get(far) {
                         Some(Some(v)) => found.push(Far::Read(*v, weight)),
                         Some(None) => {}
-                        None if all => {}
                         None => found.push(Far::Unread(far.to_owned(), weight)),
                     }
                 };
@@ -998,7 +996,6 @@ impl Reached {
 #[derive(Default)]
 struct Places {
     bits: Vec<Vec<u64>>,
-    count: usize,
 }
 
 impl Places {
@@ -1015,14 +1012,10 @@ impl Places {
             }
             words.resize(word + 1, 0);
         }
-        let held = words[word] & (1 << bit) != 0;
-        if held != on {
-            words[word] ^= 1 << bit;
-            if on {
-                self.count += 1;
-            } else {
-                self.count -= 1;
-            }
+        if on {
+            words[word] |= 1 << bit;
+        } else {
+            words[word] &= !(1 << bit);
         }
     }
 
@@ -1053,18 +1046,13 @@ impl Places {
 
     #[inline]
     fn first(&self) -> Option<(u32, u64)> {
-        if self.count == 0 { None } else { self.from(0, 0) }
+        self.from(0, 0)
     }
 
+    /// An entity's place is below 2⁶⁴ − 1, so the next one is its successor
     #[inline]
     fn after(&self, (type_at, seq): (u32, u64)) -> Option<(u32, u64)> {
-        if self.count == 0 {
-            return None;
-        }
-        match seq.checked_add(1) {
-            Some(next) => self.from(type_at, next),
-            None => self.from(type_at + 1, 0),
-        }
+        self.from(type_at, seq + 1)
     }
 }
 
