@@ -685,6 +685,9 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
 /// Drains a rank index in memory, computed and written in the transaction it is given. Whether any still wait
 pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mirror = t.state.mirror.clone();
+    if let Some(mirror) = &mirror {
+        mirror.lock().at(super::mirror::stored_sequence(&*t)?);
+    }
     match plan(&*t, t.schema, index, limit, mirror.as_ref())? {
         Some(planned) => planned.write(t),
         None => Ok(false),
@@ -751,8 +754,8 @@ impl Drained {
 /// Computes a drain from what `t` reads, writing nothing: the nodes waiting to be pushed, read from its queue, pushed in
 /// the sweep `push` makes until none waits or `limit` pushes are made, each node and its arcs read once as the pushes
 /// first reach it. A drain costs the nodes its pushes reach, not the graph: a change whose residual spreads to a few
-/// hundred nodes reads those. `t` may be a snapshot older than the store, so the mirror keeps only what it reads at that
-/// snapshot's commit, and is held only for one node's arcs, so commits never wait on a drain for it
+/// hundred nodes reads those. `t` may be a snapshot older than the store, so the mirror keeps what it reads only while that
+/// is still the store's, and is held only for one node's arcs, so commits never wait on a drain for it
 pub fn plan(
     t: &impl Read,
     schema: &Schema,
@@ -765,11 +768,7 @@ pub fn plan(
     let held = totals(t, index.name)?;
     let sequence = mirror.map(|_| super::mirror::stored_sequence(t)).transpose()?;
     if let (Some(mirror), Some(sequence)) = (mirror, sequence) {
-        // A mirror past this snapshot is this process's newer commits', and stays for the drains after this one
-        let mut graph = mirror.lock();
-        if graph.sequence().is_none_or(|held| held < sequence) {
-            graph.at(sequence);
-        }
+        mirror.lock().reader_at(sequence);
     }
     let mut reached = Reached::default();
     // A drain reaching a quarter of the nodes reads them all in one pass, cheaper than one read each. A drain stops once

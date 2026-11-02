@@ -1552,7 +1552,7 @@ fn a_rebuild_leaves_the_commit_that_wrote_the_index_later_than_any_before_it() {
 }
 
 #[test]
-fn a_mirror_past_a_drains_snapshot_answers_from_its_lists_and_keeps_nothing_the_drain_reads() {
+fn a_mirror_keeps_what_a_reader_reads_until_an_edge_changes_after_the_readers_snapshot() {
     use crate::engine::mirror::{EdgeDelta, EdgeMirror, stored_sequence};
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("both", true));
@@ -1564,20 +1564,26 @@ fn a_mirror_past_a_drains_snapshot_answers_from_its_lists_and_keeps_nothing_the_
             json!({ "op": "create", "type": "Task", "id": "Task-2" }),
             json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-1" }),
             json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Task-0" }),
         ],
     )
     .unwrap();
     db.wait_for_index_builds().unwrap();
     db.snapshot(|s| {
         let at = stored_sequence(s)?;
+        let far_ends = |mirror: &mut EdgeMirror, reader: u64, id: &str| {
+            let mut far = Vec::new();
+            mirror.visit_far_ends(s, reader, id, true, "refs", |name, _| far.push(name.to_owned())).map(|()| far)
+        };
         let mut mirror = EdgeMirror::default();
         mirror.at(at);
-        let far_ends = |mirror: &mut EdgeMirror, id: &str| {
-            let mut far = Vec::new();
-            mirror.visit_far_ends(s, at, id, true, "refs", |name, _| far.push(name.to_owned())).map(|()| far)
-        };
-        assert_eq!(far_ends(&mut mirror, "Task-0")?, ["Task-1"]);
-        assert_eq!(mirror.held(), 1, "at the reader's commit, a list read is kept");
+        assert_eq!(far_ends(&mut mirror, at, "Task-0")?, ["Task-1"]);
+        assert_eq!(mirror.held(), 1, "at the mirror's commit, a list read is kept");
+        // A commit with no edge in it: the lists are the store's still, whatever a reader behind it reads
+        mirror.commit(at, at + 1, Some(&[]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!(mirror.held(), 2, "no edge changed since the reader's snapshot, so what it read is kept");
+        // One filing an entry in a list held: answered as the commit left it, and nothing more kept
         let filed = EdgeDelta::Filed {
             kind: "refs".into(),
             source: "Task-0".into(),
@@ -1585,36 +1591,72 @@ fn a_mirror_past_a_drains_snapshot_answers_from_its_lists_and_keeps_nothing_the_
             seq: u64::MAX,
             weight: None,
         };
-        mirror.commit(at, at + 1, Some(&[filed]));
-        assert_eq!(far_ends(&mut mirror, "Task-0")?, ["Task-1", "Task-2"], "a list held answers, as commits left it");
-        assert_eq!(far_ends(&mut mirror, "Task-1")?, ["Task-2"], "a list not held is read from the reader");
-        assert_eq!(mirror.held(), 1, "and not kept: it is an older commit's");
+        mirror.commit(at + 1, at + 2, Some(&[filed]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-0")?, ["Task-1", "Task-2"], "a list held answers");
+        assert_eq!(far_ends(&mut mirror, at, "Task-2")?, ["Task-0"], "a list not held is read from the reader");
+        assert_eq!(mirror.held(), 2, "and not kept: an edge changed after the reader's snapshot");
+        // One filing an entry in a list not held tells the same
+        let mut mirror = EdgeMirror::default();
+        mirror.at(at);
+        let other = EdgeDelta::Filed {
+            kind: "refs".into(),
+            source: "Task-1".into(),
+            target: "Task-0".into(),
+            seq: u64::MAX,
+            weight: None,
+        };
+        mirror.commit(at, at + 1, Some(&[other]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!(mirror.held(), 0, "what it read misses the entry filed since, so isn't kept");
+        // A reader ahead reads the store, keeps nothing, and leaves the mirror where it was
+        let mut mirror = EdgeMirror::default();
+        mirror.at(at - 1);
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!((mirror.held(), mirror.sequence()), (0, Some(at - 1)));
         Ok(())
     })
     .unwrap();
 }
 
 #[test]
-fn a_drain_from_a_snapshot_leaves_a_mirror_past_it_in_place() {
+fn a_drain_outside_the_write_lock_starts_a_mirror_and_never_resets_one() {
     use crate::engine::mirror::{EdgeMirror, stored_sequence};
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("both", true));
     write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-0" })]).unwrap();
     db.wait_for_index_builds().unwrap();
     db.snapshot(|s| {
-        let past = stored_sequence(s)? + 5;
+        let at = stored_sequence(s)?;
         let mirror: std::sync::Arc<crate::sync::PlainMutex<EdgeMirror>> = std::sync::Arc::default();
-        mirror.lock().at(past);
         ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
-        assert_eq!(mirror.lock().sequence(), Some(past), "its lists stay for the drains after this one");
-        // Behind the snapshot, its lists miss what another process committed
-        let behind = past - 6;
-        mirror.lock().at(behind);
-        ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
-        assert_eq!(mirror.lock().sequence(), Some(past - 5), "a mirror older than the reader starts again");
+        assert_eq!(mirror.lock().sequence(), Some(at), "an empty mirror starts at the reader");
+        for held in [at + 5, at - 1] {
+            mirror.lock().at(held);
+            ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
+            assert_eq!(mirror.lock().sequence(), Some(held), "past it or behind it, a mirror is left as it is");
+        }
         Ok(())
     })
     .unwrap();
+}
+
+#[test]
+fn a_drain_under_the_write_lock_resets_a_mirror_another_process_left_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 40, 5, 0);
+    let store = db.store().unwrap();
+    let mirror = store.mirror();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let held = mirror.lock().sequence().unwrap();
+    mirror.lock().at(held - 3);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(mirror.lock().sequence(), Some(store.sequence()), "the next commits brought it back to the store's");
 }
 
 #[test]

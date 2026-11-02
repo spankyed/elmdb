@@ -10,8 +10,11 @@
 //!   entries each commit filed or unfiled. An entity the mirror holds no list for is read from the store, as before.
 //! - **A commit that can't say what it filed empties it**: a write outside the engine's units, an admin unit, a schema
 //!   change; and so does a commit whose base isn't the mirror's sequence, another process's commit between them.
-//! - **A drain asks the store's sequence in its own transaction** and empties the mirror when it differs, so another
-//!   process's writes are read afresh.
+//! - **Only the write lock resets it**: a drain under the lock asks the store's sequence in its own transaction and empties
+//!   it when it differs. A drain computed outside the lock may read a snapshot either side of it, and resets nothing: one
+//!   behind answers from what it holds and keeps what it reads only if no edge has changed since, and one ahead, which may
+//!   be this process's commit on its way here, reads the store. Another process's commit is caught by the next commit here,
+//!   whose base then isn't the mirror's sequence.
 //!
 //! `check()` compares every list held with the store's entries.
 
@@ -68,6 +71,9 @@ impl Entry {
 pub struct EdgeMirror {
     /// The commit the lists are the store's at; `None` holds nothing
     sequence: Option<u64>,
+    /// The last commit that filed or unfiled an entry, of a list held or not: a list read at this commit or later is still
+    /// the store's. Most commits change no edge, so this falls far behind `sequence`
+    changed_at: u64,
     /// Every entity and kind name the lists mention, each once
     names: FxHashMap<Box<str>, u32>,
     ids: Vec<Box<str>>,
@@ -103,12 +109,21 @@ impl EdgeMirror {
         *self = EdgeMirror::default();
     }
 
-    /// The mirror for a reader at `sequence`, the store's in the reader's transaction: emptied first if the lists are
-    /// another commit's
+    /// The mirror for a reader at `sequence` under the write lock, the store's in the reader's transaction: emptied first
+    /// if the lists are another commit's
     pub fn at(&mut self, sequence: u64) {
         if self.sequence != Some(sequence) {
             self.clear();
             self.sequence = Some(sequence);
+            self.changed_at = sequence;
+        }
+    }
+
+    /// The mirror for a reader at `sequence` outside the write lock: started if it holds no sequence, and otherwise left
+    /// as it is, the reader being behind it or ahead of it for now
+    pub fn reader_at(&mut self, sequence: u64) {
+        if self.sequence.is_none() {
+            self.at(sequence);
         }
     }
 
@@ -124,6 +139,9 @@ impl EdgeMirror {
             self.clear();
             return;
         };
+        if !entries.is_empty() {
+            self.changed_at = next;
+        }
         for delta in entries {
             match delta {
                 EdgeDelta::Filed { kind, source, target, seq, weight } => {
@@ -197,12 +215,12 @@ impl EdgeMirror {
     }
 
     /// Visits the entity's entries of `kind` out (or in), in place order, as `relations::visit_far_ends` does, for a reader
-    /// whose stored sequence is `at`: from the list held, or from the store, the list then held. Every entry is visited.
+    /// whose stored sequence is `at`, every entry visited.
     ///
-    /// A mirror not at the reader's sequence keeps nothing the reader reads, which would file an older commit's entries as
-    /// its own. It still answers from a list it holds, which commits since the reader's snapshot may have changed: that
-    /// reader is a drain computed outside the write lock, and a commit changing an edge of its index writes the index,
-    /// so `Drained::apply` has the drain computed again
+    /// A reader ahead of the mirror reads the store, and changes nothing here. Otherwise a list held answers. A commit since
+    /// the reader's snapshot may have changed it: that reader is a drain computed outside the write lock, and a commit
+    /// changing an edge of its index writes the index, so `Drained::apply` has the drain computed again. A list not held is
+    /// read from the store, and kept if no edge has changed since the reader's snapshot, when it is the mirror's too
     pub fn visit_far_ends(
         &mut self,
         t: &impl Read,
@@ -212,33 +230,37 @@ impl EdgeMirror {
         kind: &str,
         mut each: impl FnMut(&str, Option<f64>),
     ) -> Result<()> {
-        if self.sequence != Some(at) {
-            let held = self.known(entity).zip(self.known(kind)).and_then(|(e, k)| self.lists.get(&(e, k, outward)));
-            if let Some(list) = held {
-                for entry in list {
-                    each(&self.ids[entry.far as usize], entry.weight());
-                }
-                return Ok(());
+        if self.sequence.is_none_or(|held| held < at) {
+            return relations::visit_placed_far_ends(t, entity, outward, kind, |_, far, weight| {
+                each(far, weight);
+                Ok(true)
+            });
+        }
+        let held = self.known(entity).zip(self.known(kind)).and_then(|(e, k)| self.lists.get(&(e, k, outward)));
+        if let Some(list) = held {
+            for entry in list {
+                each(&self.ids[entry.far as usize], entry.weight());
             }
+            return Ok(());
+        }
+        if self.changed_at > at {
             return relations::visit_placed_far_ends(t, entity, outward, kind, |_, far, weight| {
                 each(far, weight);
                 Ok(true)
             });
         }
         let key = (self.name(entity), self.name(kind), outward);
-        if !self.lists.contains_key(&key) {
-            // Filled straight from the store, and fitted: a list collected from a buffer of what was read would keep
-            // that buffer, twice an entry's size
-            let mut list = Vec::new();
-            relations::visit_placed_far_ends(t, entity, outward, kind, |seq, far, weight| {
-                list.push(Entry::new(seq, self.name(far), weight));
-                Ok(true)
-            })?;
-            list.shrink_to_fit();
-            self.entries += list.len();
-            self.lists.insert(key, list);
-        }
-        for entry in &self.lists[&key] {
+        // Filled straight from the store, and fitted: a list collected from a buffer of what was read would keep that
+        // buffer, twice an entry's size
+        let mut list = Vec::new();
+        relations::visit_placed_far_ends(t, entity, outward, kind, |seq, far, weight| {
+            list.push(Entry::new(seq, self.name(far), weight));
+            Ok(true)
+        })?;
+        list.shrink_to_fit();
+        self.entries += list.len();
+        let list = self.lists.entry(key).or_insert(list);
+        for entry in list.iter() {
             each(&self.ids[entry.far as usize], entry.weight());
         }
         Ok(())
