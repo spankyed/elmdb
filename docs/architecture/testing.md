@@ -170,7 +170,10 @@ A survivor is killed by a new test, recorded as a finding, or excluded in the co
 exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
 an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. A line
 that moves shows the excluded mutant as missed, and can hide a mutant of the same kind in the same function that moves
-onto that line; the `--list --no-config` diff above shows what each exclusion hides, and is the check after an edit. The hand-made mutation scripts that remain
+onto that line; the `--list --no-config` diff above shows what each exclusion hides. `cargo xtask
+check-mutant-exclusions`, a CI step, fails when an exclusion, or one line of a pattern naming several, matches no mutant
+cargo-mutants lists, so a line moved is fixed in the commit that moves it. It can't tell a moved line from one another
+mutant moved onto, so a pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`) make changes cargo-mutants
 doesn't: one expression swapped for another, and heap and timing regressions.
 
