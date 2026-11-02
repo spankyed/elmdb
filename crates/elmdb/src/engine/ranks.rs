@@ -189,7 +189,7 @@ fn order_bits(x: f64) -> u64 {
 }
 
 /// Whether two states of one node have the same place in the score order, read without building either key: most
-/// pushes leave it, and a drain writes back nearly every node
+/// pushes leave it, and a drain over a graph whose links are spread writes back nearly every node
 fn same_order(a: &Node, b: &Node) -> bool {
     order_bits(a.x) == order_bits(b.x) && (a.type_at, a.seq) == (b.type_at, b.seq)
 }
@@ -715,7 +715,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mut pushes = 0;
     let mut moved = 0u64;
     while pushes < limit && residuals > index.budget(estimates) {
-        if !reached.all && reached.nodes.len() as u64 > most {
+        if !reached.all && reached.at.len() as u64 > most {
             reached.read_all(t, &index)?;
             // Numbered again: the sweep takes up after the place pushed last
             last = None;
@@ -745,15 +745,22 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
                 seen += 1;
             }
         } else {
+            use std::ops::Bound;
             after
-                .and_then(|place| reached.waiting.after(place))
-                .or_else(|| reached.waiting.first())
-                .map(|place| reached.by_place[&place])
+                .and_then(|place| reached.waiting.range((Bound::Excluded(place), Bound::Unbounded)).next())
+                .or_else(|| reached.waiting.iter().next())
+                .map(|(_, &u)| u)
         };
         let Some(u) = u else { break };
         let place = (reached.nodes[u].type_at, reached.nodes[u].seq);
         if reached.arcs[u].is_none() {
-            let arcs = reached.arcs(t, &index, graph.as_deref_mut(), u)?;
+            let Some(arcs) = reached.arcs(t, &index, graph.as_deref_mut(), u, most)? else {
+                // Its far ends would pass the most read one at a time: numbered again, and the sweep takes up after the
+                // place pushed last, which is this node's turn still
+                reached.read_all(t, &index)?;
+                last = None;
+                continue;
+            };
             reached.arcs[u] = Some(arcs);
         }
         let Reached { nodes, arcs, waiting, all, .. } = &mut reached;
@@ -769,7 +776,11 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
                 residuals += now - held;
                 moved += 1;
                 if !*all && (now > threshold) != (held > threshold) {
-                    waiting.set((node.type_at, node.seq), now > threshold);
+                    if now > threshold {
+                        waiting.insert((node.type_at, node.seq), v);
+                    } else {
+                        waiting.remove(&(node.type_at, node.seq));
+                    }
                 }
             }
         }
@@ -777,7 +788,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         estimates += residual;
         nodes[u].r = 0.0;
         if !*all {
-            waiting.set(place, false);
+            waiting.remove(&place);
         }
         after = Some(place);
         last = Some(u);
@@ -787,11 +798,7 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     drop(graph);
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
     let waiting = residuals > index.budget(estimates)
-        && if reached.all {
-            reached.nodes.iter().any(|n| n.r.abs() > threshold)
-        } else {
-            reached.waiting.first().is_some()
-        };
+        && if reached.all { reached.nodes.iter().any(|n| n.r.abs() > threshold) } else { !reached.waiting.is_empty() };
     // Written back: the nodes that moved, their places in score order and in the queue, and the totals
     for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
         if old == new {
@@ -820,16 +827,15 @@ pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
 struct Reached {
     /// Each entity read, and its place here when it is a node
     at: rustc_hash::FxHashMap<Rc<str>, Option<usize>>,
-    /// Each node read, by its place in the index
-    by_place: rustc_hash::FxHashMap<(u32, u64), usize>,
     ids: Vec<Rc<str>>,
     before: Vec<Node>,
     nodes: Vec<Node>,
     /// A node's arcs to other nodes, `(node, weight)`, read the first time it is pushed
     arcs: Vec<Option<Vec<(usize, f64)>>>,
     /// The nodes reached whose residual is over the threshold, by their places: every node waiting, the queue having been
-    /// read. Kept until every node is read, when the sweep compares each residual as it walks the nodes instead
-    waiting: Places,
+    /// read. Kept until every node is read, when the sweep compares each residual as it walks the nodes instead. A place
+    /// is a number from the store's one sequence, however few nodes a drain reaches, so nothing here is sized by it
+    waiting: BTreeMap<(u32, u64), usize>,
     /// Whether every node is read
     all: bool,
 }
@@ -854,11 +860,8 @@ impl Reached {
         let at = self.nodes.len();
         let id: Rc<str> = id.into();
         self.at.insert(Rc::clone(&id), Some(at));
-        if !self.all {
-            self.by_place.insert((n.type_at, n.seq), at);
-            if n.r.abs() > index.threshold {
-                self.waiting.set((n.type_at, n.seq), true);
-            }
+        if !self.all && n.r.abs() > index.threshold {
+            self.waiting.insert((n.type_at, n.seq), at);
         }
         self.ids.push(id);
         self.before.push(n);
@@ -897,9 +900,8 @@ impl Reached {
             return Err(e);
         }
         self.all = true;
-        // Swept by number from here on, so no node is looked up by its place, nor kept in the set of the waiting
-        self.by_place = Default::default();
-        self.waiting = Places::default();
+        // Swept by number from here on, so no node is kept in the set of the waiting
+        self.waiting = BTreeMap::new();
         // Nothing read before: added in place order, so numbered in it as they are added
         let fresh = self.nodes.is_empty();
         if fresh {
@@ -941,14 +943,16 @@ impl Reached {
         }
     }
 
-    /// A node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order, those to a node
+    /// A node's arcs, as `Change::arcs_of` reads them: kind by kind, each side, in stored order, those to a node. `None`
+    /// when reading its far ends one at a time would pass `most` entities read
     fn arcs(
         &mut self,
         t: &impl Read,
         index: &Index<'_>,
         mut graph: Option<&mut super::mirror::EdgeMirror>,
         u: usize,
-    ) -> Result<Vec<(usize, f64)>> {
+        most: u64,
+    ) -> Result<Option<Vec<(usize, f64)>>> {
         // A far end already read is taken by its place here; one not read yet is named, read once the visit is done
         enum Far {
             Read(usize, f64),
@@ -976,7 +980,7 @@ impl Reached {
                     visited?;
                 }
             }
-            return Ok(arcs);
+            return Ok(Some(arcs));
         }
         let mut found: Vec<Far> = Vec::new();
         for kind in &index.def.relations {
@@ -1000,6 +1004,10 @@ impl Reached {
                 visited?;
             }
         }
+        let unread = found.iter().filter(|far| matches!(far, Far::Unread(..))).count();
+        if (self.at.len() + unread) as u64 > most {
+            return Ok(None);
+        }
         let mut arcs = Vec::with_capacity(found.len());
         for far in found {
             match far {
@@ -1011,72 +1019,7 @@ impl Reached {
                 }
             }
         }
-        Ok(arcs)
-    }
-}
-
-/// A set of places, a bit per entity place under each type's: what a drain's sweep takes the next waiting node from,
-/// a word at a time
-#[derive(Default)]
-struct Places {
-    bits: Vec<Vec<u64>>,
-}
-
-impl Places {
-    #[inline]
-    fn set(&mut self, (type_at, seq): (u32, u64), on: bool) {
-        let (t, word, bit) = (type_at as usize, (seq / 64) as usize, seq % 64);
-        if self.bits.len() <= t {
-            self.bits.resize_with(t + 1, Vec::new);
-        }
-        let words = &mut self.bits[t];
-        if words.len() <= word {
-            if !on {
-                return;
-            }
-            words.resize(word + 1, 0);
-        }
-        if on {
-            words[word] |= 1 << bit;
-        } else {
-            words[word] &= !(1 << bit);
-        }
-    }
-
-    /// The first place at or after `seq` under type `t` and after it under the types following
-    #[inline]
-    fn from(&self, type_at: u32, seq: u64) -> Option<(u32, u64)> {
-        for t in type_at as usize..self.bits.len() {
-            let start = if t == type_at as usize { seq } else { 0 };
-            let words = &self.bits[t];
-            let mut word = (start / 64) as usize;
-            if word >= words.len() {
-                continue;
-            }
-            let mut w = words[word] & (u64::MAX << (start % 64));
-            loop {
-                if w != 0 {
-                    return Some((t as u32, word as u64 * 64 + u64::from(w.trailing_zeros())));
-                }
-                word += 1;
-                if word >= words.len() {
-                    break;
-                }
-                w = words[word];
-            }
-        }
-        None
-    }
-
-    #[inline]
-    fn first(&self) -> Option<(u32, u64)> {
-        self.from(0, 0)
-    }
-
-    /// An entity's place is below 2⁶⁴ − 1, so the next one is its successor
-    #[inline]
-    fn after(&self, (type_at, seq): (u32, u64)) -> Option<(u32, u64)> {
-        self.from(type_at, seq + 1)
+        Ok(Some(arcs))
     }
 }
 

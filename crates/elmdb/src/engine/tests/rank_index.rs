@@ -1041,6 +1041,159 @@ fn the_totals_are_counted_afresh_once_as_many_changes_as_nodes_have_added_to_the
     assert_eq!(settled(34), (0.0, 0), "as many changes as nodes left the totals uncounted");
 }
 
+/// A graph of `nodes` tasks each linking the five after it, built at a tolerance whose drains stay near a change, its
+/// sequence starting from `from`
+fn near_links(dir: &tempfile::TempDir, nodes: usize, from: u64) -> Database {
+    let mut near = serde_json::to_value(schema("out", true)).unwrap();
+    near["ranks"]["taskRank"]["tolerance"] = json!(1e-6);
+    let db = open_with(dir, Schema::from_json(&near).unwrap());
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                d.main.put(txn, &keys::sequence("seq"), &crate::engine::values::encode(&from.into()))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let mut ops: Vec<Json> =
+        (0..nodes).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    for i in 0..nodes {
+        for step in 1..=5 {
+            ops.push(json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs",
+                "target": format!("Task-{}", (i + step) % nodes) }));
+        }
+    }
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db
+}
+
+/// How many nodes are queued, and each node's bits
+fn queued_and_bits(t: &impl crate::engine::unit::Read) -> crate::Result<(u64, Vec<(u64, u64)>)> {
+    let mut queued = 0;
+    t.visit(&keys::rank_queue("taskRank"), |_, _| {
+        queued += 1;
+        true
+    })?;
+    let mut nodes = Vec::new();
+    t.visit(&keys::rank_nodes("taskRank"), |_, bytes| {
+        let n = ranks::Node::decode(bytes).unwrap();
+        nodes.push((n.x.to_bits(), n.r.to_bits()));
+        true
+    })?;
+    Ok((queued, nodes))
+}
+
+#[test]
+fn a_drain_reading_nodes_one_at_a_time_makes_the_pushes_the_commits_would() {
+    const NODES: usize = 400;
+    // After `limit` pushes of one sweep or the other: a push no sweep makes would spend one of them and show here. The
+    // history ends with a node leaving and coming back at the place the sweep stopped, so that place waits again
+    let after = |limit: usize, by_drain: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = near_links(&dir, NODES, 0);
+        let found = std::cell::RefCell::new(Vec::new());
+        db.admin_unit_with_checkpoint(
+            |t| {
+                let swept = ranks::totals(t, "taskRank")?.swept;
+                let mut at_swept = None;
+                t.visit(&keys::rank_nodes("taskRank"), |key, bytes| {
+                    let n = ranks::Node::decode(bytes).unwrap();
+                    if Some((n.type_at, n.seq)) == swept {
+                        let parts = crate::format::key::decode(key).unwrap();
+                        if let Some(crate::format::key::Part::String(id)) = parts.into_iter().nth(2) {
+                            at_swept = Some(id);
+                        }
+                    }
+                    true
+                })?;
+                let at_swept = at_swept.unwrap_or_else(|| "Task-7".to_owned());
+                ranks::liveness(t, "Task-200", false)?;
+                ranks::liveness(t, &at_swept, false)?;
+                ranks::liveness(t, &at_swept, true)?;
+                let (queued, before) = queued_and_bits(t)?;
+                assert!(queued > 0 && queued <= NODES as u64 / 4, "{queued} queued reads every node");
+                if by_drain {
+                    ranks::drain(t, "taskRank", limit)?;
+                } else {
+                    ranks::push(t, "taskRank", limit)?;
+                }
+                let (_, nodes) = queued_and_bits(t)?;
+                let moved = nodes.iter().zip(&before).filter(|(a, b)| a != b).count();
+                let totals = ranks::totals(t, "taskRank")?;
+                found.borrow_mut().push((nodes, totals.swept, moved));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.into_inner().remove(0)
+    };
+    // The few first pushes stay within a quarter of the nodes, read one at a time; the rest pass it and read them all
+    for limit in [1, 2, 3, 5, 8, 13, 21, 34, 1000] {
+        let (drained, swept, moved) = after(limit, true);
+        let (committed, swept_by_commit, _) = after(limit, false);
+        assert_eq!(drained, committed, "after {limit} pushes");
+        assert_eq!(swept, swept_by_commit, "after {limit} pushes");
+        if limit <= 34 {
+            assert!(moved > 0 && moved <= NODES / 4, "{moved} nodes moved by {limit} pushes");
+        } else {
+            assert!(moved > NODES / 4, "{moved} nodes moved by a whole drain, which never read them all");
+        }
+    }
+}
+
+#[test]
+fn a_drain_costs_what_it_reaches_however_high_the_stores_sequence() {
+    // A node's place holds the store's sequence as it was made, 2⁴⁰ here, which nothing a drain keeps is sized by
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 1 << 40);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let (queued, _) = queued_and_bits(t)?;
+            assert!(queued > 0 && queued <= 100, "{queued} queued reads every node");
+            while ranks::drain(t, "taskRank", usize::MAX)? {}
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_drain_ends_when_its_held_sum_is_past_the_budget_and_nothing_waits() {
+    // The held sum off by more than any push can lower: every waiting node is pushed, and then none is left to push
+    let inflated = |db: &Database| {
+        let done = std::cell::Cell::new(true);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, "Task-20", false)?;
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                t.put(&key, &bytes)?;
+                done.set(ranks::drain(t, "taskRank", usize::MAX)?);
+                let (queued, _) = queued_and_bits(t)?;
+                assert_eq!(queued, 0, "a node still waits");
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        done.get()
+    };
+    // Few waiting, read one at a time
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!inflated(&near_links(&dir, 400, 0)), "owed a push with none to make, reading one at a time");
+    // A small graph, where a quarter of the nodes is soon passed and all are read
+    let dir = tempfile::tempdir().unwrap();
+    assert!(!inflated(&near_links(&dir, 40, 0)), "owed a push with none to make, reading every node");
+}
+
 #[test]
 fn a_commit_past_the_changes_a_count_waits_for_is_left_to_the_builder() {
     // A loose tolerance, so a commit owes no pushes and only the count can call for the builder
