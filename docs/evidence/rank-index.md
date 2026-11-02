@@ -150,7 +150,14 @@ runs' medians, at the default tolerance:
 `ranked` is unchanged, 7.9 to 8.4 µs. Over near links a change costs its commits and the drain's 5 ms wait for them to
 pause, twice, whatever the graph's size. Over spread links a drain reads every node, and from then walks them in place
 order comparing each residual as it reaches it, as the drain over the whole graph did: one change costs 7 to 13% more
-here and a burst about 14% less, neither of them taken apart further.
+here and a burst about 14% less.
+
+Where one change's cost goes, in milliseconds a drain at 100,000 documents, from timers in uncommitted copies run in turn
+twice each, 2026-11-02, a load average of 5 to 6: main reads its nodes in 16, its arcs in 50, pushes in 9 and writes in 97.
+This branch reads its nodes in 20, its arcs in 51, pushes in 23 and writes in 95, and its count of the totals takes 2 where
+main's is part of its drain. The push's figure holds the timers' own cost, around each of the 100,000 arc reads. Its
+reads' extra is the map by id owning its keys. Keeping the sweep's sums in local variables moved nothing, so what is left
+is shared among those phases, and no one change takes it.
 
 The two sweeps are two loops and two arc reads because that is what this cost took. Sharing one body, a change's arc read
 over spread links took 100 ms where it takes 55 apart, at 100,000 documents, and one change 525 ms; a bitset of the waiting
