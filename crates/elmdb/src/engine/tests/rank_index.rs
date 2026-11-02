@@ -1473,6 +1473,15 @@ fn a_mirror_past_a_drains_snapshot_answers_from_its_lists_and_keeps_nothing_the_
 }
 
 #[test]
+fn commits_take_their_pushes_again_when_a_drain_being_computed_stops_early() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    let store = db.store().unwrap();
+    drop(store.plan_rank("taskRank"));
+    assert_eq!(store.rank_planning(), None);
+}
+
+#[test]
 fn a_drain_from_a_snapshot_leaves_a_mirror_past_it_in_place() {
     use crate::engine::mirror::{EdgeMirror, stored_sequence};
     let dir = tempfile::tempdir().unwrap();
@@ -1485,6 +1494,11 @@ fn a_drain_from_a_snapshot_leaves_a_mirror_past_it_in_place() {
         mirror.lock().at(past);
         ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
         assert_eq!(mirror.lock().sequence(), Some(past), "its lists stay for the drains after this one");
+        // Behind the snapshot, its lists miss what another process committed
+        let behind = past - 6;
+        mirror.lock().at(behind);
+        ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
+        assert_eq!(mirror.lock().sequence(), Some(past - 5), "a mirror older than the reader starts again");
         Ok(())
     })
     .unwrap();
