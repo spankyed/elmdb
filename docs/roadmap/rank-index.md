@@ -26,8 +26,14 @@ scores rather than computing them. Where the build differs from the design below
   since the last count, or fewer at a tolerance so tight their rounding would reach a tenth of its budget. A commit past
   that hands the index to the builder though it owes no push, so a count's cost is spread over the changes that called
   for it.
-- **The score order** (`d/rk`) is keyed on the estimate kept to 16 significant bits, so most of a drain's small moves
-  leave it alone; `ranked` sorts by the estimates themselves, and the order is promised only beyond twice the bound.
+- **The score order** (`d/rk`) is keyed on the estimate kept to the bits a cell of 256 times the tolerance takes, as a
+  share of the score, so most of a drain's small moves leave it alone at any tolerance. `ranked` over a whole set sorts by
+  the estimates themselves. Read with `limit`, the order is promised beyond twice the larger of the tolerance and the
+  bound: nodes in one cell come by place, reading on past the limit only through a cell wider than that, which only a
+  score over about 1/128 of the estimates' sum can be in.
+- **A drain runs to its budget, and no further.** Stopping below it to leave room for the next change wouldn't save a
+  drain at the default tolerance: at 100,000 documents one change leaves some 40 times the budget. Commits close together
+  already share a drain (`QUIET`, `PATIENCE`), and at a tolerance loose enough for a change to fit, it drains nothing.
 - **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a
   drain's timing can change where its pushes start, so across histories only the bound and the order are promised.
 - **The hits answer's `rank`** is `{ index, error }`, with no `sequence`: a watch's delivery carries the sequence.

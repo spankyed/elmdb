@@ -206,6 +206,42 @@ with a field write every 2 ms through twenty changes at 100,000: the first drain
 every drain after it reads none. Only the write lock resets the mirror, so a drain starting between a commit and its deltas
 can't empty it.
 
+### The score order's bits follow the tolerance
+
+Keeping 16 significant bits whatever the tolerance, an edge changed rewrote some 43,500 order keys a drain over spread
+links at 100,000 documents and 1e-6, under the write lock. What rewriting none would save, the most a coarser key could,
+from a copy that never moved a key, in turn with #58's build, two runs each, 2026-11-02, this Mac, a load average falling
+from 78 to 11, so the first runs' times are high:
+
+| 100,000 documents | writing keys | writing none |
+|---|---:|---:|
+| one change, 1e-6 | 447, 434 ms | 384, 370 ms |
+| ten and ten, 1e-6 | 523, 550 ms | 411, 393 ms |
+| ten and ten, 1e-4 | 679, 552 ms | 386, 399 ms |
+| a field's write beside them, p99 | 104, 105 ms | 68, 69 ms |
+| its slowest | 162, 158 ms | 73, 72 ms |
+
+The width of a cell, as multiples of the tolerance, over the same graph, each width run in turn twice at a load of 4 to 8.
+`rankIndexChange`-shaped loops timed from a probe, medians of 15; 16 bits is the build before this one:
+
+| Cell | one change, 1e-6 | ten and ten, 1e-6 | ten and ten, 1e-4 | a field's write, p99 | its slowest |
+|---:|---:|---:|---:|---:|---:|
+| 16 bits | 439, 413 ms | 551, 534 ms | 551, 506 ms | 105, 103 ms | 158, 155 ms |
+| 64 | 388, 377 ms | 468, 438 ms | 418, 442 ms | 82, 81 ms | 140, 178 ms |
+| **256** | 374, 371 ms | 433, 430 ms | 424, 419 ms | 78, 76 ms | 137, 131 ms |
+| 1024 | 356, 373 ms | 420, 425 ms | 416, 418 ms | 75, 76 ms | 135, 133 ms |
+| 4096 | 357, 361 ms | 396, 430 ms | 394, 406 ms | 74, 75 ms | 128, 133 ms |
+
+256 keeps what a wider cell only moves within how far runs differ, where a wider one lets more nodes hold a cell wider than
+the order promises, about half the multiple of them. It takes the keys a drain writes from some 43,500 to 12,250 at 1e-6.
+They stop near there at any width, some 11,000 at 4096: this graph's scores sit around 1, where the exponent changes, so a
+small move changes the key whatever the bits kept. The slowest write stays over the 72 ms of no key writes at any width.
+
+Read costs, at every width and at 16 bits alike, hits then ids, top 10 and top 1,000: 8.3 to 9.2 µs and 680 to 840 µs,
+3.0 µs and 69 µs. Over this graph of alike scores no cell is wider than promised, so these don't price reading through
+one. Reading through every cell instead, so that a read with `limit` always agreed with one without, took top 10 from 9 µs
+to 6 ms at 20,000 documents, as nearly every node is in one cell at 16 bits too.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
