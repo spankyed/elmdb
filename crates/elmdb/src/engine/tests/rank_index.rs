@@ -1162,6 +1162,51 @@ fn a_drain_reading_nodes_one_at_a_time_makes_the_pushes_the_commits_would() {
 }
 
 #[test]
+fn a_node_a_push_takes_under_the_threshold_no_longer_waits_in_a_drain_reading_one_at_a_time() {
+    // Around a ring of single links, a node holding negative residual and the one after it holding a little more than the
+    // threshold: the first's push takes the second under it, so no sweep should push the second
+    let after = |by_drain: bool| {
+        let dir = tempfile::tempdir().unwrap();
+        let db = near_links(&dir, 400, 1, 0);
+        let threshold = 1e-6 * 0.15 * 0.15 / (2.0 + 1e-6);
+        let found = std::cell::RefCell::new(Vec::new());
+        db.admin_unit_with_checkpoint(
+            |t| {
+                for (id, r) in [("Task-10", -2.0 * threshold), ("Task-11", 1.5 * threshold)] {
+                    let mut n = ranks::node(t, "taskRank", id)?.unwrap();
+                    n.r = r;
+                    t.put(&keys::rank_node("taskRank", id), &n.encode())?;
+                    t.put(&keys::rank_queued("taskRank", n.type_at, n.seq), id.as_bytes())?;
+                }
+                // The sweep from the first place, and the sum past any budget, so pushes end only when no node waits
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = t.get(&key)?.unwrap();
+                bytes.truncate(33);
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                t.put(&key, &bytes)?;
+                let (queued, _) = queued_and_bits(t)?;
+                assert!((2..=100).contains(&queued), "{queued} queued reads every node");
+                if by_drain {
+                    ranks::drain(t, "taskRank", 90)?;
+                } else {
+                    ranks::push(t, "taskRank", 90)?;
+                }
+                let second = ranks::node(t, "taskRank", "Task-11")?.unwrap();
+                assert!(second.r != 0.0 && second.r.abs() <= threshold, "the second was pushed: {}", second.r);
+                let (_, bits) = queued_and_bits(t)?;
+                found.borrow_mut().push((bits, ranks::totals(t, "taskRank")?.swept));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        found.into_inner().remove(0)
+    };
+    assert_eq!(after(true), after(false));
+}
+
+#[test]
 fn a_drain_costs_what_it_reaches_however_high_the_stores_sequence() {
     // A node's place holds the store's sequence as it was made, 2⁴⁰ here, which nothing a drain keeps is sized by
     let dir = tempfile::tempdir().unwrap();

@@ -173,10 +173,6 @@ exclude_re = [
     # Where the sweep looks after the node it pushed: that one's residual is 0, so looking from it or from the next
     # finds the same
     "ranks.rs:1033:.*replace \\+= with \\*= in Reached::sweep_all",
-    # A residual a push takes under the threshold left marked waiting, the second `>` of its crossing's test. Partial
-    # drains here don't take one down across it, and pushing such a node keeps the invariant and the bound, only pushing
-    # one the commit's sweep wouldn't
-    "ranks.rs:866:47:.*replace > with == in Sweep::push",
     # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
     # moves a value far past them, so a tolerance off by a factor answers the same
     "ranks.rs:(1344|1356|1394|1395):.*in violations",
