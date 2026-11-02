@@ -124,6 +124,16 @@ impl Commit {
     }
 }
 
+/// What became of the drains computed outside the write lock, for a test
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RankPlans {
+    pub(crate) applied: u64,
+    pub(crate) redone: u64,
+    pub(crate) one_at_a_time: u64,
+    pub(crate) every_node: u64,
+}
+
 pub struct Store {
     path: PathBuf,
     read_only: bool,
@@ -142,6 +152,9 @@ pub struct Store {
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
     #[cfg(test)]
     rank_planned: PlainMutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// What became of the drains computed outside the write lock
+    #[cfg(test)]
+    pub(crate) rank_plans: PlainMutex<RankPlans>,
     /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
     /// write outside the engine's units, whose commit then empties the mirror
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
@@ -300,6 +313,8 @@ impl Store {
             mirror: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
+            #[cfg(test)]
+            rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
         })
     }

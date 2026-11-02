@@ -716,6 +716,12 @@ pub enum Applied {
 }
 
 impl Drained {
+    /// Whether it read every node, for a test
+    #[cfg(test)]
+    pub(crate) fn read_every_node(&self) -> bool {
+        self.reached.all
+    }
+
     /// Writes the drain if the index is as it read it
     pub fn apply(&self, t: &mut Txn<'_, '_>) -> Result<Applied> {
         if totals(&*t, &self.index)?.written_at != self.read_at {

@@ -352,6 +352,20 @@ fn build_rank(
         commits(&mut |t| {
             // A commit wrote the index meanwhile: drained again, here, from what it left
             let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
+            #[cfg(test)]
+            if let (Some(drained), Some(applied)) = (&planned, applied) {
+                let mut plans = store.rank_plans.lock();
+                if applied == super::ranks::Applied::Stale {
+                    plans.redone += 1;
+                } else {
+                    plans.applied += 1;
+                }
+                if drained.read_every_node() {
+                    plans.every_node += 1;
+                } else {
+                    plans.one_at_a_time += 1;
+                }
+            }
             let waiting = match applied {
                 Some(super::ranks::Applied::Written { waiting }) => waiting,
                 _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,

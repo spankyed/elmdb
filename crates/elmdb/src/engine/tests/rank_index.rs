@@ -1384,6 +1384,11 @@ fn a_commit_that_leaves_the_index_alone_doesnt_disturb_a_drain_being_computed() 
         json!({ "op": "link", "source": "Tag-0", "kind": "other", "target": "Tag-1" }),
     ]);
     assert_eq!(alone, beside, "the commit took pushes, or the drain was computed again");
+    let plans = *db.store().unwrap().rank_plans.lock();
+    assert!(
+        plans.applied > 0 && plans.redone == 0,
+        "the drain computed outside the lock wasn't what was written: {plans:?}"
+    );
     assert_within_bound(&db, "both", true);
 }
 
@@ -1674,10 +1679,70 @@ fn a_commit_that_writes_the_index_has_a_drain_being_computed_done_again_from_it(
     ];
     for window in windows {
         let (db, _dir, _) = with_a_commit_during_a_drain(window.clone());
+        assert!(
+            db.store().unwrap().rank_plans.lock().redone > 0,
+            "{window:?} wrote the index under a drain it left standing"
+        );
         assert_within_bound(&db, "both", true);
         let report = db.check().unwrap();
         assert!(report.is_clean(), "after {window:?}: {report:?}");
     }
+}
+
+#[test]
+fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound() {
+    use proptest::test_runner::{Config, TestRunner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Rounds of an op landing between a drain's computing and its writing, and an op leaving that drain to compute
+    let rounds = prop::collection::vec((op(), op()), 1..4);
+    let run = |db: &Arc<Database>, direction: &str, rounds: &[(Op, Op)], fired: &Arc<AtomicU64>| {
+        for (window, trigger) in rounds {
+            let (inner, window, count) = (Arc::clone(db), json_of(window), Arc::clone(fired));
+            db.store().unwrap().when_rank_planned(move || {
+                // A refused write (a self link, an entity gone) changes nothing
+                let _ = write(&inner, vec![window]);
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+            let _ = write(db, vec![json_of(trigger)]);
+            db.wait_for_index_builds().unwrap();
+            // A hook not fired holds the database: let it go
+            db.store().unwrap().when_rank_planned(|| {});
+            assert_within_bound(db, direction, true);
+        }
+    };
+    let config = || Config { cases: 24, failure_persistence: None, ..Config::default() };
+    // Over the karate club a drain reads every node
+    let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    TestRunner::new(config())
+        .run(&rounds, |rounds| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(open_with(&dir, schema("both", true)));
+            let mut ops: Vec<Json> =
+                (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+            ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(|&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") })));
+            write(&db, ops).unwrap();
+            db.wait_for_index_builds().unwrap();
+            run(&db, "both", &rounds, &fired);
+            plans.fetch_add(db.store().unwrap().rank_plans.lock().every_node, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
+    assert!(plans.load(Ordering::SeqCst) > 0, "no drain read every node");
+    // Over a long ring of near links, one reads a node at a time
+    let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    TestRunner::new(config())
+        .run(&rounds, |rounds| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(near_links(&dir, 400, 2, 0));
+            run(&db, "out", &rounds, &fired);
+            plans.fetch_add(db.store().unwrap().rank_plans.lock().one_at_a_time, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
+    assert!(plans.load(Ordering::SeqCst) > 0, "no drain read a node at a time");
 }
 
 #[test]
