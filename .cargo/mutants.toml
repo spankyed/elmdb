@@ -163,6 +163,10 @@ exclude_re = [
     # only its cost shows (the bench's spread and near graphs)
     "ranks.rs:(688|691|692|694|715):.*in drain",
     "ranks.rs:1054:.*in Reached::arcs",
+    "ranks.rs:1026:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
+    # Where the sweep looks after the node it pushed: that one's residual is 0, so looking from it or from the next
+    # finds the same
+    "ranks.rs:979:.*replace \\+= with \\*= in Reached::sweep_all",
     # A residual a push takes under the threshold left marked waiting, the second `>` of its crossing's test. Partial
     # drains here don't take one down across it, and pushing such a node keeps the invariant and the bound, only pushing
     # one the commit's sweep wouldn't
