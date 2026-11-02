@@ -68,8 +68,8 @@ fn work_queued_is_run_after_it_was_queued_and_waits_in_the_queue_once() {
             .map(|_| {
                 let (core, order) = (Arc::clone(&core), Arc::clone(&order));
                 thread::spawn(move || {
-                    let asked = order.fetch_add(1, Ordering::SeqCst);
                     core.queue([rank()]);
+                    let asked = order.fetch_add(1, Ordering::SeqCst);
                     let waiting = core.lock().queue.iter().filter(|work| **work == rank()).count();
                     assert!(waiting <= 1, "the rank index waits in the queue {waiting} times");
                     asked
@@ -83,6 +83,42 @@ fn work_queued_is_run_after_it_was_queued_and_waits_in_the_queue_once() {
         for asked in asked {
             assert!(starts.iter().any(|start| *start > asked), "work queued at {asked} never ran after: {starts:?}");
         }
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn work_queued_while_it_runs_runs_again() {
+    explore(|| {
+        let (core, _) = core();
+        let runs = Arc::new(AtomicU64::new(0));
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, runs, started, release) =
+                (Arc::clone(&core), Arc::clone(&runs), Arc::clone(&started), Arc::clone(&release));
+            thread::spawn(move || {
+                core.run(|_, _| {
+                    if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        started.store(true, Ordering::SeqCst);
+                        while !release.load(Ordering::SeqCst) {
+                            thread::yield_now();
+                        }
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.queue([index()]);
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        // A commit landing as a drain finishes: the drain has read what it reads, so this needs a run of its own
+        core.queue([index()]);
+        release.store(true, Ordering::SeqCst);
+        core.wait();
+        assert_eq!(runs.load(Ordering::SeqCst), 2, "work queued while it ran never ran after");
         core.stop();
         runner.join().unwrap();
     });
@@ -119,27 +155,17 @@ fn a_waiter_returns_once_the_work_queued_before_it_is_done() {
 }
 
 #[test]
-fn a_stop_ends_the_builder_waiting_pausing_or_working_and_its_waiters() {
+fn a_stop_ends_the_builder_waiting_or_pausing_and_its_waiters() {
     explore(|| {
         // The clock never moves, so a rank index's pause would last until the stop
         let (core, _) = core();
         let runner = {
             let core = Arc::clone(&core);
-            thread::spawn(move || {
-                core.run(|work, stopping| {
-                    if *work == index() {
-                        while !stopping() {
-                            thread::yield_now();
-                        }
-                    }
-                    Ok(())
-                });
-            })
+            thread::spawn(move || core.run(|_, _| Ok(())))
         };
         let queuer = {
             let core = Arc::clone(&core);
-            // The rank index first, so the builder is pausing for it when the stop comes, then an index it works on
-            thread::spawn(move || core.queue([rank(), index()]))
+            thread::spawn(move || core.queue([rank()]))
         };
         let waiter = {
             let core = Arc::clone(&core);
@@ -149,6 +175,37 @@ fn a_stop_ends_the_builder_waiting_pausing_or_working_and_its_waiters() {
         runner.join().unwrap();
         waiter.join().unwrap();
         queuer.join().unwrap();
+    });
+}
+
+#[test]
+fn a_stop_ends_the_work_underway_and_its_waiters() {
+    explore(|| {
+        let (core, _) = core();
+        let started = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            thread::spawn(move || {
+                core.run(|_, stopping| {
+                    started.store(true, Ordering::SeqCst);
+                    while !stopping() {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.queue([index()]);
+        let waiter = {
+            let core = Arc::clone(&core);
+            thread::spawn(move || core.wait())
+        };
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        core.stop();
+        runner.join().unwrap();
+        waiter.join().unwrap();
     });
 }
 
@@ -174,14 +231,14 @@ fn a_failure_is_seen_by_the_waiter_its_work_wakes() {
 fn a_rank_index_waits_for_its_commits_to_pause() {
     explore(|| {
         let (core, ticks) = core();
+        // When the case last queued it, as the case knows it
+        let last = Arc::new(AtomicU64::new(0));
         let runner = {
-            let (core, ticks) = (Arc::clone(&core), std::sync::Arc::clone(&ticks));
+            let (core, ticks, last) = (Arc::clone(&core), std::sync::Arc::clone(&ticks), Arc::clone(&last));
             thread::spawn(move || {
-                let inner = Arc::clone(&core);
                 core.run(move |_, _| {
                     let now = Duration::from_nanos(ticks.elapsed.load(Ordering::SeqCst));
-                    let state = inner.lock();
-                    let queued = state.queued_at["rank"].saturating_duration_since(ticks.base);
+                    let queued = Duration::from_nanos(last.load(Ordering::SeqCst));
                     // The case's ticks add to less than `PATIENCE`, so only a pause lets the work start
                     assert!(now < PATIENCE);
                     assert!(now - queued >= QUIET, "the drain started {:?} after the last commit", now - queued);
@@ -192,10 +249,39 @@ fn a_rank_index_waits_for_its_commits_to_pause() {
         let step = Duration::from_millis(3);
         core.queue([rank()]);
         tick(&core, &ticks, step);
+        last.store(ticks.elapsed.load(Ordering::SeqCst), Ordering::SeqCst);
         core.queue([rank()]);
         tick(&core, &ticks, step);
         tick(&core, &ticks, step);
         core.wait();
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn a_steady_stream_of_commits_is_drained_once_patience_has_passed() {
+    explore(|| {
+        let (core, ticks) = core();
+        let started = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, ticks, started) = (Arc::clone(&core), std::sync::Arc::clone(&ticks), Arc::clone(&started));
+            thread::spawn(move || {
+                core.run(move |_, _| {
+                    let now = Duration::from_nanos(ticks.elapsed.load(Ordering::SeqCst));
+                    assert!(now >= PATIENCE, "the drain started at {now:?}, the commits never having paused");
+                    started.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            })
+        };
+        // Queued again before each `QUIET` has passed, so only the cap ends the pause: without it this never ends
+        let step = QUIET / 2;
+        while !started.load(Ordering::SeqCst) {
+            core.queue([rank()]);
+            tick(&core, &ticks, step);
+            thread::yield_now();
+        }
         core.stop();
         runner.join().unwrap();
     });

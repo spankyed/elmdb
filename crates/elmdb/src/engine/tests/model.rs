@@ -1320,12 +1320,14 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
 const RANKED: RankIndex<'static> =
     RankIndex { name: "modelRank", types: &["Task", "Note"], kinds: &ALL_KINDS, direction: "both", weights: true };
 
+const TOLERANCE: f64 = 1e-9;
+
 /// The engine tests' schema with `RANKED` declared
 fn open(dir: &tempfile::TempDir) -> Database {
     let mut schema = schema_json();
     schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
                                               "direction": RANKED.direction, "weights": RANKED.weights,
-                                              "tolerance": 1e-9 } });
+                                              "tolerance": TOLERANCE } });
     let schema = Schema::from_json(&schema).unwrap();
     Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
 }
@@ -1372,6 +1374,10 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         let live: Vec<String> =
             reference.model.entities.iter().filter(|(_, e)| !e.trashed).map(|(id, _)| id.clone()).collect();
         assert_eq!(RANKED.assert_within_bound(&engine.db), live, "the rank index's nodes");
+        // Any state of the index is within the bound it reports, so that bound is what says the drain ran. Its report is
+        // rounded up, a step at most about the tolerance
+        let (_, error) = RANKED.indexed(&engine.db);
+        assert!(error <= 2.0 * TOLERANCE, "the drain left a bound of {error}");
     }
 
     fn teardown(engine: Engine, _: Reference) {
