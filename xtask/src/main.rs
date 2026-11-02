@@ -126,9 +126,13 @@ fn check_mutant_exclusions(root: &Path) -> Result<(), String> {
     let config = root.join(".cargo/mutants.toml");
     let text = std::fs::read_to_string(&config).map_err(|e| format!("{}: {e}", config.display()))?;
     let exclusions = exclude_res(&text)?;
-    // Every mutant, the configuration's exclusions and globs not applied, so each exclusion is tried against them all
-    let output =
-        Command::new("cargo").args(["mutants", "--list", "--no-config"]).current_dir(root).output().map_err(|e| {
+    // Every mutant, the configuration's exclusions and globs not applied, so each exclusion is tried against them all;
+    // uncoloured, since CI's `CARGO_TERM_COLOR=always` would wrap each name's parts in escapes no pattern matches
+    let output = Command::new("cargo")
+        .args(["mutants", "--list", "--no-config", "--colors", "never"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| {
             format!("cargo mutants --list: {e}; install cargo-mutants, as .github/workflows/mutants.yml pins it")
         })?;
     if !output.status.success() {
