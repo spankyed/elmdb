@@ -349,8 +349,9 @@ fn build_rank(
         commits(&mut |t| {
             planning.end();
             // A commit wrote the index meanwhile: drained again, here, from what it left
-            let waiting = match &planned {
-                Some(drained) if !super::ranks::stale(t, drained)? => super::ranks::apply(t, drained)?,
+            let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
+            let waiting = match applied {
+                Some(super::ranks::Applied::Written { waiting }) => waiting,
                 _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
             };
             if waiting {

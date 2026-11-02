@@ -1340,7 +1340,7 @@ fn a_drains_changes_count_toward_the_totals_being_counted_afresh() {
 }
 
 /// The karate club, built, with `window` written between a drain's computing and its writing: the drain a further link
-/// leaves. What it answers: the index's estimates and its count of writes
+/// leaves. What it answers: the index's estimates and its count of changes
 fn with_a_commit_during_a_drain(
     window: Vec<Json>,
 ) -> (std::sync::Arc<Database>, tempfile::TempDir, (Vec<Option<u64>>, u64)) {
@@ -1371,7 +1371,7 @@ fn with_a_commit_during_a_drain(
             let estimates = (0..34)
                 .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
                 .collect::<crate::Result<Vec<_>>>()?;
-            Ok((estimates, ranks::totals(s, "taskRank")?.written_at))
+            Ok((estimates, ranks::totals(s, "taskRank")?.moved))
         })
         .unwrap();
     (db, dir, state)
@@ -1406,6 +1406,68 @@ fn a_rebuild_while_a_drain_is_being_computed_has_the_drain_done_again_from_it() 
     assert_within_bound(&db, "both", true);
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
+fn a_drain_is_stale_after_any_write_of_the_index_another_drains_and_a_count_included() {
+    // What another process's builder does in the window: its own drain, then a count of the totals. Here in one
+    // transaction, on the plan one snapshot read
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let planned = ranks::plan(&*t, t.schema, "taskRank", usize::MAX, None)?.unwrap();
+            assert!(matches!(planned.apply(t)?, ranks::Applied::Written { .. }), "nothing wrote it since it read");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    let plan_then = |between: &dyn Fn(&mut crate::engine::unit::Txn<'_, '_>) -> crate::Result<()>| {
+        let applied = std::cell::Cell::new(None);
+        // A sequence of its own for each write: what makes it a later commit
+        let planned = std::cell::RefCell::new(None);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, "Task-100", false)?;
+                ranks::liveness(t, "Task-100", true)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        // The builder's own drain of that done, so only `between` writes the index after the plan reads it
+        db.wait_for_index_builds().unwrap();
+        db.admin_unit_with_checkpoint(
+            |t| {
+                *planned.borrow_mut() = ranks::plan(&*t, t.schema, "taskRank", 5, None)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        db.admin_unit_with_checkpoint(|t| between(t), false).unwrap();
+        db.admin_unit_with_checkpoint(
+            |t| {
+                applied.set(Some(planned.borrow().as_ref().unwrap().apply(t)?));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        applied.get().unwrap()
+    };
+    assert_eq!(plan_then(&|t| ranks::drain(t, "taskRank", 5).map(|_| ())), ranks::Applied::Stale, "another drain");
+    let count = |t: &mut crate::engine::unit::Txn<'_, '_>| {
+        let key = keys::rank_totals("taskRank");
+        let mut bytes = t.get(&key)?.unwrap();
+        bytes[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+        t.put(&key, &bytes)?;
+        ranks::settle(t, "taskRank")
+    };
+    assert_eq!(plan_then(&count), ranks::Applied::Stale, "a count of the totals");
+    assert!(matches!(plan_then(&|_| Ok(())), ranks::Applied::Written { .. }), "nothing wrote it");
 }
 
 #[test]

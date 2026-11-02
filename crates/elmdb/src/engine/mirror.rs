@@ -202,7 +202,7 @@ impl EdgeMirror {
     /// A mirror not at the reader's sequence keeps nothing the reader reads, which would file an older commit's entries as
     /// its own. It still answers from a list it holds, which commits since the reader's snapshot may have changed: that
     /// reader is a drain computed outside the write lock, and a commit changing an edge of its index writes the index,
-    /// so `ranks::stale` has the drain computed again
+    /// so `Drained::apply` has the drain computed again
     pub fn visit_far_ends(
         &mut self,
         t: &impl Read,

@@ -105,9 +105,9 @@ pub struct Totals {
     /// adds its rounding to both, so `settle` counts them afresh once `Index::count_due` says, a full count's cost spread
     /// over the changes that called for it
     pub moved: u64,
-    /// The store's sequence as the last commit to change the index read it: a drain computed outside the write lock is
-    /// written only if this is what it read. Every commit raises the sequence and nothing lowers it, so a later commit
-    /// can't leave the number this one did, an index cleared and rebuilt included
+    /// The store's sequence as the last commit to write the index read it, by `put_totals`: a drain computed outside the
+    /// write lock is written only if this is what it read. Every commit raises the sequence and nothing lowers it, so a
+    /// later commit can't leave the number this one did, an index cleared and rebuilt included
     pub written_at: u64,
     pub stage: Stage,
     /// Where the sweep of the queue is: the place of the node pushed last, which the next push starts after
@@ -556,7 +556,7 @@ impl<'i, 'a> Change<'i, 'a> {
     }
 
     /// Writes what changed: each node, its place in score order and in the queue, and the totals
-    fn finish(mut self, t: &mut Txn<'_, '_>) -> Result<()> {
+    fn finish(self, t: &mut Txn<'_, '_>) -> Result<()> {
         if self.totals == self.held && self.nodes.values().all(|(before, after)| before == after) {
             return Ok(());
         }
@@ -587,9 +587,15 @@ impl<'i, 'a> Change<'i, 'a> {
                 None => t.del(&keys::rank_node(name, id))?,
             }
         }
-        self.totals.written_at = super::mirror::stored_sequence(&*t)?;
-        t.put(&keys::rank_totals(name), &self.totals.encode())
+        put_totals(t, name, self.totals)
     }
+}
+
+/// Writes a rank index's totals, stamped with the commit writing them: the one way they are written, so every write of
+/// the index tells a drain computed before it
+fn put_totals(t: &mut Txn<'_, '_>, index: &str, mut totals: Totals) -> Result<()> {
+    totals.written_at = super::mirror::stored_sequence(&*t)?;
+    t.put(&keys::rank_totals(index), &totals.encode())
 }
 
 /// The node an entity would be: its type's place among the index's and its place, when it is live and of one of them
@@ -676,11 +682,11 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     Ok(waiting)
 }
 
-/// Drains a rank index in memory, in the transaction it is given: `plan` and `apply`. Whether any still wait
+/// Drains a rank index in memory, computed and written in the transaction it is given. Whether any still wait
 pub fn drain(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mirror = t.state.mirror.clone();
     match plan(&*t, t.schema, index, limit, mirror.as_ref())? {
-        Some(planned) => apply(t, &planned),
+        Some(planned) => planned.write(t),
         None => Ok(false),
     }
 }
@@ -696,10 +702,50 @@ pub struct Drained {
     waiting: bool,
 }
 
-/// Whether the index has been written since the drain read it, which makes what the drain would write wrong: a commit's
-/// corrections are computed from the estimates it read
-pub fn stale(r: &impl Read, drained: &Drained) -> Result<bool> {
-    Ok(totals(r, &drained.index)?.written_at != drained.read_at)
+/// What became of a drain computed by `plan`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// Written, and whether any still wait
+    Written { waiting: bool },
+    /// The index was written since the drain read it, so nothing was: a commit's corrections are computed from the
+    /// estimates it read, and another drain's pushes from the residuals
+    Stale,
+}
+
+impl Drained {
+    /// Writes the drain if the index is as it read it
+    pub fn apply(&self, t: &mut Txn<'_, '_>) -> Result<Applied> {
+        if totals(&*t, &self.index)?.written_at != self.read_at {
+            return Ok(Applied::Stale);
+        }
+        Ok(Applied::Written { waiting: self.write(t)? })
+    }
+
+    /// Writes what was computed: the nodes that moved, their places in score order and in the queue, and the totals.
+    /// Whether any still wait
+    fn write(&self, t: &mut Txn<'_, '_>) -> Result<bool> {
+        let Drained { index, reached, threshold, totals, waiting, .. } = self;
+        let threshold = *threshold;
+        for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
+            if old == new {
+                continue;
+            }
+            let id = &reached.ids[at];
+            t.put(&keys::rank_node(index, id), &new.encode())?;
+            if !same_order(old, new) {
+                t.del(&order_key(index, old))?;
+                t.put(&order_key(index, new), id.as_bytes())?;
+            }
+            let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
+            if was && !is {
+                t.del(&keys::rank_queued(index, old.type_at, old.seq))?;
+            } else if is && !was {
+                t.put(&keys::rank_queued(index, new.type_at, new.seq), id.as_bytes())?;
+            }
+        }
+        put_totals(t, index, *totals)?;
+        Ok(*waiting)
+    }
 }
 
 /// Computes a drain from what `t` reads, writing nothing: the nodes waiting to be pushed, read from its queue, pushed in
@@ -801,32 +847,6 @@ pub fn plan(
         ..held
     };
     Ok(Some(Drained { index: index.name.to_owned(), read_at: held.written_at, reached, threshold, totals, waiting }))
-}
-
-/// Writes a drain computed by `plan` over what it read: the nodes that moved, their places in score order and in the
-/// queue, and the totals. Whether any still wait
-pub fn apply(t: &mut Txn<'_, '_>, drained: &Drained) -> Result<bool> {
-    let Drained { index, reached, threshold, totals, waiting, .. } = drained;
-    let threshold = *threshold;
-    for (at, (old, new)) in reached.before.iter().zip(&reached.nodes).enumerate() {
-        if old == new {
-            continue;
-        }
-        let id = &reached.ids[at];
-        t.put(&keys::rank_node(index, id), &new.encode())?;
-        if !same_order(old, new) {
-            t.del(&order_key(index, old))?;
-            t.put(&order_key(index, new), id.as_bytes())?;
-        }
-        let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
-        if was && !is {
-            t.del(&keys::rank_queued(index, old.type_at, old.seq))?;
-        } else if is && !was {
-            t.put(&keys::rank_queued(index, new.type_at, new.seq), id.as_bytes())?;
-        }
-    }
-    t.put(&keys::rank_totals(index), &totals.encode())?;
-    Ok(*waiting)
 }
 
 /// A drain's pushes so far
@@ -1226,7 +1246,7 @@ pub fn settle(t: &mut Txn<'_, '_>, index: &str) -> Result<()> {
     if totals.stage == Stage::Pushing {
         totals.stage = Stage::Built;
     }
-    t.put(&keys::rank_totals(index), &totals.encode())
+    put_totals(t, index, totals)
 }
 
 /// Deletes a rank index's data
