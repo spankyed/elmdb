@@ -16,10 +16,13 @@ scores rather than computing them. Where the build differs from the design below
 - **The drain runs in memory:** a commit pushes 16 nodes, and the index thread drains the rest after commits pause
   for 5 ms (at most 100 ms), in one unit: it reads the queue, reads each node and its arcs the first time a push
   reaches it, pushes in memory and writes back each node it moved. A drain costs the nodes its pushes reach, not the
-  graph. Pushing through the store a node at a time cost some 10 µs a push.
-- **The totals are kept, not counted:** each push adds to the estimates' and residuals' sums, and a drain that empties
-  the queue counts them afresh from the nodes only once as many pushes as nodes have added their rounding since the
-  last count, so a count's cost is spread over the pushes that called for it.
+  graph, until a quarter of the nodes are read or would be, when it reads them all in one pass. Pushing through the store
+  a node at a time cost some 10 µs a push.
+- **The totals are kept, not counted:** each change to a node adds to the estimates' and residuals' sums, and a drain
+  that owes no more pushes counts them afresh from the nodes only once as many changes as nodes have added their rounding
+  since the last count, or fewer at a tolerance so tight their rounding would reach a tenth of its budget. A commit past
+  that hands the index to the builder though it owes no push, so a count's cost is spread over the changes that called
+  for it.
 - **The score order** (`d/rk`) is keyed on the estimate kept to 16 significant bits, so most of a drain's small moves
   leave it alone; `ranked` sorts by the estimates themselves, and the order is promised only beyond twice the bound.
 - **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a

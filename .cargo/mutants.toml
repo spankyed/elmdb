@@ -147,34 +147,31 @@ exclude_re = [
     "ranks.rs:551:.*replace == with != in Change<'i, 'a>::finish",
     # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
     "ranks.rs:(564|574):.*replace > with >= in Change<'i, 'a>::finish",
-    "ranks.rs:(717|741|778|779|800|801):.*replace > with >= in drain",
-    "ranks.rs:863:.*replace > with >= in Reached::add",
-    "ranks.rs:1164:.*replace > with >= in unfinished",
+    "ranks.rs:(714|750|751):.*replace > with >= in drain",
+    "ranks.rs:964:.*replace > with >= in Reached::sweep_all",
+    "ranks.rs:(815|816):.*replace > with >= in Sweep::push",
+    "ranks.rs:866:.*replace > with >= in Reached::add",
+    "ranks.rs:1210:.*replace > with >= in unfinished",
     # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
     # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
-    "ranks.rs:1164:.*replace && with \\|\\| in unfinished",
+    "ranks.rs:1210:.*replace && with \\|\\| in unfinished",
     # The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
     # (`draining_in_chunks_makes_the_bits_one_drain_makes`)
-    "ranks.rs:717:.*replace < with <= in drain",
+    "ranks.rs:714:.*replace < with <= in drain",
+    "ranks.rs:964:.*replace < with <= in Reached::sweep_all",
     # Whether a drain reads its nodes one at a time or all in one pass: which nodes it pushes, and how, is the same, so
     # only its cost shows (the bench's spread and near graphs)
-    "ranks.rs:(688|691|692|694|718):.*in drain",
-    "ranks.rs:1008:.*in Reached::arcs",
-    # Where the sweep looks for the node after the one it pushed: that one's residual is 0, so looking from it or from the
-    # next finds the same
-    "ranks.rs:729:.*replace \\+ with \\* in drain",
+    "ranks.rs:(688|691|692|694|715):.*in drain",
+    "ranks.rs:1054:.*in Reached::arcs",
     # A residual a push takes under the threshold left marked waiting, the second `>` of its crossing's test. Partial
     # drains here don't take one down across it, and pushing such a node keeps the invariant and the bound, only pushing
     # one the commit's sweep wouldn't
-    "ranks.rs:778:56:.*replace > with == in drain",
-    # Whether the set of the waiting is told of a residual that didn't cross: it holds that node as it would be told, and
-    # nothing reads the set once every node is read
-    "ranks.rs:778:26:.*replace && with \\|\\| in drain",
+    "ranks.rs:815:47:.*replace > with == in Sweep::push",
     # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
     # moves a value far past them, so a tolerance off by a factor answers the same
-    "ranks.rs:(1238|1250|1288|1289):.*in violations",
+    "ranks.rs:(1284|1296|1334|1335):.*in violations",
     # check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the bound's
     # proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which the invariant
     # checks above it catch first
-    "ranks.rs:(1300|1311):.*in violations",
+    "ranks.rs:(1346|1357):.*in violations",
 ]
