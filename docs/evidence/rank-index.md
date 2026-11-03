@@ -206,6 +206,26 @@ with a field write every 2 ms through twenty changes at 100,000: the first drain
 every drain after it reads none. Only the write lock resets the mirror, so a drain starting between a commit and its deltas
 can't empty it.
 
+### Cutting how long a drain holds the lock
+
+Writing a drain's rows in key order, each prefix in one pass, doesn't pay: its write phase at 100,000 documents read 98.3
+and 97.6 ms in place order and 96.2 and 96.0 ms in key order, by a timer on a copy, 2026-11-02. Over spread links nearly
+every node moves, so every page of those rows is dirtied whichever order they go in. It wasn't kept.
+
+A drain that finds itself stale waits for the commits that made it so to pause, then computes outside the lock again, up to
+twice, before computing under it. From `examples/rank-write-stall.rs` at 100,000 documents, 2026-11-02, a load average of 4
+to 8, the two sides in turn, three runs each. `--bursts` is twenty edge writes 2 ms apart and then 300 ms of nothing,
+`--edges` an edge write every 2 ms:
+
+| The writer | Writes made, before | after | p50, before | after | p90, before | after | p99, before | after | Slowest, before | after | All its waits, before | after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Bursts | 900, 920, 920 | 1,080, 1,080, 1,080 | 154, 157, 165 µs | 158, 147, 154 µs | 530, 574, 584 µs | 545, 590, 576 µs | 219, 200, 204 ms | 42, 29, 22 ms | 296, 297, 307 ms | 101, 101, 104 ms | 5.2, 4.5, 4.6 s | 1.28, 1.29, 1.33 s |
+| Steady | 4,131, 3,843, 3,785 | 6,458, 6,189, 6,377 | 113, 124, 123 µs | 139, 161, 151 µs | 432, 422, 407 µs | 497, 571, 545 µs | 4.1, 188, 206 ms | 1.2, 1.2, 1.0 ms | 291, 297, 401 ms | 462, 482, 271 ms | 9.9, 10.8, 10.9 s | 4.3, 5.9, 5.0 s |
+
+A steady write's p50 and p90 rise about a quarter: more of them now find the index within its budget, and so make a commit's
+pushes. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
+the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting

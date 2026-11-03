@@ -361,7 +361,8 @@ unit is open.
   residual into its estimate and on along its arcs. A commit that changed the index pushes up to 16 nodes, and one that left it alone
   writes nothing to it; the rest wait in the index's queue for the index thread, which on a read snapshot reads its nodes and their edges and pushes in memory until none
   waits, then writes back each node it moved under the write lock, in one unit that tells the watches it wrote into; any
-  write of the index meanwhile has it computed again in that unit. The edges come through an edge mirror on the
+  write of the index meanwhile has it wait for commits to pause and compute again on a snapshot, up to twice, and then in
+  that unit. The edges come through an edge mirror on the
   store that the commits keep, each one handing it the entries it filed and unfiled; a commit that can't, or another
   process's, empties it, and `check()` compares it with the store. A rank index is built by that thread too: its nodes added
   1,000 at a time, then pushed. The scores are within `2R / ((1 − α) s)` of PageRank in L1, `R` the residuals' sum and
