@@ -16,6 +16,9 @@ them, keeps its value and text indexes in the same transaction as the data, and 
 - **Live queries:** each commit names the tracked reads it wrote into, so a view re-runs only when its answer could change.
 - **Repairable:** every index can be rebuilt from primary data, and `check()` compares them.
 
+Built for apps with connected data, search-heavy interfaces and views that stay current: knowledge workspaces, document
+libraries, desktop tools.
+
 Reads and writes are data: a read is a plan and a write is a batch, each crossing into Rust once as msgpack.
 
 ## Example
@@ -49,19 +52,24 @@ db.write(msgpack.pack({ ops: [
 ] }));
 
 const notes = { from: 'types', types: ['Note'] };
-const [found, top] = msgpack.unpack(db.readSync(msgpack.pack({ reads: [
+const [found, top] = msgpack.unpack(db.readSync(msgpack.pack({ track: 1, reads: [
   { read: 'query', plan: { start: notes, steps: [{ step: 'search', query: 'databse' }], terminal: { answer: 'ids' } } },
   { read: 'query', plan: { start: notes, steps: [{ step: 'ranked', index: 'noteRank' }, { step: 'limit', n: 1 }], terminal: { answer: 'ids' } } },
 ] })));
 
 console.log(found.ids); // what the misspelled search found
 console.log(top.ids);   // the most central note
+
+const edit = { op: 'set', id: 'Note-c', fields: { title: 'Schema migrations' } };
+const { changes } = msgpack.unpack(db.write(msgpack.pack({ ops: [edit] })));
+console.log(changes.touched); // the tracked reads this commit wrote into: re-run token 1
 db.close();
 ```
 
 ```text
 [ 'Note-c', 'Note-a' ]
 [ 'Note-a' ]
+[ 1 ]
 ```
 
 The protocol's types are generated from the Rust: `crates/elmdb-node/protocol/`. [apack](https://github.com/spankyed/apack),
@@ -69,14 +77,28 @@ elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
 
 ## Status
 
-Running under apack, and not yet published: build it from source. The storage format stays at 1, edited in place,
+Running under apack, and not yet published, so build it from source. The storage format stays at 1, edited in place,
 until a release has users, so nothing here is a stable API yet.
+
+```sh
+git clone https://github.com/spankyed/elmdb.git && cd elmdb
+npm ci && npm run build
+npm install /path/to/elmdb/crates/elmdb-node msgpackr   # from your app
+```
+
+It uses N-API, so a Node or Electron upgrade needs no rebuild.
 
 | | |
 |---|---|
 | Node | 22.17 or later, and Electron through N-API |
 | Platforms | macOS, Linux (glibc and musl) and Windows on x64; macOS and Linux on arm64 |
-| Not in scope | a server, replication, access control, or calling embedding models |
+| Not in scope | a server, replication, or access control |
+
+**Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` syncs before it
+returns. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it.
+
+**Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
+refused.
 
 ## Docs
 
