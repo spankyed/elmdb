@@ -890,7 +890,12 @@ impl<R: Read> Query<'_, R> {
                     }
                     return each(first, visit);
                 }
+                // mutant-skip: replace > with < in Query<'_, R>::stage
+                // orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same
+                // order, and EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are
+                // its cost
                 if before > 0
+                    // mutant-skip: replace - with / in Query<'_, R>::stage (as above)
                     && let Step::OrderBy { field: name, descending } = &self.plan.steps[before - 1]
                 {
                     let first = self.first_ordered(before - 1, name, *descending, take as usize)?;
@@ -912,6 +917,9 @@ impl<R: Read> Query<'_, R> {
                     taken += 1;
                     Ok(taken < take)
                 })?;
+                // mutant-skip: delete ! in Query<'_, R>::stage
+                // A stage's answer flows only to the stages after it and the terminal, none of which reads it: an id
+                // refused is what stops a walk
                 Ok(!stopped)
             }
             Step::After { id: cursor } => {
@@ -1183,6 +1191,9 @@ impl<R: Read> Query<'_, R> {
             // the asking rather than repeating it forever
             let numbered =
                 super::vector::graph_of(self.r, entity_type, &def.name)?.map_or(0, |(_, next)| next as usize);
+            // mutant-skip: replace \+ with \* in Query<'_, R>::nearest
+            // nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the
+            // graph held more, so any first ask finds the same k
             let mut ask = k + 8;
             loop {
                 let (nearest, exhausted) =
@@ -1385,8 +1396,10 @@ impl<R: Read> Query<'_, R> {
                 return Ok(true);
             }
             kept.push((key, id.to_owned()));
+            // mutant-skip: replace >= with < in Query<'_, R>::first_ordered (as above)
             if kept.len() >= take.saturating_mul(2).max(1) {
                 cut(&mut kept);
+                // mutant-skip: replace == with != in Query<'_, R>::first_ordered (as above)
                 bound = (kept.len() == take).then(|| kept[take - 1].0.clone());
             }
             Ok(true)

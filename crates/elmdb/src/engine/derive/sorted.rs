@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use crate::diagnostics::{Op, names};
 use crate::error::Result;
 
+// mutant-skip: replace \* with
+// The spill budget sets when rows go to disk, which no answer shows; the release heap test (tests/maintenance_heap.rs)
+// holds what it bounds
 const MEMORY_BYTES: usize = 8 * 1024 * 1024;
 const FAN_IN: usize = 16;
 
