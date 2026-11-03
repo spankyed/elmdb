@@ -300,7 +300,7 @@ export type EarsErrorCode =
 * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
 * index (no `substrings`)
 */
-| 'UNKNOWN_INDEX'
+| 'UNKNOWN_INDEX' | 'INDEX_BUILDING'
 /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
 | 'NO_SEARCH'
 /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
@@ -606,7 +606,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
     pickOne(): ShapeOf<D['shapes'], E> | undefined;
     rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
-    ranked(index: D['rankIndexes']): QueryBuilder<E, D>;
+    ranked(index: D['rankIndexes'], options?: RankedOptions): QueryBuilder<E, D>;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -666,6 +666,11 @@ export interface RankDeclaration {
     tolerance?: number;
     types: readonly string[];
     weights?: boolean;
+}
+
+// @public
+export interface RankedOptions {
+    whileBuilding?: 'compute' | 'refuse';
 }
 
 // @public

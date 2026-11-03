@@ -1,7 +1,7 @@
 // The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
-import type { EdgeDirection, QueryBuilder, QueryStage, RankOptions, RelationEdge, SimilarityMeasure } from './runtime.ts';
+import type { EdgeDirection, QueryBuilder, QueryStage, RankedOptions, RankOptions, RelationEdge, SimilarityMeasure } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import type { Answer } from './database.ts';
 import type { TypeName } from './write.ts';
@@ -267,7 +267,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
       return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
     }
-    ranked(index: string) { return this.#next({ step: 'ranked', index }); }
+    ranked(index: string, { whileBuilding }: RankedOptions = {}) { return this.#next({ step: 'ranked', index, ...(whileBuilding && { whileBuilding }) }); }
     rank(kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) {
       names.relationKinds(kinds, 'rank');
       return this.#next({

@@ -84,6 +84,20 @@ describe('a rank index building', () => {
     expect(e.query('Task').ranked('taskRank').limit(1).explain().stages.find((at) => at.stage === 'ranked')?.building).toBeUndefined();
   });
 
+  it('refuses a read that asked to be, for as long as the build runs, and answers it after', () => {
+    const { e, hub } = graph();
+    const refusing = () => e.query('Task').ranked('taskRank', { whileBuilding: 'refuse' }).limit(1).ids();
+    // The builder runs on its own thread and could finish first, so each try declares the index afresh
+    const codes = Array.from({ length: 5 }, () => {
+      e.admin.setSchema(declared());
+      e.admin.setSchema(declared(RANKS));
+      try { refusing(); return undefined; } catch (error) { return (error as { code?: string }).code; }
+    });
+    expect(codes).toContain('INDEX_BUILDING');
+    e.admin.waitForIndexBuilds();
+    expect(refusing()).toEqual([hub]);
+  });
+
   it('never delivers a watch an error across the build, and leaves it on the index', async () => {
     const { e, hub } = graph();
     const answers: unknown[] = [];
