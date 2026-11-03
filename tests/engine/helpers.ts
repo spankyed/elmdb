@@ -1,4 +1,4 @@
-import type { EARS, EarsDatabase, RelationRules, RowRules } from '../../src/index.ts';
+import type { EARS, EarsDatabase, RankDeclaration, RelationRules, RowRules } from '../../src/index.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
 export const TYPES = new Set(['Task', 'Project', 'Person']);
@@ -20,7 +20,7 @@ export type RelId = EARS.RelationId;
 export const NAMES = { types: TYPES, relationKinds: KINDS, roles: ROLES };
 
 /** An engine with the contract specs' names, its rows and edges held to the rules given */
-export function engine(rules: { rowRules?: Record<string, RowRules>; relationRules?: Record<string, RelationRules>; wrap?: (database: EarsDatabase) => EarsDatabase } = {}): EngineUnderTest {
+export function engine(rules: { rowRules?: Record<string, RowRules>; relationRules?: Record<string, RelationRules>; ranks?: Record<string, RankDeclaration>; wrap?: (database: EarsDatabase) => EarsDatabase } = {}): EngineUnderTest {
   return freshEngine({ ...NAMES, ...rules });
 }
 

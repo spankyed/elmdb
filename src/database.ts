@@ -46,6 +46,8 @@ export interface EarsDatabase {
   readSync(reads: Uint8Array): Uint8Array;
   begin(): EarsUnit;
   setSchema(schema: object): SchemaChange[];
+  /** Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done */
+  waitForIndexBuilds(): void;
   /** Every entry removed but the database's format and schema */
   reset(): void;
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
@@ -152,6 +154,7 @@ const CODES: Record<string, EarsErrorCode> = {
   DUPLICATE_EDGE: 'DUPLICATE_EDGE',
   VALUE_INVALID: 'VALUE_INVALID',
   UNKNOWN_INDEX: 'UNKNOWN_INDEX',
+  INDEX_BUILDING: 'INDEX_BUILDING',
   FIELD_TYPE: 'FIELD_TYPE',
   PATTERN_INVALID: 'PATTERN_INVALID',
 };

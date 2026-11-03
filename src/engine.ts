@@ -152,11 +152,13 @@ export interface EarsAdmin {
    */
   setSchema(schema: EngineSchema): SchemaChange[];
   /**
-   * Declares what `schema` declares — each of its types, relation kinds and roles, with their rules — keeping every other
+   * Declares what `schema` declares — each of its types, relation kinds, roles and rank indexes, with their rules — keeping every other
    * declaration the database holds: what an app whose packs register one at a time applies as each does, so a pack's
    * registration changes nothing another pack declared. Answers the changes as `setSchema` does
    */
   declare(schema: EngineSchema): SchemaChange[];
+  /** Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done */
+  waitForIndexBuilds(): void;
   /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
   watchesSettled(): Promise<void>;
   /** How many watches are open, and how many keys and ranges their read sets hold */
@@ -369,6 +371,10 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
         declared = declaredNames(database.schema);
         connection.committedEverything();
       });
+    },
+    waitForIndexBuilds() {
+      outsideUnit('waitForIndexBuilds()');
+      database.waitForIndexBuilds();
     },
     watchesSettled: watches.settled,
     watchStats: watches.stats,

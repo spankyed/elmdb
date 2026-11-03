@@ -1,0 +1,75 @@
+import { describe, expect, it } from 'vitest';
+import { engine, NAMES, type Id } from './helpers.ts';
+import type { EngineSchema } from '../../src/index.ts';
+
+const RANKS = { taskRank: { types: ['Task'], relations: ['refs'] } };
+const declared = (ranks?: EngineSchema['ranks']): EngineSchema => ({
+  types: Object.fromEntries([...NAMES.types].map((type) => [type, { required: [] }])),
+  relations: Object.fromEntries([...NAMES.relationKinds].map((kind) => [kind, {}])),
+  roles: [...NAMES.roles],
+  ...(ranks && { ranks }),
+});
+
+/** An engine with one rank index, and tasks all referring to the first but the first, which refers to the last */
+function hubbed() {
+  const e = engine({ ranks: RANKS });
+  const tasks: Id[] = Array.from({ length: 6 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
+  const [hub] = tasks as [Id, ...Id[]];
+  for (const task of tasks.slice(1)) e.write(task).link('refs', hub);
+  e.write(hub).link('refs', tasks[5]!);
+  e.admin.waitForIndexBuilds();
+  return { e, tasks, hub };
+}
+
+describe('ranked', () => {
+  it('orders a query by the index, highest first, with hits answering the scores rank computes', () => {
+    const { e, tasks, hub } = hubbed();
+    const ids = e.query('Task').ranked('taskRank').ids();
+    expect(ids.slice(0, 2)).toEqual([hub, tasks[5]]);
+    expect(new Set(ids)).toEqual(new Set(tasks));
+
+    const exact = new Map(e.query('Task').rank('refs').hits().map((hit) => [hit.id, hit.score]));
+    const hits = e.query('Task').ranked('taskRank').hits();
+    expect(hits.map((hit) => hit.id)).toEqual(ids);
+    for (const hit of hits) expect(hit.score).toBeCloseTo(exact.get(hit.id)!, 3);
+  });
+
+  it('keeps the top with limit, reading it from the index, whose bound explain answers', () => {
+    const { e, tasks, hub } = hubbed();
+    const explained = e.query('Task').ranked('taskRank').limit(2).explain();
+    expect(explained.ids).toEqual([hub, tasks[5]]);
+    const stage = explained.stages.find((at) => at.stage === 'ranked');
+    expect(stage).toMatchObject({ index: 'taskRank' });
+    expect(stage!.error).toBeGreaterThanOrEqual(0);
+    expect(stage!.error).toBeLessThan(1e-3);
+  });
+
+  it('follows commits: a new hub takes the top once its pushes are done', () => {
+    const { e, tasks } = hubbed();
+    const riser = tasks[2]!;
+    for (const task of tasks) if (task !== riser) e.write(task).unlink('refs', tasks[0]!);
+    for (const task of tasks) if (task !== riser) e.write(task).link('refs', riser);
+    e.admin.waitForIndexBuilds();
+    expect(e.query('Task').ranked('taskRank').limit(1).ids()).toEqual([riser]);
+  });
+
+  it('refuses an index no schema declares, and a set outside its graph', () => {
+    const { e } = hubbed();
+    expect(() => e.query('Task').ranked('nothing').ids()).toThrow(expect.objectContaining({ code: 'UNKNOWN_INDEX' }));
+    e.create('Project', { title: 'p' });
+    expect(() => e.query('Project').ranked('taskRank').ids()).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+  });
+});
+
+describe('declaring a rank index', () => {
+  it('declare keeps those it does not name, and setSchema holds only those it names', () => {
+    const { e, hub } = hubbed();
+    e.admin.declare(declared({ projectRank: { types: ['Project'], relations: ['refs'] } }));
+    e.admin.waitForIndexBuilds();
+    expect(e.query('Task').ranked('taskRank').ids()[0]).toBe(hub);
+    expect(e.query('Project').ranked('projectRank').ids()).toEqual([]);
+
+    e.admin.setSchema(declared());
+    expect(() => e.query('Task').ranked('taskRank').ids()).toThrow(expect.objectContaining({ code: 'UNKNOWN_INDEX' }));
+  });
+});

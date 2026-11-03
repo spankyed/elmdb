@@ -89,7 +89,7 @@ const STREAMING: readonly string[] = [
   'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both', 'limit',
 ];
 /** The steps whose hits `hits()` answers */
-const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'similar'];
+const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'ranked', 'similar'];
 
 /**
  * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
@@ -267,6 +267,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'degrees', kinds: asArr(kinds), direction, ...(type !== undefined && { types: asArr(type) }) });
       return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
     }
+    ranked(index: string) { return this.#next({ step: 'ranked', index }); }
     rank(kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) {
       names.relationKinds(kinds, 'rank');
       return this.#next({
@@ -323,7 +324,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const split = lastWhere((p) => !('step' in p));
       if (searched < 0 || split > searched) {
         throw new EarsError('NO_SEARCH', searched < 0
-          ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...) or similar(...)'
+          ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...), ranked(...) or similar(...)'
           : 'hits() answers what a search, a rank or a similar found, and a where(...) given a function follows it: put the search, rank or similar after it');
       }
       const answer = run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });

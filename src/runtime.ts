@@ -204,6 +204,8 @@ export interface QueryStage {
   edges?: number;
   /** For a stage that built a graph and read weights (a `rank` or `communities` over a weighted kind): its edges' weights added up */
   weight?: number;
+  /** For a `ranked`: the bound on the scores it read, the distance their share of all the scores may be from PageRank's */
+  error?: number;
   /** For a `rank`: the rounds it ran */
   iterations?: number;
   /** For a `rank`: whether its scores settled within the rounds it ran */
@@ -253,6 +255,8 @@ export interface EarsSchema {
   weightedKinds: string;
   /** The roles grants and `withRole` take */
   roles: string;
+  /** The rank indexes `ranked` reads: those declared, `never` when none is */
+  rankIndexes: string;
 }
 
 /** No shapes and any name, kind or role: the untyped operations (`@apackdev/ears`'s own, and the SDK's `untyped*`) */
@@ -262,6 +266,7 @@ export interface UntypedSchema extends EarsSchema {
   relKinds: string;
   weightedKinds: string;
   roles: string;
+  rankIndexes: string;
 }
 
 /**
@@ -379,6 +384,15 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    */
   rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
   /**
+   * The query's entities by the scores a rank index holds, highest first, ties in query order: PageRank declared ahead
+   * of time and kept current by every commit, so reading it needs no walk. A query that starts from the index's types
+   * and keeps the first `n` with `limit(n)` costs `n`, not the graph. `hits()` answers each score, and `explain()` the
+   * bound on them. Every entity the query reaches must be one of the index's nodes, else `BATCH_INVALID`; an index no
+   * schema declares is `UNKNOWN_INDEX`, and one still building `INDEX_BUILDING`, which a newly declared index is until
+   * its first build ends
+   */
+  ranked(index: D['rankIndexes']): QueryBuilder<E, D>;
+  /**
    * The query's entities in an order where each edge of the kinds between two of them, followed `out` unless
    * `direction` says `in`, leads from an entity to a later one: with `blocks`, what blocks comes before what it blocks.
    * The members of a cycle can't be ordered so, and stay together in query order where the cycle falls
@@ -472,7 +486,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
   /** The entities after `id` in the order so far: the page after one that ended at `id` */
   after(id: EARS.EntityId): QueryBuilder<E, D>;
   /**
-   * What the query's `search` (or `near`, `like`, `hybrid` or `rank`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
+   * What the query's `search` (or `near`, `like`, `hybrid`, `rank` or `ranked`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
    * they are, and with `fields` its row's fields picked (`pick`'s)
    */
   hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(

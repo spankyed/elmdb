@@ -184,6 +184,7 @@ export interface EarsAdmin {
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
+    waitForIndexBuilds(): void;
     watchesSettled(): Promise<void>;
     watchStats(): {
         watches: number;
@@ -232,6 +233,7 @@ export interface EarsDatabase {
         ranges: number;
     };
     untrack(token: number): void;
+    waitForIndexBuilds(): void;
     // (undocumented)
     write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
 }
@@ -298,7 +300,7 @@ export type EarsErrorCode =
 * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
 * index (no `substrings`)
 */
-| 'UNKNOWN_INDEX'
+| 'UNKNOWN_INDEX' | 'INDEX_BUILDING'
 /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
 | 'NO_SEARCH'
 /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
@@ -350,6 +352,7 @@ export interface EARSRuntimeDeps {
 // @public
 export interface EarsSchema {
     names: string;
+    rankIndexes: string;
     relKinds: string;
     roles: string;
     shapes: EntityShapes;
@@ -403,6 +406,7 @@ export interface Embedding {
 
 // @public
 export interface EngineSchema {
+    ranks?: Readonly<Record<string, RankDeclaration>>;
     relations: Readonly<Record<string, RelationRules>>;
     // (undocumented)
     roles: readonly string[];
@@ -602,6 +606,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
     pickOne(): ShapeOf<D['shapes'], E> | undefined;
     rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
+    ranked(index: D['rankIndexes']): QueryBuilder<E, D>;
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -640,6 +645,7 @@ export interface QueryStage {
     converged?: boolean;
     cycles?: number;
     edges?: number;
+    error?: number;
     index?: string;
     iterations?: number;
     kept: number;
@@ -649,6 +655,16 @@ export interface QueryStage {
     stage: string;
     visited: number;
     weight?: number;
+}
+
+// @public
+export interface RankDeclaration {
+    damping?: number;
+    direction?: EdgeDirection;
+    relations: readonly string[];
+    tolerance?: number;
+    types: readonly string[];
+    weights?: boolean;
 }
 
 // @public
@@ -892,6 +908,8 @@ export interface UnitOptions {
 export interface UntypedSchema extends EarsSchema {
     // (undocumented)
     names: string;
+    // (undocumented)
+    rankIndexes: string;
     // (undocumented)
     relKinds: string;
     // (undocumented)
