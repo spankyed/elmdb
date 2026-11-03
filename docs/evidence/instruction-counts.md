@@ -97,8 +97,9 @@ out of its `brk` segment and falls back to `mmap`, which no process outside Valg
 
 So the benchmark allocates from an address range that only moves forward, and `free` does nothing. An allocation costs a
 fixed number of instructions whatever came before it: 24 on x86_64 and 30 on aarch64, each dividing `all_rows`' allocating
-into the same 896,053 allocations. Over 2026-11-03's eight runners, with EPYC 7763, 9V45 and 9V74 among them, `all_rows` read
-395,211,653 on all eight, and the gated cases differ by at most 26 instructions.
+into the same 896,053 allocations. On `f613673`, over two runs of eight runners that met EPYC 7763, 9V45 and 9V74 and Xeon 8370C, 8573C and 6973P-C between them
+(`instruction determinism` runs 41645890627 and 41707931411), `all_rows` read 395,193,893 on all sixteen, and the gated cases
+differ by at most 3 instructions in each run.
 The largest case allocates 777 MB in its whole process, setup included (aarch64), inside the 4 GiB it reserves.
 
 What a count holds moved with it. On one aarch64 container `all_rows` fell from about 537 million to 349 million, and on
