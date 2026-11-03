@@ -55,3 +55,12 @@ The key-encoding cases nearly double. The text rebuild, which encodes its entrie
 
 A count is reported in the pull request's step summary and never fails it. A gate waits until it is known how much the
 counts move with a toolchain or Valgrind update, which only the runs to come will show.
+
+## The rank drain
+
+`rank_drain`, an edge linked and unlinked at 1,000 documents, counted from `build_rank` on the index's thread: three runs of
+one commit read 50,094,718, 50,094,719 and 50,094,717 instructions over spread links and 40,187,204, 40,187,175 and
+40,187,174 over near ones, 2026-11-02, in the Linux container. A drain over every node sharing its arc read with the read of
+a few, a regression the timings of 2026-11-02 found only by bisecting, reads +6.6% and +2.1%, on a copy. So the count shows
+that regression, though not its size: at 100,000 documents it cost 80% of the arc read's time and more, some of it no
+instruction count sees.

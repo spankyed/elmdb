@@ -339,7 +339,8 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare. Text
 work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
-(`../evidence/instruction-counts.md`). Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
+(`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
+own thread does none of a drain's work; its commits are outside it. Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
 runs in a Linux container, with Valgrind and the runner at the dependency's version installed:
 
 ```sh

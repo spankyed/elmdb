@@ -21,7 +21,7 @@ use elmdb::engine::plan::Reads;
 #[cfg(target_os = "linux")]
 use elmdb::format::key::{Part, encode};
 #[cfg(target_os = "linux")]
-use gungraun::{library_benchmark, library_benchmark_group, main};
+use gungraun::{Callgrind, EntryPoint, LibraryBenchmarkConfig, library_benchmark, library_benchmark_group, main};
 
 /// The rows the maintenance operations run over: the smaller of the Criterion benchmark's two sizes, which Valgrind's
 /// slowdown keeps to seconds
@@ -175,7 +175,40 @@ fn graph((fixture, reads): (support::Fixture, Reads)) -> (support::Fixture, Vec<
 library_benchmark_group!(name = graphs, benchmarks = [graph]);
 
 #[cfg(target_os = "linux")]
-main!(library_benchmark_groups = keys, maintenance, read, write, graphs);
+fn rank_change(links: &str) -> (support::Fixture, Batch, Batch) {
+    let fixture = match links {
+        "near" => support::Fixture::ranked_local_graph(ROWS, 5),
+        _ => support::Fixture::ranked_graph(ROWS, 5),
+    };
+    let change = |op: &str| {
+        let edge = serde_json::json!({"op":op, "source":"Doc-00000000", "kind":"refs",
+            "target":format!("Doc-{:08}", ROWS / 2)});
+        Batch { ops: vec![serde_json::from_value(edge).unwrap()], now: Some(1.0) }
+    };
+    (fixture, change("link"), change("unlink"))
+}
+
+// An edge linked and unlinked, each drained: only what the index's thread does for it, `build_rank`, which the count is
+// entered at since the benchmark's own thread does none of it. A commit's own cost is `small_write`'s
+#[cfg(target_os = "linux")]
+#[library_benchmark(
+    config = LibraryBenchmarkConfig::default()
+        .tool(Callgrind::default().entry_point(EntryPoint::Custom("*build_rank*".to_owned())))
+)]
+#[benches::links(args = ["spread", "near"], setup = rank_change)]
+fn rank_drain((fixture, link, unlink): (support::Fixture, Batch, Batch)) -> support::Fixture {
+    fixture.db.write(black_box(&link), false).unwrap();
+    fixture.db.wait_for_index_builds().unwrap();
+    fixture.db.write(black_box(&unlink), false).unwrap();
+    fixture.db.wait_for_index_builds().unwrap();
+    fixture
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(name = rank_drains, benchmarks = [rank_drain]);
+
+#[cfg(target_os = "linux")]
+main!(library_benchmark_groups = keys, maintenance, read, write, graphs, rank_drains);
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
