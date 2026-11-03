@@ -57,9 +57,9 @@ Text and vector indexes are named indexes on a type, beside its value indexes (`
 Search steps are plan steps, so everything else a plan does combines with them:
 
 - **Filters:** type, scope through relations (inside a thread, under a folder's descendants), field values, roles,
-  time ranges, trash excluded unless asked for. A filter becomes a bitmap the search runs inside.
+  trash excluded unless asked for. A filter becomes a bitmap the search runs inside.
 - **Order:** relevance, a field, or relevance with a recency decay.
-- **Facets:** counts per type, per field value or per related entity, over the matches.
+- **Facets:** counts per type or per field value, over the matches (`groupBy` with `counts`).
 - **Paging:** top k, and a cursor after the last result.
 - **Results:** scores, the matched terms, and highlight offsets per field.
 - **Watch:** a watched search runs again when a commit touches its fields.
@@ -69,7 +69,7 @@ Reranking with a model is the caller's: apack has `rerank` in `services.inferenc
 ## Embeddings
 
 The engine never calls a model. A write that changes a vector index's source fields records the entity's chunks as
-pending, in the same unit. A caller's worker takes pending chunks (`db.pendingEmbeddings(index, limit)`), embeds them
+pending, in the same unit. A caller's worker takes pending chunks (the read `{ read: 'pendingEmbeddings', type, index?, limit? }`), embeds them
 and writes the vectors back in a batch, which the engine accepts only if the source hasn't changed since, and answers
 `stale` for one whose entity is gone. `pendingEmbeddings` is a read (`ReadOp`), so a caller asks it within the same
 snapshot as a search when it needs to say that search is incomplete.
@@ -114,7 +114,7 @@ snapshot as a search when it needs to say that search is incomplete.
   trigram and entity tripled the file, and blocks add an eighth (`docs/evidence/next-phase-9.md`).
 - **Fields**: as a text index's. Each string, and each element of a list, is apart, so no run spans two.
 - **`containing`** a text, exactly or with `caseInsensitive`; **`matching`** a pattern in Rust's `regex` syntax (G11 of
-  `goal-elmdb-next.md`), which has no look-around or backreferences: a pattern using them, or one that doesn't parse,
+  `../archive/goals/goal-elmdb-next.md`), which has no look-around or backreferences: a pattern using them, or one that doesn't parse,
   is refused (`PATTERN_INVALID`) with the parser's reason.
 - **Narrowing**: what every match holds is read off the text, or off the pattern's syntax — its literals, all of a
   sequence's parts, one of an alternation's branches, a repetition's body when it repeats at least once — and the
@@ -145,9 +145,9 @@ snapshot as a search when it needs to say that search is incomplete.
   embedding), `hybrid` (reciprocal rank fusion of the text ranking and the vector ranking, k = 60), each among what
   the steps before it reached and ended by `hits`; `pendingEmbeddings`.
 
-## Order of work
+## The order it was built in
 
-1. Ranked full text over messages, notes and documents, with filters and highlights, replacing apack #148.
+1. Ranked full text over messages, notes and documents, with filters and highlights, to replace apack #148.
 2. Fuzzy labels for a quick-open across entities.
-3. Vector and hybrid search, replacing apack's dormant library index.
+3. Vector and hybrid search, to replace apack's dormant library index.
 4. Substring and regex, for what words don't find: error text, ids, hashes and code (`docs/evidence/next-phase-9.md`).

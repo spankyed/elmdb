@@ -3,7 +3,7 @@
 What proves elmdb correct, and where each proof lives. `cargo nextest run --workspace` runs the Rust suites, each test in
 its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's. A test that hangs is
 killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test, where a regression deadlocks a
-delivery, fifteen minutes for the model harness, which takes four to five on CI's Intel macOS runner, and four for any other;
+delivery, twenty for a graph walk, rank index, reader-saturation or idle-reader test, fifteen minutes for the model harness, which takes four to five on CI's Intel macOS runner, and four for any other;
 the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
 a second process: the crash harnesses' killed writers, another process's commit, schema change and map growth seen by
 this one, a read-only open beside another process's writer, and the process claim.
@@ -103,7 +103,7 @@ Diagnostics are off by default, and three checks hold that claim:
   benchmark's operations on one commit without the feature and with it, and fails when a gated case grows more than
   0.05% or 300 instructions, whichever is more, or spends anything more on allocating, naming the functions that grew.
   It refuses a case it doesn't know and a gated case that didn't run. CI's
-  `diagnostics overhead` job runs it on every pull request; from a Mac:
+  `diagnostics overhead` job runs it on every pull request ready for review; from a Mac:
 
   ```sh
   python3 scripts/linux.py --apt valgrind --apt python3 --unconfined -- sh -c '
@@ -176,8 +176,9 @@ a line lives in the source: a `// mutant-skip: PATTERN` comment directly above t
 the same kind that moves onto that line; the `--list --no-config` diff above shows what each exclusion hides. `cargo xtask
 check-mutant-exclusions`, a CI step, fails when that part isn't what the comments generate, and when an exclusion, or one line
 of a pattern naming several, matches no mutant cargo-mutants lists. A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
-(`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`) make changes cargo-mutants
-doesn't: one expression swapped for another, and heap and timing regressions.
+(`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`, `check-idle-reader-mutation.py`,
+`check-reader-recovery.py`) make changes cargo-mutants doesn't: one expression swapped for another, and heap, timing and
+cleanup regressions.
 
 ## Derived data
 
@@ -266,10 +267,11 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 
 ## Platforms
 
-CI (`.github/workflows/ci.yml`): format, clippy and tests on every push, on Linux. A draft pull request runs the fast
+CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux. A draft pull request runs the fast
 tier, those and macOS arm64 and Windows x64; a pull request ready for review, and a dispatch, run the full matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
-every suite, the model and crash harnesses included, on it, with the instruction counts and the diagnostics overhead.
+every suite, the model and crash harnesses included, on it; a pull request ready for review also runs the instruction
+counts and the diagnostics overhead.
 `ci-pass` passes when every job passed or was skipped, and is the check `main`'s branch protection requires; a change
 to documentation alone skips everything else.
 
@@ -300,11 +302,11 @@ are recorded in [maintenance memory evidence](../evidence/maintenance-memory-202
 ## Repeatable maintenance measurements
 
 `cargo bench -p elmdb --bench maintenance` measures deterministic key encoding, selected value/text rebuilds,
-export and indexed limit queries. Criterion reports comparisons; timing is not a CI pass/fail budget.
+export, indexed limit queries, and graph reads and rank-index changes. Criterion reports comparisons; timing is not a CI pass/fail budget.
 `cargo test -p elmdb --release --test maintenance_heap -- --ignored --exact maintenance_heap_bounds --nocapture`
 runs one isolated dhat test, asserting workload-specific heap allowances for export and selected value/text
-rebuilds at 1k/10k entities, and how much a full rebuild, a full check and a selected vector rebuild grow per entity
-between two sizes. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
+rebuilds at 1k/10k entities, and how much a full rebuild, a full check, a selected vector rebuild, a graph read and an
+open database's edge mirror grow per entity between two sizes. Linux CI runs this dedicated gate and a benchmark smoke run. Normal executables retain
 their allocator.
 
 **Timing.** A comparison is two runs on one host and toolchain, with comparable cache and load:
@@ -357,13 +359,13 @@ python3 scripts/linux.py --apt valgrind --unconfined -- sh -c '
 
 The runner turns off address randomization for each count, a call Docker's default seccomp profile refuses, hence
 `--unconfined`. A run compares itself with the one before it in `target/gungraun`;
-`-- --save-baseline=<name>` and `-- --baseline=<name>` keep and compare named ones. On every pull request CI's
-`instructions` job runs `scripts/instruction-counts.py`: the base it merges into, then the change against it, each
+`-- --save-baseline=<name>` and `-- --baseline=<name>` keep and compare named ones. On every pull request ready for
+review CI's `instructions` job runs `scripts/instruction-counts.py`: the base it merges into, then the change against it, each
 operation's count and change written to the job's summary. A count is reported and never fails the job, until the
 counts' movement across toolchain updates is known.
 
 **Heap.** The heap gate's one ignored test owns a dhat allocator in its own executable, builds each fixture before
-profiling and measures only the export, the rebuild or the check. Its allowances are 24 MiB for an export (with an
+profiling and measures only the operation under test. Its allowances are 24 MiB for an export (with an
 8 KiB relation payload per entity), 16 MiB for a value rebuild and 32 MiB for a text rebuild, each case printing its
 peak: regression allowances for those inputs, not memory limits. Full derivation and a selected vector rebuild keep something per entity
 by design, so they are held to growth instead: between 6,000 and 12,000 entities of 250-byte values (each entity's
@@ -372,7 +374,7 @@ its inventory measuring about 300; between 1,000 and 2,000 vectors of 256 dimens
 measuring about 320 to 350, where one decoded vector is 1 KB. They leave out what was live before profiling, native allocations,
 LMDB's mappings and RSS. Timing and heap profiling run apart, allocation backtraces distorting CPU time. Criterion 0.8.2
 and dhat 0.3.3 are development dependencies only, Criterion without default features, and dhat's allocator is linked
-into that one test binary.
+only into that test binary and the `read-allocations` example.
 
 **A CPU profile**, before optimizing a maintenance path:
 
@@ -404,7 +406,7 @@ binary. `read-allocations` counts each read's allocations with dhat. Readings: `
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
 buffers text memberships, and slows the timed key encoding by a millisecond: each heap mutation must fail its
 assertion and the slowdown must be reported as a regression. Run it serially, in a full history, after
-`cargo bench -p elmdb --bench maintenance -- --save-baseline <name>`; it reuses `target`, so rebuild afterwards. The
+`cargo bench -p elmdb --bench maintenance -- --save-baseline remediation-20261027`, the name it compares with; it reuses `target`, so rebuild afterwards. The
 evidence is [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).
 
 ## Comparing two revisions

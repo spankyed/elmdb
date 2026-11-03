@@ -88,6 +88,7 @@ What a database holds and the rules it keeps, declared as data. Built: `crates/e
 | `types` | entity types by name |
 | `relations` | relation kinds by name |
 | `roles` | role names, each an object kept for future options |
+| `ranks` | rank indexes by name (Rank indexes, below) |
 
 Every object refuses keys it doesn't know, so a typo is an error rather than a rule silently not applied.
 
@@ -101,7 +102,8 @@ Every object refuses keys it doesn't know, so a typo is an error rather than a r
 | short code prefix | `^[A-Z][A-Z0-9]{0,7}$`, unique across types | `THR` |
 
 The engine's own names can't be declared: the fields `id`, `entityType`, `shortCode`, `createdAt`, `updatedAt`,
-`trashedAt` and `role`, and the types `Relation` and `Sequence`, which the engine's own ids are written with.
+`trashedAt` and `role`, the types `Relation` and `Sequence`, which the engine's own ids are written with, and the index names `shortCode` and
+`role`, the engine's own indexes.
 
 ## Types
 
@@ -144,7 +146,7 @@ Every field also takes:
 
 These are TypeScript's `?` and `| null`, kept apart because they mean different things.
 
-A `ref` lets `check()` report ids that name no entity and lets a plan follow one like an edge, without the field being
+A `ref` lets `check()` report ids that name no entity, and a type rename rewrites it, without the field being
 a relation. A relation is the better choice when the link has a kind, info or an order; a `ref` suits a foreign key
 such as a chunk's `indexId`. Missing-target auditing also follows nested lists whose declared element type is `ref`;
 violations identify the element path. Strings inside `object` and `any` remain opaque.
@@ -164,8 +166,7 @@ violations identify the element path. Strings inside `object` and `any` remain o
   parent), `many-to-one` (a source has at most one target), `many-to-many`. It counts far ends, not edges: a second
   edge between the same two ends is no second source. A link past it is refused (`CARDINALITY`);
   moving a child is an unlink and a link in one batch.
-- `acyclic: true`: a link that would close a cycle through this kind is refused (`CYCLE`). Today's per-call
-  `acyclicIn` becomes this.
+- `acyclic: true`: a link that would close a cycle through this kind is refused (`CYCLE`).
 - `key`: the info fields that, with its two ends, identify an edge. Absent, the ends alone do: two entities are joined
   by at most one edge of the kind. A key lets a pair be joined by several, one for each value of its fields, as a
   flow's transitions are one for each pair of handles they join: `"key": ["sourceHandle", "targetHandle"]`. A field
@@ -187,17 +188,17 @@ An entity's edges keep the order they were linked in.
 ## Indexes
 
 Indexes are declared on the type, named, and separate from the fields, since one index can cover several fields and one
-field several indexes. A plan never names a value index: the engine picks one from the plan's filters and order. A
+field several indexes. A plan never names a value index: the engine reads a built one for a `where` or `withRole` it can. A
 search step names its text, trigram or vector index only when the type has more than one.
 
-**Value**: equality, ranges and order.
+**Value**: equality lookups, and what `unique` enforces.
 
 ```json
 "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"], "unique": false }
 ```
 
-- `fields`: one, or several for a compound index, which serves a filter on its leading fields together with order or a
-  range on the next: `where('sender', 'user').orderBy('timestamp')`. A field of any type but `bytes` and `object`: of
+- `fields`: one, or several for a compound index, which enforces `unique` over the fields together; a plan's lookups
+  read single-field indexes only (`engine.md`, Reads: plans). A field of any type but `bytes`, `object` or a list of those or of lists: of
   an `any` field the index holds the scalar values, and a lookup for another walks the type's rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`), from the moment it is
   declared: a value the index can't hold (below), or one of rows its build hasn't reached yet, is found by walking the
@@ -237,7 +238,7 @@ search step names its text, trigram or vector index only when the type has more 
              "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
 ```
 
-- `from`: the `string` fields the text to embed is made of. `chunk`: `whole`, `paragraph` or `heading` (Markdown
+- `from`: the `string` fields, lists of strings or `any` fields the text to embed is made of. `chunk`: `whole`, `paragraph` or `heading` (Markdown
   sections).
 - `dims`, `metric` (`cosine` or `l2`), `precision` (`f32`). hannoy's graphs measure cosine and euclidean distance over
   f32 vectors; a normalized embedding ranks by dot product as it does by cosine.
@@ -284,11 +285,11 @@ stored one.
 | An index removed | dropped |
 | A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
-| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
+| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `stats()` counts it, and `purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic` added, a field dropped from a relation's `key`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
-| A short code prefix changed, a type declared again with another prefix than its stored codes hold, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
-| Anything renamed | not inferred. `admin.renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |
+| A short code prefix changed or removed, a type declared again with another prefix than its stored codes hold or with none, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
+| Anything renamed | not inferred. `renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |
 
 Rows that predate a tightened rule are reported, not rewritten: fixing them is a migration's job, which knows what the
 right value is.

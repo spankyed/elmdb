@@ -23,7 +23,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 ## Development improvements
 
 - [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
-  benchmarks, concurrency models and diagnostics; initial benchmarks implemented, other stages planned.
+  benchmarks, concurrency models and diagnostics, each stage built or declined with its record.
 - [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
-  failpoints, heap assertions, per-process tests, model-based properties, profiling; initial heap gates implemented,
-  other stages planned.
+  failpoints, heap assertions, per-process tests, model-based properties, profiling; all built.
+- [Lessons from lmdb-js](lmdb-js-research.md): a planned survey of what lmdb-js does that elmdb might learn from.
