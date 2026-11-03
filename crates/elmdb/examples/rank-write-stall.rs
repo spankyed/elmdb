@@ -10,7 +10,7 @@ mod support;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-/// What a built index at the default tolerance reports at most: its bound, plus up to half that for rounding its scores,
+/// What a built index at `Fixture::ranked_graph`'s tolerance, 1e-6, reports at most: its bound, plus up to half that for rounding its scores,
 /// rounded up to one significant figure
 const BUILT: f64 = 2e-6;
 

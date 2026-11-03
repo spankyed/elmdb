@@ -242,6 +242,18 @@ Read costs, at every width and at 16 bits alike, hits then ids, top 10 and top 1
 one. Reading through every cell instead, so that a read with `limit` always agreed with one without, took top 10 from 9 µs
 to 6 ms at 20,000 documents, as nearly every node is in one cell at 16 bits too.
 
+Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-11-02 against the drain retried off the lock
+(`826b827`), this change at `40089a1`, run in turn twice each at a load average of 5 to 6, at the default tolerance of the time, 1e-6:
+
+| | before | after |
+|---|---:|---:|
+| One change, spread, 100,000 | 423, 432 ms | 371, 381 ms |
+| One change, spread, 10,000 | 61.8, 61.3 ms | 45.9, 45.8 ms |
+| Burst, spread, 100,000 | 533, 532 ms | 420, 426 ms |
+| Burst, spread, 10,000 | 65.3, 65.6 ms | 58.3, 58.1 ms |
+| One change, near, 100,000 | 21.6, 23.1 ms | 22.2, 23.2 ms |
+| `ranked`, 100,000 | 8.22, 8.22 µs | 8.43, 8.40 µs |
+
 ### Cutting how long a drain holds the lock
 
 Writing a drain's rows in key order, each prefix in one pass, doesn't pay: its write phase at 100,000 documents read 98.3
@@ -262,17 +274,22 @@ A steady write's p50 and p90 rise about a quarter, which fits more of them findi
 making a commit's pushes, though that wasn't measured. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
 the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
 
-Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-11-02 against the drain retried off the lock
-(`826b827`), run in turn twice each at a load average of 5 to 6, at the default tolerance of the time, 1e-6:
+Two retries were chosen from what a reader sampling every 5 ms found, the same runs at each count, two each, a load average
+of 5 to 13, the second run of each the quieter; `past tolerance` is the share of samples reporting more than a built index
+does, and the longest stretch of them:
 
-| | before | after |
-|---|---:|---:|
-| One change, spread, 100,000 | 423, 432 ms | 371, 381 ms |
-| One change, spread, 10,000 | 61.8, 61.3 ms | 45.9, 45.8 ms |
-| Burst, spread, 100,000 | 533, 532 ms | 420, 426 ms |
-| Burst, spread, 10,000 | 65.3, 65.6 ms | 58.3, 58.1 ms |
-| One change, near, 100,000 | 21.6, 23.1 ms | 22.2, 23.2 ms |
-| `ranked`, 100,000 | 8.22, 8.22 µs | 8.43, 8.40 µs |
+| Retries | Bursts p99 | Bursts slowest | Steady p99 | Steady slowest | Steady writes | Bursts past tolerance | longest | Steady past tolerance | longest |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 228, 211 ms | 270, 307 ms | 246, 239 ms | 573, 316 ms | 3,646, 3,515 | 67%, 67% | 818, 996 ms | 100%, 97% | 7.2, 1.9 s |
+| 2 | 58, 30 ms | 115, 95 ms | 2.8, 0.7 ms | 751, 307 ms | 5,758, 5,957 | 67%, 58% | 475, 383 ms | 83%, 84% | 1.3, 1.1 s |
+| 4 | 16, 76 ms | 84, 96 ms | 2.4, 0.7 ms | 317, 277 ms | 6,019, 6,353 | 65%, 56% | 785, 348 ms | 81%, 81% | 0.9, 0.8 s |
+| 8 | 47, 8 ms | 97, 127 ms | 1.8, 0.7 ms | 312, 301 ms | 6,358, 6,374 | 60%, 59% | 407, 497 ms | 80%, 81% | 1.3, 1.1 s |
+
+The rule was set before these were read: the smallest count past which those latencies stop improving by more than the runs
+differ, whose longest stretch is at most twice that of none. Waiting didn't cost freshness in these runs: the stretches past tolerance
+were shorter with retries than without, why not having been measured. The scores reported are well past the
+tolerance through most of these runs at any count, up to 2e-4 at a tolerance of 1e-6, since a change comes every half second
+and a drain then takes its time; a read reports that bound rather than hiding it.
 
 ### The default tolerance, against exact PageRank
 
@@ -323,7 +340,9 @@ and the spread graph, whose links a seed doesn't change, by four histories of ch
 
 So the default is 1e-5, the loosest at which the top 10 was the true top 10 in the true order and the top 100 within 1% over every
 graph with hubs, at every size and seed, a bar set before these were read. One seed at 1,000 documents holds two of its top 10 in
-the other order at every tolerance: their scores are equal, so either is the true order.
+the other order at every tolerance: their scores are equal, so either is the true order. That order is a `hits` answer's, which
+sorts what it read; an `ids` answer past the first narrow cell comes by place, so on a shuffled graph it holds the same nodes in
+another order, which only the top 10 at 1,000 and 4,000 documents is held to (`tests/rank_default.rs`).
 
 The bar separates 1e-5 from 1e-4 narrowly. Over the eight shuffled graphs 1e-4's top 10 is true in every case, and it misses the bar
 once, at 98 of a top 100. Its one near tie in the top 10 comes only with the hubs first: the same links with their documents shuffled
@@ -361,22 +380,6 @@ alone.
 
 Reads over the graph with hubs at 1e-5 are 8.4 µs top 10 and 751 µs top 1,000 at 100,000 documents as hits, and 3.9 and 71 µs as
 ids, so reading through a wide cell costs little there.
-Two retries were chosen from what a reader sampling every 5 ms found, the same runs at each count, two each, a load average
-of 5 to 13, the second run of each the quieter; `past tolerance` is the share of samples reporting more than a built index
-does, and the longest stretch of them:
-
-| Retries | Bursts p99 | Bursts slowest | Steady p99 | Steady slowest | Steady writes | Bursts past tolerance | longest | Steady past tolerance | longest |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 0 | 228, 211 ms | 270, 307 ms | 246, 239 ms | 573, 316 ms | 3,646, 3,515 | 67%, 67% | 818, 996 ms | 100%, 97% | 7.2, 1.9 s |
-| 2 | 58, 30 ms | 115, 95 ms | 2.8, 0.7 ms | 751, 307 ms | 5,758, 5,957 | 67%, 58% | 475, 383 ms | 83%, 84% | 1.3, 1.1 s |
-| 4 | 16, 76 ms | 84, 96 ms | 2.4, 0.7 ms | 317, 277 ms | 6,019, 6,353 | 65%, 56% | 785, 348 ms | 81%, 81% | 0.9, 0.8 s |
-| 8 | 47, 8 ms | 97, 127 ms | 1.8, 0.7 ms | 312, 301 ms | 6,358, 6,374 | 60%, 59% | 407, 497 ms | 80%, 81% | 1.3, 1.1 s |
-
-The rule was set before these were read: the smallest count past which those latencies stop improving by more than the runs
-differ, whose longest stretch is at most twice that of none. Waiting didn't cost freshness in these runs: the stretches past tolerance
-were shorter with retries than without, why not having been measured. The scores reported are well past the
-tolerance through most of these runs at any count, up to 2e-4 at a tolerance of 1e-6, since a change comes every half second
-and a drain then takes its time; a read reports that bound rather than hiding it.
 
 ### What it took to get there
 
