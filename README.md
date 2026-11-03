@@ -80,7 +80,7 @@ until a release has users, so nothing here is a stable API yet.
 
 ## Docs
 
-Start at the [docs map](docs/README.md). The ones most people want:
+See [docs map](docs/README.md). The ones most people want:
 
 - [design.md](docs/architecture/design.md): principles, vocabulary, and what elmdb won't do
 - [schema.md](docs/architecture/schema.md): types, fields, relations, indexes, and how a schema changes
