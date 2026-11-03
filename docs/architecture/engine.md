@@ -107,7 +107,7 @@ A plan is a scope, a start, steps and a terminal:
   edges of the kinds named between two of them the edges. `ranked` orders the set by the scores a rank index holds
   (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
   index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`. One not built yet
-  answers from `rank` over the graph it declares, to its tolerance: the same answer, costing what `rank` does until the build ends. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
+  answers from `rank` over the graph it declares, to its tolerance: the same answer, costing what `rank` does until the build ends. `whileBuilding: "refuse"` asks for `INDEX_BUILDING` instead, for a caller that would rather not pay that. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
   those `n` from the index's score order, and past them only through a cell of it wider than the order promises: the index's
   scores further apart than twice the tolerance come in order, PageRank's further apart than that and the bound, and closer ones in the same cell by place, sorted when
   the answer shows scores. Its scores are hits', and the `hits` answer's `rank` is

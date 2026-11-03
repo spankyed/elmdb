@@ -117,6 +117,18 @@ pub struct Plan {
     pub terminal: Terminal,
 }
 
+/// What a `ranked` step does while its index isn't built yet
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub enum WhileBuilding {
+    /// Computes the scores the index will hold, costing what `rank` does
+    #[default]
+    Compute,
+    /// Refuses the read (`INDEX_BUILDING`), for a caller that would rather not pay that
+    Refuse,
+}
+
 /// Which entities a query reaches
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
@@ -302,6 +314,10 @@ pub enum Step {
     /// the first `n` with `limit` reads only those from the index
     Ranked {
         index: String,
+        /// What it does while the index isn't built yet
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<WhileBuilding>", optional))]
+        while_building: WhileBuilding,
     },
     /// The set in an order where each edge of the kinds between two of its entities, followed the direction's way,
     /// leads from an entity to one after it: `A blocks B` puts A first with `out`, and `in` reverses it. The members

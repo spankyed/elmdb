@@ -17,7 +17,7 @@ use crate::format::value::TIMESTAMP_EXTENSION;
 use super::algorithms::{self, Groups, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
-use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal};
+use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal, WhileBuilding};
 use super::text::{self, search::Hit};
 use super::trigram::{self, Matcher};
 use super::unit::Read;
@@ -716,7 +716,7 @@ impl<R: Read> Query<'_, R> {
                 }
                 Ok(true)
             }
-            Step::Ranked { index } => self.ranked_by(before, upto, index, visit),
+            Step::Ranked { index, while_building } => self.ranked_by(before, upto, index, *while_building, visit),
             Step::Topological { kinds, direction } => {
                 if *direction == Direction::Both {
                     return Err(Error::new(
@@ -882,7 +882,7 @@ impl<R: Read> Query<'_, R> {
                     return Ok(true);
                 }
                 if before == 1
-                    && let Step::Ranked { index } = &self.plan.steps[0]
+                    && let Step::Ranked { index, .. } = &self.plan.steps[0]
                     && self.reads_rank_top(index)?
                 {
                     let first = self.rank_top(index, take as usize)?;
@@ -1556,12 +1556,24 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// `ranked`: the set by the index's scores, highest first, ties in the set's order; an entity that isn't one of the
-    /// index's nodes is refused. An index not built yet answers from the scores it will hold
-    fn ranked_by(&self, before: usize, upto: usize, index: &str, visit: &mut Visit<'_>) -> Result<bool> {
+    /// index's nodes is refused. An index not built yet answers from the scores it will hold, or refuses if asked to
+    fn ranked_by(
+        &self,
+        before: usize,
+        upto: usize,
+        index: &str,
+        while_building: WhileBuilding,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
         let def = self.rank_def(index)?;
         let (totals, computed, step) = if ranks::is_built(self.r, index)? {
             let (_, totals, step) = self.rank_index(upto, index)?;
             (Some(totals), HashMap::default(), step)
+        } else if while_building == WhileBuilding::Refuse {
+            return Err(Error::new(
+                ErrorCode::IndexBuilding,
+                format!("The rank index {index} is still being built, and this read asked not to compute its scores"),
+            ));
         } else {
             let (scores, step) = self.computed_scores(upto, index, def)?;
             (None, scores, step)

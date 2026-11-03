@@ -223,6 +223,15 @@ fn an_index_not_built_yet_answers_as_it_will_once_built_and_says_so() {
     assert_eq!(stage["building"], true);
     assert!(stage["error"].as_f64().unwrap() >= tolerance);
 
+    // A read that asked not to compute them is refused, and one whose index is built is answered regardless
+    let refusing = |steps: Json| plan(steps, json!({ "answer": "ids" }));
+    let asks = json!({ "step": "ranked", "index": "taskRank", "whileBuilding": "refuse" });
+    assert_eq!(read(&db, refusing(json!([asks.clone()]))).unwrap_err().code, ErrorCode::IndexBuilding);
+    assert_eq!(
+        read(&db, refusing(json!([asks, { "step": "limit", "n": 3 }]))).unwrap_err().code,
+        ErrorCode::IndexBuilding
+    );
+
     // What it refuses it refuses the same: a set outside the graph, and a name nothing declares
     let outside = json!({ "start": { "from": "types", "types": ["Tag"] },
         "steps": [{ "step": "ranked", "index": "taskRank" }], "terminal": { "answer": "ids" } });

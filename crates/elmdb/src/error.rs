@@ -87,6 +87,8 @@ pub enum ErrorCode {
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
     /// `ranked` step naming no rank index
     UnknownIndex,
+    /// A `ranked` read asked to be refused while its index builds
+    IndexBuilding,
     /// A read of an index still being built, which has nothing to answer from in its place: a rank index
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
@@ -151,6 +153,7 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
@@ -245,6 +248,7 @@ mod tests {
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
             ErrorCode::UnknownIndex,
+            ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
