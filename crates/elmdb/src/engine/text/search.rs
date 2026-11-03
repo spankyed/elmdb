@@ -63,6 +63,8 @@ pub fn parse(query: &str) -> Vec<RawClause> {
         let mut field = None;
         // A field name, then a colon, then what is held in it
         let name_end = (at..chars.len()).find(|&i| !chars[i].is_ascii_alphanumeric()).unwrap_or(chars.len());
+        // mutant-skip: replace > with >= in parse
+        // parse's field name needs an alphabetic first character, which an empty name (name_end == at) doesn't have
         if name_end > at
             && chars[at].is_ascii_alphabetic()
             && chars.get(name_end) == Some(&':')
@@ -307,9 +309,13 @@ fn expand(r: &impl Read, entity_type: &str, index: &TextIndex, word: &Word, fuzz
             }
         }
         let edits = if fuzzy { edits_for(alternative) } else { 0 };
+        // mutant-skip: replace > with >= in expand
+        // A word given no edits walks an exact DFA, whose only match, at distance 0, the loop skips
         if edits > 0 {
             let dfa = automaton(edits).build_dfa(alternative);
             for (term, d, p) in within(r, &keys::text_terms(entity_type, name), &dfa, edits)? {
+                // mutant-skip: replace > with >= in expand
+                // The exact term was merged at weight 1 first, and merge keeps a term's highest weight
                 if d > 0 {
                     let weight = if d == 1 { ONE_EDIT_WEIGHT } else { TWO_EDITS_WEIGHT };
                     merge(&mut out, term, weight, || Ok(Some(p)))?;
@@ -419,11 +425,16 @@ pub fn search(
             clause.words.iter().map(|w| expand(r, entity_type, index, w, options.fuzzy)).collect::<Result<_>>()?;
         let mut candidates = words.first().map(union).unwrap_or_default();
         for word in words.iter().skip(1) {
+            // mutant-skip: replace &= with \|= in search
+            // A clause of several words is checked by holds, which needs every word at consecutive places, so the union
+            // of the words' postings keeps what their intersection keeps; and holds answers true for one word in any
+            // field
             candidates &= union(word);
         }
         if let Some(among) = among {
             candidates &= among;
         }
+        // mutant-skip: replace > with >= in search (as above)
         let needs_places = words.len() > 1 || clause.fields.is_some();
         if needs_places {
             let mut kept = RoaringTreemap::new();
@@ -589,6 +600,7 @@ pub fn suggest(
         _ => 2,
     };
     let mut near: Vec<(u8, u64, String)> = Vec::new();
+    // mutant-skip: replace > with >= in suggest (as above)
     if edits > 0 {
         let dfa = automaton(edits).build_dfa(&term);
         for (t, d, p) in within(r, &dictionary, &dfa, edits)? {

@@ -359,6 +359,11 @@ impl<'i, 'a> Change<'i, 'a> {
         let held = node(t, self.index.name, id)?;
         self.nodes.insert(id.to_owned(), (held, held));
         if let Some(n) = held
+            // mutant-skip: in Change<'i, 'a>::get
+            // Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep
+            // kept in the totals, so the same nodes are pushed in the same order
+            // (`draining_in_chunks_makes_the_bits_one_drain_makes`), and the queue `finish` writes is counted from each
+            // node's residual, not from what was waiting
             && n.r.abs() > self.index.threshold
         {
             self.waiting.insert((n.type_at, n.seq), id.to_owned());
@@ -375,6 +380,7 @@ impl<'i, 'a> Change<'i, 'a> {
         self.totals.moved += 1;
         self.nodes.get_mut(id).expect("read above").1 = to;
         if let Some(n) = to.or(from) {
+            // mutant-skip: replace > with >= in Change<'i, 'a>::set (as above)
             if to.is_some_and(|n| n.r.abs() > self.index.threshold) {
                 self.waiting.insert((n.type_at, n.seq), id.to_owned());
             } else {
@@ -475,13 +481,20 @@ impl<'i, 'a> Change<'i, 'a> {
         let Some(mut n) = self.get(t, u)? else { return Ok(()) };
         if n.w <= 0.0 {
             // Its arcs carried nothing; this one now carries all of it, as `add_arc` has it
+            // mutant-skip: replace > with >= in Change<'i, 'a>::reweigh_arc
+            // A node whose arcs weighed nothing takes an arc of weight 0 or doesn't, which carries nothing either way;
+            // its out-weight is counted again from its arcs when the subtraction leaves too little to trust, and
+            // counting it again more or less often answers the same arcs; a node left with no out-weight keeps its
+            // estimate or hands it to its residual, and both hold the invariant
             return if to > 0.0 { self.add_arc(t, u, v, to) } else { Ok(()) };
         }
         let f = n.x / n.w;
         let mut left = n.w - from + to;
+        // mutant-skip: replace \* with (\+|/) in Change<'i, 'a>::reweigh_arc (as above)
         if left <= n.w * 1e-9 {
             left = self.out_weight(t, u)?;
         }
+        // mutant-skip: replace > with >= in Change<'i, 'a>::reweigh_arc (as above)
         if left > 0.0 {
             let x = f * left;
             n.r -= x - n.x;
@@ -588,6 +601,9 @@ impl<'i, 'a> Change<'i, 'a> {
 
     /// Writes what changed: each node, its place in score order and in the queue, and the totals
     fn finish(self, t: &mut Txn<'_, '_>) -> Result<()> {
+        // mutant-skip: replace == with != in Change<'i, 'a>::finish
+        // finish's shortcut: nothing changed, so nothing to write; the totals change only with a node, whose writes put
+        // them too
         if self.totals == self.held && self.nodes.values().all(|(before, after)| before == after) {
             return Ok(());
         }
@@ -605,6 +621,9 @@ impl<'i, 'a> Change<'i, 'a> {
                 if after.is_none_or(|a| !same_order(&a, b, precision)) {
                     t.del(&order_key(name, precision, b))?;
                 }
+                // mutant-skip: replace > with >= in Change<'i, 'a>::finish
+                // A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never
+                // land on
                 if b.r.abs() > threshold && after.is_none_or(|a| a.r.abs() <= threshold) {
                     t.del(&keys::rank_queued(name, b.type_at, b.seq))?;
                 }
@@ -615,6 +634,7 @@ impl<'i, 'a> Change<'i, 'a> {
                     if before.is_none_or(|b| !same_order(a, &b, precision)) {
                         t.put(&order_key(name, precision, a), id.as_bytes())?;
                     }
+                    // mutant-skip: replace > with >= in Change<'i, 'a>::finish (as above)
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
                         t.put(&keys::rank_queued(name, a.type_at, a.seq), id.as_bytes())?;
                     }
@@ -704,6 +724,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
             break;
         }
         let next = match change.next_waiting(t, after)? {
+            // mutant-skip: replace match guard after.is_some\(\) with (true|false) in push (as above)
             None if after.is_some() => change.next_waiting(t, None)?,
             next => next,
         };
@@ -712,6 +733,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         after = Some(place);
     }
     change.totals.swept = after;
+    // mutant-skip: replace > with >= in push (as above)
     let waiting = change.totals.residuals > index.budget(change.totals.estimates);
     change.finish(t)?;
     Ok(waiting)
@@ -760,6 +782,9 @@ impl Drained {
 
     /// Whether the index has been written since the drain read it
     pub fn is_stale(&self, r: &impl Read) -> Result<bool> {
+        // mutant-skip: replace Drained::is_stale -> Result<bool> with Ok\(false\)
+        // The check for staleness before taking the lock: `Drained::apply` makes it again under the lock and the drain
+        // is retried either way, so only the empty unit it saves shows
         Ok(totals(r, &self.index)?.written_at != self.read_at)
     }
 
@@ -786,6 +811,7 @@ impl Drained {
                 t.del(&order_key(index, precision, old))?;
                 t.put(&order_key(index, precision, new), id.as_bytes())?;
             }
+            // mutant-skip: replace > with >= in Drained::write (as above)
             let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
             if was && !is {
                 t.del(&keys::rank_queued(index, old.type_at, old.seq))?;
@@ -820,12 +846,18 @@ pub fn plan(
     let mut reached = Reached::default();
     // A drain reaching a quarter of the nodes reads them all in one pass, cheaper than one read each. A drain stops once
     // the residuals' sum is within its budget, so the queue it leaves can be most of the nodes
+    // mutant-skip: in plan
+    // Whether a drain reads its nodes one at a time or all in one pass: which nodes it pushes, and how, is the same, so
+    // only its cost shows (the bench's spread and near graphs)
     let most = held.nodes / 4;
     let mut queued = 0u64;
     t.visit(&keys::rank_queue(index.name), |_, _| {
+        // mutant-skip: in plan (as above)
         queued += 1;
+        // mutant-skip: in plan (as above)
         queued <= most
     })?;
+    // mutant-skip: in plan (as above)
     if queued > most {
         reached.read_all(t, &index)?;
     } else {
@@ -846,7 +878,12 @@ pub fn plan(
         Sweep { residuals: held.residuals, estimates: held.estimates, after: held.swept, pushes: 0, moved: 0 };
     // One node at a time while few are read: the next waiting after the place pushed last, from the first again once past
     // the last
+    // mutant-skip: replace > with >= in plan (as above)
+    // mutant-skip: replace < with <= in plan
+    // The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
+    // (`draining_in_chunks_makes_the_bits_one_drain_makes`)
     while !reached.all && sweep.pushes < limit && sweep.residuals > index.budget(sweep.estimates) {
+        // mutant-skip: in plan (as above)
         if reached.at.len() as u64 > most {
             reached.read_all(t, &index)?;
             break;
@@ -883,7 +920,9 @@ pub fn plan(
         reached.sweep_all(t, &index, mirror, sequence, &mut sweep, limit)?;
     }
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
+    // mutant-skip: replace > with >= in plan (as above)
     let waiting = sweep.residuals > index.budget(sweep.estimates)
+        // mutant-skip: replace > with >= in plan (as above)
         && if reached.all { reached.nodes.iter().any(|n| n.r.abs() > threshold) } else { !reached.waiting.is_empty() };
     let totals = Totals {
         estimates: sweep.estimates,
@@ -937,7 +976,9 @@ impl Sweep {
                 node.r += share * weight;
                 let now = node.r.abs();
                 self.residuals += now - held;
+                // mutant-skip: replace > with >= in Sweep::push (as above)
                 if (now > threshold) != (held > threshold) {
+                    // mutant-skip: replace > with >= in Sweep::push (as above)
                     crossed((node.type_at, node.seq), v, now > threshold);
                 }
             }
@@ -988,6 +1029,7 @@ impl Reached {
         let at = self.nodes.len();
         let id: Rc<str> = id.into();
         self.at.insert(Rc::clone(&id), Some(at));
+        // mutant-skip: replace > with >= in Reached::add (as above)
         if !self.all && n.r.abs() > index.threshold {
             self.waiting.insert((n.type_at, n.seq), at);
         }
@@ -1087,6 +1129,8 @@ impl Reached {
         let n = self.nodes.len();
         let mut at = sweep.after.map_or(0, |place| self.nodes.partition_point(|n| (n.type_at, n.seq) <= place));
         let mut seen = 0;
+        // mutant-skip: replace > with >= in Reached::sweep_all (as above)
+        // mutant-skip: replace < with <= in Reached::sweep_all (as above)
         while sweep.pushes < limit && seen < n && sweep.residuals > index.budget(sweep.estimates) {
             if at >= n {
                 at = 0;
@@ -1104,6 +1148,9 @@ impl Reached {
             }
             let list = self.arcs[at].as_deref().unwrap_or_default();
             sweep.push(&mut self.nodes, list, at, alpha, threshold, |_, _, _| {});
+            // mutant-skip: replace \+= with \*= in Reached::sweep_all
+            // Where the sweep looks after the node it pushed: that one's residual is 0, so looking from it or from the
+            // next finds the same
             at += 1;
             seen = 0;
         }
@@ -1151,6 +1198,7 @@ impl Reached {
         most: u64,
     ) -> Result<Option<Vec<(usize, f64)>>> {
         // A far end already read is taken by its place here; one not read yet is named, read once the visit is done
+        // mutant-skip: replace Reached::arcs -> Result<Option<Vec<\(usize, f64\)>>> with Ok\(None\) (as above)
         enum Far {
             Read(usize, f64),
             Unread(String, f64),
@@ -1179,6 +1227,7 @@ impl Reached {
             }
         }
         let unread = found.iter().filter(|far| matches!(far, Far::Unread(..))).count();
+        // mutant-skip: in Reached::arcs (as above)
         if (self.at.len() + unread) as u64 > most {
             return Ok(None);
         }
@@ -1227,6 +1276,7 @@ pub fn owes_work(r: &impl Read, index: &str) -> Result<bool> {
     let Some(def) = r.schema().ranks.get(index) else { return Ok(false) };
     let index = Index::new(index, def, r.schema());
     let totals = totals(r, index.name)?;
+    // mutant-skip: replace > with >= in owes_work (as above)
     Ok(totals.stage != Stage::Built || totals.residuals > index.budget(totals.estimates) || index.count_due(&totals))
 }
 
@@ -1353,6 +1403,10 @@ pub fn unfinished(r: &impl Read) -> Result<Vec<String>> {
             })?;
             Ok(any)
         };
+        // mutant-skip: replace > with >= in unfinished (as above)
+        // mutant-skip: replace && with \|\| in unfinished
+        // Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes
+        // no push and writes nothing, so only its cost shows; index_status reads the build stage, not this
         if totals.stage != Stage::Built || (totals.error(def.damping) > def.tolerance && queued()?) {
             out.push(name.clone());
         }
@@ -1427,6 +1481,9 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 )));
             }
             let w: f64 = arcs[at].iter().map(|(_, w)| w).sum();
+            // mutant-skip: in violations
+            // check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the
+            // tests make moves a value far past them, so a tolerance off by a factor answers the same
             if (w - n.w).abs() > 1e-9 * w.max(1.0) {
                 out.push(violation(format!("{} holds out-weight {} where its arcs weigh {w}", nodes[at].0, n.w)));
             }
@@ -1439,6 +1496,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let scale = nodes.iter().map(|(_, n)| n.x.abs()).fold(1.0, f64::max);
         for (at, (id, n)) in nodes.iter().enumerate() {
             let residual = keep + inflow[at] - n.x;
+            // mutant-skip: in violations (as above)
             if (residual - n.r).abs() > 1e-9 * scale {
                 out.push(violation(format!("{id} holds residual {} where its estimates make it {residual}", n.r)));
             }
@@ -1477,7 +1535,9 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let estimates: f64 = nodes.iter().map(|(_, n)| n.x).sum();
         let residuals: f64 = nodes.iter().map(|(_, n)| n.r.abs()).sum();
         if totals.nodes != nodes.len() as u64
+            // mutant-skip: in violations (as above)
             || (totals.estimates - estimates).abs() > 1e-9 * estimates.abs().max(1.0)
+            // mutant-skip: in violations (as above)
             || (totals.residuals - residuals).abs() > 1e-9 * estimates.abs().max(1.0)
         {
             out.push(violation(format!(
@@ -1489,6 +1549,10 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             )));
         }
         // The contract: within the reported bound of `rank` over the same graph
+        // mutant-skip: in violations
+        // check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the
+        // bound's proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which
+        // the invariant checks above it catch first
         if nodes.is_empty() || estimates <= 0.0 {
             continue;
         }
@@ -1500,6 +1564,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let truth = algorithms::rank(&graph, &seeds, alpha, 1_000_000, 1e-13).expect("a seed in a graph of its nodes");
         let distance: f64 = nodes.iter().zip(&truth.scores).map(|((_, n), s)| (n.x / estimates - s).abs()).sum();
         let bound = error_bound(residuals, estimates, nodes.len() as u64, alpha);
+        // mutant-skip: in violations (as above)
         if distance > bound + 1e-9 {
             out.push(violation(format!("its scores are {distance} from PageRank, past the bound {bound} it reports")));
         }

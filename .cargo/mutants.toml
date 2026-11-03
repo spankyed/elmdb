@@ -34,67 +34,23 @@ exclude_re = [
     # unique_keys' arms for one field absent and one field held each give what its general arm gives those inputs
     "entities.rs:.*delete match arm \\[None\\] in unique_keys",
     "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
-    # check_unique's index read skips the entity's own entry; a unique index holds one entity a value, so stopping
-    # at the first entry or the one after it finds the same holder
-    "entities.rs:351:.*replace == with != in check_unique",
-    # stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
-    # within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
-    # being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here, which
-    # the `--list --no-config` diff (`docs/architecture/testing.md`, Mutation testing) shows
-    "values.rs:42:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
-    # parse's field name needs an alphabetic first character, which an empty name (name_end == at) doesn't have
-    "search.rs:66:.*replace > with >= in parse",
     # within's guard: the DFA is built for the distance within asks, and reports Exact only up to its own maximum
     "search.rs:.*replace match guard d <= distance with true in within",
-    # A word given no edits walks an exact DFA, whose only match, at distance 0, the loop skips
-    "search.rs:310:.*replace > with >= in expand",
-    "search.rs:592:.*replace > with >= in suggest",
-    # The exact term was merged at weight 1 first, and merge keeps a term's highest weight
-    "search.rs:313:.*replace > with >= in expand",
-    # A clause of several words is checked by holds, which needs every word at consecutive places, so the union of the
-    # words' postings keeps what their intersection keeps; and holds answers true for one word in any field
-    "search.rs:422:.*replace &= with \\|= in search",
-    "search.rs:427:.*replace > with >= in search",
     # walk_type merges the trash into the live range by place, and no two entities share a place
     "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
-    # nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the graph held
-    # more, so any first ask finds the same k
-    "reads.rs:1186:.*replace \\+ with \\* in Query<'_, R>::nearest",
-    # orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same order, and
-    # EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are its cost
-    "reads.rs:893:.*replace > with < in Query<'_, R>::stage",
-    "reads.rs:894:.*replace - with / in Query<'_, R>::stage",
-    "reads.rs:1388:.*replace >= with < in Query<'_, R>::first_ordered",
-    "reads.rs:1390:.*replace == with != in Query<'_, R>::first_ordered",
-    # A stage's answer flows only to the stages after it and the terminal, none of which reads it: an id refused is
-    # what stops a walk
-    "reads.rs:915:.*delete ! in Query<'_, R>::stage",
     # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
     "reads.rs:.*replace match guard n.is_finite\\(\\) with true in json_text",
     # check_stamp's newer-format arm: the format equal to this elmdb's is the arm above it
     "store/mod.rs:.*replace > with >= in check_stamp",
-    # The worker's owed check: a sync is due only after a commit since the last sync began, so whenever one is due the
-    # commits outnumber the synced
-    "sync.rs:330:.*replace > with >= in run",
-    # A manual clock's worker would wait a millisecond at a time rather than to be woken: the same syncs, polled
-    "sync.rs:343:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
     # A build error other than a refusal recurs in the fallback's walk of the same rows, which returns it
     "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
-    # The spill budget sets when rows go to disk, which no answer shows; the release heap test
-    # (tests/maintenance_heap.rs) holds what it bounds
-    "sorted.rs:12:.*replace \\* with",
     # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
     # own entry under one key
     "derive.rs:.*replace match guard \\*other != id with true in buildable_entry",
     # begin's growth when more than half the map is used: at exactly half, growing or not is a page's difference
     "store/mod.rs:.*replace > with >= in Store::begin",
-    # build_chunk's unique check skips the entity's own entry: a write checks a unique value against the rows while the
-    # index is unbuilt, so an entity's own entry and another's for the same value are never both in the index
-    "derive.rs:594:.*replace == with != in build_chunk",
-    # move_file's temporary-attribute check: clearing an attribute a file doesn't have sets the attributes it has
-    "backup.rs:101:.*replace & with \\| in move_file",
     # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
     # from-address and pin
     "backup.rs:.*replace \\| with \\^ in move_file",
@@ -110,7 +66,6 @@ exclude_re = [
     # A stored value streamed, which every one is with the guard false or the one-call size made 0: the stream
     # decompresses the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
     "values.rs:.*replace match guard size <= ONE_CALL_UP_TO with false in decompress",
-    "values.rs:69:.*replace << with >>",
     # rank's stop: a round whose scores moved by exactly the tolerance stops, or runs one more round that moves them
     # less; the two differ only where an L1 sum of floats lands on the tolerance to the bit
     "algorithms.rs:.*replace < with <= in rank",
@@ -118,10 +73,6 @@ exclude_re = [
     # dropping repeats from a set that holds none answers the same, at the cost of marking every id
     "reads.rs:.*replace == with != in Query<'_, R>::holds_each_once",
     "reads.rs:.*delete ! in Query<'_, R>::holds_each_once",
-    # The rank index (`docs/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches run
-    # again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch and each
-    # hears the same
-    "engine/mod.rs:76:.*delete ! in drain_commits",
     # When a drain starts: a pause for commits to stop leaving pushes, which in a suite here only a drain's cost shows
     # (the bench); that it waits for quiet, and no longer than its cap, is the builder's Shuttle model
     # (`engine/builder/model.rs`), which no suite cargo-mutants runs builds
@@ -135,63 +86,68 @@ exclude_re = [
     # Abandoning the builder as the process exits: without it `Drop` stops the thread and joins it, which matters only
     # where a join at exit could hang, and no test here runs a process to its exit
     "builder.rs:.*replace Builder::abandon with \\(\\)",
-    # Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep kept in
-    # the totals, so the same nodes are pushed in the same order (`draining_in_chunks_makes_the_bits_one_drain_makes`),
-    # and the queue `finish` writes is counted from each node's residual, not from what was waiting
-    # The edge mirror's count of removals against what it holds: one removal at the bound only moves when the names are
-    # counted afresh by one commit
-    "mirror.rs:161:.*replace > with >= in EdgeMirror::commit",
-    # The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
-    "mirror.rs:57:.*delete -",
-    "ranks.rs:362:.*in Change<'i, 'a>::get",
-    "ranks.rs:378:.*replace > with >= in Change<'i, 'a>::set",
-    "ranks.rs:707:.*replace match guard after.is_some\\(\\) with (true|false) in push",
-    "ranks.rs:715:.*replace > with >= in push",
-    # A node whose arcs weighed nothing takes an arc of weight 0 or doesn't, which carries nothing either way; its
-    # out-weight is counted again from its arcs when the subtraction leaves too little to trust, and counting it again
-    # more or less often answers the same arcs; a node left with no out-weight keeps its estimate or hands it to its
-    # residual, and both hold the invariant
-    "ranks.rs:478:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
-    "ranks.rs:482:.*replace \\* with (\\+|/) in Change<'i, 'a>::reweigh_arc",
-    "ranks.rs:485:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
-    # finish's shortcut: nothing changed, so nothing to write; the totals change only with a node, whose writes put
-    # them too
-    "ranks.rs:591:.*replace == with != in Change<'i, 'a>::finish",
-    # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
-    "ranks.rs:789:.*replace > with >= in Drained::write",
-    "ranks.rs:1230:.*replace > with >= in owes_work",
-    "ranks.rs:(608|618):.*replace > with >= in Change<'i, 'a>::finish",
-    "ranks.rs:(849|886|887):.*replace > with >= in plan",
-    "ranks.rs:1090:.*replace > with >= in Reached::sweep_all",
-    "ranks.rs:(940|941):.*replace > with >= in Sweep::push",
-    "ranks.rs:991:.*replace > with >= in Reached::add",
-    "ranks.rs:1356:.*replace > with >= in unfinished",
-    # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
-    # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
-    "ranks.rs:1356:.*replace && with \\|\\| in unfinished",
-    # A drain written, then drained again in its unit: it stopped at the budget or with nothing waiting, so this one finds
-    # nothing to push, and one that stopped at its limit takes up the sweep where the next unit would
-    "builder.rs:396:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
-    # The check for staleness before taking the lock: `Drained::apply` makes it again under the lock and the drain is
-    # retried either way, so only the empty unit it saves shows
-    "ranks.rs:763:.*replace Drained::is_stale -> Result<bool> with Ok\\(false\\)",
-    # The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
-    # (`draining_in_chunks_makes_the_bits_one_drain_makes`)
-    "ranks.rs:849:.*replace < with <= in plan",
-    "ranks.rs:1090:.*replace < with <= in Reached::sweep_all",
-    # Whether a drain reads its nodes one at a time or all in one pass: which nodes it pushes, and how, is the same, so
-    # only its cost shows (the bench's spread and near graphs)
-    "ranks.rs:(823|826|827|829|850):.*in plan",
-    "ranks.rs:1182:.*in Reached::arcs",
-    "ranks.rs:1154:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
-    # Where the sweep looks after the node it pushed: that one's residual is 0, so looking from it or from the next
-    # finds the same
-    "ranks.rs:1107:.*replace \\+= with \\*= in Reached::sweep_all",
-    # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
-    # moves a value far past them, so a tolerance off by a factor answers the same
-    "ranks.rs:(1430|1442|1480|1481):.*in violations",
-    # check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the bound's
-    # proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which the invariant
-    # checks above it catch first
-    "ranks.rs:(1492|1503):.*in violations",
+    # BEGIN generated by `cargo xtask mutant-exclusions` from each `// mutant-skip:` comment, which holds its reason
+    "crates/elmdb/src/engine/builder.rs:400:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
+    "crates/elmdb/src/engine/derive/sorted.rs:15:.*replace \\* with",
+    "crates/elmdb/src/engine/derive.rs:598:.*replace == with != in build_chunk",
+    "crates/elmdb/src/engine/entities.rs:354:.*replace == with != in check_unique",
+    "crates/elmdb/src/engine/mirror.rs:59:.*delete -",
+    "crates/elmdb/src/engine/mirror.rs:166:.*replace > with >= in EdgeMirror::commit",
+    "crates/elmdb/src/engine/mod.rs:80:.*delete ! in drain_commits",
+    "crates/elmdb/src/engine/ranks.rs:367:.*in Change<'i, 'a>::get",
+    "crates/elmdb/src/engine/ranks.rs:384:.*replace > with >= in Change<'i, 'a>::set",
+    "crates/elmdb/src/engine/ranks.rs:489:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
+    "crates/elmdb/src/engine/ranks.rs:494:.*replace \\* with (\\+|/) in Change<'i, 'a>::reweigh_arc",
+    "crates/elmdb/src/engine/ranks.rs:498:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
+    "crates/elmdb/src/engine/ranks.rs:607:.*replace == with != in Change<'i, 'a>::finish",
+    "crates/elmdb/src/engine/ranks.rs:627:.*replace > with >= in Change<'i, 'a>::finish",
+    "crates/elmdb/src/engine/ranks.rs:638:.*replace > with >= in Change<'i, 'a>::finish",
+    "crates/elmdb/src/engine/ranks.rs:728:.*replace match guard after.is_some\\(\\) with (true|false) in push",
+    "crates/elmdb/src/engine/ranks.rs:737:.*replace > with >= in push",
+    "crates/elmdb/src/engine/ranks.rs:788:.*replace Drained::is_stale -> Result<bool> with Ok\\(false\\)",
+    "crates/elmdb/src/engine/ranks.rs:815:.*replace > with >= in Drained::write",
+    "crates/elmdb/src/engine/ranks.rs:852:.*in plan",
+    "crates/elmdb/src/engine/ranks.rs:856:.*in plan",
+    "crates/elmdb/src/engine/ranks.rs:858:.*in plan",
+    "crates/elmdb/src/engine/ranks.rs:861:.*in plan",
+    "crates/elmdb/src/engine/ranks.rs:885:.*replace > with >= in plan",
+    "crates/elmdb/src/engine/ranks.rs:885:.*replace < with <= in plan",
+    "crates/elmdb/src/engine/ranks.rs:887:.*in plan",
+    "crates/elmdb/src/engine/ranks.rs:924:.*replace > with >= in plan",
+    "crates/elmdb/src/engine/ranks.rs:926:.*replace > with >= in plan",
+    "crates/elmdb/src/engine/ranks.rs:980:.*replace > with >= in Sweep::push",
+    "crates/elmdb/src/engine/ranks.rs:982:.*replace > with >= in Sweep::push",
+    "crates/elmdb/src/engine/ranks.rs:1033:.*replace > with >= in Reached::add",
+    "crates/elmdb/src/engine/ranks.rs:1134:.*replace > with >= in Reached::sweep_all",
+    "crates/elmdb/src/engine/ranks.rs:1134:.*replace < with <= in Reached::sweep_all",
+    "crates/elmdb/src/engine/ranks.rs:1154:.*replace \\+= with \\*= in Reached::sweep_all",
+    "crates/elmdb/src/engine/ranks.rs:1202:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
+    "crates/elmdb/src/engine/ranks.rs:1231:.*in Reached::arcs",
+    "crates/elmdb/src/engine/ranks.rs:1280:.*replace > with >= in owes_work",
+    "crates/elmdb/src/engine/ranks.rs:1410:.*replace > with >= in unfinished",
+    "crates/elmdb/src/engine/ranks.rs:1410:.*replace && with \\|\\| in unfinished",
+    "crates/elmdb/src/engine/ranks.rs:1487:.*in violations",
+    "crates/elmdb/src/engine/ranks.rs:1500:.*in violations",
+    "crates/elmdb/src/engine/ranks.rs:1539:.*in violations",
+    "crates/elmdb/src/engine/ranks.rs:1541:.*in violations",
+    "crates/elmdb/src/engine/ranks.rs:1556:.*in violations",
+    "crates/elmdb/src/engine/ranks.rs:1568:.*in violations",
+    "crates/elmdb/src/engine/reads.rs:897:.*replace > with < in Query<'_, R>::stage",
+    "crates/elmdb/src/engine/reads.rs:899:.*replace - with / in Query<'_, R>::stage",
+    "crates/elmdb/src/engine/reads.rs:923:.*delete ! in Query<'_, R>::stage",
+    "crates/elmdb/src/engine/reads.rs:1197:.*replace \\+ with \\* in Query<'_, R>::nearest",
+    "crates/elmdb/src/engine/reads.rs:1400:.*replace >= with < in Query<'_, R>::first_ordered",
+    "crates/elmdb/src/engine/reads.rs:1403:.*replace == with != in Query<'_, R>::first_ordered",
+    "crates/elmdb/src/engine/text/search.rs:68:.*replace > with >= in parse",
+    "crates/elmdb/src/engine/text/search.rs:314:.*replace > with >= in expand",
+    "crates/elmdb/src/engine/text/search.rs:319:.*replace > with >= in expand",
+    "crates/elmdb/src/engine/text/search.rs:432:.*replace &= with \\|= in search",
+    "crates/elmdb/src/engine/text/search.rs:438:.*replace > with >= in search",
+    "crates/elmdb/src/engine/text/search.rs:604:.*replace > with >= in suggest",
+    "crates/elmdb/src/engine/values.rs:47:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
+    "crates/elmdb/src/engine/values.rs:77:.*replace << with >>",
+    "crates/elmdb/src/store/backup.rs:103:.*replace & with \\| in move_file",
+    "crates/elmdb/src/store/sync.rs:333:.*replace > with >= in run",
+    "crates/elmdb/src/store/sync.rs:349:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
+    # END generated
 ]

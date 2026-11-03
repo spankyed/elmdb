@@ -98,6 +98,8 @@ fn move_file(source: &Path, target: &Path, replace: bool) -> std::io::Result<()>
     if attributes == INVALID_FILE_ATTRIBUTES {
         return Err(std::io::Error::last_os_error());
     }
+    // mutant-skip: replace & with \| in move_file
+    // move_file's temporary-attribute check: clearing an attribute a file doesn't have sets the attributes it has
     if attributes & FILE_ATTRIBUTE_TEMPORARY != 0 {
         let remaining = attributes & !FILE_ATTRIBUTE_TEMPORARY;
         // NORMAL is a file's attribute only when it has no other

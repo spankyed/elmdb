@@ -591,6 +591,10 @@ pub fn build_chunk(
                 let mut holder = None;
                 t.visit(&keys::index_range(entity_type, name, &parts), |_, v| {
                     holder = values::decode(v).ok().and_then(|v| v.as_str().map(str::to_owned));
+                    // mutant-skip: replace == with != in build_chunk
+                    // build_chunk's unique check skips the entity's own entry: a write checks a unique value against
+                    // the rows while the index is unbuilt, so an entity's own entry and another's for the same value
+                    // are never both in the index
                     holder.as_deref() == Some(id.as_str())
                 })?;
                 if let Some(other) = holder.filter(|h| h != id) {

@@ -327,6 +327,9 @@ fn run(shared: &Shared) {
                     if let Some(id) = state.queued.take() {
                         break begin(&mut state, id);
                     }
+                    // mutant-skip: replace > with >= in run
+                    // The worker's owed check: a sync is due only after a commit since the last sync began, so whenever
+                    // one is due the commits outnumber the synced
                     let owed = state.committed > state.synced;
                     let due = state.policy.due_at();
                     if owed && due.is_some_and(|due| due <= shared.clock.now()) {
@@ -340,6 +343,9 @@ fn run(shared: &Shared) {
                 }
                 // Woken by a commit, a `durable()`, a test moving a manual clock, or the deadline
                 state = match state.policy.due_at() {
+                    // mutant-skip: replace match guard !shared.clock.is_manual\(\) with true in run
+                    // A manual clock's worker would wait a millisecond at a time rather than to be woken: the same
+                    // syncs, polled
                     Some(due) if !shared.clock.is_manual() => {
                         let wait = due.saturating_duration_since(shared.clock.now()).max(Duration::from_millis(1));
                         shared.changed.wait_timeout(state, wait).expect("the sync state's lock is never poisoned").0

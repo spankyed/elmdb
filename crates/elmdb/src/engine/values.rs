@@ -39,6 +39,11 @@ pub fn stored(value: &Value) -> Vec<u8> {
         return plain;
     }
     match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
+        // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored
+        // stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
+        // within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
+        // being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here,
+        // which the `--list --no-config` diff (`docs/architecture/testing.md`, Mutation testing) shows
         Ok(frame) if frame.len() + 1 < plain.len() => {
             let mut out = Vec::with_capacity(frame.len() + 1);
             out.push(COMPRESSED);
@@ -66,6 +71,9 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 
 /// The largest value decompressed in one call into a buffer of the size its frame records. A frame that records more,
 /// or no size, is read as a stream, so a damaged header can't ask for a large allocation
+// mutant-skip: replace << with >>
+// A stored value streamed, which every one is with the guard false or the one-call size made 0: the stream decompresses
+// the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
 thread_local! {

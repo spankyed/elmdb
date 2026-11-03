@@ -348,6 +348,9 @@ fn check_unique(
             Some(parts) => {
                 t.visit(&keys::index_range(entity_type, &index.name, &parts), |_, held| {
                     holder = values::decode(held).ok().and_then(|v| v.as_str().map(str::to_owned));
+                    // mutant-skip: replace == with != in check_unique
+                    // check_unique's index read skips the entity's own entry; a unique index holds one entity a value,
+                    // so stopping at the first entry or the one after it finds the same holder
                     holder.as_deref() == Some(id)
                 })?;
                 holder = holder.filter(|h| h != id);
