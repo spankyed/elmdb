@@ -100,3 +100,6 @@ cargo run -p elmdb-cli -- check DIR  # also: inspect, backup, dump, load
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+
+Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
+the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
