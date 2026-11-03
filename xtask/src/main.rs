@@ -13,7 +13,7 @@
 //! - `check-mutant-exclusions`: fails when an `exclude_re` in `.cargo/mutants.toml` matches none of the mutants
 //!   cargo-mutants lists: each names a mutant by its line, so an edit above it leaves the exclusion naming nothing, the
 //!   mutant it was written for reported again, and the line free for another mutant to be skipped unread.
-//! - `compare`: runs one command on two revisions in turn and prints each reading beside the load it was taken at; it
+//! - `compare`: runs one command on two revisions in turn and prints each reading beside the load as its run ended; it
 //!   reports and decides nothing (`docs/architecture/testing.md`, Comparing two revisions).
 //! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
 //!   testing.md`, The build directory).

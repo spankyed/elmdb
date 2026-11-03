@@ -406,11 +406,14 @@ cargo xtask compare main --runs 2 -- cargo bench -p elmdb --bench maintenance --
 cargo xtask compare main -- cargo run --release -p elmdb --example rank-write-stall -- --edges
 ```
 
-One command on two revisions, in turn, each in a worktree under `target/compare/` that stays between runs so its builds stay
-warm. It prints each reading on each side, Criterion's medians and any `key=value` a command prints, beside the load average
-at the start of each run, and marks a load past the machine's core count. Alternating is what keeps a load spike from reading
-as a change. It reports and decides nothing: it fails only when the command does or prints no reading. A count that doesn't
-move with the load is `benches/instructions.rs`'s.
+One command on two revisions, in turn and each run in the other order, each in a worktree under `target/compare/` that stays
+between runs so its builds stay warm. The revisions are resolved once, from the checkout, and printed as commits. It prints
+each reading on each side, Criterion's medians and any `key=value` a command prints, a run that didn't print one as `-`, beside
+the load average as each run ended, and marks a load past the machine's core count. A first run includes its side's build, so
+the second is usually the one to read. Alternating is what keeps a spike or a drift in load from reading as a change. It clears
+`CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN` for the command, which other variables such as `ELMDB_BENCH_ROWS` pass through. It
+reports and decides nothing: it fails when the command does, after printing what it read, or when a side prints no reading. A
+count that doesn't move with the load is `benches/instructions.rs`'s.
 
 ## Read allocation and codec reports
 
