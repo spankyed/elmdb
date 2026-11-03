@@ -108,7 +108,9 @@ A plan is a scope, a start, steps and a terminal:
   (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
   index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`, and one still building
   `INDEX_BUILDING`. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
-  those `n` from the index's score order and nothing else. Its scores are hits', and the `hits` answer's `rank` is
+  those `n` from the index's score order, and past them only through a cell of it wider than the order promises: scores
+  further apart than twice the larger of the tolerance and the bound come in order, and closer ones in the same cell by place, sorted when
+  the answer shows scores. Its scores are hits', and the `hits` answer's `rank` is
   `{ index, error }`: the bound on the scores' L1 distance from PageRank. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
   `damping` (0.85) and otherwise jumps back to a `seeds` entity, every entity when none are given, which is PageRank.
@@ -361,7 +363,8 @@ unit is open.
   residual into its estimate and on along its arcs. A commit that changed the index pushes up to 16 nodes, and one that left it alone
   writes nothing to it; the rest wait in the index's queue for the index thread, which on a read snapshot reads its nodes and their edges and pushes in memory until none
   waits, then writes back each node it moved under the write lock, in one unit that tells the watches it wrote into; any
-  write of the index meanwhile has it computed again in that unit. The edges come through an edge mirror on the
+  write of the index meanwhile has it wait for commits to pause and compute again on a snapshot, up to twice, and then in
+  that unit. The edges come through an edge mirror on the
   store that the commits keep, each one handing it the entries it filed and unfiled; a commit that can't, or another
   process's, empties it, and `check()` compares it with the store. A rank index is built by that thread too: its nodes added
   1,000 at a time, then pushed. The scores are within `2R / ((1 − α) s)` of PageRank in L1, `R` the residuals' sum and

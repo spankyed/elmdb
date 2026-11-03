@@ -17,8 +17,8 @@ scores rather than computing them. Where the build differs from the design below
   it, and the index thread drains the rest after commits pause
   for 5 ms (at most 100 ms): on a read snapshot it reads the queue, reads each node and its arcs the first time a push
   reaches it and pushes in memory, then under the write lock writes back each node it moved. Any write of the index
-  meanwhile has the drain computed again under the lock, which every writer's stamp on the totals (`put_totals`) tells. A
-  drain costs the nodes its pushes reach, not the
+  meanwhile, which every writer's stamp on the totals (`put_totals`) tells, has it wait for commits to pause and compute
+  outside the lock again, up to twice, and then under it. A drain costs the nodes its pushes reach, not the
   graph, until a quarter of the nodes are read or would be, when it reads them all in one pass. Pushing through the store
   a node at a time cost some 10 µs a push.
 - **The totals are kept, not counted:** each change to a node adds to the estimates' and residuals' sums, and a drain
@@ -26,8 +26,14 @@ scores rather than computing them. Where the build differs from the design below
   since the last count, or fewer at a tolerance so tight their rounding would reach a tenth of its budget. A commit past
   that hands the index to the builder though it owes no push, so a count's cost is spread over the changes that called
   for it.
-- **The score order** (`d/rk`) is keyed on the estimate kept to 16 significant bits, so most of a drain's small moves
-  leave it alone; `ranked` sorts by the estimates themselves, and the order is promised only beyond twice the bound.
+- **The score order** (`d/rk`) is keyed on the estimate kept to the bits a cell of 256 times the tolerance takes, as a
+  share of the score, so most of a drain's small moves leave it alone at any tolerance. `ranked` over a whole set sorts by
+  the estimates themselves. Read with `limit`, the order is promised beyond twice the larger of the tolerance and the
+  bound: nodes in one cell come by place, reading on past the limit only through a cell wider than that, which only a
+  score over about 1/128 of the estimates' sum can be in.
+- **A drain runs to its budget, and no further.** Stopping below it to leave room for the next change wouldn't save a
+  drain at the default tolerance: at 100,000 documents one change leaves some 40 times the budget. Commits close together
+  already share a drain (`QUIET`, `PATIENCE`), and at a tolerance loose enough for a change to fit, it drains nothing.
 - **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a
   drain's timing can change where its pushes start, so across histories only the bound and the order are promised.
 - **The hits answer's `rank`** is `{ index, error }`, with no `sequence`: a watch's delivery carries the sequence.
