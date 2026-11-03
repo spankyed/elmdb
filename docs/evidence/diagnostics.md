@@ -56,7 +56,8 @@ are empty. `tracing` is in every build already, through hannoy, so the check is 
 | `small_write` | 1,187,939 | 1,187,992 | +53 (+0.0045%) |
 | `text_rebuild` (reported only) | 913,959,664 | 913,647,270 | −312,394 (−0.0342%), the tokenizer's per-process seed |
 
-A write's spans cost 53 instructions of its 1.19 million. The gate allows 0.05% or 100 instructions, whichever is more:
+A write's spans cost 53 instructions of its 1.19 million. The gate allowed 0.05% or 100 instructions, whichever is more, when these were read (it allows 300 since its counts left
+glibc out, `instruction-counts.md`, The machine):
 three times the largest growth measured.
 
 **What the gate catches.** Each mutation applied inside the container's copy, gated, and the file restored:

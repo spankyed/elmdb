@@ -6,8 +6,8 @@ collector, compared with the first. An instruction count doesn't move with the m
 a gate. Exits nonzero when a gated case grew past its bound, when a case the benchmark runs is neither gated nor named
 as reported only, or when a gated case is missing, so it can't pass having compared nothing.
 
-The bound is declared: with no collector a span costs one cached check of its callsite, a few dozen instructions an
-operation, while what the gate is for — work per row, such as an event or a clock read — grows with the rows. One
+The bound is declared: with no collector a span costs one cached check of its callsite, an operation's spans a couple of hundred
+instructions, while what the gate is for — work per row, such as an event or a clock read — grows with the rows. One
 uncollected event per sorted entry costs a 1,000-entity rebuild about 0.1%, twice the bound (`docs/evidence/
 diagnostics.md`, where the firing cases are).
 """

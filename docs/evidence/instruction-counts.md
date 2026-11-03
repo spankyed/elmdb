@@ -74,3 +74,39 @@ is 43 million. In the Linux container, 2026-11-03:
 So a drain is about 43.0 million over spread links and 24.3 million over near ones. A drain over every node sharing its arc read
 with the read of a few, a regression the timings of 2026-11-02 found only by bisecting, reads 44.9 million over spread links on a
 copy, +4.4%, where at 100,000 documents it cost 80% of the arc read's time; some of that no instruction count sees. Over near links it reads about the same, as that drain doesn't take that path, and its `rank_build` +0.2%; over spread links `rank_build` reads +2.9%, as the fixture's own drain takes that path.
+
+## The machine
+
+`read_bytes` `all_rows` read one of two counts in CI, about 524.95 million or 530.17 million, whatever the commit. Over 70
+CI jobs on one source the mode stayed within a job and moved between jobs at the same minute, so it wasn't the clock; one
+binary at 100%, about 50% and about 25% of a core read within 24 instructions, so it wasn't load (aarch64 container).
+A workflow ran one binary, by its SHA-256, three times each on eight runners on 2026-11-03:
+
+| CPU | Runners | `all_rows` |
+|---|---:|---:|
+| AMD EPYC 7763 | 4 | 530,169,830 to 530,169,833 |
+| Intel Xeon Platinum 85xx | 1 | 530,169,830 |
+| Intel Xeon Platinum 83xx | 1 | 530,169,830 |
+| AMD EPYC 9V45 | 2 | 524,950,622 |
+
+Function by function from one job's two Callgrind profiles, every function of elmdb's reads the same and the 5.2 million
+is in glibc's `_int_malloc`, `malloc_consolidate` and `_int_free`: the heap settles in another shape. The CPU reaches the
+heap some way not traced here, and the binary with it: that job, on the Xeon 85xx, read low without the `diagnostics`
+feature and high with it, which failed the overhead gate on a change of comments alone. Under Valgrind the heap also runs
+out of its `brk` segment and falls back to `mmap`, which no process outside Valgrind does.
+
+So the benchmark allocates from an address range that only moves forward, and `free` does nothing. An allocation costs
+15 instructions, whatever came before it. Over 2026-11-03's eight runners, with EPYC 7763, 9V45 and 9V74 among them,
+`all_rows` read 395,211,653 on all eight, and the gated cases differ by at most 22 instructions.
+The largest case allocates 777 MB in its whole process, setup included (aarch64), inside the 4 GiB it reserves.
+
+What a count holds moved with it. On one aarch64 container `all_rows` fell from about 537 million to 349 million and
+`small_write` from about 1.2 million to 47,007, so most of a small write's count was glibc, and the 0.05% share of it that
+had covered one operation's spans fell below them: 172 instructions (`Op::live` and its drop) against a floor of 100. The
+floor is now 300, still under the 706 that share allowed.
+
+Allocations are gated apart, by the allocator's own instructions, since an allocation at 15 instructions is little in a
+share of a count. On a copy with one allocation per row added under the feature, `all_rows` grew 189,985 instructions against a
+bound of 174,586, `page` 943 against 940, narrowly, and both failed on allocating, 300,000 and 1,500 instructions more,
+each naming `bump_allocation`. Callgrind's call counts can't do this: they include the setup, so an 8,507-instruction read
+reported 1.1 million allocations.

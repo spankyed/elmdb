@@ -4,8 +4,6 @@
 name: instruction determinism
 on:
   workflow_dispatch:
-  push:
-    branches: [session/instruction-allocator]
 
 jobs:
   count:
