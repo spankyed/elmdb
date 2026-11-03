@@ -279,8 +279,8 @@ Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-
 The readings above that say "the default tolerance" are at 1e-6, which it was then. `examples/rank-accuracy.rs`, 2026-11-02,
 this Mac: a rank index's top after 30 ordinary changes (`--accuracy`), against `rank` run to 1e-13, over a graph with hubs (the
 first document some 4% of the score at 100,000), the same graph with its hubs anywhere among the documents by three seeds, and
-the spread graph. The hub graph's first documents are its hubs, which flatters a top list, since one cell's nodes come by place
-and those places then follow the scores; shuffled, they don't.
+the spread graph. One cell's nodes come by place, and on the graph with hubs first those places follow the scores; shuffled, they
+don't.
 
 How many of each true top the index's top holds, and how many in the true place:
 
@@ -301,16 +301,43 @@ How many of each true top the index's top holds, and how many in the true place:
 | | 1,000 | hubs | 989, 869 | 995, 977 | **999, 995** | 1,000, 1,000 |
 | | | shuffled, lowest seed | 983, 884 | 995, 976 | **998, 994** | 999, 997 |
 
-So the default is 1e-5, the loosest at which the top 10 was the true top 10 in the true order and the top 100 within 1% at every
-size and seed, a bar set before these were read. It is closer than one graph made it look: 1e-4 misses its top 10 only over the
-graph with hubs first, by one near tie, and misses the bar on the top 100 only at 98 of 100 in one seed. Four histories are few,
-and the gaps near the 10th place are about 8 times the order's margin here, so another seed could move any of these. An
-application for which those swaps are acceptable can declare a looser tolerance.
+The same on 2026-11-03 with more histories, the true top's share held at each, lowest to highest: the shuffled graph by eight seeds
+and the spread graph, whose links a seed doesn't change, by four histories of changes:
 
-What it doesn't buy is a top list over a graph whose scores are alike. Over the spread graph at 100,000 documents the top 10 holds
-1, 3, 3 and 5 of the true 10 at these four tolerances, the top 100 holds 29, 62, 65 and 70, and 1e-5 loses 1.36e-4 of the top 10's
-score against 3.6e-5 at 1e-6; at 10,000 its top 10 holds 5 of 10 against 7. No tolerance tried gives PageRank's list there, as
-nearly every score is alike, and a top list there says little at any of them.
+| Documents | Top | Graph | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---:|---:|---|---:|---:|---:|---:|
+| 1,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 3-4 | 9-10 | **10** | 10 |
+| | 100 | shuffled | 99-100 | 99-100 | **100** | 100 |
+| | | spread | 40-50 | 77-83 | **98-100** | 99-100 |
+| 10,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 2-4 | 3-6 | **3-7** | 7-10 |
+| | 100 | shuffled | 98-100 | 99-100 | **100** | 100 |
+| | | spread | 29-31 | 60-66 | **79-88** | 93-98 |
+| 100,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 1-5 | 2-7 | **2-6** | 4-8 |
+| | 100 | shuffled | 97-100 | 98-100 | **99-100** | 100 |
+| | | spread | 27-29 | 54-68 | **54-67** | 65-75 |
+| | 1,000 | shuffled | 980-988 | 995-999 | **998-1,000** | 999-1,000 |
+| | | spread | 251-326 | 185-196 | **910-930** | 962-993 |
+
+So the default is 1e-5, the loosest at which the top 10 was the true top 10 in the true order and the top 100 within 1% over every
+graph with hubs, at every size and seed, a bar set before these were read. One seed at 1,000 documents holds two of its top 10 in
+the other order at every tolerance: their scores are equal, so either is the true order.
+
+The bar separates 1e-5 from 1e-4 narrowly. Over the shuffled graphs, the same links as the graph with hubs first among them, 1e-4's
+top 10 is true in every case, and it misses the bar once, at 98 of a top 100. Its one near tie in the top 10 comes only with the hubs
+first, where place order takes the wrong one, so that graph flatters no top 10 here; what it flatters is further down, as the lowest
+shuffled seed at 1,000 of 100,000 shows. Nothing promises 1e-5's result either. The closest two of the top 11 are 1.6e-5, 1.3e-5 and
+3.7e-7 of all the scores apart over the graph with hubs first at the three sizes, and a median of 5.9e-5, 7.4e-6 and 1.3e-6 over the
+shuffled ones, where the order's margin at 1e-5 is at least 2e-5. Only the median at 1,000 documents is clear of it; the rest hold
+because the estimates are closer than the margin allows. An application for which those swaps are acceptable can declare a looser
+tolerance.
+
+What it costs is accuracy over a graph whose scores are alike, with no time back. Over the spread graph 1e-5 holds less than 1e-6 at
+every size above 1,000: at 10,000 documents 3 to 7 of the top 10 against 7 to 10, and 79 to 88 of the top 100 against 93 to 98. Those
+swaps are between scores that barely differ: 1e-5 loses a median 2.8e-4 of the top 10's score at 10,000 and 1.3e-4 at 100,000,
+against 3.5e-6 and 4.3e-5 at 1e-6. At 1,000 documents 1e-5 finds the true top 10, and at 100,000 no tolerance tried does.
 
 What one change costs at 100,000 documents, its commit and its drain: medians of 40 from a document in the later half and of 20
 from the highest-scoring one, and of 20 bursts of ten, the tolerances alternated, two runs each, a load average of 4 to 5:

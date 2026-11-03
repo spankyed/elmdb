@@ -265,8 +265,8 @@ beside `types` and `relations`.
 - `damping`: in (0, 1), `0.85` by default.
 - `tolerance`: above 0, `1e-5` by default: the bound on the L1 distance between the index's scores and PageRank once
   its pushes are done. Tighten it where scores close together must come in their true order; loosen it where a change
-  should cost less and the top's near ties may swap. Where nearly all scores are alike, no tolerance tried made a top
-  list match PageRank's (`docs/evidence/rank-index.md`).
+  should cost less and the top's near ties may swap. Where nearly all scores are alike, a top list takes a tighter
+  tolerance to match PageRank's, and at 100,000 documents none tried did (`docs/evidence/rank-index.md`).
 - The name is lowerCamelCase, and no type has an index of the same name.
 
 ## Changing a schema
