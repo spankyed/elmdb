@@ -7,32 +7,119 @@
   <em>Say "LMDB" out loud: that's the name.</em>
 </p>
 
-Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.
+An embedded database for Node.js and Electron, with search, graphs and live queries built in. It runs inside your app,
+with no server, so you don't need a separate search index or your own cache invalidation. Written in Rust on LMDB.
 
-elmdb holds typed entities, their attributes and the relations between them. It keeps value, text and vector indexes
-in the same transaction as the data, runs a read as one plan and a write as one batch, and reports what every commit
-changed, so a view can stay current. It assumes nothing about your application: your schema defines the types,
-relation kinds and rules.
+- **Search:** full text and vectors, plus fuzzy, substring and regex matching.
+- **Graphs:** paths, communities and PageRank, over the relations between your data.
+- **Live queries:** every commit says which reads it affected, so a view re-runs only when it needs to.
+- **Enforced schemas:** you declare your types and relations, and every write is checked against them.
+- **Repairable indexes:** `check()` verifies them against your data, and `rebuild()` replaces them.
 
-## Docs
+A good fit for knowledge tools, document libraries and other desktop apps with connected data.
 
-- [design.md](docs/architecture/design.md): principles, packages, vocabulary, conventions, the boundary with apack
-- [schema.md](docs/architecture/schema.md): types, fields, relations, indexes, and how a schema changes
-- [engine.md](docs/architecture/engine.md): the operations and the protocol
-- [search.md](docs/architecture/search.md): text and vector indexes, and search as plan steps
-- [format.md](docs/architecture/format.md): the key layout, values, versions and LMDB
-- [testing.md](docs/architecture/testing.md): what proves it correct
-- [roadmap.md](docs/roadmap.md): the order of work
-- [background.md](docs/background.md): why elmdb exists
+## Example
+
+```js
+import { Database } from 'elmdb';
+import { Packr } from 'msgpackr';
+
+const msgpack = new Packr({ useRecords: false, mapsAsObjects: true });
+
+const db = Database.open('./notes', {
+  schema: {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: {
+      Note: {
+        fields: { title: { type: 'string' } },
+        indexes: { text: { kind: 'text', fields: { title: {} } } },
+      },
+    },
+    relations: { refs: { cardinality: 'many-to-many' } },
+    ranks: { noteRank: { types: ['Note'], relations: ['refs'] } },
+  },
+});
+
+db.write(msgpack.pack({ ops: [
+  { op: 'create', type: 'Note', id: 'Note-a', fields: { title: 'Choosing a database' } },
+  { op: 'create', type: 'Note', id: 'Note-b', fields: { title: 'Backups' } },
+  { op: 'create', type: 'Note', id: 'Note-c', fields: { title: 'Database migrations' } },
+  { op: 'link', source: 'Note-b', kind: 'refs', target: 'Note-a' },
+  { op: 'link', source: 'Note-c', kind: 'refs', target: 'Note-a' },
+] }));
+
+const notes = { from: 'types', types: ['Note'] };
+const [found, top] = msgpack.unpack(db.readSync(msgpack.pack({ track: 1, reads: [
+  { read: 'query', plan: { start: notes, steps: [{ step: 'search', query: 'databse' }], terminal: { answer: 'ids' } } },
+  { read: 'query', plan: { start: notes, steps: [{ step: 'ranked', index: 'noteRank' }, { step: 'limit', n: 1 }], terminal: { answer: 'ids' } } },
+] })));
+
+console.log(found.ids); // what the misspelled search found
+console.log(top.ids);   // the most central note
+
+const edit = { op: 'set', id: 'Note-c', fields: { title: 'Schema migrations' } };
+const { changes } = msgpack.unpack(db.write(msgpack.pack({ ops: [edit] })));
+console.log(changes.touched); // the tracked reads this commit wrote into: re-run token 1
+db.close();
+```
+
+```text
+[ 'Note-c', 'Note-a' ]
+[ 'Note-a' ]
+[ 1 ]
+```
+
+Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. [apack](https://github.com/spankyed/apack),
+elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
 
 ## Status
 
-Built and running apack: the schema, the engine and its protocol, durability, value, text and vector indexes, change
-sets with tracked reads, the admin operations and the CLI, with the model, crash and fuzz suites
-(`docs/architecture/testing.md`). The order of work, and what comes next, is `docs/roadmap.md`.
+Running under apack, and not yet published, so build it from source. The storage format stays at 1, edited in place,
+until a release has users, so nothing here is a stable API yet.
 
 ```sh
-cargo nextest run --workspace   # the Rust suites
-cargo test --workspace --doc    # and their doc tests
-npm run build && npm test  # the Node binding, and its tests
+git clone https://github.com/spankyed/elmdb.git && cd elmdb
+npm ci && npm run build
+npm install /path/to/elmdb/crates/elmdb-node msgpackr   # from your app
 ```
+
+It uses N-API, so a Node or Electron upgrade needs no rebuild.
+
+| | |
+|---|---|
+| Node | 22.17 or later, and Electron through N-API |
+| Platforms | macOS, Linux (glibc and musl) and Windows on x64; macOS and Linux on arm64 |
+| Not in scope | a server, replication, or access control |
+
+**Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` syncs before it
+returns. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it.
+
+**Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
+refused.
+
+## Docs
+
+See [docs map](docs/README.md). The ones most people want:
+
+- [background.md](docs/background.md): why elmdb exists
+- [design.md](docs/architecture/design.md): principles, vocabulary, and what elmdb won't do
+- [schema.md](docs/architecture/schema.md): types, fields, relations, indexes, and how a schema changes
+- [engine.md](docs/architecture/engine.md): every read, write and admin operation, and the protocol
+- [roadmap.md](docs/roadmap.md): what's built, and what's waiting on what
+
+## Develop
+
+Needs Rust, which `rust-toolchain.toml` pins, and Node. `CLAUDE.md` has the full list of checks and the repository's rules.
+
+```sh
+npm ci && npm run build && npm test  # the binding and its tests
+cargo nextest run --workspace        # the Rust suites
+cargo run -p elmdb-cli -- check DIR  # also: inspect, backup, dump, load
+```
+
+## License
+
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+
+Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
+the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.

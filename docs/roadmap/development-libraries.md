@@ -12,7 +12,7 @@ value-index emission and the spill sorter on their own, whose combined cost the 
 
 Reduce handwritten platform code, make performance changes easier to evaluate, and improve evidence for concurrency
 and operational failures. This follows the [review](../reviews/elmdb-review-2026-10.md) and its
-[finding dispositions](../evidence/elmdb-remediation.md). It complements the active engine goals; it does not reorder
+[finding dispositions](../evidence/elmdb-remediation.md). It complements the engine goals, archived in `docs/archive/goals/`; it does not reorder
 or expand them. Reconcile each affected file with ongoing work before implementation.
 
 The initial work belongs entirely in elmdb. No apack changes or copied apack build directory are needed. Application
@@ -176,8 +176,8 @@ parallelism that can't be turned off; building from the plan's CSR without copyi
 - **rustworkx-core 0.18.1**: connected components, and centralities (betweenness, closeness, eigenvector, Katz), but no
   PageRank.
 
-None meets the requirements, so `crates/elmdb/src/engine/algorithms.rs` holds the two the roadmap sized: union-find
-components and power-iteration personalized PageRank over its own CSR, about a hundred lines, checked against a dense
+None meets the requirements, so `crates/elmdb/src/engine/algorithms.rs` holds its own: union-find
+components and power-iteration personalized PageRank over its own CSR first, then the later algorithms, those two checked against a dense
 reference over random graphs and networkx's karate-club scores.
 
 **Leiden** (`../archive/roadmap/graph-algorithms.md`'s stage 4), evaluated on its own, against: seeded and deterministic, a resolution,
