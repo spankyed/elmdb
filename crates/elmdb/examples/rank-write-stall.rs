@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let edges = args.iter().any(|a| a == "--edges");
-    let mut numbers = args.iter().filter(|a| *a != "--edges");
+    let bursts = args.iter().any(|a| a == "--bursts");
+    let edges = bursts || args.iter().any(|a| a == "--edges");
+    let mut numbers = args.iter().filter(|a| !a.starts_with("--"));
     let rows: usize = numbers.next().map(|s| s.parse().expect("a document count")).unwrap_or(100_000);
     let changes: usize = numbers.next().map(|s| s.parse().expect("a change count")).unwrap_or(20);
     let fixture = support::Fixture::ranked_graph(rows, 5);
@@ -42,7 +43,7 @@ fn main() {
                 fixture.db.write(&write, false).unwrap();
                 waits.push(started.elapsed());
                 i += 1;
-                std::thread::sleep(Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(if bursts && i.is_multiple_of(20) { 300 } else { 2 }));
             }
             waits
         });
