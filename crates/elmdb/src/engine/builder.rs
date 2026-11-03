@@ -37,7 +37,8 @@ const PATIENCE: Duration = Duration::from_millis(100);
 
 /// How many more times a drain computed outside the write lock is computed there again, after the commits that made it
 /// stale have paused, before it is computed under the lock: a burst usually ends within them, and under the lock every
-/// write waits for the whole drain
+/// write waits for the whole drain. More don't lower a write's latency further and none leaves scores staler for longer
+/// (`docs/evidence/rank-index.md`, Cutting how long a drain holds the lock)
 const STALE_RETRIES: u32 = 2;
 
 /// How many pushes one unit of a rank index's drain makes in memory, about 10 ms a million (2026-10-31, Apple M1 Pro,
