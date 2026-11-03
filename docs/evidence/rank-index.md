@@ -381,6 +381,16 @@ alone.
 Reads over the graph with hubs at 1e-5 are 8.4 µs top 10 and 751 µs top 1,000 at 100,000 documents as hits, and 3.9 and 71 µs as
 ids, so reading through a wide cell costs little there.
 
+The same changes under criterion, `ELMDB_BENCH_ROWS=10000,100000 cargo bench -p elmdb --bench maintenance -- 'rankIndexChange/(hubs|hubSource)'`
+and the default 1,000, at `11a5ec1`, 2026-11-03, this Mac, two runs in turn at a load average of 7 to 12, a link and its unlink each
+iteration, so about two changes:
+
+| Documents | `rankIndexChange/hubs` | `rankIndexChange/hubSource` |
+|---:|---:|---:|
+| 1,000 | 14.8, 14.6 ms | 16.8, 16.8 ms |
+| 10,000 | 34.0, 31.2 ms | 60.0, 59.9 ms |
+| 100,000 | 270, 262 ms | 670, 713 ms |
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
