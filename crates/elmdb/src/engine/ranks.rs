@@ -756,6 +756,11 @@ impl Drained {
         self.reached.all
     }
 
+    /// Whether the index has been written since the drain read it
+    pub fn is_stale(&self, r: &impl Read) -> Result<bool> {
+        Ok(totals(r, &self.index)?.written_at != self.read_at)
+    }
+
     /// Writes the drain if the index is as it read it
     pub fn apply(&self, t: &mut Txn<'_, '_>) -> Result<Applied> {
         if totals(&*t, &self.index)?.written_at != self.read_at {

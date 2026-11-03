@@ -17,8 +17,8 @@ scores rather than computing them. Where the build differs from the design below
   it, and the index thread drains the rest after commits pause
   for 5 ms (at most 100 ms): on a read snapshot it reads the queue, reads each node and its arcs the first time a push
   reaches it and pushes in memory, then under the write lock writes back each node it moved. Any write of the index
-  meanwhile has the drain computed again under the lock, which every writer's stamp on the totals (`put_totals`) tells. A
-  drain costs the nodes its pushes reach, not the
+  meanwhile, which every writer's stamp on the totals (`put_totals`) tells, has it wait for commits to pause and compute
+  outside the lock again, up to twice, and then under it. A drain costs the nodes its pushes reach, not the
   graph, until a quarter of the nodes are read or would be, when it reads them all in one pass. Pushing through the store
   a node at a time cost some 10 µs a push.
 - **The totals are kept, not counted:** each change to a node adds to the estimates' and residuals' sums, and a drain

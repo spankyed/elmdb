@@ -1925,10 +1925,8 @@ fn a_commit_that_writes_the_index_has_a_drain_being_computed_done_again_from_it(
     ];
     for window in windows {
         let (db, _dir, _) = with_a_commit_during_a_drain(window.clone());
-        assert!(
-            db.store().unwrap().rank_plans.lock().redone > 0,
-            "{window:?} wrote the index under a drain it left standing"
-        );
+        let plans = *db.store().unwrap().rank_plans.lock();
+        assert!(plans.retried > 0, "{window:?} wrote the index under a drain it left standing: {plans:?}");
         assert_within_bound(&db, "both", true);
         let report = db.check().unwrap();
         assert!(report.is_clean(), "after {window:?}: {report:?}");
@@ -1994,6 +1992,54 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
         .unwrap();
     assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
     assert!(plans.load(Ordering::SeqCst) > 0, "no drain read a node at a time");
+}
+
+#[test]
+fn a_drain_stale_each_time_it_is_computed_is_computed_under_the_lock_in_the_end() {
+    // A write of the index in every window: retried off the lock as many times as it takes to give up, and written all the
+    // same
+    fn arm(db: &std::sync::Arc<Database>, left: usize) {
+        if left == 0 {
+            return;
+        }
+        let inner = std::sync::Arc::clone(db);
+        db.store().unwrap().when_rank_planned(move || {
+            let (a, b) = (left, left + 3);
+            write(
+                &inner,
+                vec![json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") })],
+            )
+            .unwrap();
+            arm(&inner, left - 1);
+        });
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": 1 }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    arm(&db, 3);
+    write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let store = db.store().unwrap();
+    let plans = *store.rank_plans.lock();
+    assert_eq!((plans.retried, plans.redone), (2, 1), "{plans:?}");
+    store.when_rank_planned(|| {});
+    assert_within_bound(&db, "both", true);
+}
+
+#[test]
+fn a_drain_stale_once_is_written_from_its_retry_outside_the_lock() {
+    let window = vec![json!({ "op": "link", "source": "Task-33", "kind": "refs", "target": "Task-9" })];
+    let (db, _dir, _) = with_a_commit_during_a_drain(window);
+    let plans = *db.store().unwrap().rank_plans.lock();
+    assert_eq!((plans.retried, plans.redone), (1, 0), "{plans:?}");
+    assert!(plans.applied > 0, "{plans:?}");
+    assert_within_bound(&db, "both", true);
 }
 
 #[test]
