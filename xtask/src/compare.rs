@@ -50,15 +50,11 @@ fn readings(output: &str) -> Vec<(String, String)> {
     for line in output.lines() {
         // A long name stands on the line before its time, and a change's own `time:` line follows with no name
         let first = line.split_whitespace().next();
-        if let Some(first) = first.filter(|_| !line.starts_with(char::is_whitespace)) {
-            if first.contains('/') {
-                name = Some(first.to_owned());
-            }
+        if let Some(first) = first.filter(|first| first.contains('/') && !line.starts_with(char::is_whitespace)) {
+            name = Some(first.to_owned());
         }
-        if let Some(median) = time.captures(line).and_then(|c| c.get(1)) {
-            if let Some(name) = name.take() {
-                found.push((name, median.as_str().to_owned()));
-            }
+        if let (Some(median), true) = (time.captures(line).and_then(|c| c.get(1)), name.is_some()) {
+            found.push((name.take().expect("checked just above"), median.as_str().to_owned()));
         }
         for one in pair.captures_iter(line) {
             found.push((one[1].to_owned(), one[2].to_owned()));
