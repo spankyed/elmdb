@@ -343,9 +343,11 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare, and it
 doesn't move with the machine either: the benchmark allocates through a counter that only moves forward, since glibc's
 `malloc` costs what the heap's shape makes it and that follows the CPU. So a count here leaves out what an allocator
-costs, and an allocation shows at its fixed 15 instructions; real memory and time are the heap tests' and Criterion's.
-The `instruction determinism` workflow, dispatched after a change of that allocator, the toolchain, Valgrind or the
-runner image, runs the benchmark on eight runners and fails when they disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
+costs, and an allocation shows at its few fixed instructions; real memory and time are the heap tests' and Criterion's.
+Each setup also waits out the read it leaves cached, whose 100 ms would otherwise make a count follow how long the setup
+took. The `instruction determinism` workflow (`gh workflow run instruction-determinism.yml`), dispatched after a change of
+that allocator, the toolchain, Valgrind or the runner image, runs the benchmark on eight runners and fails when they
+disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
 (`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
 own thread does none of a drain's work, so it holds the drains' commits and not the benchmark's. The fixture's build runs there too
