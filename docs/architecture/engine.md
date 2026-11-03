@@ -108,8 +108,8 @@ A plan is a scope, a start, steps and a terminal:
   (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
   index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`, and one still building
   `INDEX_BUILDING`. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
-  those `n` from the index's score order, and past them only through a cell of it wider than the order promises: scores
-  further apart than twice the larger of the tolerance and the bound come in order, and closer ones in the same cell by place, sorted when
+  those `n` from the index's score order, and past them only through a cell of it wider than the order promises: the index's
+  scores further apart than twice the tolerance come in order, PageRank's further apart than that and the bound, and closer ones in the same cell by place, sorted when
   the answer shows scores. Its scores are hits', and the `hits` answer's `rank` is
   `{ index, error }`: the bound on the scores' L1 distance from PageRank. `rank` orders the set by personalized PageRank, highest
   first, ties in the set's order, following edges `out`, `in` or `both` ways: a walker follows an edge with probability
