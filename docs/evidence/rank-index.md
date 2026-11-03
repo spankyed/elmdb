@@ -313,6 +313,13 @@ from the highest-scoring one, and of 20 bursts of ten, the tolerances alternated
 So 1e-5 saves 10 to 19% on an ordinary change, and 12 to 17% on one from a hub or a burst. A change from a hub is the costliest
 found, over twice an ordinary one on the same graph: it moves far more residual, as the estimate it redistributes is far larger.
 
+Earlier the same day, not alternated, at a load of 5 to 29, so rough: over the graph with hubs 1e-4's ordinary change had a median
+of 0.1 ms and a 90th percentile of 87 ms, since at least half of them commit with no drain, with 228 and 231 ms from a hub and 136
+and 137 ms a burst. Over the spread graph 1e-5 and 1e-6 cost about the same: 227 and 244 ms against 230 and 261 ms an ordinary
+change, 233 and 246 ms against 242 and 338 ms a burst. A watch over the spread graph's top hears some 70 of the top 100 change
+place with each change at any tolerance, where the graph with hubs moves none at 100,000: the roadmap's watch churn, on that graph
+alone.
+
 Reads over the graph with hubs at 1e-5 are 8.4 µs top 10 and 751 µs top 1,000 at 100,000 documents as hits, and 3.9 and 71 µs as
 ids, so reading through a wide cell costs little there.
 
