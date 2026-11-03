@@ -88,7 +88,6 @@ pub enum ErrorCode {
     /// `ranked` step naming no rank index
     UnknownIndex,
     /// A read of an index still being built, which has nothing to answer from in its place: a rank index
-    IndexBuilding,
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
@@ -152,7 +151,6 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
-            Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
@@ -247,7 +245,6 @@ mod tests {
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
             ErrorCode::UnknownIndex,
-            ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,

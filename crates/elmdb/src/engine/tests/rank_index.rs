@@ -1,5 +1,5 @@
 //! Rank indexes (`docs/archive/roadmap/rank-index.md`): scores kept current by every commit, within the bound they report of
-//! the PageRank `rank` computes over the same graph; read by `ranked`, the top of them read alone; refused while
+//! the PageRank `rank` computes over the same graph; read by `ranked`, the top of them read alone; computed while
 //! building; held to that bound and to their own invariant by `check()`.
 
 use proptest::prelude::*;
@@ -163,18 +163,76 @@ fn ranked_reads_the_top_alone_and_refuses_what_it_cannot_answer() {
     )
     .unwrap_err();
     assert_eq!(e.code, ErrorCode::UnknownIndex);
-    // An index whose build hasn't finished has nothing to answer from
+}
+
+#[test]
+fn an_index_not_built_yet_answers_as_it_will_once_built_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..40).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(
+        (1..40).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" })),
+    );
+    ops.extend(
+        (2..20).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-1" })),
+    );
+    ops.push(json!({ "op": "create", "type": "Tag", "id": "Tag-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let plan = |steps: Json, answer: Json| json!({ "start": { "from": "types", "types": ["Task", "Note"] }, "steps": steps, "terminal": answer });
+    let top =
+        |answer: Json| plan(json!([{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 3 }]), answer);
+    let all = plan(json!([{ "step": "ranked", "index": "taskRank" }]), json!({ "answer": "hits" }));
+    let scores = |answer: &Json| -> Vec<(String, f64)> {
+        answer["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap()))
+            .collect()
+    };
+    let built = scores(&read(&db, all.clone()).unwrap());
+    let built_top = read(&db, top(json!({ "answer": "ids" }))).unwrap();
+
+    // As a build leaves it: the totals say nothing is built
     db.store()
         .unwrap()
         .write(|txn, d| d.delete(txn, &keys::rank_totals("taskRank")).map(|_| ()).map_err(Into::into), false)
         .unwrap();
-    let e = read(
-        &db,
-        json!({ "start": { "from": "types", "types": ["Task"] },
-        "steps": [{ "step": "ranked", "index": "taskRank" }], "terminal": { "answer": "ids" } }),
+
+    let building = scores(&read(&db, all).unwrap());
+    assert_eq!(building.len(), built.len());
+    let tolerance = 1e-9;
+    let distance: f64 = {
+        let held: std::collections::HashMap<_, _> = built.iter().cloned().collect();
+        building.iter().map(|(id, score)| (score - held[id]).abs()).sum()
+    };
+    assert!(distance < 4.0 * tolerance, "{distance} from the built scores");
+    assert_eq!(read(&db, top(json!({ "answer": "ids" }))).unwrap(), built_top);
+
+    // EXPLAIN tells the slower route from the index
+    let asked: Reads = serde_json::from_value(
+        json!({ "reads": [{ "read": "query", "explain": true, "plan": top(json!({ "answer": "ids" })) }] }),
     )
-    .unwrap_err();
-    assert_eq!(e.code, ErrorCode::IndexBuilding);
+    .unwrap();
+    let explained: Json =
+        serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&asked).unwrap()[..]).unwrap()).unwrap();
+    let stage = explained[0]["stages"].as_array().unwrap().iter().find(|s| s["stage"] == "ranked").unwrap().clone();
+    assert_eq!(stage["index"], "taskRank");
+    assert_eq!(stage["building"], true);
+    assert!(stage["error"].as_f64().unwrap() >= tolerance);
+
+    // What it refuses it refuses the same: a set outside the graph, and a name nothing declares
+    let outside = json!({ "start": { "from": "types", "types": ["Tag"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }], "terminal": { "answer": "ids" } });
+    assert_eq!(read(&db, outside).unwrap_err().code, ErrorCode::BatchInvalid);
+    assert_eq!(
+        read(&db, plan(json!([{ "step": "ranked", "index": "nothing" }]), json!({ "answer": "ids" })))
+            .unwrap_err()
+            .code,
+        ErrorCode::UnknownIndex
+    );
 }
 
 #[test]
