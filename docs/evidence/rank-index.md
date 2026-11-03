@@ -325,10 +325,10 @@ So the default is 1e-5, the loosest at which the top 10 was the true top 10 in t
 graph with hubs, at every size and seed, a bar set before these were read. One seed at 1,000 documents holds two of its top 10 in
 the other order at every tolerance: their scores are equal, so either is the true order.
 
-The bar separates 1e-5 from 1e-4 narrowly. Over the shuffled graphs, the same links as the graph with hubs first among them, 1e-4's
-top 10 is true in every case, and it misses the bar once, at 98 of a top 100. Its one near tie in the top 10 comes only with the hubs
-first, where place order takes the wrong one, so that graph flatters no top 10 here; what it flatters is further down, as the lowest
-shuffled seed at 1,000 of 100,000 shows. Nothing promises 1e-5's result either. The closest two of the top 11 are 1.6e-5, 1.3e-5 and
+The bar separates 1e-5 from 1e-4 narrowly. Over the eight shuffled graphs 1e-4's top 10 is true in every case, and it misses the bar
+once, at 98 of a top 100. Its one near tie in the top 10 comes only with the hubs first: the same links with their documents shuffled
+put that top 10 in its true order at 1e-4 at all three sizes, so there place order takes the wrong one, and that graph flatters no
+top 10. What it may flatter is further down, by a few places in a top 1,000. Nothing promises 1e-5's result either. The closest two of the top 11 are 1.6e-5, 1.3e-5 and
 3.7e-7 of all the scores apart over the graph with hubs first at the three sizes, and a median of 5.9e-5, 7.4e-6 and 1.3e-6 over the
 shuffled ones, where the order's margin at 1e-5 is at least 2e-5. Only the median at 1,000 documents is clear of it; the rest hold
 because the estimates are closer than the margin allows. An application for which those swaps are acceptable can declare a looser
