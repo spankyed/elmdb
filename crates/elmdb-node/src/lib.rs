@@ -220,7 +220,7 @@ impl Database {
         self.inner.rebuild(one).map_err(to_js)
     }
 
-    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    /// Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when a build failed
     #[napi(ts_return_type = "IndexStatus[]")]
     pub fn index_status(&self) -> Result<serde_json::Value, Code> {
         let status = self.inner.index_status().map_err(to_js)?;

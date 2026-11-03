@@ -62,7 +62,7 @@ export declare class Database {
   check(): CheckReport
   /** Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's */
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
-  /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
+  /** Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Blocks until every index waiting to be built is built or has failed */
   waitForIndexBuilds(): void
