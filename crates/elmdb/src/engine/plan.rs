@@ -53,6 +53,10 @@ pub enum ReadOp {
         #[cfg_attr(feature = "codegen", ts(optional))]
         target: Option<String>,
     },
+    /// What the database holds, from what it keeps as it writes: each declared type with its live entities and the
+    /// fields its entities have held, each declared relation kind with its relations, and the declared roles. It reads
+    /// one key per name, so a watch over it runs again only when a count moves or a field is first written
+    Catalog,
     /// Whether linking `source` to `target` would close a cycle through these kinds
     WouldCreateCycle { source: String, target: String, kinds: Vec<String> },
     /// Terms of a type's text index for a word being typed: those it starts (`completions`, most held first) and the

@@ -81,6 +81,27 @@ pub fn count(entity_type: &str) -> Vec<u8> {
     })
 }
 
+/// A relation kind's count
+pub fn relation_count(kind: &str) -> Vec<u8> {
+    with(Prefix::RelationCount, |w| {
+        w.string(kind);
+    })
+}
+
+/// That a type's entities have held a field
+pub fn field_name(entity_type: &str, field: &str) -> Vec<u8> {
+    with(Prefix::FieldName, |w| {
+        w.string(entity_type).string(field);
+    })
+}
+
+/// The fields a type's entities have held
+pub fn field_names(entity_type: &str) -> Vec<u8> {
+    with(Prefix::FieldName, |w| {
+        w.string(entity_type);
+    })
+}
+
 /// An index entry: the type, the index, the key's parts, and the entity's place
 pub fn index_entry(entity_type: &str, index: &str, parts: &[crate::format::key::Part], seq: u64) -> Vec<u8> {
     with(Prefix::Index, |w| {

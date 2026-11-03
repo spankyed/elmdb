@@ -4,6 +4,8 @@
 //! - `p/v id field` → the field's value, so an entity's fields are one range and a row is one read
 //! - `d/e type seq` → id for a live entity, `d/t type seq` → id for a trashed one: a type's entities in creation order
 //! - `d/c type` → the type's count of live entities
+//! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
+//!   goes, as a property key is in a graph database, and pruned only by `rebuild`
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
 //!
 //! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
@@ -159,6 +161,9 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     let stored = t.get(&key)?;
     let before = stored.as_deref().map(values::decode_stored).transpose()?;
     let seq = place_for(t, id, field)?;
+    if stored.is_none() {
+        register_field(t, id, field)?;
+    }
     reindex(t, id, field, before.as_ref(), Some(value), seq)?;
     t.put_over(&key, &values::stored(value), stored.as_deref())?;
     super::text::refile(t, id, field, seq, Some(value))?;
@@ -169,6 +174,12 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
         set_trashed(t, id, true)?;
     }
     Ok(())
+}
+
+/// Registers a field the entity didn't hold, so the write that finds it registered writes nothing a catalog reads
+fn register_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
+    let key = keys::field_name(ids::type_of(id), field);
+    if t.get(&key)?.is_none() { t.put(&key, &[]) } else { Ok(()) }
 }
 
 /// Removes a field, keeping its type's value indexes and, for `trashedAt`, the trash, reading as `put_field` does
