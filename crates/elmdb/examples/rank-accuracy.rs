@@ -190,9 +190,14 @@ fn main() {
         // What the answer's nodes truly score against what the true top does: near ties cost this nothing
         let kept: f64 = held.iter().map(|h| at[h.0.as_str()]).sum();
         let best: f64 = truth[..n].iter().map(|t| t.1).sum();
+        // The closest two of the true top and the first past it, as a share of all the scores: an order held to `2 * tolerance`
+        // of them promises nothing closer
+        let total: f64 = truth.iter().map(|t| t.1).sum();
+        let least_gap =
+            truth[..truth.len().min(n + 1)].windows(2).map(|w| (w[0].1 - w[1].1) / total).fold(f64::INFINITY, f64::min);
         let worst_error = held.iter().map(|h| (h.1 - at[h.0.as_str()]).abs() / at[h.0.as_str()]).fold(0.0, f64::max);
         println!(
-            "  top{n}: in_true_top={overlap}/{n} same_place={same_place}/{n} score_lost={:.2e} worst_score_error={worst_error:.2e}",
+            "  top{n}: in_true_top={overlap}/{n} same_place={same_place}/{n} score_lost={:.2e} worst_score_error={worst_error:.2e} least_gap={least_gap:.2e}",
             1.0 - kept / best
         );
     }
