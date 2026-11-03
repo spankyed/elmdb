@@ -242,6 +242,18 @@ Read costs, at every width and at 16 bits alike, hits then ids, top 10 and top 1
 one. Reading through every cell instead, so that a read with `limit` always agreed with one without, took top 10 from 9 µs
 to 6 ms at 20,000 documents, as nearly every node is in one cell at 16 bits too.
 
+Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-11-02 against the drain retried off the lock
+(`826b827`), this change at `40089a1`, run in turn twice each at a load average of 5 to 6, at the default tolerance of the time, 1e-6:
+
+| | before | after |
+|---|---:|---:|
+| One change, spread, 100,000 | 423, 432 ms | 371, 381 ms |
+| One change, spread, 10,000 | 61.8, 61.3 ms | 45.9, 45.8 ms |
+| Burst, spread, 100,000 | 533, 532 ms | 420, 426 ms |
+| Burst, spread, 10,000 | 65.3, 65.6 ms | 58.3, 58.1 ms |
+| One change, near, 100,000 | 21.6, 23.1 ms | 22.2, 23.2 ms |
+| `ranked`, 100,000 | 8.22, 8.22 µs | 8.43, 8.40 µs |
+
 ### Cutting how long a drain holds the lock
 
 Writing a drain's rows in key order, each prefix in one pass, doesn't pay: its write phase at 100,000 documents read 98.3

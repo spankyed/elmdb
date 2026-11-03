@@ -28,9 +28,10 @@ scores rather than computing them. Where the build differs from the design below
   for it.
 - **The score order** (`d/rk`) is keyed on the estimate kept to the bits a cell of 256 times the tolerance takes, as a
   share of the score, so most of a drain's small moves leave it alone at any tolerance. `ranked` over a whole set sorts by
-  the estimates themselves. Read with `limit`, the order is promised beyond twice the larger of the tolerance and the
-  bound: nodes in one cell come by place, reading on past the limit only through a cell wider than that, which only a
-  score over about 1/128 of the estimates' sum can be in.
+  the estimates themselves. Read with `limit`, the order is promised between the index's scores beyond twice the tolerance, so
+  between PageRank's beyond that and the bound: which of one cell's nodes are taken goes by place, as does their order when only ids are
+  answered, and scores shown are sorted. It reads on past the limit only through a cell wider than twice the tolerance, which only a score over about 1/128 of the estimates' sum can be in. A cell is at
+  most 1/16 of its score, so past a tolerance of about 2.4e-4 it is narrower than 256 times it.
 - **A drain runs to its budget, and no further.** Stopping below it to leave room for the next change wouldn't save a
   drain at the default tolerance: at 100,000 documents one change leaves some 40 times the budget. Commits close together
   already share a drain (`QUIET`, `PATIENCE`), and at a tolerance loose enough for a change to fit, it drains nothing.
@@ -95,11 +96,13 @@ PageRank is unique and depends on the graph alone, so the index promises what bo
 - **Every stored score is within the reported error bound of true PageRank** (Error is reported, not hidden, below).
   The bound is below `tolerance` once no drain is pending. The bound is on the L1 error of the whole score vector, so
   it bounds each score's error too.
-- **Order:** two entities whose scores differ by more than twice the bound are in the same order in every database
-  holding the same data. Closer than that, their order is not promised, as an approximate nearest-neighbour search
+- **Order:** a read of the whole set puts two entities whose scores differ by more than twice the bound in the same order
+  in every database holding the same data; read with `limit`, that margin is twice the tolerance and twice the bound, and against
+  PageRank twice the tolerance and the bound. Closer than that, their order is not promised, as an approximate nearest-neighbour search
   doesn't promise the order of near neighbours (an HNSW graph, which the vector index keeps, also depends on the order
   vectors were added).
-- **Within one database, answers are deterministic:** ties go to set order, and the same history of commits gives the
+- **Within one database, answers are deterministic:** ties go to set order, and which of one cell's nodes a `limit` read takes goes by
+  place, and the same history of commits gives the
   same bits on every platform (When the work runs, Determinism).
 
 `check()`, `rebuild()` and restores are specified against this contract (Rebuild and check), not against stored bits.
