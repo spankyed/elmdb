@@ -18,13 +18,14 @@ describe('catalog', () => {
 
     const delivered: unknown[] = [];
     const watching = e.watch(() => e.catalog(), (value) => delivered.push(value));
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await e.admin.watchesSettled();
     const opened = delivered.length;
     e.write(a).set('title', 'renamed');
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await e.admin.watchesSettled();
     expect(delivered, 'a new value of a registered field changes nothing').toHaveLength(opened);
     e.create('Task').set('title', 'c').id();
-    await expect.poll(() => delivered.length).toBeGreaterThan(opened);
+    await e.admin.watchesSettled();
+    expect(delivered.length).toBeGreaterThan(opened);
     watching.stop();
   });
 });
