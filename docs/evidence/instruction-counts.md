@@ -75,6 +75,12 @@ So a drain is about 43.0 million over spread links and 24.3 million over near on
 with the read of a few, a regression the timings of 2026-11-02 found only by bisecting, reads 44.9 million over spread links on a
 copy, +4.4%, where at 100,000 documents it cost 80% of the arc read's time; some of that no instruction count sees. Over near links it reads about the same, as that drain doesn't take that path, and its `rank_build` +0.2%; over spread links `rank_build` reads +2.9%, as the fixture's own drain takes that path.
 
+The diagnostics gate holds `rank_drain` and `rank_build` too, since the counts stopped depending on the machine. Over two runs
+of eight runners on 2026-11-03 they differed by at most 504 instructions, against bounds from about 20,000 to 79,000, and spent
+the same on allocating on every machine. On a copy with one allocation per push added under the feature, `rank_drain` over near
+links failed on allocating, 35,910 instructions more, though its count grew 51,770 of the 75,133 its bound allows. Spread links
+didn't move: at 1,000 documents their drain reads every node in one pass, past that push.
+
 ## The machine
 
 `read_bytes` `all_rows` read one of two counts in CI, about 524.95 million or 530.17 million, whatever the commit. Over about 70

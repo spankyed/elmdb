@@ -5,10 +5,11 @@
 # for grows with the rows, past it
 SHARE = 0.0005
 FLOOR = 300
-GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write", "graph"}
+GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write", "graph", "rank_drain",
+         "rank_build"}
 # The tokenizer seeds its hash map per process, which moves a text rebuild's count by a fraction of a percent between
 # runs of one build (`docs/evidence/instruction-counts.md`)
-REPORTED = {"text_rebuild", "rank_drain", "rank_build"}
+REPORTED = {"text_rebuild"}
 
 
 def allowed_growth(count):
