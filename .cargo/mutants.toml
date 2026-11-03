@@ -172,6 +172,9 @@ exclude_re = [
     # A drain written, then drained again in its unit: it stopped at the budget or with nothing waiting, so this one finds
     # nothing to push, and one that stopped at its limit takes up the sweep where the next unit would
     "builder.rs:394:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
+    # The check for staleness before taking the lock: `Drained::apply` makes it again under the lock and the drain is
+    # retried either way, so only the empty unit it saves shows
+    "ranks.rs:761:.*replace Drained::is_stale -> Result<bool> with Ok\\(false\\)",
     # The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
     # (`draining_in_chunks_makes_the_bits_one_drain_makes`)
     "ranks.rs:847:.*replace < with <= in plan",

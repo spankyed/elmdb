@@ -1,13 +1,18 @@
 //! How long a write waits while a rank index drains: `rank-write-stall [DOCUMENTS] [CHANGES]`, built with `--release`.
 //! One edge of the benchmark graph is linked and unlinked, each change drained, while another thread makes a small write
 //! every 2 ms: a field of one document, which leaves the index alone, or with `--edges`, an edge the index reads. Answers
-//! the writes' latencies.
+//! the writes' latencies, and how fresh the scores stayed: what a reader sampling every 5 ms found the index's reported
+//! error to be, and how long it stayed past what a built index reports.
 #[path = "../tests/support/mod.rs"]
 #[allow(dead_code)]
 mod support;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+/// What a built index at the default tolerance reports at most: its bound, plus up to half that for rounding its scores,
+/// rounded up to one significant figure
+const BUILT: f64 = 2e-6;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -27,7 +32,26 @@ fn main() {
     };
     let (link, unlink) = (change("link"), change("unlink"));
     let done = AtomicBool::new(false);
-    let mut waits: Vec<Duration> = std::thread::scope(|scope| {
+    let ranked = fixture.graph_read("ranked");
+    let (mut waits, mut errors, longest): (Vec<Duration>, Vec<f64>, Duration) = std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            let (mut errors, mut longest, mut past_since) = (Vec::new(), Duration::ZERO, None);
+            while !done.load(Ordering::SeqCst) {
+                let bytes = fixture.db.read(&ranked).unwrap();
+                let answer: serde_json::Value = rmp_serde::from_slice(&bytes).unwrap();
+                // No figure is a bound too wide to report
+                let error = answer[0]["rank"]["error"].as_f64().unwrap_or(f64::INFINITY);
+                errors.push(error);
+                if error > BUILT {
+                    let since = *past_since.get_or_insert_with(Instant::now);
+                    longest = longest.max(since.elapsed());
+                } else {
+                    past_since = None;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            (errors, longest)
+        });
         let writer = scope.spawn(|| {
             let mut waits = Vec::new();
             let mut i = 0usize;
@@ -67,7 +91,8 @@ fn main() {
         let waits = writer.join().unwrap();
         fixture.db.wait_for_index_builds().unwrap();
         println!("changes took {:.3} s", started.elapsed().as_secs_f64());
-        waits
+        let (errors, longest) = reader.join().unwrap();
+        (waits, errors, longest)
     });
     waits.sort();
     let at = |q: f64| waits[((waits.len() - 1) as f64 * q) as usize];
@@ -79,6 +104,18 @@ fn main() {
         at(0.99),
         at(1.0),
         waits.iter().sum::<Duration>()
+    );
+    errors.sort_by(f64::total_cmp);
+    let error = |q: f64| errors[((errors.len() - 1) as f64 * q) as usize];
+    let past = errors.iter().filter(|e| **e > BUILT).count() as f64 / errors.len() as f64;
+    println!(
+        "reads={} error_p50={:e} error_p99={:e} error_max={:e} past_share={:.3} past_longest={:?}",
+        errors.len(),
+        error(0.5),
+        error(0.99),
+        error(1.0),
+        past,
+        longest
     );
     std::hint::black_box(&fixture.directory);
 }
