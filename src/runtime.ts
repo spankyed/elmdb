@@ -206,6 +206,8 @@ export interface QueryStage {
   weight?: number;
   /** For a `ranked`: the bound on the scores it read, the distance their share of all the scores may be from PageRank's */
   error?: number;
+  /** For a `ranked` whose index isn't built yet: it computed the scores, costing what a `rank` does */
+  building?: boolean;
   /** For a `rank`: the rounds it ran */
   iterations?: number;
   /** For a `rank`: whether its scores settled within the rounds it ran */
@@ -388,8 +390,8 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * of time and kept current by every commit, so reading it needs no walk. A query that starts from the index's types
    * and keeps the first `n` with `limit(n)` costs `n`, not the graph. `hits()` answers each score, and `explain()` the
    * bound on them. Every entity the query reaches must be one of the index's nodes, else `BATCH_INVALID`; an index no
-   * schema declares is `UNKNOWN_INDEX`, and one still building `INDEX_BUILDING`, which a newly declared index is until
-   * its first build ends
+   * schema declares is `UNKNOWN_INDEX`. A newly declared index answers the same while its first build runs, costing what
+   * a `rank` does until it ends, which `explain()` reports as `building`
    */
   ranked(index: D['rankIndexes']): QueryBuilder<E, D>;
   /**

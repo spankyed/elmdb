@@ -300,7 +300,7 @@ export type EarsErrorCode =
 * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
 * index (no `substrings`)
 */
-| 'UNKNOWN_INDEX' | 'INDEX_BUILDING'
+| 'UNKNOWN_INDEX'
 /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
 | 'NO_SEARCH'
 /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
@@ -641,6 +641,7 @@ export interface QueryExplanation<E extends string = string> {
 
 // @public
 export interface QueryStage {
+    building?: boolean;
     candidates?: number;
     converged?: boolean;
     cycles?: number;

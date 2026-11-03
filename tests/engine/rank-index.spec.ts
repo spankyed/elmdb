@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { engine, NAMES, type Id } from './helpers.ts';
 import type { EngineSchema } from '../../src/index.ts';
 
@@ -58,6 +58,48 @@ describe('ranked', () => {
     expect(() => e.query('Task').ranked('nothing').ids()).toThrow(expect.objectContaining({ code: 'UNKNOWN_INDEX' }));
     e.create('Project', { title: 'p' });
     expect(() => e.query('Project').ranked('taskRank').ids()).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+  });
+});
+
+describe('a rank index building', () => {
+  /** An engine holding a graph with one hub and no rank index yet */
+  function graph() {
+    const e = engine();
+    const tasks: Id[] = Array.from({ length: 2_000 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
+    const [hub] = tasks as [Id, ...Id[]];
+    for (const task of tasks.slice(1)) e.write(task).link('refs', hub);
+    return { e, hub };
+  }
+
+  it('answers as soon as it is declared, with the top and the scores a build will hold', () => {
+    const { e, hub } = graph();
+    e.admin.declare(declared(RANKS));
+    expect(e.query('Task').ranked('taskRank').limit(1).ids()).toEqual([hub]);
+    const [first] = e.query('Task').ranked('taskRank').limit(1).hits();
+    const exact = e.query('Task').rank('refs').limit(1).hits()[0]!;
+    expect(first!.id).toBe(hub);
+    expect(first!.score).toBeCloseTo(exact.score, 3);
+    e.admin.waitForIndexBuilds();
+    expect(e.query('Task').ranked('taskRank').limit(1).ids()).toEqual([hub]);
+    expect(e.query('Task').ranked('taskRank').limit(1).explain().stages.find((at) => at.stage === 'ranked')?.building).toBeUndefined();
+  });
+
+  it('never delivers a watch an error across the build, and leaves it on the index', async () => {
+    const { e, hub } = graph();
+    const answers: unknown[] = [];
+    const errors: unknown[] = [];
+    e.admin.declare(declared(RANKS));
+    const watching = e.watch(() => e.query('Task').ranked('taskRank').limit(1).ids(), {
+      next: (answer) => answers.push(answer),
+      error: (error) => errors.push(error),
+    });
+    // The first read runs after this call returns, so it must get to run before the wait blocks the thread
+    await vi.waitFor(() => expect(answers.length + errors.length).toBeGreaterThan(0));
+    e.admin.waitForIndexBuilds();
+    await e.admin.watchesSettled();
+    watching.stop();
+    expect(errors).toEqual([]);
+    expect(answers.at(-1)).toEqual([hub]);
   });
 });
 

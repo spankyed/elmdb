@@ -48,7 +48,6 @@ export type EarsErrorCode =
    * index (no `substrings`)
    */
   | 'UNKNOWN_INDEX'
-  | 'INDEX_BUILDING'
   /** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
   | 'NO_SEARCH'
   /** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
