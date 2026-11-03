@@ -10,7 +10,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../../..');
 
 test('the README\'s example runs and prints what it shows', (t) => {
-  const readme = readFileSync(join(root, 'README.md'), 'utf8');
+  // A Windows checkout holds the README with CRLF line endings
+  const readme = readFileSync(join(root, 'README.md'), 'utf8').replaceAll('\r\n', '\n');
   const example = /```js\n([\s\S]*?)```/.exec(readme)?.[1];
   const shown = /```text\n([\s\S]*?)```/.exec(readme)?.[1];
   assert.ok(example && shown, 'the README holds a ```js example and the ```text it prints');
