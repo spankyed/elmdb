@@ -5,7 +5,7 @@ The schema, the operations and the protocol. Built: `crates/elmdb/src/engine/`.
 ## Opening
 
 ```ts
-const db = Database.open(path, { schema, readOnly?, mapSizeBytes?, syncIdleMs?, syncIntervalMs?, syncs? })
+const db = Database.open(path, { schema?, readOnly?, mapSizeBytes?, syncIdleMs?, syncIntervalMs?, syncs? })
 ```
 
 `syncs: false` skips group commit's syncs, for tests on a temporary directory, where a crash of the machine can't
@@ -88,7 +88,7 @@ envelope, an answer per read. A read is a query plan, or a direct read: an entit
 whether it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind
 and ends, `wouldCreateCycle` (the walk a link's
 `CYCLE` check makes, a trashed entity's edges included), and search's
-`suggest` and `findLabels`. A search naming an index its type lacks, or none on a type with none or several, is refused
+`suggest`, `findLabels` and `pendingEmbeddings`. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`).
 
 A plan is a scope, a start, steps and a terminal:
@@ -142,7 +142,8 @@ A plan is a scope, a start, steps and a terminal:
   start).
 - **Search:** `search` (a text index's matches, most relevant first; `search.md`, Text search as built); `containing`
   and `matching` (a trigram index's substring and pattern matches, in the set's order; `search.md`, Substrings and
-  patterns as built), a pattern the syntax doesn't hold refused (`PATTERN_INVALID`).
+  patterns as built), a pattern the syntax doesn't hold refused (`PATTERN_INVALID`); `near`, `like` and `hybrid` (a vector
+  index's nearest entities, and text and vector rankings fused; `search.md`, Vector search as built).
 - **Terminals:** `ids`, `count`, `first`, `last`, `exists`, `rows` (whole rows, or the fields asked for), `firstRow`,
   `edges` (the relation rows of the set's edges, `out`, `in` or `both` ways, each relation once; with `types`, an edge is answered when its far end seen from a set entity is of one of them, so with `both` an edge between two of the set is answered if either end, seen from the other, is), `degrees` (each
   entity with how many edges of the kinds it has, out, in or both ways, counting those `edges` from it alone would
@@ -228,7 +229,8 @@ The operations:
   and `updatedAt`), upsert, set, set many, append to a list, merge into an object, delete a field, remove from a list,
   trash, restore, grant and revoke a role, grant exclusively among entities, link (with info and, for a kind declared
   weighted, a weight; merging on the edge's identity, and refusing a cycle in a kind), unlink, unlink all, update a relation (its ends, its
-  info, its weight) and remove one, destroy.
+  info, its weight) and remove one, destroy, take a label (the next `<base> <n>` of a type), and embed (a caller's vector
+  for a chunk, answered `stale` if its text changed).
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
   it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
   is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
@@ -244,7 +246,8 @@ The operations:
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
   moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later.
-- **The result** carries what the batch created (ids, codes), the rows asked for back, and the commit's change set.
+- **The result** carries each operation's answer (an entity's id, code and whether it was created; a relation's id and
+  whether it was linked; a label; `stale`), and the commit's change set.
 
 A batch is data, so the engine can retry it (after growing the map, `design.md`) without involving the caller.
 
@@ -343,7 +346,8 @@ unit is open.
   this database's schema, in one durable unit, the database staying open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
 - `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
-  index, the database's entries, file and map sizes; `indexStatus()` says which indexes are built.
+  index, the database's entries, file and map sizes; `indexStatus()` says which value and rank indexes are built, the
+  built-in `shortCode` and `role` among them; it does not report text, trigram or vector indexes.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
@@ -353,7 +357,7 @@ unit is open.
   damaged or unbuilt; rebuilding cannot hide these violations. Unique values include values an index cannot store,
   and use the write contract's numeric, map, single-field list and compound equality rules. heed exposes no walk of
   LMDB's pages, so damage to the B+tree itself is what LMDB reports as `CORRUPTED` when a read reaches it.
-- `rebuild(index?)`: deletes derived data, every index's or one index's, and writes what primary data derives, in one
+- `rebuild(type?, index?)`: deletes derived data, every index's or one type's index's, and writes what primary data derives, in one
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
   everything leaves such an index unbuilt, as a build does.

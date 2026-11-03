@@ -1,8 +1,8 @@
 # Tooling for tests that can fail, faults by name, and measured bounds
 
-Status: partial implementation. Stage 3 has dedicated dhat assertions for selected value/text rebuilding and export
-(2026-10-27); stages 1, 2 and 9 were built on 2026-10-28 (`../archive/goals/goal-verification-tooling.md`, Outcome),
-and stages 4 to 8 since, each with what it leaves below. The commands are in
+Status: all nine stages are built, each with what it leaves below. Stage 3's dhat assertions date from 2026-10-27 and were
+extended to full derivation and vector rebuilds; stages 1, 2 and 9 were built on 2026-10-28
+(`../archive/goals/goal-verification-tooling.md`, Outcome), and stages 4 to 8 since. The commands are in
 `../architecture/testing.md`: Repeatable maintenance measurements (instruction counts among them), Failpoints and
 Mutation testing.
 
@@ -54,8 +54,8 @@ first pass against the suite without the model harness, then `--iterate` against
 over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and `schema/diff.rs` triaged
 (`../evidence/verification-tooling.md`): of 169 survivors, 144 killed (5 by the whole suite, the rest by new specs),
 24 excluded as answering what the code answers, and one finding left, EXPLAIN's stage times, which no count shows; the
-triage also found a step limit whose plan needs more than a debug test thread's 2 MB stack. The three mutation scripts
-make changes cargo-mutants doesn't (an expression swapped for another, a Windows attribute, heap and timing regressions)
+triage also found a step limit whose plan needs more than a debug test thread's 2 MB stack. The mutation scripts that remain
+make changes cargo-mutants doesn't (an expression swapped for another, heap and timing regressions)
 and stay, each saying why in its header. The baseline over `store/`, `engine/watch.rs`, `engine/derive.rs` with
 `derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
 killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
@@ -99,9 +99,8 @@ Acceptance:
   within the spill threshold plus the stated overheads, on fixtures large enough that an unbounded collection
   exceeds it. A mutation that collects one index's entries into a `Vec` fails it.
 - Single-index rebuild and dump export now stream/spill intermediate collections (c78c623). Dedicated heap
-  assertions exercise export and selected value/text rebuilds at two input sizes. Extend coverage to selected
-  vector rebuilds and isolated full derivation; remaining full-check/rebuild inventories and reports require
-  separate observations rather than an invented constant-heap guarantee.
+  assertions exercise export and selected value/text rebuilds at two input sizes. Selected vector
+  rebuilds and full derivation are held to growth (below), rather than an invented constant-heap guarantee.
 - dhat measures the Rust heap only. LMDB's mapped pages and the process RSS remain `scripts/measure-recovery.mjs`'s.
 
 Full derivation and a selected vector rebuild keep something per entity by design, so the heap test holds them to
@@ -209,7 +208,7 @@ Acceptance:
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
 
-Built (2026-10-30): Shuttle runs the unit slot's model and watch delivery's (`engine/watch/model.rs`) on the
+Built (2026-10-30): Shuttle runs the unit slot's model, watch delivery's (`engine/watch/model.rs`) and the index builder's (`engine/builder/model.rs`) on the
 primitives Loom uses (`../architecture/testing.md`, Concurrency models). The write slipping between the unit check and
 the writer fails the slot's model. The listener dropped outside the callback guard isn't in the model: the guard is
 what `Database::close` consults, and the database is outside it; the mutations the model does catch are in

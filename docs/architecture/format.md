@@ -11,15 +11,15 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | Prefix | Holds | Kind |
 |---|---|---|
 | `p/v` id field | an attribute's value | primary |
-| `p/i` id | an entity's type and sequence | primary |
+| `p/i` id | that the entity exists: its sequence and whether it is trashed (its type is in its id) | primary |
 | `p/r` relation | a relation's row: its kind, ends, info, sequence, and its weight when it isn't 1 | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
-| `m/` | the format, the schema, the last synced transaction, the last commit's sequence | meta |
+| `m/` | the format, the kind, the schema and its hash, the last commit's sequence | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
-| `d/xb` type index | that a value index is built; a plan reads only a built one | derived |
-| `d/x` type field value seq | a value index | derived |
+| `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |
+| `d/x` type index values seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
@@ -38,7 +38,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
-`elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` does the same in a scratch transaction and
+`elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` derives the same from a read snapshot into scratch files and
 compares. A rank index's stored bits depend on the order of the commits and pushes that made it, so `check()` holds
 it to what it promises instead: its scores within the bound it reports of PageRank over the same graph, each residual
 and out-weight what the estimates and the edges make them, and its score order, queue and totals what its nodes make
@@ -125,5 +125,5 @@ elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.
 Its base trails upstream: on 2026-10-24 heed 0.23.0's LMDB sat on upstream's 2026-04-27 commit, without ten later
 fixes, among them ITS#10642 (`mdb_subdb_adjust` alignment) and ITS#10643 (page counts when deleting DUPSORT records).
 Neither reaches elmdb: `mdb_subdb_adjust` isn't in heed's LMDB at all, and both concern DUPSORT sub-databases, which
-elmdb doesn't use (`docs/evidence/phase-1.md`). A CI job lists the upstream commits heed's LMDB lacks, and a fix elmdb needs goes to
+elmdb doesn't use (`docs/evidence/phase-1.md`). No CI job tracks the upstream commits heed's LMDB lacks: they are checked by hand, and a fix elmdb needs goes to
 Meilisearch's fork as a rebase request or a pull request.
