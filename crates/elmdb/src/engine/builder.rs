@@ -317,11 +317,15 @@ fn build_rank(
     name: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
-    let joined = store.read(|txn, db| {
+    let (joined, owes) = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let s = super::unit::Snapshot { txn, db, schema };
-        Ok(super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining)
+        Ok((super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining, super::ranks::owes_work(&s, name)?))
     })?;
+    // A commit that left the index alone queues it while a drain is computed; that drain has done what it owed
+    if !owes {
+        return Ok(());
+    }
     if !joined {
         let mut after = None;
         chunks(store, stopping, || {
@@ -335,9 +339,38 @@ fn build_rank(
             Ok(done)
         })?;
     }
+    let mirror = store.mirror();
     chunks(store, stopping, || {
+        // Computed outside the write lock, so commits go on meanwhile; only what it writes holds them up
+        let planned = store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            let s = super::unit::Snapshot { txn, db, schema };
+            super::ranks::plan(&s, schema, name, DRAIN_PUSHES, Some(&mirror))
+        })?;
+        #[cfg(test)]
+        store.rank_planned();
         commits(&mut |t| {
-            if super::ranks::drain(t, name, DRAIN_PUSHES)? {
+            // A commit wrote the index meanwhile: drained again, here, from what it left
+            let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
+            #[cfg(test)]
+            if let (Some(drained), Some(applied)) = (&planned, applied) {
+                let mut plans = store.rank_plans.lock();
+                if applied == super::ranks::Applied::Stale {
+                    plans.redone += 1;
+                } else {
+                    plans.applied += 1;
+                }
+                if drained.read_every_node() {
+                    plans.every_node += 1;
+                } else {
+                    plans.one_at_a_time += 1;
+                }
+            }
+            let waiting = match applied {
+                Some(super::ranks::Applied::Written { waiting }) => waiting,
+                _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
+            };
+            if waiting {
                 return Ok(false);
             }
             super::ranks::settle(t, name)?;

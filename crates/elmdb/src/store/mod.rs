@@ -124,6 +124,16 @@ impl Commit {
     }
 }
 
+/// What became of the drains computed outside the write lock, for a test
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct RankPlans {
+    pub(crate) applied: u64,
+    pub(crate) redone: u64,
+    pub(crate) one_at_a_time: u64,
+    pub(crate) every_node: u64,
+}
+
 pub struct Store {
     path: PathBuf,
     read_only: bool,
@@ -139,6 +149,12 @@ pub struct Store {
     sequence: AtomicU64,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
+    /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
+    #[cfg(test)]
+    rank_planned: PlainMutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// What became of the drains computed outside the write lock
+    #[cfg(test)]
+    pub(crate) rank_plans: PlainMutex<RankPlans>,
     /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
     /// write outside the engine's units, whose commit then empties the mirror
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
@@ -295,6 +311,10 @@ impl Store {
             idle,
             sequence: AtomicU64::new(sequence),
             mirror: Arc::default(),
+            #[cfg(test)]
+            rank_planned: PlainMutex::default(),
+            #[cfg(test)]
+            rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
         })
     }
@@ -549,6 +569,19 @@ impl Store {
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror
     pub(crate) fn deposit(&self, entries: Vec<EdgeDelta>) {
         *self.deposited.lock() = Some(entries);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn when_rank_planned(&self, run: impl FnOnce() + Send + 'static) {
+        *self.rank_planned.lock() = Some(Box::new(run));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rank_planned(&self) {
+        let run = self.rank_planned.lock().take();
+        if let Some(run) = run {
+            run();
+        }
     }
 
     /// What rank drains read the graph through

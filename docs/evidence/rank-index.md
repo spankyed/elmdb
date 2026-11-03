@@ -164,9 +164,47 @@ over spread links took 100 ms where it takes 55 apart, at 100,000 documents, and
 kept up on every arc a push crosses made the pushes three times as dear. That set is a map by place in the sweep over a
 few nodes, since a place is a number from the store's one sequence and a bitset by place is sized by that.
 
-How long a drain holds the write lock follows what it reaches: over near links, the some 575 nodes it reads and writes.
-Over spread links a drain still holds it for the whole drain, and splitting it into shorter units would write every node again in each,
-since every unit's pushes reach nearly all of them; what would shorten it is deriving off the write lock.
+Pushing only the nodes over a level that halves down to the threshold, so residual piles up before it is pushed, does not
+pay here. On a disposable copy on 2026-11-02, at a load average of 18 to 36, so the times are rough and the push counts
+exact: pushes fell by 30 to 50% (100,000 documents: 940,000 to 1.3 million down to about 660,000; 10,000: a mean of 127,000
+down to 64,000), and one change over spread links went from 497 to 576 ms at 100,000 and from 63 to 67 ms at 10,000, a
+burst from 645 to 760 ms. Pushes are about 10 ms of a drain of some 215 ms, by phase timers on a copy at 100,000 documents,
+and the writes about 100 ms, so fewer pushes save little and the repeat passes over every node cost more than that.
+
+### A drain computed outside the write lock
+
+A drain is computed on a read snapshot and written under the write lock, computed again there if a commit changed the
+index meanwhile. What a small write waits for while one change after another drains, from `examples/rank-write-stall.rs`
+at 100,000 documents and five spread links each, twenty changes linked and unlinked, a write every 2 ms; 2026-11-02, this
+Mac, a load average of 5 to 7, the two sides in turn, two runs each:
+
+| The write | Writes made, before | after | p50, before | after | p99, before | after | Slowest, before | after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A field | 1,473, 1,484 | 4,825, 3,312 | 418, 382 µs | 92, 103 µs | 214, 207 ms | 1.2, 105 ms | 445, 252 ms | 160, 225 ms |
+| An edge the index reads | 131, 147 | 3,282, 3,130 | 237, 227 ms | 170, 202 µs | 469, 489 ms | 235, 238 ms | 523, 492 ms | 528, 328 ms |
+
+The slowest write stays near what the drain's writes hold the lock for, and a recount when one is due. An edge write every
+2 ms changes the index under most drains, so they are computed twice; the write still waits only for the second.
+
+That table is commits asking a shared flag whether a drain was being computed, and leaving its pushes to it. A commit now
+pushes an index only if it changed it and the index owed none before it, which depends on the history alone. Against the
+flag on 2026-11-02, the two sides in turn, two runs each, a load average of 5 to 10:
+
+| The write | Writes made, flag | now | p50, flag | now | p90, flag | now | p99, flag | now | Slowest, flag | now |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| A field | 3,386, 3,323 | 2,771, 3,203 | 90, 81 µs | 67, 61 µs | 468, 442 µs | 113, 103 µs | 103, 102 ms | 103, 103 ms | 211, 153 ms | 157, 153 ms |
+| An edge the index reads | 2,950, 3,193 | 3,524, 3,802 | 168, 164 µs | 139, 143 µs | 558, 551 µs | 443, 426 µs | 239, 227 ms | 197, 195 ms | 302, 532 ms | 298, 323 ms |
+
+With a commit pushing whenever it changed the index, drain owed or not, an edge write's p50 was 482 to 529 µs and its p90
+617 to 714 µs: 16 pushes through the store, which the coming drain covers. One change over spread links at 100,000 is
+unmoved, 421 and 415 ms against 418 and 415, and at 10,000, 60.1 and 59.6 ms against 60.6 and 62.9. A burst is 579 and 580 ms
+against 533 and 520 at 100,000, and 70.8 and 72.8 against 64.7 and 65.2 at 10,000. Near links at 100,000 are 28.1 and 24.2 ms
+against 24.7 and 24.2, higher than earlier the same day on both sides.
+
+The mirror keeps what a drain reads until an edge changes after the drain's snapshot. From a counter in a disposable copy,
+with a field write every 2 ms through twenty changes at 100,000: the first drain reads 100,000 lists from the store and
+every drain after it reads none. Only the write lock resets the mirror, so a drain starting between a commit and its deltas
+can't empty it.
 
 ### What it took to get there
 

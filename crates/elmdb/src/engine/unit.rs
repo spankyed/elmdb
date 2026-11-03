@@ -41,6 +41,9 @@ pub struct UnitState {
     pub(super) events: Vec<Event>,
     /// The edge entries the unit filed and unfiled, in order, which its commit hands the store for the edge mirror
     pub(crate) edges: Vec<super::mirror::EdgeDelta>,
+    /// Whether each rank index the unit changed owed pushes as the unit began: a savepoint rolled back keeps this, since
+    /// what it restores is the same state
+    pub(super) rank_owed_before: rustc_hash::FxHashMap<String, bool>,
     /// The edge mirror a drain reads its graph through, when the unit is one of the builder's
     pub(crate) mirror: Option<Arc<PlainMutex<super::mirror::EdgeMirror>>>,
     /// Every key the unit wrote, while tracked reads are filed for a commit to be matched against; `None` when none

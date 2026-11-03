@@ -43,7 +43,7 @@ changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}..
 
 def windows_only(path):
     file = root / path
-    return path.endswith(".rs") and file.exists() and any(mark in file.read_text() for mark in WINDOWS_ONLY)
+    return path.endswith(".rs") and file.exists() and any(mark in file.read_text(encoding="utf-8") for mark in WINDOWS_ONLY)
 
 
 scope = [path for path in changed if windows_only(path)] if args.windows_only else None
@@ -89,7 +89,7 @@ if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
     for line in missed:
         file, number, _ = line.split(":", 2)
         print(f"::warning file={file},line={number},title=Missed mutant::{line}")
-    with open(summary, "a") as written:
+    with open(summary, "a", encoding="utf-8") as written:
         written.write(f"## Mutants in {what}\n\n{len(missed)} missed, {len(timeouts)} timeouts\n\n")
         for heading, lines in (("Missed", missed), ("Timeouts", timeouts)):
             if lines:

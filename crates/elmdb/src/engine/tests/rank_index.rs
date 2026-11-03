@@ -1132,7 +1132,7 @@ fn a_node_a_push_takes_under_the_threshold_no_longer_waits_in_a_drain_reading_on
                 // The sweep from the first place, and the sum past any budget, so pushes end only when no node waits
                 let key = keys::rank_totals("taskRank");
                 let mut bytes = t.get(&key)?.unwrap();
-                bytes.truncate(33);
+                bytes.truncate(41);
                 let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1e6;
                 bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
                 t.put(&key, &bytes)?;
@@ -1337,6 +1337,484 @@ fn a_drains_changes_count_toward_the_totals_being_counted_afresh() {
     // Each push changes its node and its one far end, but for the chain's end, which has none
     let moved = drained(5, "Task-100", 3);
     assert!((5 + 5..=5 + 6).contains(&moved), "three pushes took the count from 5 to {moved}");
+}
+
+/// The karate club, built, with `window` written between a drain's computing and its writing: the drain a further link
+/// leaves. What it answers: the index's estimates and its count of changes
+fn with_a_commit_during_a_drain(
+    window: Vec<Json>,
+) -> (std::sync::Arc<Database>, tempfile::TempDir, (Vec<Option<u64>>, u64)) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    let edges = crate::engine::algorithms::tests::KARATE_EDGES;
+    let weights = crate::engine::algorithms::tests::KARATE_WEIGHTS;
+    ops.extend(edges.iter().zip(weights).map(|(&(a, b), w)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": w })));
+    ops.push(json!({ "op": "create", "type": "Tag", "id": "Tag-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(window.is_empty()));
+    if !window.is_empty() {
+        let (inner, fired) = (std::sync::Arc::clone(&db), std::sync::Arc::clone(&fired));
+        db.store().unwrap().when_rank_planned(move || {
+            write(&inner, window).unwrap();
+            fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+    }
+    write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(fired.load(std::sync::atomic::Ordering::SeqCst), "no drain ran for the link");
+    let state = db
+        .snapshot(|s| {
+            let estimates = (0..34)
+                .map(|i| Ok(ranks::node(s, "taskRank", &format!("Task-{i}"))?.map(|n| n.x.to_bits())))
+                .collect::<crate::Result<Vec<_>>>()?;
+            Ok((estimates, ranks::totals(s, "taskRank")?.moved))
+        })
+        .unwrap();
+    (db, dir, state)
+}
+
+#[test]
+fn a_commit_that_leaves_the_index_alone_doesnt_disturb_a_drain_being_computed() {
+    let (_db, _dir, alone) = with_a_commit_during_a_drain(Vec::new());
+    let (db, _dir2, beside) = with_a_commit_during_a_drain(vec![
+        json!({ "op": "create", "type": "Tag", "id": "Tag-1" }),
+        json!({ "op": "link", "source": "Tag-0", "kind": "other", "target": "Tag-1" }),
+    ]);
+    assert_eq!(alone, beside, "the commit took pushes, or the drain was computed again");
+    let plans = *db.store().unwrap().rank_plans.lock();
+    assert!(
+        plans.applied > 0 && plans.redone == 0,
+        "the drain computed outside the lock wasn't what was written: {plans:?}"
+    );
+    assert_within_bound(&db, "both", true);
+}
+
+#[test]
+fn a_rebuild_while_a_drain_is_being_computed_has_the_drain_done_again_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let inner = std::sync::Arc::clone(&db);
+    db.store().unwrap().when_rank_planned(move || inner.rebuild(None).unwrap());
+    write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_within_bound(&db, "both", true);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+}
+
+#[test]
+fn a_commit_that_leaves_the_index_alone_writes_nothing_to_it_and_still_hands_it_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    write(&db, vec![json!({ "op": "create", "type": "Tag", "id": "Tag-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // Past the budget: the sum as a commit it didn't come from finds it
+    db.admin_unit_with_checkpoint(
+        |t| {
+            let key = keys::rank_totals("taskRank");
+            let mut bytes = t.get(&key)?.unwrap();
+            let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1.0;
+            bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+            bytes[32..40].copy_from_slice(&0u64.to_le_bytes());
+            t.put(&key, &bytes)?;
+            let before = t.get(&key)?;
+            let (_, nodes) = queued_and_bits(t)?;
+            assert_eq!(ranks::push_at_commit(t)?, ["taskRank"], "pushes owed go to the builder");
+            assert_eq!(t.get(&key)?, before, "and nothing is written");
+            assert_eq!(queued_and_bits(t)?.1, nodes);
+            // Within it, and no count due: nothing to hand on
+            let mut within = before.clone().unwrap();
+            let residuals = f64::from_le_bytes(within[16..24].try_into().unwrap()) - 1.0;
+            within[16..24].copy_from_slice(&residuals.to_le_bytes());
+            within[24..32].copy_from_slice(&0u64.to_le_bytes());
+            t.put(&key, &within)?;
+            assert!(ranks::push_at_commit(t)?.is_empty());
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_commit_that_changes_an_index_already_owing_pushes_leaves_them_to_the_drain() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    // Owing pushes as the commit finds it, with no builder told
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                let key = keys::rank_totals("taskRank");
+                let mut bytes = d.main.get(txn, &key)?.unwrap().to_vec();
+                let residuals = f64::from_le_bytes(bytes[16..24].try_into().unwrap()) + 1.0;
+                bytes[16..24].copy_from_slice(&residuals.to_le_bytes());
+                d.main.put(txn, &key, &bytes)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let swept = ranks::totals(&*t, "taskRank")?.swept;
+            let (_, nodes) = queued_and_bits(t)?;
+            assert_eq!(ranks::push_at_commit(t)?, ["taskRank"], "owed, so handed to the builder");
+            assert_eq!(ranks::totals(&*t, "taskRank")?.swept, swept, "it made pushes");
+            assert_eq!(queued_and_bits(t)?.1, nodes);
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_commit_that_changes_the_index_makes_its_pushes_and_a_run_owing_nothing_commits_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let queued = |t: &crate::engine::unit::Txn<'_, '_>| queued_and_bits(t).map(|(queued, _)| queued);
+            let swept = ranks::totals(&*t, "taskRank")?.swept;
+            let before = queued(t)?;
+            ranks::push_at_commit(t)?;
+            assert!(ranks::totals(&*t, "taskRank")?.swept != swept || queued(t)? != before, "it made no pushes");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let store = db.store().unwrap();
+    let sequence = store.sequence();
+    db.snapshot(|s| {
+        assert!(!ranks::owes_work(s, "taskRank")?, "drained, and counted if due");
+        Ok(())
+    })
+    .unwrap();
+    // A run queued now finds nothing owed: a commit would raise the sequence
+    db.builders().unwrap().unwrap().queue(vec![crate::engine::Work::Rank { name: "taskRank".to_owned() }]);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(store.sequence(), sequence, "a run owing nothing committed");
+}
+
+#[test]
+fn a_drain_is_stale_after_any_write_of_the_index_another_drains_and_a_count_included() {
+    // What another process's builder does in the window: its own drain, then a count of the totals. Here in one
+    // transaction, on the plan one snapshot read
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.admin_unit_with_checkpoint(
+        |t| {
+            ranks::liveness(t, "Task-200", false)?;
+            let planned = ranks::plan(&*t, t.schema, "taskRank", usize::MAX, None)?.unwrap();
+            assert!(matches!(planned.apply(t)?, ranks::Applied::Written { .. }), "nothing wrote it since it read");
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    let plan_then = |between: &dyn Fn(&mut crate::engine::unit::Txn<'_, '_>) -> crate::Result<()>| {
+        let applied = std::cell::Cell::new(None);
+        // A sequence of its own for each write: what makes it a later commit
+        let planned = std::cell::RefCell::new(None);
+        db.admin_unit_with_checkpoint(
+            |t| {
+                ranks::liveness(t, "Task-100", false)?;
+                ranks::liveness(t, "Task-100", true)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        // The builder's own drain of that done, so only `between` writes the index after the plan reads it
+        db.wait_for_index_builds().unwrap();
+        db.admin_unit_with_checkpoint(
+            |t| {
+                *planned.borrow_mut() = ranks::plan(&*t, t.schema, "taskRank", 5, None)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        db.admin_unit_with_checkpoint(|t| between(t), false).unwrap();
+        db.admin_unit_with_checkpoint(
+            |t| {
+                applied.set(Some(planned.borrow().as_ref().unwrap().apply(t)?));
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+        applied.get().unwrap()
+    };
+    assert_eq!(plan_then(&|t| ranks::drain(t, "taskRank", 5).map(|_| ())), ranks::Applied::Stale, "another drain");
+    let count = |t: &mut crate::engine::unit::Txn<'_, '_>| {
+        let key = keys::rank_totals("taskRank");
+        let mut bytes = t.get(&key)?.unwrap();
+        bytes[24..32].copy_from_slice(&u64::MAX.to_le_bytes());
+        t.put(&key, &bytes)?;
+        ranks::settle(t, "taskRank")
+    };
+    assert_eq!(plan_then(&count), ranks::Applied::Stale, "a count of the totals");
+    assert!(matches!(plan_then(&|_| Ok(())), ranks::Applied::Written { .. }), "nothing wrote it");
+}
+
+#[test]
+fn a_rebuild_leaves_the_commit_that_wrote_the_index_later_than_any_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let written_at = || db.snapshot(|s| Ok(ranks::totals(s, "taskRank")?.written_at)).unwrap();
+    let before = written_at();
+    db.rebuild(None).unwrap();
+    assert!(written_at() > before, "a drain that read {before} would take the rebuilt index for the one it read");
+}
+
+#[test]
+fn a_mirror_keeps_what_a_reader_reads_until_an_edge_changes_after_the_readers_snapshot() {
+    use crate::engine::mirror::{EdgeDelta, EdgeMirror, stored_sequence};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-0" }),
+            json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+            json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-1" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Task-0" }),
+        ],
+    )
+    .unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.snapshot(|s| {
+        let at = stored_sequence(s)?;
+        let far_ends = |mirror: &mut EdgeMirror, reader: u64, id: &str| {
+            let mut far = Vec::new();
+            mirror.visit_far_ends(s, reader, id, true, "refs", |name, _| far.push(name.to_owned())).map(|()| far)
+        };
+        let mut mirror = EdgeMirror::default();
+        mirror.at(at);
+        assert_eq!(far_ends(&mut mirror, at, "Task-0")?, ["Task-1"]);
+        assert_eq!(mirror.held(), 1, "at the mirror's commit, a list read is kept");
+        // A commit with no edge in it: the lists are the store's still, whatever a reader behind it reads
+        mirror.commit(at, at + 1, Some(&[]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!(mirror.held(), 2, "no edge changed since the reader's snapshot, so what it read is kept");
+        // One filing an entry in a list held: answered as the commit left it, and nothing more kept
+        let filed = EdgeDelta::Filed {
+            kind: "refs".into(),
+            source: "Task-0".into(),
+            target: "Task-2".into(),
+            seq: u64::MAX,
+            weight: None,
+        };
+        mirror.commit(at + 1, at + 2, Some(&[filed]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-0")?, ["Task-1", "Task-2"], "a list held answers");
+        assert_eq!(far_ends(&mut mirror, at, "Task-2")?, ["Task-0"], "a list not held is read from the reader");
+        assert_eq!(mirror.held(), 2, "and not kept: an edge changed after the reader's snapshot");
+        // One filing an entry in a list not held tells the same
+        let mut mirror = EdgeMirror::default();
+        mirror.at(at);
+        let other = EdgeDelta::Filed {
+            kind: "refs".into(),
+            source: "Task-1".into(),
+            target: "Task-0".into(),
+            seq: u64::MAX,
+            weight: None,
+        };
+        mirror.commit(at, at + 1, Some(&[other]));
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!(mirror.held(), 0, "what it read misses the entry filed since, so isn't kept");
+        // A reader ahead reads the store, keeps nothing, and leaves the mirror where it was
+        let mut mirror = EdgeMirror::default();
+        mirror.at(at - 1);
+        assert_eq!(far_ends(&mut mirror, at, "Task-1")?, ["Task-2"]);
+        assert_eq!((mirror.held(), mirror.sequence()), (0, Some(at - 1)));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_drain_outside_the_write_lock_starts_a_mirror_and_never_resets_one() {
+    use crate::engine::mirror::{EdgeMirror, stored_sequence};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("both", true));
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.snapshot(|s| {
+        let at = stored_sequence(s)?;
+        let mirror: std::sync::Arc<crate::sync::PlainMutex<EdgeMirror>> = std::sync::Arc::default();
+        ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
+        assert_eq!(mirror.lock().sequence(), Some(at), "an empty mirror starts at the reader");
+        for held in [at + 5, at - 1] {
+            mirror.lock().at(held);
+            ranks::plan(s, s.schema, "taskRank", usize::MAX, Some(&mirror))?;
+            assert_eq!(mirror.lock().sequence(), Some(held), "past it or behind it, a mirror is left as it is");
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
+fn a_drain_under_the_write_lock_resets_a_mirror_another_process_left_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 40, 5, 0);
+    let store = db.store().unwrap();
+    let mirror = store.mirror();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let held = mirror.lock().sequence().unwrap();
+    mirror.lock().at(held - 3);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(mirror.lock().sequence(), Some(store.sequence()), "the next commits brought it back to the store's");
+}
+
+#[test]
+fn a_commit_that_writes_the_index_has_a_drain_being_computed_done_again_from_it() {
+    let link = |a: u32, b: u32| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") });
+    let windows = [
+        // Out of a hub, whose estimate the drain moved most
+        vec![link(33, 9)],
+        vec![json!({ "op": "unlink", "source": "Task-0", "kind": "rates", "target": "Task-1" })],
+        vec![json!({ "op": "trash", "id": "Task-33" })],
+        vec![json!({ "op": "destroy", "id": "Task-0" })],
+        vec![json!({ "op": "create", "type": "Task", "id": "Task-40" }), link(33, 40)],
+        // A node the first drain's link reached, gone and an arc left to fill in
+        vec![json!({ "op": "trash", "id": "Task-20" }), json!({ "op": "restore", "id": "Task-20" }), link(20, 9)],
+    ];
+    for window in windows {
+        let (db, _dir, _) = with_a_commit_during_a_drain(window.clone());
+        assert!(
+            db.store().unwrap().rank_plans.lock().redone > 0,
+            "{window:?} wrote the index under a drain it left standing"
+        );
+        assert_within_bound(&db, "both", true);
+        let report = db.check().unwrap();
+        assert!(report.is_clean(), "after {window:?}: {report:?}");
+    }
+}
+
+#[test]
+fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound() {
+    use proptest::test_runner::{Config, TestRunner};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // Rounds of an op landing between a drain's computing and its writing, and an op leaving that drain to compute
+    let rounds = prop::collection::vec((op(), op()), 1..4);
+    let run = |db: &Arc<Database>, direction: &str, rounds: &[(Op, Op)], fired: &Arc<AtomicU64>| {
+        for (round, (window, trigger)) in rounds.iter().enumerate() {
+            let (inner, window, count) = (Arc::clone(db), json_of(window), Arc::clone(fired));
+            db.store().unwrap().when_rank_planned(move || {
+                // A refused write (a self link, an entity gone) changes nothing
+                let _ = write(&inner, vec![window]);
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+            // A refused write changes nothing, so a link of its own in each round, for a drain to compute
+            let _ = write(db, vec![json_of(trigger)]);
+            let link = json!({ "op": "link", "source": format!("Task-{}", 10 + round), "kind": "rates",
+                "target": format!("Task-{}", 20 + round), "weight": 3 });
+            write(db, vec![link]).unwrap();
+            db.wait_for_index_builds().unwrap();
+            // A hook not fired holds the database: let it go
+            db.store().unwrap().when_rank_planned(|| {});
+            assert_within_bound(db, direction, true);
+        }
+    };
+    let config = || Config { cases: 8, failure_persistence: None, ..Config::default() };
+    // Over the karate club a drain reads every node
+    let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    TestRunner::new(config())
+        .run(&rounds, |rounds| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(open_with(&dir, schema("both", true)));
+            let mut ops: Vec<Json> =
+                (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+            ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(|&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "refs", "target": format!("Task-{b}") })));
+            write(&db, ops).unwrap();
+            db.wait_for_index_builds().unwrap();
+            run(&db, "both", &rounds, &fired);
+            plans.fetch_add(db.store().unwrap().rank_plans.lock().every_node, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
+    assert!(plans.load(Ordering::SeqCst) > 0, "no drain read every node");
+    // Over a long ring of single links, where a drain's fronts of residual die out within a quarter of the nodes, one reads
+    // a node at a time throughout
+    let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
+    TestRunner::new(config())
+        .run(&rounds, |rounds| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(near_links(&dir, 1600, 1, 0));
+            run(&db, "out", &rounds, &fired);
+            plans.fetch_add(db.store().unwrap().rank_plans.lock().one_at_a_time, Ordering::SeqCst);
+            Ok(())
+        })
+        .unwrap();
+    assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
+    assert!(plans.load(Ordering::SeqCst) > 0, "no drain read a node at a time");
+}
+
+#[test]
+fn commits_racing_drains_leave_the_index_within_its_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let ops: Vec<Json> =
+        (0..60).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let writers: Vec<_> = (0..3u64)
+        .map(|w| {
+            let db = std::sync::Arc::clone(&db);
+            std::thread::spawn(move || {
+                // A fixed walk over the pairs, each writer its own
+                let mut at = w * 7 + 1;
+                for i in 0..120u64 {
+                    at = (at * 31 + 11) % 60;
+                    let (source, target) = (format!("Task-{at}"), format!("Task-{}", (at + w + 1) % 60));
+                    let op = if i % 5 == 4 { "unlink" } else { "link" };
+                    write(&db, vec![json!({ "op": op, "source": source, "kind": "refs", "target": target })]).unwrap();
+                    if i % 7 == 0 {
+                        // Long enough for the builder's pause, so drains come between the writes
+                        std::thread::sleep(std::time::Duration::from_millis(8));
+                    }
+                }
+            })
+        })
+        .collect();
+    for writer in writers {
+        writer.join().unwrap();
+    }
+    assert_within_bound(&db, "both", true);
 }
 
 #[test]
