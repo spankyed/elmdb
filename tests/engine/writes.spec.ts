@@ -540,3 +540,57 @@ describe('schema stats', () => {
     expect(({} as Record<string, unknown>).entityCount).toBeUndefined();
   });
 });
+
+describe("fields typed by a type's shape", () => {
+  const typed = () => freshEngine({
+    ...NAMES,
+    rowRules: {
+      Task: {
+        required: ['title'],
+        search: { fields: { body: 1, notes: 1 } },
+        fields: {
+          title: { type: 'string' },
+          rank: { type: 'number', optional: true },
+          stage: { type: 'enum', values: ['draft', 'final'], optional: true },
+          icon: { type: 'string', optional: true, nullable: true },
+          owner: { type: 'ref', to: ['Person'], optional: true },
+          elsewhere: { type: 'ref', to: ['Nowhere'], optional: true },
+          tags: { type: 'list', of: { type: 'string' }, optional: true },
+          body: { type: 'enum', values: ['a'], optional: true },
+          // A list whose elements may be anything, as a pack that doesn't check nulls types every list
+          notes: { type: 'list', of: { type: 'any' }, optional: true },
+        },
+      },
+    },
+  });
+
+  it('refuses a value its field does not take, from every write, naming the field and the type', () => {
+    const e = typed();
+    const id = e.create('Task', { title: 'one' }).id();
+    for (const write of [
+      () => e.write(id).set('rank', 'high'),
+      () => e.write(id).set('stage', 'published'),
+      () => e.write(id).set('owner', 'Project-p'),
+      () => e.write(id).setMany({ tags: ['a', 2] }),
+      () => e.write(id).set('title', null),
+      () => e.create('Task', { title: 3 }),
+      () => e.upsert('Task', { id: 'Task-u', title: 'u', rank: '1' }),
+    ]) expect(write).toThrow(expect.objectContaining({ code: 'FIELD_TYPE' }));
+    expect(() => e.write(id).set('rank', 'high')).toThrow(/Task\.rank is a number/);
+    expect(e.getRow(id)).toMatchObject({ title: 'one' });
+  });
+
+  it('takes what the shape allows, null where it says so, and a field it does not declare', () => {
+    const e = typed();
+    const id = e.create('Task', { title: 'one', rank: 2, stage: 'final', icon: null, owner: 'Person-x', tags: ['a'] }).id();
+    e.write(id).set('undeclared', { any: 'thing' }).set('icon', 'star');
+    expect(e.getRow(id)).toMatchObject({ rank: 2, stage: 'final', icon: 'star', owner: 'Person-x', tags: ['a'], undeclared: { any: 'thing' } });
+  });
+
+  it('holds a ref to a type the schema does not declare as text, and a field its text index reads as anything', () => {
+    const e = typed();
+    const id = e.create('Task', { title: 'one', elsewhere: 'anything-at-all', body: 'not in the enum', notes: ['found', null] }).id();
+    expect(e.getRow(id)).toMatchObject({ elsewhere: 'anything-at-all', body: 'not in the enum' });
+    expect(e.query('Task').search('found').ids()).toEqual([id]);
+  });
+});

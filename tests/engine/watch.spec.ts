@@ -5,7 +5,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { engine, type Id } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
-import type { EarsDatabase } from '../../src/database.ts';
+import { createConnection, runCommitted, type Commit, type EarsDatabase } from '../../src/database.ts';
 
 let e: EngineUnderTest;
 beforeEach(() => { e = engine(); });
@@ -217,4 +217,135 @@ describe('watch', () => {
     e.query('Task').ids();
     expect(e.lastCommit()).toBe(before + 2);
   });
+});
+
+/** Native methods require their own receiver; the wrapper changes only the outcome after a real commit. */
+function committedFailure(method: keyof EarsDatabase, before = false, refusalCode: 'IO' | 'SCHEMA_CHANGED' = 'IO') {
+  return (database: EarsDatabase): EarsDatabase => new Proxy(database, {
+    get(target, key) {
+      const value: unknown = Reflect.get(target, key, target);
+      if (key !== method) return typeof value === 'function' ? value.bind(target) : value;
+      return (...args: unknown[]) => {
+        if (before) throw Object.assign(new Error('refused before commit'), { code: refusalCode });
+        (value as (...args: unknown[]) => unknown).apply(target, args);
+        throw Object.assign(new Error('the sync failed after commit'), { code: 'NOT_DURABLE' });
+      };
+    },
+  });
+}
+
+describe('admin committed errors', () => {
+  it.each(['reset', 'bulkLoad'] as const)('notifies a committed %s before rethrowing', async (method) => {
+    e = engine({ wrap: committedFailure(method) });
+    const id = e.create('Task', { title: 'before' }).id();
+    const w = watched(titles);
+    await settled();
+    const operation = () => method === 'reset' ? e.admin.clear() : e.admin.putAttr(id, 'title', 'after');
+    expect(operation).toThrow('the sync failed after commit');
+    await settled();
+    expect(w.last()).toEqual(method === 'reset' ? [] : ['after']);
+    expect(w.runs()).toBe(2);
+    expect(w.seen.at(-1)!.commit).toBe(e.lastCommit());
+  });
+
+  it.each(['setSchema', 'declare'] as const)('refreshes declarations and notifies a committed %s', async (method) => {
+    e = engine({ wrap: committedFailure('setSchema') });
+    e.create('Task', { title: 'before' });
+    const w = watched(() => {
+      const count = e.query('Task').count();
+      try { e.query('Novel').count(); return [count, true]; }
+      catch { return [count, false]; }
+    });
+    await settled();
+    expect(w.last()).toEqual([1, false]);
+    expect(() => e.admin[method]({ types: { Task: { required: [] }, Novel: { required: [] } }, relations: {}, roles: [] }))
+      .toThrow('the sync failed after commit');
+    await settled();
+    expect(w.last()).toEqual([1, true]);
+    expect(w.runs()).toBe(2);
+    expect(() => e.create('Novel', {})).not.toThrow();
+  });
+
+  it.each(['reset', 'bulkLoad', 'setSchema'] as const)('does not notify an uncommitted %s refusal', async (method) => {
+    e = engine({ wrap: committedFailure(method, true) });
+    const id = e.create('Task', { title: 'before' }).id();
+    const w = watched(titles);
+    await settled();
+    const sequence = e.lastCommit();
+    expect(() => {
+      if (method === 'reset') e.admin.clear();
+      else if (method === 'bulkLoad') e.admin.putAttr(id, 'title', 'after');
+      else e.admin.declare({ types: { Novel: { required: [] } }, relations: {}, roles: [] });
+    }).toThrow('refused before commit');
+    await settled();
+    expect(w.last()).toEqual(['before']);
+    expect(w.runs()).toBe(1);
+    expect(e.lastCommit()).toBe(sequence);
+    expect(() => e.query('Novel').count()).toThrow();
+  });
+
+  it('does not notify or adopt declarations after a SCHEMA_CHANGED refusal', async () => {
+    e = engine({ wrap: committedFailure('setSchema', true, 'SCHEMA_CHANGED') });
+    e.create('Task', { title: 'before' });
+    const w = watched(titles);
+    await settled();
+    const sequence = e.lastCommit();
+    expect(() => e.admin.declare({ types: { Novel: { required: [] } }, relations: {}, roles: [] }))
+      .toThrow(expect.objectContaining({ code: 'SCHEMA_CHANGED' }));
+    await settled();
+    expect(w.last()).toEqual(['before']);
+    expect(w.runs()).toBe(1);
+    expect(e.lastCommit()).toBe(sequence);
+    expect(() => e.query('Novel').count()).toThrow();
+    w.stop();
+  });
+
+  it('notifies a replacement that commits and then reports failed sync', async () => {
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'ears-committed-replace-'));
+    try {
+      let backing: EarsDatabase | undefined;
+      e = engine({ wrap: (db) => { backing = db; return committedFailure('replaceWith')(db); } });
+      const id = e.create('Task', { title: 'backup' }).id();
+      backing!.backup(join(dir, 'backup'));
+      e.write(id).set('title', 'before');
+      const w = watched(titles);
+      await settled();
+      expect(() => e.admin.replaceWith(join(dir, 'backup'))).toThrow('the sync failed after commit');
+      await settled();
+      expect(w.last()).toEqual(['backup']);
+      expect(w.runs()).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
+it('reports a committed load to connection listeners exactly once', () => {
+  let database: EarsDatabase | undefined;
+  e = engine({ wrap: (raw) => { database = committedFailure('bulkLoad')(raw); return database; } });
+  const connection = createConnection(database!);
+  const heard: Commit[] = [];
+  connection.onCommit((commit) => heard.push(commit));
+  expect(() => connection.load([{ load: 'entity', id: 'Task-committed', fields: { title: 'kept' } }]))
+    .toThrow('the sync failed after commit');
+  expect(heard).toHaveLength(1);
+  expect(heard[0]).toEqual({ sequence: connection.lastCommit(), touched: 'all' });
+  expect(e.query('Task').count()).toBe(1);
+});
+
+
+it('preserves failed durability when refreshing committed state also throws', () => {
+  const durability = Object.assign(new Error('sync failed'), { code: 'NOT_DURABLE' });
+  const refresh = new Error('schema refresh failed');
+  let failure: unknown;
+  try { runCommitted(() => { throw durability; }, () => { throw refresh; }); }
+  catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(AggregateError);
+  expect((failure as AggregateError & { code: string }).code).toBe('NOT_DURABLE');
+  expect((failure as AggregateError).errors).toEqual([durability, refresh]);
+  expect((failure as Error).cause).toBe(durability);
 });

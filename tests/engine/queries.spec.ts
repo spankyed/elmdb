@@ -41,10 +41,13 @@ describe('starts', () => {
       ordered: e.query('Task').orderBy('title'),
       everything: e.query.all(),
     };
+    Object.freeze(held.indexed);
+    const openIds = held.indexed.ids;
+    expect(held.indexed.ids).toBe(openIds);
     // A terminal run before the write doesn't fix what the builder answers after it
-    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d]);
+    expect(openIds()).toEqual([t.a, t.c, t.d]);
     const late = e.create('Task').setMany({ title: 'aardvark', rank: 3, status: 'open' }).grant('focus').id();
-    expect(held.indexed.ids()).toEqual([t.a, t.c, t.d, late]);
+    expect(openIds()).toEqual([t.a, t.c, t.d, late]);
     expect(held.role.ids()).toEqual([t.a, late]);
     expect(held.filtered.count()).toBe(4);
     expect(held.ordered.first()).toBe(late);
@@ -182,11 +185,14 @@ describe('terminals', () => {
     expect([q.count(), q.first(), q.last(), q.exists()]).toEqual([3, t.a, t.d, true]);
     const none = e.query('Task').where('status', 'gone');
     expect([none.count(), none.first(), none.last(), none.exists()]).toEqual([0, undefined, undefined, false]);
+    const readIds = q.ids;
+    q.ids = () => [];
     expect(q.map((id) => id.length > 0)).toEqual([true, true, true]);
     const seen: Id[] = [];
     expect(q.forEach((id) => seen.push(id)).count()).toBe(3);
     expect(seen).toEqual([t.a, t.c, t.d]);
     expect(q.reduce((n, id) => n + (id === t.c ? 1 : 0), 0)).toBe(1);
+    q.ids = readIds;
     const ids = q.ids();
     ids.pop();
     expect(q.count()).toBe(3);
@@ -206,6 +212,7 @@ describe('terminals', () => {
     expect(reads(() => counted().limit(2).ids())).toBe(2);
     e.write(t.a).link('contains', t.c);
     expect(reads(() => counted().out('contains').first())).toBe(1);
+    expect(reads(() => counted().both('contains').first())).toBe(1);
     expect(reads(() => counted().count())).toBe(4);
   });
 
@@ -379,5 +386,32 @@ describe('declared indexes', () => {
     expect(() => engine.write(b).set('status', Infinity)).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
     expect(engine.query('Task').where('status', long).ids()).toEqual([a]);
     expect(engine.query('Task').where('status', Infinity).ids()).toEqual([]);
+  });
+});
+
+describe('explain', () => {
+  it("answers the query's ids and each stage of its plan: the index it read, what it visited and kept", () => {
+    const indexed = freshEngine({ ...NAMES, rowRules: { Task: { required: [], indexes: ['status'] } } });
+    const ids = Array.from({ length: 30 }, (_, i) => indexed.create('Task', { status: i % 3 ? 'open' : 'done', rank: i % 4 }).id());
+    const explained = indexed.query('Task').has('rank').where('status', 'done').limit(5).explain();
+    expect(explained.ids).toEqual(indexed.query('Task').has('rank').where('status', 'done').limit(5).ids());
+    expect(explained.ids).toEqual(ids.filter((_, i) => i % 3 === 0).slice(0, 5));
+    expect(explained.stages.map(({ ms, ...stage }) => (expect(ms).toBeGreaterThanOrEqual(0), stage))).toEqual([
+      { stage: 'types', visited: 0, kept: 0 },
+      { stage: 'has', visited: 0, kept: 0 },
+      { stage: 'where', index: 'status', visited: 5, kept: 5 },
+      { stage: 'limit', visited: 5, kept: 5 },
+      { stage: 'ids', visited: 5, kept: 5 },
+    ]);
+    expect(explained.visited).toBe(5);
+    expect(explained.ms).toBeGreaterThanOrEqual(0);
+    // Without the index the start walks every task
+    const walked = indexed.query('Task').where('rank', 1).explain();
+    expect(walked.stages[1]).toMatchObject({ stage: 'where', index: 'none: walks the type', visited: 30, kept: walked.ids.length });
+  });
+
+  it('refuses a query with a where given a function, which runs outside the plan', () => {
+    const e = engine();
+    expect(() => e.query('Task').where('title', (v) => v === 'x').explain()).toThrow(expect.objectContaining({ code: 'NOT_EXPLAINABLE' }));
   });
 });

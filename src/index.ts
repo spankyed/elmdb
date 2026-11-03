@@ -7,12 +7,14 @@ export {
   type EntityRow, type SchemaStats, type RelationMatch, type RelationRow, type RelationStats,
 } from './engine.ts';
 export type { EarsDatabase, EarsUnit, SchemaChange, UnitOptions } from './database.ts';
-export type { WatchObserver, Watching } from './watch.ts';
+export { WATCH_SCHEDULE } from './watch.ts';
+export type { WatchObserver, WatchOptions, WatchReadContext, Watching, WatchSchedule } from './watch.ts';
+export type { CallCounting, CallKind, CallReport, CallSite, WatchCount } from './calls.ts';
 export type { EngineSchema, RelationRules } from './schema.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';
 export type {
-  EARSRuntimeDeps, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, SearchHighlights, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode,
+  EARSRuntimeDeps, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, SearchHighlights, QueryExplanation, QueryStage, EdgeDirection, SimilarityMeasure, FieldRule, FieldType, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, WeightedLinkOptions, RelationPatch, RankSeed, RankOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query } from './query.ts';
 export { entityTypeOf, getTimestamp } from './ids.ts';
@@ -22,3 +24,5 @@ export {
   defineEars,
   type TypedEars, type TypedQuery, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedNewId, type TypedGetAttr,
 } from './typed.ts';
+
+export type { EarsOperation, EarsOperationResult, EarsOperationObserver } from './observation.ts';

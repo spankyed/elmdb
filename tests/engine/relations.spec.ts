@@ -57,33 +57,37 @@ describe('links', () => {
     expect(e.query.withTrashed('Task').unlinkedFrom('child').ids()).toEqual([root, loose]);
   });
 
-  it('linking the same edge again changes nothing, keeping its id and its place; another info is another edge', () => {
+  it('a link to the same two ends is the same edge, keeping its id and its place, its info replaced by any the link gives', () => {
     const [a, b, c] = [task('A'), task('B'), task('C')];
     e.write(a).link('blocks', b, { info: { x: 1 } }).link('blocks', c);
     const first = e.findRelations({ source: a, target: b })[0].id;
-    e.write(a).link('blocks', b, { info: { x: 1 } });
-    // No info given matches any edge between the ends
     e.write(a).link('blocks', b);
-    expect(e.findRelations().map((r) => r.id)).toEqual([first, expect.any(String)]);
-    expect(e.query.ids(a).out('blocks').ids()).toEqual([b, c]);
+    expect(e.getRelation(first)?.info).toEqual({ x: 1 });
     e.write(a).link('blocks', b, { info: { x: 2 } });
-    expect(e.findRelations({ source: a, target: b })).toHaveLength(2);
+    expect(e.findRelations().map((r) => [r.id, r.info])).toEqual([[first, { x: 2 }], [expect.any(String), undefined]]);
+    expect(e.query.ids(a).out('blocks').ids()).toEqual([b, c]);
   });
 
-  it('an info with the same fields in another order is the same edge', () => {
+  it('a keyed kind joins two ends by one edge per value of its key, a field the info lacks being null', () => {
+    e = engine({ relationRules: { refs: { key: ['handle'] } } });
     const [a, b] = [task('A'), task('B')];
-    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [1, 2], z: 'z' } } });
-    e.write(a).link('blocks', b, { info: { at: { z: 'z', y: [1, 2] }, x: 1 } });
-    expect(e.findRelations()).toHaveLength(1);
-    // A list's order is its value
-    e.write(a).link('blocks', b, { info: { x: 1, at: { y: [2, 1], z: 'z' } } });
-    expect(e.findRelations()).toHaveLength(2);
+    e.write(a).link('refs', b, { info: { handle: 1, label: 'one' } }).link('refs', b, { info: { handle: 2 } });
+    e.write(a).link('refs', b, { info: { label: 'uno', handle: 1 } });
+    expect(edges()).toEqual([[a, 'refs', b, { label: 'uno', handle: 1 }], [a, 'refs', b, { handle: 2 }]]);
+    // No handle is a third identity, which a link with no info and one with a null handle both name
+    e.write(a).link('refs', b).link('refs', b, { info: { handle: null } }).link('refs', b, { info: { label: 'none' } });
+    expect(edges()).toEqual([[a, 'refs', b, { label: 'uno', handle: 1 }], [a, 'refs', b, { handle: 2 }], [a, 'refs', b, { label: 'none' }]]);
+    // A key's value compares as a value: the same fields in another order are the same, a list's order is its value
+    e.write(a).link('refs', b, { info: { handle: { y: [1, 2], z: 'z' } } }).link('refs', b, { info: { handle: { z: 'z', y: [1, 2] } } });
+    expect(e.findRelations()).toHaveLength(4);
+    e.write(a).link('refs', b, { info: { handle: { y: [2, 1], z: 'z' } } });
+    expect(e.findRelations()).toHaveLength(5);
   });
 
   it('refuses options it does not know, which is info passed where the options go', () => {
     const [a, b] = [task('A'), task('B')];
-    const info: any = { weight: 2 };
-    expect(() => e.write(a).link('blocks', b, info)).toThrow("unknown option weight; an edge's info goes in { info }");
+    const info: any = { size: 2 };
+    expect(() => e.write(a).link('blocks', b, info)).toThrow("unknown option size; an edge's info goes in { info }");
     expect(e.findRelations()).toEqual([]);
   });
 
@@ -121,6 +125,7 @@ describe('links', () => {
   });
 
   it('removeRelation removes that one edge, leaving the other edges between its ends and the ends themselves, and refuses an id no relation has', () => {
+    e = engine({ relationRules: { blocks: { key: ['handle'] } } });
     const [a, b] = [task('A'), task('B')];
     e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
     const [first] = e.findRelations();
@@ -131,13 +136,18 @@ describe('links', () => {
     expect(() => e.removeRelation(first.id)).toThrow(expect.objectContaining({ code: 'NO_SUCH_RELATION' }));
   });
 
-  it('a kind declared unique keeps one edge between two ends, which linking again replaces the info of; updateRelation moves one, keeping its id, and refuses an id no relation has', () => {
-    e = engine({ relationRules: { refs: { unique: true } } });
+  it('updateRelation moves an edge, keeping its id, refuses one onto another edge\'s identity, and refuses an id no relation has', () => {
+    e = engine({ relationRules: { blocks: { key: ['handle'] } } });
     const [a, b, c] = [task('A'), task('B'), task('C')];
-    e.write(a).link('refs', b, { info: 1 }).link('refs', b, { info: 2 });
-    e.write(a).link('refs', b, { info: 3 });
-    expect(edges()).toEqual([[a, 'refs', b, 3]]);
-    e.write(a).link('refs', b);
+    e.write(a).link('refs', b, { info: 3 }).link('refs', c);
+    const onto = e.findRelations({ target: c })[0].id;
+    expect(() => e.updateRelation(onto, { target: b })).toThrow(expect.objectContaining({ code: 'DUPLICATE_EDGE' }));
+    e.write(a).link('blocks', b, { info: { handle: 1 } }).link('blocks', b, { info: { handle: 2 } });
+    const second = e.findRelations({ kind: 'blocks' })[1].id;
+    expect(() => e.updateRelation(second, { info: { handle: 1 } })).toThrow(expect.objectContaining({ code: 'DUPLICATE_EDGE' }));
+    e.updateRelation(second, { info: { handle: 2, label: 'kept' } });
+    e.removeRelation(onto);
+    e.write(a).unlink('blocks');
     expect(edges()).toEqual([[a, 'refs', b, 3]]);
     const rel = e.findRelations()[0].id;
     e.updateRelation(rel, { target: c, info: 4 });
@@ -191,6 +201,15 @@ describe('relation kinds', () => {
       ['findRelations', () => e.findRelations({ kind: 'blokcs' })],
       ['descendants', () => e.query.ids(a).descendants('blokcs')],
       ['ancestors', () => e.query.ids(b).ancestors('blokcs')],
+      ['both', () => e.query.ids(a).both('blokcs')],
+      ['pathTo', () => e.query.ids(a).pathTo(b, 'blokcs')],
+      ['degrees', () => e.query.ids(a).degrees('blokcs')],
+      ['rank', () => e.query.ids(a).rank('blokcs')],
+      ['weakComponents', () => e.query.ids(a).weakComponents('blokcs')],
+      ['strongComponents', () => e.query.ids(a).strongComponents('blokcs')],
+      ['communities', () => e.query.ids(a).communities('blokcs')],
+      ['topological', () => e.query.ids(a).topological('blokcs')],
+      ['similar', () => e.query.ids(a).similar(b, 'blokcs')],
       ['wouldCreateCycle', () => e.wouldCreateCycle(a, b, ['blokcs'])],
     ];
     for (const [via, read] of reads) expect(read, via).toThrow(expect.objectContaining({ ...unknown, message: expect.stringContaining(`${via}("blokcs")`) }));
@@ -241,6 +260,155 @@ describe('hierarchy walks', () => {
     expect(e.query.ids(leaf).ancestors('child').ids()).toEqual([deep]);
     expect(e.query.withTrashed.ids(leaf).ancestors('child').ids()).toEqual([deep, mid, root]);
   });
+
+  it('stops at a depth, a count of edges taken as limit takes one', () => {
+    const [a, b, c, d] = [task('a'), task('b'), task('c'), task('d')];
+    e.write(a).link('child', b);
+    e.write(b).link('child', c);
+    e.write(c).link('child', d);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 1 }).ids()).toEqual([b]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 2.9 }).ids()).toEqual([b, c]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: 0 }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: -1 }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: NaN }).ids()).toEqual([]);
+    expect(e.query.ids(a).descendants('child', undefined, { depth: Infinity }).ids()).toEqual([b, c, d]);
+    expect(e.query.ids(d).ancestors('child', 'Task', { depth: 2 }).ids()).toEqual([c, b]);
+  });
+});
+
+describe('graph walks', () => {
+  it('both follows edges out and in, each far end once', () => {
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refs', b);
+    e.write(c).link('refs', a);
+    e.write(b).link('refs', a);
+    expect(e.query.ids(a).both('refs').ids()).toEqual([b, c]);
+    expect(e.query.ids(a).both('refs', 'Task').pick(['title'])).toEqual([{ id: b, title: 'b' }, { id: c, title: 'c' }]);
+  });
+
+  it('pathTo answers a shortest path from the set, following edges the way it is told, or none', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    e.write(a).link('refs', b);
+    e.write(b).link('refs', c);
+    e.write(c).link('refs', d);
+    e.write(a).link('blocks', d);
+    expect(e.query.ids(a).pathTo(d, 'refs').ids()).toEqual([a, b, c, d]);
+    expect(e.query.ids(a).pathTo(d, ['refs', 'blocks']).ids()).toEqual([a, d]);
+    expect(e.query.ids(a).pathTo(d, 'refs', { depth: 2 }).ids()).toEqual([]);
+    expect(e.query.ids(a).pathTo(x, 'refs').ids()).toEqual([]);
+    expect(e.query.ids(d).pathTo(a, 'refs').ids()).toEqual([]);
+    expect(e.query.ids(d).pathTo(a, 'refs', { direction: 'in' }).ids()).toEqual([d, c, b, a]);
+    expect(e.query.ids(c).pathTo(a, 'refs', { direction: 'both' }).pick(['title']).map((r) => r.title)).toEqual(['c', 'b', 'a']);
+    // A trashed entity is walked around, unless the query reaches the trash
+    e.write(b).trash();
+    expect(e.query.ids(a).pathTo(c, 'refs').ids()).toEqual([]);
+    expect(e.query.withTrashed.ids(a).pathTo(c, 'refs').ids()).toEqual([a, b, c]);
+  });
+
+  it("degrees counts each entity's edges as outEdges and inEdges answer them", () => {
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    const project = e.create('Project').id();
+    e.write(a).link('refs', b).link('refs', c).link('refs', project);
+    e.write(b).link('refs', a);
+    expect(e.query.ids([a, b, c]).degrees('refs')).toEqual(new Map([[a, 3], [b, 1], [c, 0]]));
+    expect(e.query.ids([a, b, c]).degrees('refs', undefined, { direction: 'in' })).toEqual(new Map([[a, 1], [b, 1], [c, 1]]));
+    expect(e.query.ids([a, b, c]).degrees('refs', 'Task', { direction: 'both' })).toEqual(new Map([[a, 3], [b, 2], [c, 1]]));
+    expect(e.query.ids(a).degrees('refs').get(a)).toBe(e.query.ids(a).outEdges('refs').length);
+  });
+});
+
+describe('graph algorithms', () => {
+  it('rank orders the query by PageRank over its own edges, scores in hits, the highest kept by limit', () => {
+    const [a, b, c, d] = [task('a'), task('b'), task('c'), task('d')];
+    // Every walk ends up at c
+    e.write(a).link('refs', b);
+    e.write(b).link('refs', c);
+    e.write(d).link('refs', c);
+    const ranked = e.query('Task').rank('refs').hits();
+    expect(ranked[0]!.id).toBe(c);
+    expect(ranked.map((h) => h.score).reduce((x, y) => x + y)).toBeCloseTo(1, 9);
+    expect(ranked.every((h, at) => at === 0 || ranked[at - 1]!.score >= h.score)).toBe(true);
+    expect(e.query('Task').rank('refs').limit(1).ids()).toEqual([c]);
+    // From d the walker reaches only c, so a and b hold nothing
+    const fromD = new Map(e.query('Task').rank('refs', { seeds: [d] }).hits().map((h) => [h.id, h.score]));
+    expect([fromD.get(a), fromD.get(b)]).toEqual([0, 0]);
+    // Both ways, from a the walk reaches d through c
+    const both = e.query('Task').rank('refs', { seeds: [a], direction: 'both' }).hits();
+    expect(both.every((h) => h.score > 0)).toBe(true);
+    // A seed outside the query is ignored, and a query holding none answers nothing
+    expect(e.query('Task').rank('refs', { seeds: [d, 'Task-gone' as never] }).ids()).toEqual(e.query('Task').rank('refs', { seeds: [d] }).ids());
+    expect(e.query('Task').rank('refs', { seeds: ['Task-gone' as never] }).ids()).toEqual([]);
+    // Only edges inside the query: without c, b's edge leads nowhere
+    expect(e.query.ids([a, b]).rank('refs').ids()).toEqual([b, a]);
+  });
+
+  it('weakComponents groups the query by the edges between its entities, either way, the largest first', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    e.write(b).link('refs', a);
+    e.write(c).link('refs', d);
+    e.write(x).link('refs', d);
+    e.write(a).link('blocks', x);
+    expect(e.query('Task').weakComponents('refs')).toEqual([[c, d, x], [a, b]]);
+    expect(e.query('Task').weakComponents(['refs', 'blocks'])).toEqual([[a, b, c, d, x]]);
+    expect(e.query.ids([c, x]).weakComponents('refs')).toEqual([[c], [x]]);
+  });
+
+  it('strongComponents groups the query by the cycles its edges make, following each its way, the largest first', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    // a → b → c → a, a cycle; c → d, out of it; x alone
+    for (const [s, t] of [[a, b], [b, c], [c, a], [c, d]] as const) e.write(s!).link('refs', t!);
+    expect(e.query('Task').strongComponents('refs')).toEqual([[a, b, c], [d], [x]]);
+    // d → x → d closes a second cycle; and only edges inside the query count, so without c there is none through a
+    e.write(d).link('refs', x);
+    e.write(x).link('refs', d);
+    expect(e.query('Task').strongComponents('refs')).toEqual([[a, b, c], [d, x]]);
+    expect(e.query.ids([a, b]).strongComponents('refs')).toEqual([[a], [b]]);
+  });
+
+  it('communities splits the query where its edges thin, the same each time', () => {
+    // Two triangles, joined by one edge
+    const [a, b, c, x, y, z] = ['a', 'b', 'c', 'x', 'y', 'z'].map(task);
+    for (const [s, t] of [[a, b], [b, c], [c, a], [x, y], [y, z], [z, x], [c, x]] as const) e.write(s!).link('refs', t!);
+    expect(e.query('Task').communities('refs')).toEqual([[a, b, c], [x, y, z]]);
+    expect(e.query('Task').communities('refs', { seed: 3 })).toEqual([[a, b, c], [x, y, z]]);
+    expect(e.query('Task').communities('refs', { resolution: 0 })).toEqual([[a, b, c, x, y, z]]);
+    expect(() => e.query('Task').communities('refs', { resolution: -1 })).toThrow();
+    for (const seed of [-1, 1.5, 2 ** 32]) expect(() => e.query('Task').communities('refs', { seed }), String(seed)).toThrow();
+  });
+
+  it('topological puts what blocks before what it blocks, a cycle together, the rest in query order', () => {
+    const [a, b, c, d, x] = [task('a'), task('b'), task('c'), task('d'), task('x')];
+    // x blocks a; b, c and d block each other; a blocks c
+    for (const [s, t] of [[x, a], [a, c], [b, c], [c, d], [d, b]] as const) e.write(s!).link('blocks', t!);
+    expect(e.query('Task').topological('blocks').ids()).toEqual([x, a, b, c, d]);
+    expect(e.query('Task').topological('blocks', { direction: 'in' }).ids()).toEqual([b, c, d, a, x]);
+    expect(e.query('Task').topological('blocks').limit(2).ids()).toEqual([x, a]);
+    expect(e.query('Task').topological('blocks').explain().stages[1]).toMatchObject({ stage: 'topological', nodes: 5, edges: 5, cycles: 1 });
+    expect(() => e.query('Task').topological('blocks', { direction: 'both' as never }).ids()).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+  });
+
+  it('similar answers what shares neighbours with an entity, most alike first, scores in hits', () => {
+    const [to, x, y, z, w, alone] = ['to', 'x', 'y', 'z', 'w', 'alone'].map(task);
+    // to and x both reference z and w; y references z alone; alone references only y
+    for (const [s, t] of [[to, z], [to, w], [x, z], [x, w], [y, z], [alone, y]] as const) e.write(s!).link('refs', t!);
+    const hits = e.query('Task').similar(to, 'refs').hits();
+    expect(hits.map((h) => [h.id, h.score])).toEqual([[x, 1], [y, 0.5]]);
+    expect(e.query('Task').similar(to, 'refs').limit(1).ids()).toEqual([x]);
+    const adamicAdar = e.query('Task').similar(to, 'refs', { measure: 'adamicAdar' }).hits();
+    // z has three entities linking it, w two: x shares both, y z alone
+    expect(adamicAdar.map((h) => h.id)).toEqual([x, y]);
+    expect(adamicAdar[1]!.score).toBeCloseTo(1 / Math.log(3), 12);
+    expect(e.query('Task').similar('Task-gone' as never, 'refs').ids()).toEqual([]);
+    expect(e.query('Task').similar(to, 'refs').explain().stages[1]).toMatchObject({ stage: 'similar', neighbours: 2, candidates: 2 });
+  });
+
+  it('explain reports the graph a rank built and the rounds it ran', () => {
+    const [a, b] = [task('a'), task('b')];
+    e.write(a).link('refs', b);
+    const { stages } = e.query('Task').rank('refs').explain();
+    expect(stages[1]).toMatchObject({ stage: 'rank', nodes: 2, edges: 1, converged: true });
+    expect(stages[1]!.iterations).toBeGreaterThan(1);
+  });
 });
 
 describe('declared roles', () => {
@@ -290,5 +458,100 @@ describe('roles', () => {
     e.write(b).revoke('owner');
     expect(e.getRoles(b)).toEqual([]);
     expect(e.getRow(b)).not.toHaveProperty('role');
+  });
+});
+
+describe('weighted kinds', () => {
+  // `refers` weighs one edge a pair, `mentions` one per `n`, whose weights a rank adds, `refs` weighs nothing
+  const weighted = () => engine({ relationRules: { refers: { weighted: true }, mentions: { weighted: true, key: ['n'] } } });
+  const scores = (hits: { id: string; score: number }[]) => new Map(hits.map((h) => [h.id, h.score]));
+
+  it('a link takes a weight, 1 unless given, and rows of a weighted kind answer it', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 2.5 }).link('refers', c).link('refs', b);
+    const [heavy, plain, other] = e.findRelations({ source: a });
+    expect(heavy).toMatchObject({ kind: 'refers', target: b, weight: 2.5 });
+    expect(plain).toMatchObject({ kind: 'refers', target: c, weight: 1 });
+    expect(other).not.toHaveProperty('weight');
+    expect(e.getRelation(heavy!.id)).toEqual(heavy);
+    expect(e.query.ids(a).outEdges('refers').map((r) => r.weight)).toEqual([2.5, 1]);
+  });
+
+  it('refuses a weight outside 0 to 2^960 and a weight on a kind not declared weighted', () => {
+    e = weighted();
+    const [a, b] = [task('a'), task('b')];
+    for (const weight of [-1, Number.NaN, Number.POSITIVE_INFINITY, 2 ** 961]) {
+      expect(() => e.write(a).link('refers', b, { weight }), String(weight)).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
+    }
+    expect(() => e.write(a).link('refs', b, { weight: 2 })).toThrow(expect.objectContaining({ code: 'VALUE_INVALID', message: expect.stringContaining('refs') }));
+    expect(e.findRelations()).toEqual([]);
+    // 0 is a weight: an edge the walker never follows
+    e.write(a).link('refers', b, { weight: 0 });
+    expect(e.findRelations()[0]).toMatchObject({ weight: 0 });
+  });
+
+  it('a weight is what an edge holds, which a link to its identity replaces; a keyed kind\'s edges of one pair each hold one', () => {
+    e = weighted();
+    const [a, b] = [task('a'), task('b')];
+    e.write(a).link('refers', b, { weight: 2 });
+    e.write(a).link('refers', b);
+    e.write(a).link('refers', b, { weight: 5 });
+    expect(e.findRelations({ kind: 'refers' }).map((r) => r.weight)).toEqual([5]);
+    e.write(a).link('mentions', b, { info: { n: 1 }, weight: 2 });
+    e.write(a).link('mentions', b, { info: { n: 2 }, weight: 2 });
+    e.write(a).link('mentions', b, { info: { n: 1 }, weight: 3 });
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => r.weight)).toEqual([3, 2]);
+  });
+
+  it('updateRelation replaces a weight, with or without a move, and the admin face loads one', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 2 });
+    const [rel] = e.findRelations();
+    e.updateRelation(rel!.id, { weight: 4 });
+    expect(e.getRelation(rel!.id)).toMatchObject({ target: b, weight: 4 });
+    e.updateRelation(rel!.id, { info: 'kept' });
+    expect(e.getRelation(rel!.id)).toMatchObject({ info: 'kept', weight: 4 });
+    e.updateRelation(rel!.id, { target: c, weight: 0.5 });
+    expect(e.getRelation(rel!.id)).toMatchObject({ target: c, weight: 0.5 });
+    expect(() => e.updateRelation(rel!.id, { weight: -1 })).toThrow(expect.objectContaining({ code: 'VALUE_INVALID' }));
+    const loaded = e.admin.addRelation(b, 'refers', c, undefined, 3);
+    expect(e.getRelation(loaded)).toMatchObject({ weight: 3 });
+    e.admin.updateRelation(loaded, { target: a });
+    expect(e.getRelation(loaded)).toMatchObject({ target: a, weight: 3 });
+    // A loaded weight of 1 is the weight a link leaves out
+    const one = e.admin.addRelation(a, 'mentions', c, undefined, 1);
+    e.write(a).link('mentions', c, { weight: 1 });
+    expect(e.findRelations({ kind: 'mentions' }).map((r) => [r.id, r.weight])).toEqual([[one, 1]]);
+  });
+
+  it('rank walks and teleports by weight unless told not to, and EXPLAIN reports the weight it read', () => {
+    e = weighted();
+    const [a, b, c] = [task('a'), task('b'), task('c')];
+    e.write(a).link('refers', b, { weight: 9 }).link('refers', c, { weight: 1 });
+    const byWeight = scores(e.query('Task').rank('refers', { seeds: [a] }).hits());
+    expect(byWeight.get(b)! / byWeight.get(c)!).toBeCloseTo(9, 9);
+    const even = scores(e.query('Task').rank('refers', { seeds: [a], weights: false }).hits());
+    expect(even.get(b)).toBe(even.get(c));
+    // A seed's weight is how often walkers start there; an id is weight 1, named again it adds
+    const seeded = scores(e.query('Task').rank('refers', { seeds: [{ id: b, weight: 3 }, c] }).hits());
+    expect(seeded.get(b)! / seeded.get(c)!).toBeCloseTo(3, 9);
+    expect(scores(e.query('Task').rank('refers', { seeds: [b, b, b, c] }).hits())).toEqual(seeded);
+    for (const weight of [0, -1]) {
+      expect(() => e.query('Task').rank('refers', { seeds: [{ id: a, weight }] }).ids(), String(weight)).toThrow(expect.objectContaining({ code: 'BATCH_INVALID' }));
+    }
+    const [, stage] = e.query('Task').rank('refers').explain().stages;
+    expect(stage).toMatchObject({ stage: 'rank', nodes: 3, edges: 2, weight: 10 });
+    expect(e.query('Task').rank('refers', { weights: false }).explain().stages[1]).not.toHaveProperty('weight');
+  });
+
+  it('communities count each edge by its weight unless told not to', () => {
+    e = weighted();
+    // A square whose sides a–d and b–c are heavy
+    const [a, b, c, d] = ['a', 'b', 'c', 'd'].map(task);
+    for (const [s, t, weight] of [[a, b, 1], [b, c, 10], [c, d, 1], [d, a, 10]] as const) e.write(s!).link('refers', t!, { weight });
+    expect(e.query('Task').communities('refers')).toEqual([[a, d], [b, c]]);
+    expect(e.query('Task').communities('refers', { weights: false })).not.toEqual([[a, d], [b, c]]);
   });
 });

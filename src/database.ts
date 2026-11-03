@@ -5,8 +5,10 @@
 // The port is structural so this module never loads `elmdb`: `@apackdev/ears/lmdb` opens the database, and only that
 // entry imports it.
 import { Packr, Unpackr } from 'msgpackr';
+import { callSite, createCallTally, type CallCounting, type CallReport, type CallTally } from './calls.ts';
 import { EarsError, type EarsErrorCode } from './errors.ts';
 import { setField } from './ids.ts';
+import { createOperationObservation, type EarsOperationObserver } from './observation.ts';
 
 /** How `transact` commits */
 export interface UnitOptions {
@@ -147,8 +149,11 @@ const CODES: Record<string, EarsErrorCode> = {
   SHORT_CODE_IN_USE: 'SHORT_CODE_IN_USE',
   SELF_LINK: 'SELF_LINK',
   CYCLE: 'CYCLE',
+  DUPLICATE_EDGE: 'DUPLICATE_EDGE',
   VALUE_INVALID: 'VALUE_INVALID',
   UNKNOWN_INDEX: 'UNKNOWN_INDEX',
+  FIELD_TYPE: 'FIELD_TYPE',
+  PATTERN_INVALID: 'PATTERN_INVALID',
 };
 
 /**
@@ -164,6 +169,28 @@ export function crossing<T>(fn: () => T): T {
     if (mapped) throw new EarsError(mapped, (error as Error).message);
     throw error;
   }
+}
+
+/** Reports committed state before returning or rethrowing a failed sync. A refusal before commit does not notify.
+ * A failed refresh after NOT_DURABLE preserves both errors and the committed-outcome code; ordinary refresh errors
+ * propagate without being mistaken for operation failures. */
+export function runCommitted<T>(operation: () => T, notify: () => void): T {
+  let result: T;
+  try {
+    result = operation();
+  } catch (error) {
+    if ((error as { code?: unknown })?.code === 'NOT_DURABLE') {
+      try { notify(); }
+      catch (notification) {
+        throw Object.assign(new AggregateError([error, notification],
+          'The operation committed but failed to sync, and refreshing committed state also failed', { cause: error }),
+        { code: 'NOT_DURABLE' });
+      }
+    }
+    throw error;
+  }
+  notify();
+  return result;
 }
 
 /** One batch operation, as elmdb's protocol takes it (`elmdb/protocol/Op.ts`) */
@@ -204,6 +231,11 @@ export interface Connection {
   committedEverything(): void;
   /** The last commit's sequence, or 0 */
   lastCommit(): number;
+  /** Counting the calls this connection makes, off until started */
+  readonly calls: CallCounting;
+  /** The count being kept, while counting runs: what the watch scheduler records each watch's runs into */
+  tally(): CallTally | undefined;
+  observe(observer: EarsOperationObserver): () => void;
 }
 
 export function createConnection(database: EarsDatabase, { freeze = false }: { freeze?: boolean } = {}): Connection {
@@ -232,6 +264,30 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     if (listeners.size > 0) committed({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
 
+  const observation = createOperationObservation(
+    () => ({ watch: tracking !== undefined, inUnit: levels.length > 0 }),
+    () => database.sequence,
+  );
+  /** The count being kept while counting runs, and the unit it is counting until that commits or aborts */
+  let tally: CallTally | undefined;
+  let counted: { site: string; writes: number; ops: number; ms: number } | undefined;
+  /** What `transact`'s outermost level counted, once its unit ends: a unit that wrote nothing opened none */
+  const unitEnded = () => {
+    if (tally && counted && counted.writes > 0) tally.record('unit', counted.site, false, counted.ops, counted.ms, counted.writes);
+    counted = undefined;
+  };
+  /** Runs `fn`, adding its time to the unit being counted */
+  const timedInUnit = <T>(fn: () => T): T => {
+    const into = counted;
+    if (!into) return fn();
+    const start = performance.now();
+    try {
+      return fn();
+    } finally {
+      into.ms += performance.now() - start;
+    }
+  };
+
   /** The open unit, opened now for a write when none is */
   const writable = (): EarsUnit => {
     if (unit) return unit;
@@ -242,8 +298,13 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   };
 
   function transact<T>(fn: () => T, options?: UnitOptions): T {
+    return observation.run('unit', 0, () => transactUnit(fn, options));
+  }
+
+  function transactUnit<T>(fn: () => T, options?: UnitOptions): T {
     const level: { savepoint?: number; kept?: boolean } = {};
     const outermost = levels.length === 0;
+    if (outermost && tally) counted = { site: callSite(), writes: 0, ops: 0, ms: 0 };
     if (!outermost && unit) {
       const held = unit;
       level.savepoint = crossing(() => held.savepoint());
@@ -263,7 +324,8 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       const held = unit;
       if (outermost) {
         unit = undefined;
-        if (held?.isOpen) held.abort();
+        if (held?.isOpen) timedInUnit(() => held.abort());
+        unitEnded();
       } else if (held?.isOpen && level.savepoint !== undefined) {
         held.rollbackTo(level.savepoint);
       }
@@ -278,43 +340,100 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       return value;
     }
     unit = undefined;
-    if (!held) return value;
+    if (!held) {
+      unitEnded();
+      return value;
+    }
     if (!level.kept) {
       // Every write it held was rolled back with a level that threw
-      held.abort();
+      timedInUnit(() => held.abort());
+      unitEnded();
       return value;
     }
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
-      heard(unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))) as { sequence: number; touched: number[] });
+      const changes = timedInUnit(() => unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))));
+      unitEnded();
+      heard(changes as { sequence: number; touched: number[] });
     } catch (error) {
-      if (held.isOpen) held.abort();
+      const open = held.isOpen;
+      if (open) held.abort();
+      unitEnded();
       // A durable commit whose sync failed was made all the same, and its change set didn't cross with the error
-      else if ((error as { code?: unknown })?.code === 'NOT_DURABLE') committed({ sequence: database.sequence, touched: 'all' });
+      if (!open && (error as { code?: unknown })?.code === 'NOT_DURABLE') committed({ sequence: database.sequence, touched: 'all' });
       throw error;
     }
     return value;
   }
 
+  /** A read's or a write's call, counted when counting runs */
+  function counting<T>(kind: 'read' | 'write', ops: number, fn: () => T): T {
+    if (!observation.active) return countedCall(kind, ops, fn);
+    return observation.run(kind, ops, () => countedCall(kind, ops, fn));
+  }
+
+  function countedCall<T>(kind: 'read' | 'write', ops: number, fn: () => T): T {
+    if (!tally) return fn();
+    // A write inside a unit is the unit's, counted with it; one inside a unit begun before counting is not counted
+    const inUnit = kind === 'write' && levels.length > 0;
+    const site = inUnit ? undefined : callSite();
+    const start = performance.now();
+    try {
+      return fn();
+    } finally {
+      const ms = performance.now() - start;
+      if (site !== undefined) tally?.record(kind, site, tracking !== undefined, ops, ms);
+      else if (counted) {
+        counted.writes += 1;
+        counted.ops += ops;
+        counted.ms += ms;
+      }
+    }
+  }
+
+  /** The report `stop` answered, which `report` repeats until counting starts again */
+  let stopped: CallReport | undefined;
+  const calls: CallCounting = {
+    start() {
+      tally = createCallTally();
+      stopped = undefined;
+      // A unit begun before this count started isn't the count's, as one begun before counting at all isn't
+      counted = undefined;
+    },
+    report: () => tally?.report(true) ?? stopped ?? createCallTally().report(false),
+    stop() {
+      stopped = (tally ?? createCallTally()).report(false);
+      tally = undefined;
+      counted = undefined;
+      return stopped;
+    },
+  };
+
   return {
     read(reads) {
-      const bytes = pack(tracking === undefined ? { reads } : { reads, track: tracking });
-      const held = unit;
-      const answers = unpackAnswers(crossing(() => (held ? held.read(bytes) : database.readSync(bytes))));
-      return freeze ? answers.map(freezeValues) : answers;
+      return counting('read', reads.length, () => {
+        const bytes = observation.request(pack(tracking === undefined ? { reads } : { reads, track: tracking }));
+        const held = unit;
+        const answers = unpackAnswers(observation.response(crossing(() => (held ? held.read(bytes) : database.readSync(bytes)))));
+        return freeze ? answers.map(freezeValues) : answers;
+      });
     },
     write(ops, now = Date.now()) {
-      const bytes = pack({ ops, now });
-      const target = levels.length ? writable() : undefined;
-      const answer = crossing(() => (target ? target.write(bytes) : database.write(bytes, false)));
-      if (target) levels.at(-1)!.kept = true;
-      const written = unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
+      const written = counting('write', ops.length, () => {
+        const bytes = observation.request(pack({ ops, now }));
+        const target = levels.length ? writable() : undefined;
+        const answer = observation.response(crossing(() => (target ? target.write(bytes) : database.write(bytes, false))));
+        if (target) levels.at(-1)!.kept = true;
+        return unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
+      });
       if (written.changes) heard(written.changes);
       return written.results;
     },
     load(loads) {
-      crossing(() => database.bulkLoad(pack(loads)));
-      committed({ sequence: database.sequence, touched: 'all' });
+      runCommitted(
+        () => observation.run('load', loads.length, () => crossing(() => database.bulkLoad(observation.request(pack(loads))))),
+        () => committed({ sequence: database.sequence, touched: 'all' }),
+      );
     },
     transact,
     get inUnit() { return levels.length > 0; },
@@ -339,5 +458,8 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
     committedEverything: () => committed({ sequence: database.sequence, touched: 'all' }),
     lastCommit: () => database.sequence,
+    calls,
+    tally: () => tally,
+    observe: observation.observe,
   };
 }

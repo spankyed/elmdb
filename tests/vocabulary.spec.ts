@@ -66,7 +66,15 @@ function faces(): Record<'engine' | 'admin' | 'query' | 'builder' | 'write', Rec
   const engine = freshEngine({ types: ['Note'], relationKinds: [], roles: [] });
   const id = engine.create('Note').id();
   const { admin, ...operations } = engine;
-  const face = (members: object) => members as Record<string, unknown>;
+  const face = (members: object) => {
+    const result = { ...members } as Record<string, unknown>;
+    for (let prototype = Object.getPrototypeOf(members); prototype && prototype !== Object.prototype && prototype !== Function.prototype; prototype = Object.getPrototypeOf(prototype)) {
+      for (const name of Object.getOwnPropertyNames(prototype)) {
+        if (name !== 'constructor' && !Object.hasOwn(result, name)) result[name] = (members as Record<string, unknown>)[name];
+      }
+    }
+    return result;
+  };
   return { engine: face(operations), admin: face(admin), query: face(engine.query), builder: face(engine.query.all()), write: face(engine.write(id)) };
 }
 
@@ -93,6 +101,7 @@ function absentAsNull(face: Record<string, unknown>): string[] {
 /** The members that break a rule on purpose, each with why. One that no longer breaks it is reported as stale */
 const UNPAIRED_BY_DESIGN: Record<string, string> = {
   unlinkAll: 'removes every edge of the entity; its positive is a link per edge, not one call',
+  pathTo: "names where the path ends, not a way edges run: the query's set is its start, `direction` the way it walks",
 };
 
 describe('rules read off the names', () => {

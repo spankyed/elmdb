@@ -1,6 +1,7 @@
 // Text search through the builder: a type's `search` declaration as elmdb's text index, `search` ranked and combined
-// with the steps around it, `after` paging, and `hits` with highlights and picked fields. How elmdb matches and ranks
-// is its own specs' (elmdb/crates/elmdb/src/engine/text/tests.rs); these hold the builder to sending what it means.
+// with the steps around it, `after` paging, and `hits` with highlights and picked fields; and its `substrings` as
+// elmdb's trigram index, which `containing` and `matching` read. How elmdb matches and ranks is its own specs'
+// (elmdb/crates/elmdb/src/engine/text/tests.rs, engine/tests/trigram.rs); these hold the builder to sending what it means.
 import { describe, expect, it } from 'vitest';
 import type { EARS } from '../../src/index.ts';
 import { freshEngine } from './engine-under-test.ts';
@@ -13,7 +14,7 @@ const engine = ({ freeze = false } = {}) => freshEngine({
   relationKinds: ['in'],
   roles: [],
   rowRules: {
-    Message: { required: [], search: { fields: { text: 1, sender: 2 } } },
+    Message: { required: [], search: { fields: { text: 1, sender: 2 } }, substrings: ['text'] },
     Thread: { required: [], search: { fields: { title: 1 }, stem: 'en' } },
   },
 });
@@ -88,5 +89,41 @@ describe('search', () => {
     expect(e.query('Message').search('beta').ids()).toEqual([id]);
     e.write(id).destroy();
     expect(e.query('Message').search('beta').ids()).toEqual([]);
+  });
+});
+
+describe('containing and matching', () => {
+  it('find text as it is written, in the order the query had, among what the steps before reached', () => {
+    const e = engine();
+    const timeout = e.create('Message', { text: 'Error: ETIMEDOUT after 30000ms' }).id();
+    const typeError = e.create('Message', { text: "TypeError: Cannot read properties of undefined (reading 'seq')" }).id();
+    const commit = e.create('Message', { text: 'fixed in a1b6603e5a' }).id();
+    e.create('Message', { text: 'all good' });
+    expect(e.query('Message').containing('ETIMEDOUT').ids()).toEqual([timeout]);
+    expect(e.query('Message').containing('error:').ids()).toEqual([]);
+    expect(e.query('Message').containing('error:', { caseInsensitive: true }).ids()).toEqual([timeout, typeError]);
+    expect(e.query('Message').matching(String.raw`[0-9a-f]{10}`).ids()).toEqual([commit]);
+    expect(e.query('Message').matching('(?i)^error').ids()).toEqual([timeout]);
+    expect(e.query('Message').orderBy('text', 'desc').containing('Error').ids()).toEqual([typeError, timeout]);
+    const thread = e.create('Thread', { title: 'Failures' }).link('in', typeError).id();
+    expect(e.query.ids([thread]).out('in', 'Message').containing('Error').ids()).toEqual([typeError]);
+  });
+
+  it('refuse a type with no trigram index, and a pattern the syntax does not hold, naming it', () => {
+    const e = engine();
+    e.create('Message', { text: 'x' });
+    expect(() => e.query('Plain').containing('x').ids()).toThrow(expect.objectContaining({ code: 'UNKNOWN_INDEX' }));
+    expect(() => e.query('Message').matching('x(?=y)').ids())
+      .toThrow(expect.objectContaining({ code: 'PATTERN_INVALID', message: expect.stringContaining('x(?=y)') }));
+  });
+
+  it('follow writes', () => {
+    const e = engine();
+    const id = e.create('Message', { text: 'alpha-1' }).id() as Id;
+    e.write(id).set('text', 'beta-2');
+    expect(e.query('Message').containing('alpha-1').ids()).toEqual([]);
+    expect(e.query('Message').containing('beta-2').ids()).toEqual([id]);
+    e.write(id).destroy();
+    expect(e.query('Message').containing('beta-2').ids()).toEqual([]);
   });
 });
