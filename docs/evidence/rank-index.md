@@ -238,8 +238,8 @@ does, and the longest stretch of them:
 | 8 | 47, 8 ms | 97, 127 ms | 1.8, 0.7 ms | 312, 301 ms | 6,358, 6,374 | 60%, 59% | 407, 497 ms | 80%, 81% | 1.3, 1.1 s |
 
 The rule was set before these were read: the smallest count past which those latencies stop improving by more than the runs
-differ, whose longest stretch is at most twice that of none. Waiting doesn't cost freshness here, it buys some: a drain
-computed under the lock holds up the writes it would otherwise be finished before. The scores reported are well past the
+differ, whose longest stretch is at most twice that of none. Waiting didn't cost freshness in these runs: the stretches past tolerance
+were shorter with retries than without, why not having been measured. The scores reported are well past the
 tolerance through most of these runs at any count, up to 2e-4 at a tolerance of 1e-6, since a change comes every half second
 and a drain then takes its time; a read reports that bound rather than hiding it.
 
