@@ -101,7 +101,8 @@ Diagnostics are off by default, and three checks hold that claim:
 - **Close to nothing when nobody collects.** Compiled in with no collector, a span is one cached check of its callsite,
   and no clock is read and no field computed. `python3 scripts/diagnostics-overhead.py` counts the instruction-count
   benchmark's operations on one commit without the feature and with it, and fails when a gated case grows more than
-  0.05% or 100 instructions, whichever is more. It refuses a case it doesn't know and a gated case that didn't run. CI's
+  0.05% or 300 instructions, whichever is more, or spends anything more on allocating, naming the functions that grew.
+  It refuses a case it doesn't know and a gated case that didn't run. CI's
   `diagnostics overhead` job runs it on every pull request; from a Mac:
 
   ```sh
@@ -337,8 +338,12 @@ script is the way in.
 **Instruction counts.** `benches/instructions.rs` counts the instructions of the same operations under Valgrind's
 Callgrind, through [gungraun](https://github.com/gungraun/gungraun) (the renamed iai-callgrind): each run once, its
 setup, fixture and answer check outside the count, the maintenance ones at 1k entities and the reads over the same
-10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare. Text
-work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
+10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare, and it
+doesn't move with the machine either: the benchmark allocates through a counter that only moves forward, since glibc's
+`malloc` costs what the heap's shape makes it and that follows the CPU. So a count here leaves out what an allocator
+costs, and an allocation shows at its fixed 15 instructions; real memory and time are the heap tests' and Criterion's.
+The `instruction determinism` workflow, dispatched after a change of that allocator, the toolchain, Valgrind or the
+runner image, runs the benchmark on eight runners and fails when they disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
 (`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
 own thread does none of a drain's work, so it holds the drains' commits and not the benchmark's. The fixture's build runs there too

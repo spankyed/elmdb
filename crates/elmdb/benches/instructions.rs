@@ -3,6 +3,76 @@
 //! and a change shows in one run of each (`docs/architecture/testing.md`, Instruction counts). Each setup, its fixture
 //! and its answer check are outside the count, but for `rank_drain`'s, which `rank_build` counts alone. Valgrind runs on Linux, so elsewhere this says so and exits.
 
+/// Every allocation of this benchmark, from one address range that only moves forward. glibc's `malloc` costs what the
+/// heap's shape makes it, and that shape follows the CPU and the binary: one binary's `read_bytes` differed by 1% between
+/// two CPU models with every function of its own the same (`docs/evidence/instruction-counts.md`). Here an allocation
+/// costs the same whatever came before it, so a count moves when the work does; a new allocation still costs its
+/// instructions, and `scripts/diagnostics-overhead.py` counts them apart. It frees nothing, so `realloc` always copies.
+/// C libraries' own `malloc` stays glibc's. Valgrind runs on Linux alone
+#[cfg(target_os = "linux")]
+mod bump {
+    use std::alloc::{GlobalAlloc, Layout};
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    /// The range reserved, of which only what is written takes memory: past every case's total, setup included
+    /// (the same evidence), and within what Valgrind will map
+    const RESERVED: usize = 4 << 30;
+    /// What `malloc` promises, so that a copy or a comparison takes the path it would there
+    const MIN_ALIGN: usize = 16;
+
+    pub struct Bump;
+
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    static END: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" {
+        fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, offset: i64) -> *mut u8;
+    }
+
+    /// Reserves the range. The first allocation is the runtime's, before any other thread
+    #[cold]
+    fn reserve() {
+        const PROT_READ_WRITE: i32 = 1 | 2;
+        const MAP_PRIVATE_ANONYMOUS_NORESERVE: i32 = 0x02 | 0x20 | 0x4000;
+        let base =
+            unsafe { mmap(std::ptr::null_mut(), RESERVED, PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS_NORESERVE, -1, 0) };
+        if base as isize == -1 {
+            eprintln!("reserving the benchmark's allocations failed");
+            std::process::abort();
+        }
+        NEXT.store(base as usize, Relaxed);
+        END.store(base as usize + RESERVED, Relaxed);
+    }
+
+    /// Named so that a Callgrind file can count the allocations, and never inlined so that it stays there to count
+    #[inline(never)]
+    fn bump_allocation(layout: Layout) -> *mut u8 {
+        if END.load(Relaxed) == 0 {
+            reserve();
+        }
+        let align = layout.align().max(MIN_ALIGN);
+        let at = NEXT.fetch_add(layout.size() + align - 1, Relaxed);
+        let start = (at + align - 1) & !(align - 1);
+        if start + layout.size() > END.load(Relaxed) {
+            eprintln!("the benchmark allocated past the {RESERVED} bytes reserved");
+            std::process::abort();
+        }
+        start as *mut u8
+    }
+
+    unsafe impl GlobalAlloc for Bump {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            bump_allocation(layout)
+        }
+
+        unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static ALLOCATOR: bump::Bump = bump::Bump;
+
 #[cfg(target_os = "linux")]
 #[path = "../tests/support/mod.rs"]
 mod support;
