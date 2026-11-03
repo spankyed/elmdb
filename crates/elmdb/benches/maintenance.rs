@@ -164,6 +164,29 @@ fn maintenance(c: &mut Criterion) {
             })
         });
         black_box(&local.directory);
+        // One change over a graph with hubs, at the default tolerance: from a document late in it, and from its first, a hub,
+        // whose estimate is what the change moves
+        let hubs = Fixture::ranked_hub_graph_at(rows, 5, 1e-5);
+        for (name, source) in [("hubs", rows - 1), ("hubSource", 0)] {
+            let change = |op: &str| elmdb::engine::batch::Batch {
+                ops: vec![
+                    serde_json::from_value(serde_json::json!({ "op": op, "source": format!("Doc-{source:08}"),
+                            "kind": "refs", "target": format!("Doc-{:08}", rows / 2) }))
+                    .unwrap(),
+                ],
+                now: Some(1.0),
+            };
+            let (link, unlink) = (change("link"), change("unlink"));
+            group.bench_function(BenchmarkId::new(format!("rankIndexChange/{name}"), rows), |b| {
+                b.iter(|| {
+                    hubs.db.write(black_box(&link), false).unwrap();
+                    hubs.db.wait_for_index_builds().unwrap();
+                    hubs.db.write(black_box(&unlink), false).unwrap();
+                    hubs.db.wait_for_index_builds().unwrap();
+                })
+            });
+        }
+        black_box(&hubs.directory);
         // The same graph weighted: `rank` by weight, within 1.2× of the unweighted rank above
         let weighted = Fixture::weighted_graph(rows, 5);
         weighted.assert_graph_read("rankWeighted");

@@ -190,14 +190,16 @@ const CELL_TOLERANCES: f64 = 256.0;
 /// The significant bits of an estimate a rank index's score order keeps: enough that a cell spans `CELL_TOLERANCES` times
 /// the tolerance. A changed tolerance rebuilds the index, so no key outlives the bits it was written with
 pub fn order_precision(tolerance: f64) -> u32 {
-    (1.0 / (CELL_TOLERANCES * tolerance)).log2().ceil().clamp(4.0, 52.0) as u32
+    // libm's, not the platform's: a cell's width is part of what a database file holds, on every platform alike
+    libm::log2(1.0 / (CELL_TOLERANCES * tolerance)).ceil().clamp(4.0, 52.0) as u32
 }
 
 /// A node's place in its index's score order: its cell, then its own place. An edge changed moves nearly every estimate a
 /// little, and a push that leaves an estimate in its cell leaves the order's entry as it is, so a cell's width is how much
-/// of a drain's writes are the order's. The order is promised between scores further apart than twice the larger of the
-/// tolerance and the bound an index reports. A cell can be wider than that only for a score over about `2 /
-/// CELL_TOLERANCES` of the estimates' sum, which few nodes can have, and a read of the top reads through those
+/// of a drain's writes are the order's. A read of the top promises the order between the index's own scores further apart
+/// than twice the tolerance, so between PageRank's further apart than that and the bound it reports. A cell can be wider
+/// than twice the tolerance only for a score over about `2 / CELL_TOLERANCES` of the estimates' sum, which few nodes can
+/// have, and a read of the top reads through those
 fn order_key(index: &str, precision: u32, node: &Node) -> Vec<u8> {
     keys::rank_order(index, f64::from_bits(order_bits(node.x, precision)), node.type_at, node.seq)
 }

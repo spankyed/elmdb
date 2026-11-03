@@ -759,7 +759,7 @@
           "description": "The bound on the scores' L1 distance from `rank`'s that the index keeps once its pushes are done, above 0",
           "type": "number",
           "format": "double",
-          "default": 1e-6
+          "default": 0.00001
         }
       },
       "required": [

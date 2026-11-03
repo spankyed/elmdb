@@ -242,6 +242,18 @@ Read costs, at every width and at 16 bits alike, hits then ids, top 10 and top 1
 one. Reading through every cell instead, so that a read with `limit` always agreed with one without, took top 10 from 9 µs
 to 6 ms at 20,000 documents, as nearly every node is in one cell at 16 bits too.
 
+Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-11-02 against the drain retried off the lock
+(`826b827`), this change at `40089a1`, run in turn twice each at a load average of 5 to 6, at the default tolerance of the time, 1e-6:
+
+| | before | after |
+|---|---:|---:|
+| One change, spread, 100,000 | 423, 432 ms | 371, 381 ms |
+| One change, spread, 10,000 | 61.8, 61.3 ms | 45.9, 45.8 ms |
+| Burst, spread, 100,000 | 533, 532 ms | 420, 426 ms |
+| Burst, spread, 10,000 | 65.3, 65.6 ms | 58.3, 58.1 ms |
+| One change, near, 100,000 | 21.6, 23.1 ms | 22.2, 23.2 ms |
+| `ranked`, 100,000 | 8.22, 8.22 µs | 8.43, 8.40 µs |
+
 ### Cutting how long a drain holds the lock
 
 Writing a drain's rows in key order, each prefix in one pass, doesn't pay: its write phase at 100,000 documents read 98.3
@@ -278,6 +290,96 @@ differ, whose longest stretch is at most twice that of none. Waiting didn't cost
 were shorter with retries than without, why not having been measured. The scores reported are well past the
 tolerance through most of these runs at any count, up to 2e-4 at a tolerance of 1e-6, since a change comes every half second
 and a drain then takes its time; a read reports that bound rather than hiding it.
+
+### The default tolerance, against exact PageRank
+
+The readings above that say "the default tolerance" are at 1e-6, which it was then. `examples/rank-accuracy.rs`, 2026-11-02,
+this Mac: a rank index's top after 30 ordinary changes (`--accuracy`), against `rank` run to 1e-13, over a graph with hubs (the
+first document some 4% of the score at 100,000), the same graph with its hubs anywhere among the documents by three seeds, and
+the spread graph. One cell's nodes come by place, and on the graph with hubs first those places follow the scores; shuffled, they
+don't.
+
+How many of each true top the index's top holds, and how many in the true place:
+
+| Documents | Top | Graph | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---:|---:|---|---:|---:|---:|---:|
+| 1,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, each seed | 10, 10 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 97, 94 | 99, 99 | **99, 99** | 100, 100 |
+| | | shuffled, lowest seed | 99, 97 | 99, 98 | **100, 100** | 100, 100 |
+| 10,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, each seed | 10, 10 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 97, 94 | 100, 100 | **100, 100** | 100, 100 |
+| | | shuffled, lowest seed | 98, 91 | 99, 98 | **100, 98** | 100, 98 |
+| 100,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, lowest seed | 10, 8 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 99, 99 | 100, 100 | **100, 100** | 100, 100 |
+| | | shuffled, lowest seed | 97, 94 | 98, 96 | **99, 97** | 100, 100 |
+| | 1,000 | hubs | 989, 869 | 995, 977 | **999, 995** | 1,000, 1,000 |
+| | | shuffled, lowest seed | 983, 884 | 995, 976 | **998, 994** | 999, 997 |
+
+The same on 2026-11-03 with more histories, the true top's share held at each, lowest to highest: the shuffled graph by eight seeds
+and the spread graph, whose links a seed doesn't change, by four histories of changes:
+
+| Documents | Top | Graph | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---:|---:|---|---:|---:|---:|---:|
+| 1,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 3-4 | 9-10 | **10** | 10 |
+| | 100 | shuffled | 99-100 | 99-100 | **100** | 100 |
+| | | spread | 40-50 | 77-83 | **98-100** | 99-100 |
+| 10,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 2-4 | 3-6 | **3-7** | 7-10 |
+| | 100 | shuffled | 98-100 | 99-100 | **100** | 100 |
+| | | spread | 29-31 | 60-66 | **79-88** | 93-98 |
+| 100,000 | 10 | shuffled | 10 | 10 | **10** | 10 |
+| | | spread | 1-5 | 2-7 | **2-6** | 4-8 |
+| | 100 | shuffled | 97-100 | 98-100 | **99-100** | 100 |
+| | | spread | 27-29 | 54-68 | **54-67** | 65-75 |
+| | 1,000 | shuffled | 980-988 | 995-999 | **998-1,000** | 999-1,000 |
+| | | spread | 251-326 | 185-196 | **910-930** | 962-993 |
+
+So the default is 1e-5, the loosest at which the top 10 was the true top 10 in the true order and the top 100 within 1% over every
+graph with hubs, at every size and seed, a bar set before these were read. One seed at 1,000 documents holds two of its top 10 in
+the other order at every tolerance: their scores are equal, so either is the true order. That order is a `hits` answer's, which
+sorts what it read; an `ids` answer past the first narrow cell comes by place, so on a shuffled graph it holds the same nodes in
+another order, which only the top 10 at 1,000 and 4,000 documents is held to (`tests/rank_default.rs`).
+
+The bar separates 1e-5 from 1e-4 narrowly. Over the eight shuffled graphs 1e-4's top 10 is true in every case, and it misses the bar
+once, at 98 of a top 100. Its one near tie in the top 10 comes only with the hubs first: the same links with their documents shuffled
+put that top 10 in its true order at 1e-4 at all three sizes, so there place order takes the wrong one, and that graph flatters no
+top 10. What it may flatter is further down, by a few places in a top 1,000. Nothing promises 1e-5's result either. The closest two of the top 11 are 1.6e-5, 1.3e-5 and
+3.7e-7 of all the scores apart over the graph with hubs first at the three sizes, and a median of 5.9e-5, 7.4e-6 and 1.3e-6 over the
+shuffled ones, where the order's margin at 1e-5 is at least 2e-5. Only the median at 1,000 documents is clear of it; the rest hold
+because the estimates are closer than the margin allows. An application for which those swaps are acceptable can declare a looser
+tolerance.
+
+What it costs is accuracy over a graph whose scores are alike, with no time back. Over the spread graph 1e-5 holds less than 1e-6 at
+every size above 1,000: at 10,000 documents 3 to 7 of the top 10 against 7 to 10, and 79 to 88 of the top 100 against 93 to 98. Those
+swaps are between scores that barely differ: 1e-5 loses a median 2.8e-4 of the top 10's score at 10,000 and 1.3e-4 at 100,000,
+against 3.5e-6 and 4.3e-5 at 1e-6. At 1,000 documents 1e-5 finds the true top 10, and at 100,000 no tolerance tried does.
+
+What one change costs at 100,000 documents, its commit and its drain: medians of 40 from a document in the later half and of 20
+from the highest-scoring one, and of 20 bursts of ten, the tolerances alternated, two runs each, a load average of 4 to 5:
+
+| Graph | Tolerance | Ordinary | Highest-scoring | Burst |
+|---|---:|---:|---:|---:|
+| hubs | **1e-5** | 118, 118 ms | 292, 295 ms | 145, 149 ms |
+| hubs | 1e-6 | 146, 144 ms | 342, 335 ms | 170, 175 ms |
+| shuffled | **1e-5** | 128, 138 ms | 286, 309 ms | 164, 159 ms |
+| shuffled | 1e-6 | 156, 154 ms | 343, 356 ms | 186, 191 ms |
+
+So 1e-5 saves 10 to 19% on an ordinary change, and 12 to 17% on one from a hub or a burst. A change from a hub is the costliest
+found, over twice an ordinary one on the same graph: it moves far more residual, as the estimate it redistributes is far larger.
+
+Earlier the same day, not alternated, at a load of 5 to 29, so rough: over the graph with hubs 1e-4's ordinary change had a median
+of 0.1 ms and a 90th percentile of 87 ms, since at least half of them commit with no drain, with 228 and 231 ms from a hub and 136
+and 137 ms a burst. Over the spread graph 1e-5 and 1e-6 cost about the same: 227 and 244 ms against 230 and 261 ms an ordinary
+change, 233 and 246 ms against 242 and 338 ms a burst. A watch over the spread graph's top hears some 70 of the top 100 change
+place with each change at any tolerance, where the graph with hubs moves none at 100,000: the roadmap's watch churn, on that graph
+alone.
+
+Reads over the graph with hubs at 1e-5 are 8.4 µs top 10 and 751 µs top 1,000 at 100,000 documents as hits, and 3.9 and 71 µs as
+ids, so reading through a wide cell costs little there.
 
 ### What it took to get there
 

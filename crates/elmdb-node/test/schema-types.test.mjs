@@ -40,7 +40,7 @@ test('the canonical form a database answers is a Schema, every absent option nul
         declaredBy: null,
         direction: 'out',
         relations: ['cites', 'weighs'],
-        tolerance: 1e-6,
+        tolerance: 1e-5,
         types: ['Note'],
         weights: true,
       },
