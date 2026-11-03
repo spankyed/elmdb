@@ -209,13 +209,16 @@ impl Fixture {
     /// A graph with hubs, as documents that cite each other have: each document refers to `degree` others, the earlier
     /// ones far more often, the first some 5% of all links at 100,000 documents. Ranked at `tolerance`
     #[allow(dead_code)]
-    pub fn ranked_shuffled_hub_graph_at(rows: usize, degree: usize, tolerance: f64, seed: u64) -> Self {
-        Self::graph_of(rows, degree, false, Some(tolerance), Links::ShuffledHubs(seed))
-    }
-
-    /// The same graph with its hubs first among the documents
     pub fn ranked_hub_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
         let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::Hubs);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
+    }
+
+    /// The same shape by `seed`, with its hubs anywhere among the documents
+    #[allow(dead_code)]
+    pub fn ranked_shuffled_hub_graph_at(rows: usize, degree: usize, tolerance: f64, seed: u64) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::ShuffledHubs(seed));
         fixture.db.wait_for_index_builds().unwrap();
         fixture
     }
