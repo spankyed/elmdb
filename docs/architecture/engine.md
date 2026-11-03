@@ -88,7 +88,9 @@ envelope, an answer per read. A read is a query plan, or a direct read: an entit
 whether it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind
 and ends, `wouldCreateCycle` (the walk a link's
 `CYCLE` check makes, a trashed entity's edges included), and search's
-`suggest` and `findLabels`. A search naming an index its type lacks, or none on a type with none or several, is refused
+`suggest` and `findLabels`, and `catalog`: each declared type with its live entities and the fields its entities have
+held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so a watch over it
+runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`).
 
 A plan is a scope, a start, steps and a terminal:
