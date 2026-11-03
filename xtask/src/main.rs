@@ -13,18 +13,22 @@
 //! - `check-mutant-exclusions`: fails when an `exclude_re` in `.cargo/mutants.toml` matches none of the mutants
 //!   cargo-mutants lists: each names a mutant by its line, so an edit above it leaves the exclusion naming nothing, the
 //!   mutant it was written for reported again, and the line free for another mutant to be skipped unread.
+//! - `compare`: runs one command on two revisions in turn and prints each reading beside the load as its run ended; it
+//!   reports and decides nothing (`docs/architecture/testing.md`, Comparing two revisions).
 //! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
 //!   testing.md`, The build directory).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod compare;
 mod generate;
 
 fn main() -> ExitCode {
     let task = std::env::args().nth(1);
     let result = match task.as_deref() {
         Some("generate") => generate::write(&generated_dir()),
+        Some("compare") => compare::compare(&workspace_root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         Some("check-generated") => check_generated(),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
@@ -33,7 +37,7 @@ fn main() -> ExitCode {
         Some("check-sync") => check_sync(&workspace_root()),
         Some("check-mutant-exclusions") => check_mutant_exclusions(&workspace_root()),
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | check-mutant-exclusions | sweep>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | check-mutant-exclusions | compare | sweep>"
                 .to_owned(),
         ),
     };

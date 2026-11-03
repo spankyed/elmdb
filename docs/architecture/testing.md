@@ -401,6 +401,22 @@ assertion and the slowdown must be reported as a regression. Run it serially, in
 `cargo bench -p elmdb --bench maintenance -- --save-baseline <name>`; it reuses `target`, so rebuild afterwards. The
 evidence is [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).
 
+## Comparing two revisions
+
+```sh
+cargo xtask compare main --runs 2 -- cargo bench -p elmdb --bench maintenance -- 'graph/rankIndexChange/1e-6'
+cargo xtask compare main -- cargo run --release -p elmdb --example rank-write-stall -- --edges
+```
+
+One command on two revisions, in turn and each run in the other order, each in a worktree under `target/compare/` that stays
+between runs so its builds stay warm. The revisions are resolved once, from the checkout, and printed as commits. It prints
+each reading on each side, Criterion's medians and any `key=value` a command prints, a run that didn't print one as `-`, beside
+the load average as each run ended, and marks a load past the machine's core count. A first run includes its side's build, so
+the second is usually the one to read. Alternating is what keeps a spike or a drift in load from reading as a change. It clears
+`CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN` for the command, which other variables such as `ELMDB_BENCH_ROWS` pass through. It
+reports and decides nothing: it fails when the command does, after printing what it read, or when a side prints no reading. A
+count that doesn't move with the load is `benches/instructions.rs`'s.
+
 ## Read allocation and codec reports
 
 The existing four-workload read fixture is shared by Criterion, the Rust allocation executable and
