@@ -283,7 +283,7 @@ impl Reader {
         );
         let weights = self.bool_or(&mut object, "weights", true);
         let damping = self.number_or(&mut object, "damping", 0.85);
-        let tolerance = self.number_or(&mut object, "tolerance", 1e-6);
+        let tolerance = self.number_or(&mut object, "tolerance", 1e-5);
         self.finish(object);
         Some(RankDef {
             declared_by: declared_by?,

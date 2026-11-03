@@ -17,6 +17,44 @@ pub struct Fixture {
     pub rows: usize,
 }
 
+/// Which documents a benchmark graph's links reach
+#[derive(Clone, Copy)]
+enum Links {
+    /// Far across the graph, every document linked about as often, so all their scores are alike
+    Spread,
+    /// The documents just after it
+    Near,
+    /// Earlier documents far more often than later ones, a few of them hubs
+    Hubs,
+    /// The same shape, by this seed, with its hubs anywhere among the documents, so a document's place says nothing of
+    /// its score
+    ShuffledHubs(u64),
+}
+
+/// The `j`th document the `i`th links, by a hash of the two and a seed: a share of the links proportional to `(k + 1)^(1/4)
+/// - k^(1/4)` reaches the `k`th, the fourth power of a uniform number making in-degree fall with `k` by a power law
+fn hub_target(i: usize, j: usize, rows: usize, seed: u64) -> usize {
+    let mut z = (((i as u64) << 16 | j as u64) ^ (seed << 48)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    let uniform = ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64;
+    ((uniform.powi(4) * rows as f64) as usize).min(rows - 1)
+}
+
+/// `0..rows` in an order fixed by `seed`
+fn shuffled(rows: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows).collect();
+    let mut state = seed;
+    for at in (1..rows).rev() {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        order.swap(at, ((z ^ (z >> 31)) % (at as u64 + 1)) as usize);
+    }
+    order
+}
+
 impl Fixture {
     /// Eight 96-byte indexed values per entity, optional text with 16 distinct words per document, and optional
     /// 8 KiB relation payloads. Seeding and initial derivation are outside all measurement windows.
@@ -141,7 +179,7 @@ impl Fixture {
     // The benchmarks' and the heap test's, where the profiling example shares this module
     #[allow(dead_code)]
     pub fn graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, false, None, false)
+        Self::graph_of(rows, degree, false, None, Links::Spread)
     }
 
     /// The same graph with a rank index over it, `docRank`, its pushes drained: `ranked`'s workload, and what a change
@@ -154,7 +192,7 @@ impl Fixture {
     /// The same graph with a rank index kept to `tolerance`
     #[allow(dead_code)]
     pub fn ranked_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
-        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), false);
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::Spread);
         fixture.db.wait_for_index_builds().unwrap();
         fixture
     }
@@ -163,7 +201,24 @@ impl Fixture {
     /// documents around it rather than the whole graph, as they do over the spread links above. Ranked at 1e-6
     #[allow(dead_code)]
     pub fn ranked_local_graph(rows: usize, degree: usize) -> Self {
-        let fixture = Self::graph_of(rows, degree, false, Some(1e-6), true);
+        let fixture = Self::graph_of(rows, degree, false, Some(1e-6), Links::Near);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
+    }
+
+    /// A graph with hubs, as documents that cite each other have: each document refers to `degree` others, the earlier
+    /// ones far more often, the first some 5% of all links at 100,000 documents. Ranked at `tolerance`
+    #[allow(dead_code)]
+    pub fn ranked_hub_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::Hubs);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
+    }
+
+    /// The same shape by `seed`, with its hubs anywhere among the documents
+    #[allow(dead_code)]
+    pub fn ranked_shuffled_hub_graph_at(rows: usize, degree: usize, tolerance: f64, seed: u64) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::ShuffledHubs(seed));
         fixture.db.wait_for_index_builds().unwrap();
         fixture
     }
@@ -171,11 +226,11 @@ impl Fixture {
     /// The same graph with `refs` declared weighted, each edge weighing 1 to 4 by arithmetic: `rankWeighted`'s workload
     #[allow(dead_code)]
     pub fn weighted_graph(rows: usize, degree: usize) -> Self {
-        Self::graph_of(rows, degree, true, None, false)
+        Self::graph_of(rows, degree, true, None, Links::Spread)
     }
 
     #[allow(dead_code)]
-    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: Option<f64>, local: bool) -> Self {
+    fn graph_of(rows: usize, degree: usize, weighted: bool, ranked: Option<f64>, links: Links) -> Self {
         let ranks = match ranked {
             Some(tolerance) => json!({"docRank":{"types":["Doc"],"relations":["refs"],"tolerance":tolerance}}),
             None => json!({}),
@@ -198,8 +253,17 @@ impl Fixture {
                 trashed: false,
             })
             .collect();
+        let place = match links {
+            Links::ShuffledHubs(seed) => shuffled(rows, seed),
+            _ => Vec::new(),
+        };
         for i in 0..rows {
-            let target = |j: usize| if local { (i + j) % rows } else { (i * 31 + j * 977) % rows };
+            let target = |j: usize| match links {
+                Links::Spread => (i * 31 + j * 977) % rows,
+                Links::Near => (i + j) % rows,
+                Links::Hubs => hub_target(i, j, rows, 0),
+                Links::ShuffledHubs(seed) => place[hub_target(i, j, rows, seed)],
+            };
             let mut targets: Vec<usize> = (1..=degree).map(target).filter(|&t| t != i).collect();
             targets.sort_unstable();
             targets.dedup();
