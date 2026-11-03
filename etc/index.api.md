@@ -81,6 +81,20 @@ E
 } : Record<string, unknown>;
 
 // @public
+export interface DatabaseCatalog {
+    relations: Array<{
+        kind: string;
+        count: number;
+    }>;
+    roles: string[];
+    types: Array<{
+        name: string;
+        count: number;
+        fields: string[];
+    }>;
+}
+
+// @public
 export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
 
 // @public (undocumented)
@@ -135,6 +149,7 @@ export namespace EARS {
 
 // @public
 export interface Ears {
+    catalog(): DatabaseCatalog;
     create: Create;
     embed(embeddings: readonly Embedding[]): {
         stored: number;

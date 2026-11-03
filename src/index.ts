@@ -4,7 +4,7 @@
 // The database is opened by `@apackdev/ears/lmdb`, the one entry that loads elmdb.
 export {
   createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,
-  type EntityRow, type SchemaStats, type RelationMatch, type RelationRow, type RelationStats,
+  type EntityRow, type DatabaseCatalog, type SchemaStats, type RelationMatch, type RelationRow, type RelationStats,
 } from './engine.ts';
 export type { EarsDatabase, EarsUnit, SchemaChange, UnitOptions } from './database.ts';
 export { WATCH_SCHEDULE } from './watch.ts';

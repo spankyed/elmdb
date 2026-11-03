@@ -53,6 +53,16 @@ export interface SchemaStats {
   roles: Record<string, number>;
 }
 
+/** What an engine holds, from what its database keeps as it writes: reads one key per name, so a watch can follow it */
+export interface DatabaseCatalog {
+  /** Each entity type with its live entities and the fields its entities have held. A field stays when its last value goes */
+  types: Array<{ name: string; count: number; fields: string[] }>;
+  /** Each relation kind with its relations */
+  relations: Array<{ kind: string; count: number }>;
+  /** The roles */
+  roles: string[];
+}
+
 /** An engine's operations — its queries, writes and transactions: what a program is handed */
 export interface Ears {
   /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
@@ -80,7 +90,12 @@ export interface Ears {
   /** One field of the entity's row, read as `getRow` reads it (the trash included), or undefined when it holds none */
   getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
   getRoles(id: EARS.EntityId): string[];
-  /** What the engine holds, keyed by the names its data holds: entities per type, attribute, relation and role use */
+  /** What the engine holds, cheaply and exactly: what a view or anything frequent reads */
+  catalog(): DatabaseCatalog;
+  /**
+   * What only a walk answers: values per field, entities per role, a kind's distinct ends, keyed by the names its data
+   * holds, the trash included. It reads every row and relation, so it is for a person asking, never a view or a hot path
+   */
   getSchemaStats(): SchemaStats;
   /** The relation's row — its id, kind, ends and info — or undefined when no relation has the id */
   getRelation(relId: EARS.RelationId): RelationRow | undefined;
@@ -288,6 +303,10 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     getRow,
     getAttr,
     getRoles: (id) => (getAttr(id, 'role' as EARS.AttrKind) as string[] | undefined) ?? [],
+    catalog: () => {
+      const { types, relations, roles } = one({ read: 'catalog' }) as unknown as DatabaseCatalog;
+      return { types: types.filter((type) => isEntityType(type.name)), relations, roles };
+    },
     getSchemaStats,
     getRelation,
     findRelations,
