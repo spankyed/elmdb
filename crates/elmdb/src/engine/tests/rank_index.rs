@@ -1553,7 +1553,13 @@ fn a_drain_is_stale_after_any_write_of_the_index_another_drains_and_a_count_incl
         db.admin_unit_with_checkpoint(|t| between(t), false).unwrap();
         db.admin_unit_with_checkpoint(
             |t| {
-                applied.set(Some(planned.borrow().as_ref().unwrap().apply(t)?));
+                // A plan found stale writes nothing, so the unit it was asked in commits empty
+                let totals = t.get(&keys::rank_totals("taskRank"))?;
+                let answer = planned.borrow().as_ref().unwrap().apply(t)?;
+                if answer == ranks::Applied::Stale {
+                    assert_eq!(t.get(&keys::rank_totals("taskRank"))?, totals);
+                }
+                applied.set(Some(answer));
                 Ok(())
             },
             false,
@@ -1780,6 +1786,29 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
         .unwrap();
     assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
     assert!(plans.load(Ordering::SeqCst) > 0, "no drain read a node at a time");
+}
+
+#[test]
+fn a_commit_landing_as_a_drain_takes_the_lock_has_it_retried_and_not_computed_under_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": 1 }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let inner = std::sync::Arc::clone(&db);
+    db.store().unwrap().when_rank_checked(move || {
+        write(&inner, vec![json!({ "op": "link", "source": "Task-33", "kind": "refs", "target": "Task-9" })]).unwrap();
+    });
+    write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let plans = *db.store().unwrap().rank_plans.lock();
+    assert_eq!((plans.retried, plans.redone), (1, 0), "{plans:?}");
+    assert!(plans.applied > 0, "{plans:?}");
+    assert_within_bound(&db, "both", true);
 }
 
 #[test]

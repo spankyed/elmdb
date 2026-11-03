@@ -358,47 +358,55 @@ fn build_rank(
         })?;
         #[cfg(test)]
         store.rank_planned();
-        // Written since it read: asked here first, so a burst of commits is waited out rather than computed under the lock
-        if retries < STALE_RETRIES {
-            let stale = planned.as_ref().map_or(Ok(false), |drained| {
+        // Written since it read: asked here first, so a burst of commits is waited out without taking the lock
+        let may_retry = retries < STALE_RETRIES;
+        let mut stale = may_retry
+            && planned.as_ref().map_or(Ok(false), |drained| {
                 store.read(|txn, db| drained.is_stale(&super::unit::Snapshot { txn, db, schema }))
             })?;
-            if stale {
-                retries += 1;
+        #[cfg(test)]
+        store.rank_checked();
+        let done = !stale
+            && commits(&mut |t| {
+                let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
+                // A commit landed since the check: this unit writes nothing, and the drain waits it out like any other
+                stale = may_retry && applied == Some(super::ranks::Applied::Stale);
+                if stale {
+                    return Ok(false);
+                }
                 #[cfg(test)]
-                {
-                    store.rank_plans.lock().retried += 1;
+                if let (Some(drained), Some(applied)) = (&planned, applied) {
+                    let mut plans = store.rank_plans.lock();
+                    if applied == super::ranks::Applied::Stale {
+                        plans.redone += 1;
+                    } else {
+                        plans.applied += 1;
+                    }
+                    if drained.read_every_node() {
+                        plans.every_node += 1;
+                    } else {
+                        plans.one_at_a_time += 1;
+                    }
                 }
-                pause();
-                return Ok(false);
-            }
-        }
-        commits(&mut |t| {
-            // A commit wrote the index meanwhile: drained again, here, from what it left
-            let applied = planned.as_ref().map(|drained| drained.apply(t)).transpose()?;
+                // Stale with its retries spent: drained again, here, from what the commits left
+                let waiting = match applied {
+                    Some(super::ranks::Applied::Written { waiting }) => waiting,
+                    _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
+                };
+                if waiting {
+                    return Ok(false);
+                }
+                super::ranks::settle(t, name)?;
+                Ok(true)
+            })?;
+        if stale {
+            retries += 1;
             #[cfg(test)]
-            if let (Some(drained), Some(applied)) = (&planned, applied) {
-                let mut plans = store.rank_plans.lock();
-                if applied == super::ranks::Applied::Stale {
-                    plans.redone += 1;
-                } else {
-                    plans.applied += 1;
-                }
-                if drained.read_every_node() {
-                    plans.every_node += 1;
-                } else {
-                    plans.one_at_a_time += 1;
-                }
+            {
+                store.rank_plans.lock().retried += 1;
             }
-            let waiting = match applied {
-                Some(super::ranks::Applied::Written { waiting }) => waiting,
-                _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
-            };
-            if waiting {
-                return Ok(false);
-            }
-            super::ranks::settle(t, name)?;
-            Ok(true)
-        })
+            pause();
+        }
+        Ok(done)
     })
 }
