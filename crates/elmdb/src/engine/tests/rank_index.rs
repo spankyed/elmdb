@@ -376,8 +376,9 @@ fn ranked_ids(db: &Database, limit: Option<usize>, answer: &str) -> Vec<String> 
 proptest! {
     #![proptest_config(ProptestConfig { cases: 32, failure_persistence: None, ..ProptestConfig::default() })]
 
-    /// The promise of `ranks::order_key`, at tolerances that keep few bits and many: a top read answers no node above one
-    /// scoring further than twice the larger of the tolerance and the bound above it, and leaves out no such node
+    /// The index's half of the promise of `ranks::order_key`, at tolerances that keep few bits and many: a top read answers
+    /// no node above one scoring further than twice the tolerance above it, and leaves out no such node. Against PageRank
+    /// and through narrow cells is `a_top_read_holds_the_order_promised_against_rank`
     #[test]
     fn a_top_read_holds_the_order_promised_at_any_tolerance(
         ops in prop::collection::vec(op(), 1..30),
@@ -392,9 +393,9 @@ proptest! {
             let _ = write(&db, vec![json_of(op)]);
         }
         db.wait_for_index_builds().unwrap();
-        let (scores, bound) = indexed(&db);
+        let (scores, _) = indexed(&db);
         let score = |id: &str| scores.iter().find(|(held, _)| held == id).unwrap().1;
-        let promised = 2.0 * tolerance.max(bound);
+        let promised = 2.0 * tolerance;
         let top = ranked_ids(&db, Some(take), answer);
         prop_assert_eq!(top.len(), take.min(scores.len()));
         for (at, id) in top.iter().enumerate() {
@@ -406,6 +407,82 @@ proptest! {
             }
         }
     }
+}
+
+#[test]
+fn a_top_read_holds_the_order_promised_against_rank() {
+    use proptest::test_runner::{Config, TestRunner};
+    use std::cell::Cell;
+    const TASKS: usize = 300;
+    // Enough nodes that scores sit far under 1/128 of the sum, where cells stay narrow, and links that make them differ
+    let narrow_cells_read = Cell::new(0u64);
+    let rank = task_rank("out", true);
+    let strategy = (
+        prop::collection::vec(op(), 0..12),
+        prop_oneof![Just(1e-2), Just(1e-4), Just(1e-6)],
+        1usize..20,
+        prop_oneof![Just("hits"), Just("ids")],
+    );
+    TestRunner::new(Config { cases: 12, failure_persistence: None, ..Config::default() })
+        .run(&strategy, |(ops, tolerance, take, answer)| {
+            let dir = tempfile::tempdir().unwrap();
+            let db = open_with(&dir, at_tolerance(tolerance));
+            let mut graph: Vec<Json> =
+                (0..TASKS).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}") })).collect();
+            graph.extend((0..TASKS).flat_map(|i| {
+                [(i + 1) % TASKS, i * i % TASKS].map(|t| (i, t))
+            }).filter(|(i, t)| i != t).map(|(i, t)| {
+                json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{t}") })
+            }));
+            write(&db, graph).unwrap();
+            for op in &ops {
+                let _ = write(&db, vec![json_of(op)]);
+            }
+            db.wait_for_index_builds().unwrap();
+            let (scores, bound) = rank.indexed(&db);
+            let truth = rank.computed(&db);
+            let of = |all: &[(String, f64)], id: &str| all.iter().find(|(held, _)| held == id).unwrap().1;
+            let promised = 2.0 * tolerance + bound;
+            let top = ranked_ids(&db, Some(take), answer);
+            prop_assert_eq!(top.len(), take.min(truth.len()));
+            for (at, id) in top.iter().enumerate() {
+                for later in &top[at + 1..] {
+                    prop_assert!(of(&truth, later) - of(&truth, id) <= promised, "{later} above {id} at {tolerance}");
+                }
+                for (other, held) in truth.iter().filter(|(other, _)| !top.contains(other)) {
+                    prop_assert!(held - of(&truth, id) <= promised, "{other} left out for {id} at {tolerance}");
+                }
+            }
+            // That a cell held different scores for this to be about
+            let precision = ranks::order_precision(tolerance);
+            let held = db
+                .snapshot(|s| {
+                    let mut xs = Vec::new();
+                    for (id, _) in &scores {
+                        xs.push(ranks::node(s, "taskRank", id)?.unwrap().x);
+                    }
+                    Ok(xs)
+                })
+                .unwrap();
+            let shared = held
+                .iter()
+                .enumerate()
+                .any(|(at, a)| held[at + 1..].iter().any(|b| a != b && ranks::same_cell(*a, *b, precision)));
+            narrow_cells_read.set(narrow_cells_read.get() + u64::from(shared));
+            Ok(())
+        })
+        .unwrap();
+    assert!(narrow_cells_read.get() > 0, "no case had a cell holding different scores");
+}
+
+#[test]
+fn a_cell_spans_the_same_share_of_a_score_on_every_platform() {
+    // log2(1 / (256 × 1e-6)) is 11.93, and past a tolerance of about 2.4e-4 the bits are held at 4
+    for (tolerance, bits) in [(1e-9, 22), (1e-6, 12), (1e-4, 6), (2.5e-4, 4), (1e-2, 4), (1e-300, 52)] {
+        assert_eq!(ranks::order_precision(tolerance), bits, "at {tolerance}");
+    }
+    // Exactly a power of two, where a platform's log2 rounding one way or the other would change the bits
+    assert_eq!(ranks::order_precision(1.0 / (256.0 * 1024.0)), 10);
 }
 
 /// `Task-0` and `Task-1` scored apart by less than a cell of the index's order, `Task-1` created after and scoring higher,

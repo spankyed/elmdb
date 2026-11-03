@@ -262,6 +262,18 @@ A steady write's p50 and p90 rise about a quarter, which fits more of them findi
 making a commit's pushes, though that wasn't measured. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
 the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
 
+Cells of 256 times the tolerance, read again with `cargo xtask compare` on 2026-11-02 against the drain retried off the lock
+(`826b827`), run in turn twice each at a load average of 5 to 6, at the default tolerance of the time, 1e-6:
+
+| | before | after |
+|---|---:|---:|
+| One change, spread, 100,000 | 423, 432 ms | 371, 381 ms |
+| One change, spread, 10,000 | 61.8, 61.3 ms | 45.9, 45.8 ms |
+| Burst, spread, 100,000 | 533, 532 ms | 420, 426 ms |
+| Burst, spread, 10,000 | 65.3, 65.6 ms | 58.3, 58.1 ms |
+| One change, near, 100,000 | 21.6, 23.1 ms | 22.2, 23.2 ms |
+| `ranked`, 100,000 | 8.22, 8.22 µs | 8.43, 8.40 µs |
+
 ### The default tolerance, against exact PageRank
 
 The readings above that say "the default tolerance" are at 1e-6, which it was then. `examples/rank-accuracy.rs`, 2026-11-02,
