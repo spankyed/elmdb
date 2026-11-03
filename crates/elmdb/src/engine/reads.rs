@@ -1429,20 +1429,21 @@ impl<R: Read> Query<'_, R> {
     /// The first `take` of a rank index's nodes by score, each a hit when the terminal answers them: read from the top of
     /// its order, which holds a cell's nodes by place. It reads on past the `take`th only through a cell wider than the
     /// order promises, which few nodes can be in (`ranks::order_key`); a graph whose scores are alike has most of its nodes
-    /// in one narrower cell, which reading through would cost the whole index. What was read is sorted by the estimates
-    /// when hits show them or such a cell was read, stably, so equal scores keep their place as `ranked_by` keeps the
-    /// set's. Cells narrow with the score, so a first node in a narrow one means ids alone need no estimates
+    /// in one narrower cell, which reading through would cost the whole index. Those wide cells are sorted by the estimates,
+    /// and everything read when hits show them, stably, so equal scores keep their place as `ranked_by` keeps the set's.
+    /// Cells narrow with the score, so past the first narrow one ids alone need no estimates
     fn rank_top(&self, index: &str, take: usize) -> Result<Vec<String>> {
         let (def, totals, step) = self.rank_index(1, index)?;
         let precision = ranks::order_precision(def.tolerance);
         let promised = 2.0 * def.tolerance * totals.estimates;
         let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
         let mut read: Vec<(String, f64)> = Vec::with_capacity(take);
-        let mut by_place = false;
+        let mut narrow = false;
+        let mut estimated = 0;
         let mut step_to = |id: &[u8]| -> Result<bool> {
             let id = String::from_utf8(id.to_vec())
                 .map_err(|_| Error::new(ErrorCode::Corrupted, "A rank index's order names no entity"))?;
-            if by_place && !scored {
+            if narrow && !scored {
                 read.push((id, 0.0));
                 return Ok(read.len() < take);
             }
@@ -1452,13 +1453,12 @@ impl<R: Read> Query<'_, R> {
                 })?
                 .x;
             let wide = ranks::cell_wider_than(x, precision, promised);
-            if read.is_empty() {
-                by_place = !wide;
-            }
+            narrow = !wide;
             if read.len() >= take && read.last().is_some_and(|last| !ranks::same_cell(last.1, x, precision)) {
                 return Ok(false);
             }
             read.push((id, x));
+            estimated += 1;
             Ok(read.len() < take || wide)
         };
         let mut failed = None;
@@ -1472,9 +1472,7 @@ impl<R: Read> Query<'_, R> {
         if let Some(e) = failed {
             return Err(e);
         }
-        if scored || !by_place {
-            read.sort_by(|a, b| (b.1 / totals.estimates).total_cmp(&(a.1 / totals.estimates)));
-        }
+        read[..estimated].sort_by(|a, b| (b.1 / totals.estimates).total_cmp(&(a.1 / totals.estimates)));
         read.truncate(take);
         Ok(read
             .into_iter()
