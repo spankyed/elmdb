@@ -1,7 +1,9 @@
 //! How close a rank index's top is to exact PageRank at a tolerance, and what it costs:
-//! `rank-accuracy GRAPH DOCUMENTS TOLERANCE`, GRAPH `hubs` or `spread`, built with `--release`. A history of changes is
-//! made, each drained and timed, from an ordinary document and from the highest-scoring one; then the top ten, hundred and
-//! thousand are compared with `rank` run far past the tolerance, and with the top a change before, as a watch sees it.
+//! `rank-accuracy GRAPH DOCUMENTS TOLERANCE [SEED] [--accuracy]`, GRAPH `hubs`, `shuffled` (its hubs anywhere among the
+//! documents, and SEED choosing them and the changes) or `spread`, built with `--release`. A history of changes is made,
+//! each drained and timed, from an ordinary document and from the highest-scoring one, which `--accuracy` leaves out with
+//! the reads and the churn; then the top ten, hundred and thousand are compared with `rank` run far past the tolerance,
+//! and with the top a change before, as a watch sees it.
 #[path = "../tests/support/mod.rs"]
 #[allow(dead_code)]
 mod support;
@@ -82,8 +84,12 @@ fn main() {
     let graph = args.next().expect("a graph: hubs or spread");
     let rows: usize = args.next().expect("a document count").parse().unwrap();
     let tolerance: f64 = args.next().expect("a tolerance").parse().unwrap();
+    let rest: Vec<String> = args.collect();
+    let accuracy_only = rest.iter().any(|a| a == "--accuracy");
+    let seed: u64 = rest.iter().find(|a| !a.starts_with("--")).map_or(0, |s| s.parse().expect("a seed"));
     let f = match graph.as_str() {
         "hubs" => support::Fixture::ranked_hub_graph_at(rows, 5, tolerance),
+        "shuffled" => support::Fixture::ranked_shuffled_hub_graph_at(rows, 5, tolerance, seed),
         "spread" => support::Fixture::ranked_graph_at(rows, 5, tolerance),
         other => panic!("no graph {other}"),
     };
@@ -99,58 +105,62 @@ fn main() {
     let truth = exact(db);
     let hub: usize = truth[0].0["Doc-".len()..].parse().unwrap();
     let share = truth[0].1 / truth.iter().map(|t| t.1).sum::<f64>();
-    let mut far = sequence(1, rows);
-    let mut ordinary = sequence(2, rows / 2);
+    let mut far = sequence(1 + 2 * seed, rows);
+    let mut ordinary = sequence(2 + 2 * seed, rows / 2);
+    println!("{graph} n={rows} tol={tolerance:e} seed={seed} top_share={share:.4}");
 
-    // An ordinary document, in the later half, linking one anywhere and unlinking it
-    let mut typical = Vec::new();
-    for _ in 0..20 {
-        let (source, target) = (rows / 2 + ordinary(), far());
-        if source == target {
-            continue;
+    if !accuracy_only {
+        // An ordinary document, in the later half, linking one anywhere and unlinking it
+        let mut typical = Vec::new();
+        for _ in 0..20 {
+            let (source, target) = (rows / 2 + ordinary(), far());
+            if source == target {
+                continue;
+            }
+            typical.push(timed(&[change("link", source, target)]));
+            typical.push(timed(&[change("unlink", source, target)]));
         }
-        typical.push(timed(&[change("link", source, target)]));
-        typical.push(timed(&[change("unlink", source, target)]));
-    }
-    // The highest-scoring document
-    let mut from_hub = Vec::new();
-    for _ in 0..10 {
-        let target = far();
-        if target == hub {
-            continue;
+        // The highest-scoring document
+        let mut from_hub = Vec::new();
+        for _ in 0..10 {
+            let target = far();
+            if target == hub {
+                continue;
+            }
+            from_hub.push(timed(&[change("link", hub, target)]));
+            from_hub.push(timed(&[change("unlink", hub, target)]));
         }
-        from_hub.push(timed(&[change("link", hub, target)]));
-        from_hub.push(timed(&[change("unlink", hub, target)]));
-    }
-    // Ten ordinary changes sharing a drain
-    let mut burst = Vec::new();
-    for _ in 0..10 {
-        let pairs: Vec<(usize, usize)> = (0..10).map(|_| (rows / 2 + ordinary(), far())).collect();
-        let batch =
-            |op: &str| -> Vec<Batch> { pairs.iter().filter(|(s, t)| s != t).map(|&(s, t)| change(op, s, t)).collect() };
-        burst.push(timed(&batch("link")));
-        burst.push(timed(&batch("unlink")));
-    }
-    println!(
-        "{graph} n={rows} tol={tolerance:e} top_share={share:.4} ordinary={} hub={} burst={}",
-        spread_of(typical),
-        spread_of(from_hub),
-        spread_of(burst)
-    );
+        // Ten ordinary changes sharing a drain
+        let mut burst = Vec::new();
+        for _ in 0..10 {
+            let pairs: Vec<(usize, usize)> = (0..10).map(|_| (rows / 2 + ordinary(), far())).collect();
+            let batch = |op: &str| -> Vec<Batch> {
+                pairs.iter().filter(|(s, t)| s != t).map(|&(s, t)| change(op, s, t)).collect()
+            };
+            burst.push(timed(&batch("link")));
+            burst.push(timed(&batch("unlink")));
+        }
+        println!(
+            "{graph} n={rows} tol={tolerance:e} top_share={share:.4} ordinary={} hub={} burst={}",
+            spread_of(typical),
+            spread_of(from_hub),
+            spread_of(burst)
+        );
 
-    // Reads, with no drain owed
-    for (answer, n) in SIZES.iter().flat_map(|&n| [("hits", n), ("ids", n)]) {
-        let reads: Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
+        // Reads, with no drain owed
+        for (answer, n) in SIZES.iter().flat_map(|&n| [("hits", n), ("ids", n)]) {
+            let reads: Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
             "start": { "from": "types", "types": ["Doc"] },
             "steps": [{ "step": "ranked", "index": "docRank" }, { "step": "limit", "n": n }],
             "terminal": { "answer": answer } } }] }))
-        .unwrap();
-        let started = Instant::now();
-        let runs = 1000;
-        for _ in 0..runs {
-            std::hint::black_box(db.read(&reads).unwrap());
+            .unwrap();
+            let started = Instant::now();
+            let runs = 1000;
+            for _ in 0..runs {
+                std::hint::black_box(db.read(&reads).unwrap());
+            }
+            println!("  read {answer}{n} {:.1}us", started.elapsed().as_secs_f64() * 1e6 / runs as f64);
         }
-        println!("  read {answer}{n} {:.1}us", started.elapsed().as_secs_f64() * 1e6 / runs as f64);
     }
 
     // The top after a history of ordinary changes left linked, each drained: it holds what the last left within budget
@@ -187,6 +197,10 @@ fn main() {
         );
     }
 
+    if accuracy_only {
+        std::hint::black_box(&f.directory);
+        return;
+    }
     // What a watch over the top sees: how much of it moves with each ordinary change
     for n in [10, 100] {
         let (mut left, mut moved, mut changes) = (0usize, 0usize, 0usize);

@@ -265,49 +265,56 @@ the same time. A fixed 5 ms sleep in place of the pause made the steady run's tw
 ### The default tolerance, against exact PageRank
 
 The readings above that say "the default tolerance" are at 1e-6, which it was then. `examples/rank-accuracy.rs`, 2026-11-02,
-this Mac, load 5 to 17 and 29 at the end of the second 100,000 pass, times the two runs at 100,000 documents: a rank index's top after 30 changes, against `rank` run to 1e-13, on
-a graph with hubs (the first document some 4% of the score at 100,000) and on the spread graph. One fixed history at each
-size, so the top lists are single samples.
+this Mac: a rank index's top after 30 ordinary changes (`--accuracy`), against `rank` run to 1e-13, over a graph with hubs (the
+first document some 4% of the score at 100,000), the same graph with its hubs anywhere among the documents by three seeds, and
+the spread graph. The hub graph's first documents are its hubs, which flatters a top list, since one cell's nodes come by place
+and those places then follow the scores; shuffled, they don't.
 
-The share of each true top that the index's top holds, on the graph with hubs, the same at every run:
+How many of each true top the index's top holds, and how many in the true place:
 
-| Documents | Top | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
-|---:|---:|---:|---:|---:|---:|
-| 1,000 | 10 | 9 | 9 | **10** | 10 |
-| | 100 | 99 | 100 | **100** | 100 |
-| 10,000 | 10 | 9 | 9 | **10** | 10 |
-| | 100 | 98 | 100 | **100** | 100 |
-| 100,000 | 10 | 9 | 9 | **10** | 10 |
-| | 100 | 99 | 100 | **100** | 100 |
-| | 1,000 | 989 | 995 | **999** | 1,000 |
+| Documents | Top | Graph | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---:|---:|---|---:|---:|---:|---:|
+| 1,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, each seed | 10, 10 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 97, 94 | 99, 99 | **99, 99** | 100, 100 |
+| | | shuffled, lowest seed | 99, 97 | 99, 98 | **100, 100** | 100, 100 |
+| 10,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, each seed | 10, 10 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 97, 94 | 100, 100 | **100, 100** | 100, 100 |
+| | | shuffled, lowest seed | 98, 91 | 99, 98 | **100, 98** | 100, 98 |
+| 100,000 | 10 | hubs | 9, 9 | 9, 9 | **10, 10** | 10, 10 |
+| | | shuffled, lowest seed | 10, 8 | 10, 10 | **10, 10** | 10, 10 |
+| | 100 | hubs | 99, 99 | 100, 100 | **100, 100** | 100, 100 |
+| | | shuffled, lowest seed | 97, 94 | 98, 96 | **99, 97** | 100, 100 |
+| | 1,000 | hubs | 989, 869 | 995, 977 | **999, 995** | 1,000, 1,000 |
+| | | shuffled, lowest seed | 983, 884 | 995, 976 | **998, 994** | 999, 997 |
 
-What one change costs at 100,000 documents, its commit and its drain, median and 90th percentile of 40 from a document in
-the later half and of 20 from the highest-scoring one, and the median of 20 bursts of ten:
+So the default is 1e-5, the loosest at which the top 10 was the true top 10 in the true order and the top 100 within 1% at every
+size and seed, a bar set before these were read. It is closer than one graph made it look: 1e-4 misses its top 10 only over the
+graph with hubs first, by one near tie, and misses the bar on the top 100 only at 98 of 100 in one seed. Four histories are few,
+and the gaps near the 10th place are about 8 times the order's margin here, so another seed could move any of these. An
+application for which those swaps are acceptable can declare a looser tolerance.
+
+What it doesn't buy is a top list over a graph whose scores are alike. Over the spread graph at 100,000 documents the top 10 holds
+1, 3, 3 and 5 of the true 10 at these four tolerances, the top 100 holds 29, 62, 65 and 70, and 1e-5 loses 1.36e-4 of the top 10's
+score against 3.6e-5 at 1e-6; at 10,000 its top 10 holds 5 of 10 against 7. No tolerance tried gives PageRank's list there, as
+nearly every score is alike, and a top list there says little at any of them.
+
+What one change costs at 100,000 documents, its commit and its drain: medians of 40 from a document in the later half and of 20
+from the highest-scoring one, and of 20 bursts of ten, the tolerances alternated, two runs each, a load average of 4 to 5:
 
 | Graph | Tolerance | Ordinary | Highest-scoring | Burst |
 |---|---:|---:|---:|---:|
-| hubs | 1e-4 | 0.1 / 87 ms | 228, 231 ms | 136, 137 ms |
-| hubs | **1e-5** | 122, 123 / 135 ms | 307, 309 ms | 149, 151 ms |
-| hubs | 1e-6 | 153, 169 / 162, 213 ms | 351, 403 ms | 177, 198 ms |
-| spread | 1e-5 | 227, 244 / 261, 303 ms | 207, 227 ms | 233, 246 ms |
-| spread | 1e-6 | 230, 261 / 295, 333 ms | 211, 256 ms | 242, 338 ms |
+| hubs | **1e-5** | 118, 118 ms | 292, 295 ms | 145, 149 ms |
+| hubs | 1e-6 | 146, 144 ms | 342, 335 ms | 170, 175 ms |
+| shuffled | **1e-5** | 128, 138 ms | 286, 309 ms | 164, 159 ms |
+| shuffled | 1e-6 | 156, 154 ms | 343, 356 ms | 186, 191 ms |
 
-So the default is 1e-5, the loosest at which the top 10 was exact and the top 100 within 1% at every size, which was
-decided before these were read. It saves about a fifth over the graph with hubs at 100,000, and nothing to speak of at
-10,000 and below, where a change is 8 to 30 ms at any of these and the builder's waits are much of that, or on the spread
-graph. 1e-4 misses by one near tie in the top 10 at every size, costing that top 8.7e-5 of its score at 100,000, and makes
-at least half the ordinary changes at 100,000 commit-only. An application for which that swap is acceptable can declare it.
+So 1e-5 saves 10 to 19% on an ordinary change, and 12 to 17% on one from a hub or a burst. A change from a hub is the costliest
+found, over twice an ordinary one on the same graph: it moves far more residual, as the estimate it redistributes is far larger.
 
-A change from a hub is the costliest found: over twice an ordinary one on the same graph. It moves far more residual, as
-the estimate it redistributes is far larger.
-
-On the spread graph no tolerance tried gives a top list that is PageRank's. At 100,000 and 1e-6 the top 10 holds 3 of the
-true 10, at a score lost of 5.6e-5, as nearly every score is alike; a top list there says little at any tolerance. A watch
-over it hears it: some 70 of the top 100 change place with each change at any tolerance, where the graph with hubs moves
-none at 100,000. That is the roadmap's watch churn, on this graph alone.
-
-Reads on the graph with hubs are as on the spread graph for hits, 8.6 µs top 10 and 770 µs top 1,000 at 100,000 documents,
-so reading through a wide cell costs little there. Ids alone are 3.9 and 71 µs.
+Reads over the graph with hubs at 1e-5 are 8.4 µs top 10 and 751 µs top 1,000 at 100,000 documents as hits, and 3.9 and 71 µs as
+ids, so reading through a wide cell costs little there.
 
 ### What it took to get there
 

@@ -26,16 +26,33 @@ enum Links {
     Near,
     /// Earlier documents far more often than later ones, a few of them hubs
     Hubs,
+    /// The same shape, by this seed, with its hubs anywhere among the documents, so a document's place says nothing of
+    /// its score
+    ShuffledHubs(u64),
 }
 
-/// The `j`th document the `i`th links, by a hash of the two: a share of the links proportional to `(k + 1)^(3/4) -
-/// k^(3/4)` reaches the `k`th, the fourth power of a uniform number making in-degree fall with `k` by a power law
-fn hub_target(i: usize, j: usize, rows: usize) -> usize {
-    let mut z = ((i as u64) << 16 | j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+/// The `j`th document the `i`th links, by a hash of the two and a seed: a share of the links proportional to `(k + 1)^(1/4)
+/// - k^(1/4)` reaches the `k`th, the fourth power of a uniform number making in-degree fall with `k` by a power law
+fn hub_target(i: usize, j: usize, rows: usize, seed: u64) -> usize {
+    let mut z = (((i as u64) << 16 | j as u64) ^ (seed << 48)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     let uniform = ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64;
     ((uniform.powi(4) * rows as f64) as usize).min(rows - 1)
+}
+
+/// `0..rows` in an order fixed by `seed`
+fn shuffled(rows: usize, seed: u64) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows).collect();
+    let mut state = seed;
+    for at in (1..rows).rev() {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        order.swap(at, ((z ^ (z >> 31)) % (at as u64 + 1)) as usize);
+    }
+    order
 }
 
 impl Fixture {
@@ -192,6 +209,11 @@ impl Fixture {
     /// A graph with hubs, as documents that cite each other have: each document refers to `degree` others, the earlier
     /// ones far more often, the first some 5% of all links at 100,000 documents. Ranked at `tolerance`
     #[allow(dead_code)]
+    pub fn ranked_shuffled_hub_graph_at(rows: usize, degree: usize, tolerance: f64, seed: u64) -> Self {
+        Self::graph_of(rows, degree, false, Some(tolerance), Links::ShuffledHubs(seed))
+    }
+
+    /// The same graph with its hubs first among the documents
     pub fn ranked_hub_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
         let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::Hubs);
         fixture.db.wait_for_index_builds().unwrap();
@@ -228,11 +250,16 @@ impl Fixture {
                 trashed: false,
             })
             .collect();
+        let place = match links {
+            Links::ShuffledHubs(seed) => shuffled(rows, seed),
+            _ => Vec::new(),
+        };
         for i in 0..rows {
             let target = |j: usize| match links {
                 Links::Spread => (i * 31 + j * 977) % rows,
                 Links::Near => (i + j) % rows,
-                Links::Hubs => hub_target(i, j, rows),
+                Links::Hubs => hub_target(i, j, rows, 0),
+                Links::ShuffledHubs(seed) => place[hub_target(i, j, rows, seed)],
             };
             let mut targets: Vec<usize> = (1..=degree).map(target).filter(|&t| t != i).collect();
             targets.sort_unstable();

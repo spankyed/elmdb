@@ -77,8 +77,8 @@ document beside `types` and `relations`, not on a type:
 - **`weights`**, default `true`, as `rank`'s: an edge of a kind declared weighted counts by its weight, an edge of a
   kind not weighted by 1, and `false` counts every edge 1.
 - **`damping`** in (0, 1), default `0.85`. **`tolerance`** > 0, default `1e-5`: the bound on the scores' L1 error that
-  the index keeps (Error, below). The default is the loosest that kept the top 10 exact and the top 100 within 1% on a
-  graph with hubs, at every size measured (`docs/evidence/rank-index.md`).
+  the index keeps (Error, below). The default is the loosest that kept the top 10 in its true order and the top 100 within 1%
+  on graphs with hubs, at every size and history measured, four of them (`docs/evidence/rank-index.md`).
 - **Names:** lowerCamelCase, unique across the schema's indexes. `types` and `relations` must be declared, and
   `relations` is required, as `rank`'s `kinds` is.
 

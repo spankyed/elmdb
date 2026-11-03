@@ -1,5 +1,7 @@
-//! A rank index at the default tolerance holds the top of a graph with hubs to exact PageRank: what that default was chosen
-//! for (`docs/evidence/rank-index.md`), so loosening it past what readers can see fails here.
+//! A rank index at the default tolerance holds the top of a graph with hubs to exact PageRank, with its hubs first among the
+//! documents and anywhere among them: what that default was chosen for (`docs/evidence/rank-index.md`). These are one
+//! history each, so a default past the near ties in them fails here, 1e-3 and 1e-4 among those shown to, and one a little
+//! looser than today's may not.
 #[allow(dead_code)]
 mod support;
 
@@ -36,8 +38,11 @@ fn default_tolerance() -> f64 {
 
 #[test]
 fn the_default_tolerance_keeps_the_top_of_a_graph_with_hubs_exact() {
-    for rows in [1000, 4000] {
-        let f = support::Fixture::ranked_hub_graph_at(rows, 5, default_tolerance());
+    for (rows, seed) in [(1000, None), (4000, None), (1000, Some(1)), (4000, Some(2)), (4000, Some(3))] {
+        let f = match seed {
+            None => support::Fixture::ranked_hub_graph_at(rows, 5, default_tolerance()),
+            Some(seed) => support::Fixture::ranked_shuffled_hub_graph_at(rows, 5, default_tolerance(), seed),
+        };
         // Changes from later documents, each drained or within the budget, as a graph in use has
         for i in 0..30 {
             let batch = Batch {
@@ -56,9 +61,9 @@ fn the_default_tolerance_keeps_the_top_of_a_graph_with_hubs_exact() {
             ids(&f.db, step, Some(n))
         };
         let top = |n| ids(&f.db, json!({ "step": "ranked", "index": "docRank" }), Some(n));
-        assert_eq!(top(10), exact(10), "{rows}");
+        assert_eq!(top(10), exact(10), "{rows} {seed:?}");
         let truth: HashSet<String> = exact(100).into_iter().collect();
         let held = top(100).iter().filter(|id| truth.contains(*id)).count();
-        assert!(held >= 99, "{held} of the true top 100 at {rows}");
+        assert!(held >= 99, "{held} of the true top 100 at {rows} {seed:?}");
     }
 }
