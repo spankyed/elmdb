@@ -378,7 +378,8 @@ proptest! {
 
     /// The index's half of the promise of `ranks::order_key`, at tolerances that keep few bits and many: a top read answers
     /// no node above one scoring further than twice the tolerance above it, and leaves out no such node. Against PageRank
-    /// and through narrow cells is `a_top_read_holds_the_order_promised_against_rank`
+    /// is `top_reads_stay_within_the_order_promised_against_rank`, and up against the margin
+    /// `a_top_read_takes_a_narrow_cell_by_place_with_the_margin_the_order_promises`
     #[test]
     fn a_top_read_holds_the_order_promised_at_any_tolerance(
         ops in prop::collection::vec(op(), 1..30),
@@ -409,13 +410,69 @@ proptest! {
     }
 }
 
+/// `Task-0` and `Task-1` scored apart by most of a cell of the index's order, `Task-1` created after and scoring higher, among
+/// enough nodes that the cell is no wider than the order promises
+fn two_hubs_in_one_narrow_cell(dir: &tempfile::TempDir) -> Database {
+    let db = open_with(dir, at_tolerance(1e-5));
+    let task = |i: usize| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") });
+    let refs = |from: usize, to: usize| json!({ "op": "link", "source": format!("Task-{from}"), "kind": "refs", "target": format!("Task-{to}") });
+    let mut ops: Vec<Json> = (0..900).map(task).collect();
+    ops.extend((2..11).map(|leaf| refs(leaf, 0)));
+    ops.extend((11..20).map(|leaf| refs(leaf, 1)));
+    // One leaf more for the second hub, a share of it, the rest of that leaf's spread over nodes that stay low
+    ops.push(refs(20, 1));
+    ops.extend((21..125).map(|dud| refs(20, dud)));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db
+}
+
 #[test]
-fn a_top_read_holds_the_order_promised_against_rank() {
+fn a_top_read_takes_a_narrow_cell_by_place_with_the_margin_the_order_promises() {
+    let tolerance = 1e-5;
+    let dir = tempfile::tempdir().unwrap();
+    let db = two_hubs_in_one_narrow_cell(&dir);
+    let (estimates, x0, x1) = db
+        .snapshot(|s| {
+            Ok((
+                ranks::totals(s, "taskRank")?.estimates,
+                ranks::node(s, "taskRank", "Task-0")?.unwrap().x,
+                ranks::node(s, "taskRank", "Task-1")?.unwrap().x,
+            ))
+        })
+        .unwrap();
+    let precision = ranks::order_precision(tolerance);
+    // What the case is of: the higher score placed second inside one cell the order keeps by place, and apart by enough
+    // that a margin of half the promise would be false
+    assert!(x1 > x0, "{x0} {x1}");
+    assert!(ranks::same_cell(x0, x1, precision), "{x0} {x1}");
+    assert!(!ranks::cell_wider_than(x0, precision, 2.0 * tolerance * estimates), "{x0} {estimates}");
+    let gap = (x1 - x0) / estimates;
+    assert!(gap > tolerance / 2.0, "the case is of a gap near the margin, not {gap}");
+    assert!(gap <= 2.0 * tolerance, "{gap}");
+    // A cell kept by place: taking one takes the lower, whether or not scores are shown, which the promise allows
+    for answer in ["hits", "ids"] {
+        assert_eq!(ranked_ids(&db, Some(1), answer), ["Task-0"], "{answer}");
+    }
+    // Showing scores sorts what was read, and ids keep their place
+    assert_eq!(ranked_ids(&db, Some(2), "hits"), ["Task-1", "Task-0"]);
+    assert_eq!(ranked_ids(&db, Some(2), "ids"), ["Task-0", "Task-1"]);
+    // And against PageRank: truly in the other order, by less than the margin promised and more than half the tolerance
+    let rank = task_rank("out", true);
+    let (_, bound) = rank.indexed(&db);
+    let truth = rank.computed(&db);
+    let of = |id: &str| truth.iter().find(|(held, _)| held == id).unwrap().1;
+    let inverted = of("Task-1") - of("Task-0");
+    assert!(inverted > tolerance / 2.0, "{inverted}");
+    assert!(inverted <= 2.0 * tolerance + bound, "{inverted} past {bound}");
+}
+
+#[test]
+fn top_reads_stay_within_the_order_promised_against_rank() {
     use proptest::test_runner::{Config, TestRunner};
-    use std::cell::Cell;
     const TASKS: usize = 300;
-    // Enough nodes that scores sit far under 1/128 of the sum, where cells stay narrow, and links that make them differ
-    let narrow_cells_read = Cell::new(0u64);
+    // Reads of every kind over a graph of varied scores. Near its top cells are wide, and read exactly, so below 1e-2 this
+    // holds only that those stay so; `a_top_read_takes_a_narrow_cell_by_place…` is what comes up against the margin
     let rank = task_rank("out", true);
     let strategy = (
         prop::collection::vec(op(), 0..12),
@@ -429,50 +486,36 @@ fn a_top_read_holds_the_order_promised_against_rank() {
             let db = open_with(&dir, at_tolerance(tolerance));
             let mut graph: Vec<Json> =
                 (0..TASKS).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}") })).collect();
-            graph.extend((0..TASKS).flat_map(|i| {
-                [(i + 1) % TASKS, i * i % TASKS].map(|t| (i, t))
-            }).filter(|(i, t)| i != t).map(|(i, t)| {
-                json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{t}") })
-            }));
+            graph.extend(
+                (0..TASKS)
+                    .flat_map(|i| [(i + 1) % TASKS, i * i % TASKS].map(|t| (i, t)))
+                    .filter(|(i, t)| i != t)
+                    .map(|(i, t)| {
+                        json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{t}") })
+                    }),
+            );
             write(&db, graph).unwrap();
             for op in &ops {
                 let _ = write(&db, vec![json_of(op)]);
             }
             db.wait_for_index_builds().unwrap();
-            let (scores, bound) = rank.indexed(&db);
+            let (_, bound) = rank.indexed(&db);
             let truth = rank.computed(&db);
-            let of = |all: &[(String, f64)], id: &str| all.iter().find(|(held, _)| held == id).unwrap().1;
+            let of = |id: &str| truth.iter().find(|(held, _)| held == id).unwrap().1;
             let promised = 2.0 * tolerance + bound;
             let top = ranked_ids(&db, Some(take), answer);
             prop_assert_eq!(top.len(), take.min(truth.len()));
             for (at, id) in top.iter().enumerate() {
                 for later in &top[at + 1..] {
-                    prop_assert!(of(&truth, later) - of(&truth, id) <= promised, "{later} above {id} at {tolerance}");
+                    prop_assert!(of(later) - of(id) <= promised, "{later} above {id} at {tolerance}");
                 }
                 for (other, held) in truth.iter().filter(|(other, _)| !top.contains(other)) {
-                    prop_assert!(held - of(&truth, id) <= promised, "{other} left out for {id} at {tolerance}");
+                    prop_assert!(held - of(id) <= promised, "{other} left out for {id} at {tolerance}");
                 }
             }
-            // That a cell held different scores for this to be about
-            let precision = ranks::order_precision(tolerance);
-            let held = db
-                .snapshot(|s| {
-                    let mut xs = Vec::new();
-                    for (id, _) in &scores {
-                        xs.push(ranks::node(s, "taskRank", id)?.unwrap().x);
-                    }
-                    Ok(xs)
-                })
-                .unwrap();
-            let shared = held
-                .iter()
-                .enumerate()
-                .any(|(at, a)| held[at + 1..].iter().any(|b| a != b && ranks::same_cell(*a, *b, precision)));
-            narrow_cells_read.set(narrow_cells_read.get() + u64::from(shared));
             Ok(())
         })
         .unwrap();
-    assert!(narrow_cells_read.get() > 0, "no case had a cell holding different scores");
 }
 
 #[test]
