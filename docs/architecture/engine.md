@@ -106,8 +106,8 @@ A plan is a scope, a start, steps and a terminal:
 - **Graph algorithms** (`archive/roadmap/graph-algorithms.md`): over the set so far as a graph, its entities the nodes and the
   edges of the kinds named between two of them the edges. `ranked` orders the set by the scores a rank index holds
   (`schema.md`, Rank indexes), highest first, ties in the set's order: every entity of the set must be one of the
-  index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`, and one still building
-  `INDEX_BUILDING`. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
+  index's nodes, else `BATCH_INVALID`; an index the schema doesn't declare is `UNKNOWN_INDEX`. One not built yet
+  answers from `rank` over the graph it declares, to its tolerance: the same answer, costing what `rank` does until the build ends. `whileBuilding: "refuse"` asks for `INDEX_BUILDING` instead, for a caller that would rather not pay that. A plan that starts from the index's types, in its order, and keeps the first `n` with `limit` reads
   those `n` from the index's score order, and past them only through a cell of it wider than the order promises: the index's
   scores further apart than twice the tolerance come in order, PageRank's further apart than that and the bound, and closer ones in the same cell by place, sorted when
   the answer shows scores. Its scores are hits', and the `hits` answer's `rank` is
@@ -185,7 +185,7 @@ have given, the visits, the milliseconds the whole read took, and a stage per pa
 its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stage that built a graph (`rank`,
 `topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, the `weight` of its
 edges added up when it read weights, a rank's `iterations` and whether it `converged`, a `ranked` stage's rank index as
-its `index` and the bound on its scores as its `error`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
+its `index`, the bound on its scores as its `error` and, while the index isn't built and the stage computed them, `building: true`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
 …); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so

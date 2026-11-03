@@ -87,8 +87,9 @@ pub enum ErrorCode {
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
     /// `ranked` step naming no rank index
     UnknownIndex,
-    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
+    /// A `ranked` read asked to be refused while its index builds
     IndexBuilding,
+    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to

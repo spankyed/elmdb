@@ -282,7 +282,7 @@ stored one.
 | An index's definition changed | rebuilt in the background under its name |
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
-| A rank index added, changed or removed | added, built in the background, and a `ranked` read refused until it is (`INDEX_BUILDING`); changed, rebuilt; removed, dropped |
+| A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `admin` reads it, and `admin.purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |

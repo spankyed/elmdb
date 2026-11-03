@@ -17,7 +17,7 @@ use crate::format::value::TIMESTAMP_EXTENSION;
 use super::algorithms::{self, Groups, Projection};
 use super::entities::{self, field};
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
-use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal};
+use super::plan::{Direction, Plan, ReadOp, Scope, SearchOptions, Similarity, Start, Step, Terminal, WhileBuilding};
 use super::text::{self, search::Hit};
 use super::trigram::{self, Matcher};
 use super::unit::Read;
@@ -352,6 +352,9 @@ fn find_relations(
 /// A query over one read
 /// The most steps a plan holds: a long plan's walk would overflow a reading thread's stack, and no real query is near it
 pub const MAX_STEPS: usize = 256;
+
+/// The most rounds `rank` runs for an index not built yet, which its tolerance stops long before
+const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
 
 struct Query<'r, R: Read> {
     r: &'r R,
@@ -713,7 +716,7 @@ impl<R: Read> Query<'_, R> {
                 }
                 Ok(true)
             }
-            Step::Ranked { index } => self.ranked_by(before, upto, index, visit),
+            Step::Ranked { index, while_building } => self.ranked_by(before, upto, index, *while_building, visit),
             Step::Topological { kinds, direction } => {
                 if *direction == Direction::Both {
                     return Err(Error::new(
@@ -879,8 +882,8 @@ impl<R: Read> Query<'_, R> {
                     return Ok(true);
                 }
                 if before == 1
-                    && let Step::Ranked { index } = &self.plan.steps[0]
-                    && self.reads_rank_top(index)
+                    && let Step::Ranked { index, .. } = &self.plan.steps[0]
+                    && self.reads_rank_top(index)?
                 {
                     let first = self.rank_top(index, take as usize)?;
                     if let Some(stages) = self.stages {
@@ -1409,20 +1412,20 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// Every id after the first `upto` steps
-    /// A rank index's totals, refusing an index the schema doesn't declare (`UNKNOWN_INDEX`) or one not built yet
-    /// (`INDEX_BUILDING`), and recording what a `hits` answer and EXPLAIN say of its scores
-    /// The index's rules and totals, and the step its scores are reported at
+    /// A rank index's rules, refusing an index the schema doesn't declare (`UNKNOWN_INDEX`)
+    fn rank_def(&self, index: &str) -> Result<&crate::schema::RankDef> {
+        self.r
+            .schema()
+            .ranks
+            .get(index)
+            .ok_or_else(|| Error::new(ErrorCode::UnknownIndex, format!("No rank index is named \"{index}\"")))
+    }
+
+    /// A built rank index's rules and totals, and the step its scores are reported at, recording what a `hits` answer
+    /// and EXPLAIN say of its scores
     fn rank_index(&self, stage: usize, index: &str) -> Result<(&crate::schema::RankDef, ranks::Totals, f64)> {
-        let Some(def) = self.r.schema().ranks.get(index) else {
-            return Err(Error::new(ErrorCode::UnknownIndex, format!("No rank index is named \"{index}\"")));
-        };
+        let def = self.rank_def(index)?;
         let totals = ranks::totals(self.r, index)?;
-        if totals.stage != ranks::Stage::Built {
-            return Err(Error::new(
-                ErrorCode::IndexBuilding,
-                format!("The rank index {index} is still being built, and has nothing to answer from until it is"),
-            ));
-        }
         let (error, step) = ranks::reported(totals.error(def.damping), totals.nodes);
         self.ranked.replace(Some(Scored::Ranked { index: index.to_owned(), error }));
         if let Some(stages) = self.stages {
@@ -1434,9 +1437,10 @@ impl<R: Read> Query<'_, R> {
 
     /// Whether `limit` after a `ranked` first step reads the index's top from its score order: the plan starts from
     /// the index's live entities, its types in its order, so the order's ties are the set's
-    fn reads_rank_top(&self, index: &str) -> bool {
-        self.plan.scope == Scope::Live
+    fn reads_rank_top(&self, index: &str) -> Result<bool> {
+        Ok(self.plan.scope == Scope::Live
             && self.r.schema().ranks.get(index).is_some_and(|def| self.start_types() == Some(def.types.as_slice()))
+            && ranks::is_built(self.r, index)?)
     }
 
     /// The first `take` of a rank index's nodes by score, each a hit when the terminal answers them: read from the top of
@@ -1503,10 +1507,77 @@ impl<R: Read> Query<'_, R> {
         self.hits.borrow_mut().insert(id.to_owned(), (hit, "ranked".to_owned()));
     }
 
+    /// The scores a rank index not built yet will hold, within its tolerance: `rank` over the graph it declares, as a
+    /// query planner scans while an index builds. It costs what `rank` does, for every read until the build ends, so a
+    /// read answers the same and only slower. The step its scores are reported at comes with them
+    fn computed_scores(
+        &self,
+        stage: usize,
+        index: &str,
+        def: &crate::schema::RankDef,
+    ) -> Result<(HashMap<String, f64, Fixed>, f64)> {
+        let plan = Plan {
+            scope: Scope::Live,
+            start: Start::Types { types: def.types.clone() },
+            steps: vec![Step::Rank {
+                kinds: def.relations.clone(),
+                direction: def.direction,
+                seeds: None,
+                weights: def.weights,
+                damping: def.damping,
+                iterations: COMPUTED_RANK_ROUNDS,
+                // A round moving the scores by `d` leaves them within `d * damping / (1 - damping)` of where they settle
+                tolerance: def.tolerance * (1.0 - def.damping) / def.damping,
+            }],
+            terminal: Terminal::Hits { fields: None, highlights: false },
+        };
+        let query = Query {
+            r: self.r,
+            plan: &plan,
+            visited: Cell::new(0),
+            stages: None,
+            hits: RefCell::default(),
+            backward_hop: Cell::new(None),
+            walked_back: Cell::new(None),
+            ranked: RefCell::default(),
+        };
+        query.pull(1, &mut |_| Ok(true))?;
+        self.visited.set(self.visited.get() + query.visited.get());
+        let scores: HashMap<String, f64, Fixed> =
+            query.hits.into_inner().into_iter().map(|(id, (hit, _))| (id, hit.score)).collect();
+        let (error, step) = ranks::reported(def.tolerance, scores.len() as u64);
+        self.ranked.replace(Some(Scored::Ranked { index: index.to_owned(), error }));
+        if let Some(stages) = self.stages {
+            stages.reads_index_at(stage, index);
+            stages.rank_error(stage, error);
+            stages.rank_building(stage);
+        }
+        Ok((scores, step))
+    }
+
     /// `ranked`: the set by the index's scores, highest first, ties in the set's order; an entity that isn't one of the
-    /// index's nodes is refused
-    fn ranked_by(&self, before: usize, upto: usize, index: &str, visit: &mut Visit<'_>) -> Result<bool> {
-        let (def, totals, step) = self.rank_index(upto, index)?;
+    /// index's nodes is refused. An index not built yet answers from the scores it will hold, or refuses if asked to
+    fn ranked_by(
+        &self,
+        before: usize,
+        upto: usize,
+        index: &str,
+        while_building: WhileBuilding,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
+        let def = self.rank_def(index)?;
+        let (totals, computed, step) = if ranks::is_built(self.r, index)? {
+            let (_, totals, step) = self.rank_index(upto, index)?;
+            (Some(totals), HashMap::default(), step)
+        } else if while_building == WhileBuilding::Refuse {
+            return Err(Error::new(
+                ErrorCode::IndexBuilding,
+                format!("The rank index {index} is still being built, and this read asked not to compute its scores"),
+            ));
+        } else {
+            let (scores, step) = self.computed_scores(upto, index, def)?;
+            (None, scores, step)
+        };
         let mut ids = self.collect(before)?;
         if !self.holds_each_once(before) {
             let mut seen: HashSet<String, Fixed> = HashSet::default();
@@ -1514,7 +1585,11 @@ impl<R: Read> Query<'_, R> {
         }
         let mut scored = Vec::with_capacity(ids.len());
         for id in ids {
-            let Some(node) = ranks::node(self.r, index, &id)? else {
+            let score = match &totals {
+                Some(totals) => ranks::node(self.r, index, &id)?.map(|node| node.x / totals.estimates),
+                None => computed.get(&id).copied(),
+            };
+            let Some(score) = score else {
                 return Err(Error::new(
                     ErrorCode::BatchInvalid,
                     format!(
@@ -1523,7 +1598,7 @@ impl<R: Read> Query<'_, R> {
                     ),
                 ));
             };
-            scored.push((id, node.x / totals.estimates));
+            scored.push((id, score));
         }
         // Stable: equal scores keep the set's order
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -1899,6 +1974,8 @@ struct Stages {
     compared: RefCell<Vec<Option<(usize, usize, usize)>>>,
     /// Per `ranked` stage: the bound on its scores' distance from PageRank
     errors: RefCell<Vec<Option<f64>>>,
+    /// Per stage, whether a `ranked` answered from `rank` because its index isn't built yet
+    building: RefCell<Vec<bool>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
@@ -1938,6 +2015,7 @@ impl Stages {
             graph: RefCell::new(vec![None; n]),
             compared: RefCell::new(vec![None; n]),
             errors: RefCell::new(vec![None; n]),
+            building: RefCell::new(vec![false; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -1991,6 +2069,10 @@ impl Stages {
         }
     }
 
+    fn rank_building(&self, stage: usize) {
+        self.building.borrow_mut()[stage] = true;
+    }
+
     fn rank_error(&self, stage: usize, error: f64) {
         self.errors.borrow_mut()[stage] = Some(error);
     }
@@ -2020,6 +2102,7 @@ impl Stages {
         let graph = self.graph.borrow();
         let compared = self.compared.borrow();
         let errors = self.errors.borrow();
+        let building = self.building.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -2035,7 +2118,10 @@ impl Stages {
                     2 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
-            let extra = extra + if compared[at].is_some() { 3 } else { 0 } + u32::from(errors[at].is_some());
+            let extra = extra
+                + if compared[at].is_some() { 3 } else { 0 }
+                + u32::from(errors[at].is_some())
+                + u32::from(building[at]);
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -2066,6 +2152,10 @@ impl Stages {
             if let Some(error) = errors[at] {
                 w.str("error");
                 rmp::encode::write_f64(w.0, error).expect("a Vec");
+            }
+            if building[at] {
+                w.str("building");
+                w.bool(true);
             }
             if let Some((neighbours, candidates, edges)) = compared[at] {
                 w.str("neighbours");
