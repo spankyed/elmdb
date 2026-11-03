@@ -1,7 +1,7 @@
 //! Instruction counts of the operations the Criterion benchmarks time (`maintenance.rs`, `reads.rs`), each run once
 //! under Valgrind's Callgrind. A count doesn't move with the machine's load, so two runs of one commit read the same
 //! and a change shows in one run of each (`docs/architecture/testing.md`, Instruction counts). Each setup, its fixture
-//! and its answer check are outside the count. Valgrind runs on Linux, so elsewhere this says so and exits.
+//! and its answer check are outside the count, but for `rank_drain`'s, which `rank_build` counts alone. Valgrind runs on Linux, so elsewhere this says so and exits.
 
 #[cfg(target_os = "linux")]
 #[path = "../tests/support/mod.rs"]
@@ -174,26 +174,35 @@ fn graph((fixture, reads): (support::Fixture, Reads)) -> (support::Fixture, Vec<
 #[cfg(target_os = "linux")]
 library_benchmark_group!(name = graphs, benchmarks = [graph]);
 
+/// Callgrind's name for the index's `build_rank`, as `builder.rs` keeps it a function of its own
+#[cfg(target_os = "linux")]
+const ENTRY: &str = "elmdb::engine::builder::build_rank";
+
+/// Enough documents that a change over near links stays reading a node at a time, past a quarter of them
+#[cfg(target_os = "linux")]
+const NEAR_ROWS: usize = 4000;
+
 #[cfg(target_os = "linux")]
 fn rank_change(links: &str) -> (support::Fixture, Batch, Batch) {
-    let fixture = match links {
-        "near" => support::Fixture::ranked_local_graph(ROWS, 5),
-        _ => support::Fixture::ranked_graph(ROWS, 5),
+    let (fixture, rows) = match links {
+        "near" => (support::Fixture::ranked_local_graph(NEAR_ROWS, 5), NEAR_ROWS),
+        _ => (support::Fixture::ranked_graph(ROWS, 5), ROWS),
     };
     let change = |op: &str| {
         let edge = serde_json::json!({"op":op, "source":"Doc-00000000", "kind":"refs",
-            "target":format!("Doc-{:08}", ROWS / 2)});
+            "target":format!("Doc-{:08}", rows / 2)});
         Batch { ops: vec![serde_json::from_value(edge).unwrap()], now: Some(1.0) }
     };
     (fixture, change("link"), change("unlink"))
 }
 
-// An edge linked and unlinked, each drained: only what the index's thread does for it, `build_rank`, which the count is
-// entered at since the benchmark's own thread does none of it. A commit's own cost is `small_write`'s
+// An edge linked and unlinked, each drained: what the index's thread does for them, counted from `build_rank`, as the
+// benchmark's own thread does none of it. A fixture's build goes through `build_rank` too, so `rank_build` counts that alone
+// over the same fixture: the drain is one less the other. The entry point names the function, not the closures in it, each
+// of which would toggle collection back off for its length
 #[cfg(target_os = "linux")]
 #[library_benchmark(
-    config = LibraryBenchmarkConfig::default()
-        .tool(Callgrind::default().entry_point(EntryPoint::Custom("*build_rank*".to_owned())))
+    config = LibraryBenchmarkConfig::default().tool(Callgrind::default().entry_point(EntryPoint::Custom(ENTRY.to_owned())))
 )]
 #[benches::links(args = ["spread", "near"], setup = rank_change)]
 fn rank_drain((fixture, link, unlink): (support::Fixture, Batch, Batch)) -> support::Fixture {
@@ -205,7 +214,17 @@ fn rank_drain((fixture, link, unlink): (support::Fixture, Batch, Batch)) -> supp
 }
 
 #[cfg(target_os = "linux")]
-library_benchmark_group!(name = rank_drains, benchmarks = [rank_drain]);
+#[library_benchmark(
+    config = LibraryBenchmarkConfig::default().tool(Callgrind::default().entry_point(EntryPoint::Custom(ENTRY.to_owned())))
+)]
+#[benches::links(args = ["spread", "near"], setup = rank_change)]
+fn rank_build((fixture, link, unlink): (support::Fixture, Batch, Batch)) -> support::Fixture {
+    black_box((&link, &unlink));
+    fixture
+}
+
+#[cfg(target_os = "linux")]
+library_benchmark_group!(name = rank_drains, benchmarks = [rank_drain, rank_build]);
 
 #[cfg(target_os = "linux")]
 main!(library_benchmark_groups = keys, maintenance, read, write, graphs, rank_drains);

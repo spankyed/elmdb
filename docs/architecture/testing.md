@@ -340,7 +340,8 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
 (`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
-own thread does none of a drain's work; its commits are outside it. Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
+own thread does none of a drain's work, so it holds the drains' commits and not the benchmark's. The fixture's build runs there too
+and is counted with it; `rank_build` counts that alone, and the drain is one less the other. Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
 runs in a Linux container, with Valgrind and the runner at the dependency's version installed:
 
 ```sh
