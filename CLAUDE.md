@@ -2,7 +2,7 @@
 
 elmdb is an embedded database for Node.js and Electron, written in Rust on LMDB (through heed). The design is in `docs/`:
 read `docs/architecture/design.md` before changing anything, and the document that owns the area you are changing (`schema.md`,
-`engine.md`, `search.md`, `format.md`, `testing.md`). Active work is in `docs/goals/`.
+`engine.md`, `search.md`, `format.md`, `testing.md`). `docs/README.md` says what each directory holds.
 
 ## Layout
 
@@ -30,6 +30,7 @@ npm run build && npm run typecheck && npm test   # the binding, from the root pa
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
+- **Moved a line a `// mutant-skip:` excuses?** `cargo xtask mutant-exclusions`, and commit `.cargo/mutants.toml`.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast

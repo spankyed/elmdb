@@ -4,8 +4,8 @@ elmdb is an embedded database for Node.js and Electron, written in Rust on LMDB.
 and the relations between them, keeps value, text and vector indexes in the same transaction as the data, runs a read
 as one plan and a write as one batch, and reports what every commit changed.
 
-It knows no application. Its first user is apack, whose EARS engine it replaces underneath an unchanged API; apack's
-entity types, relation kinds and rules arrive as a schema.
+It knows no application. Its first user is apack, whose EARS engine runs on it; apack's entity types, relation kinds and
+rules arrive as a schema.
 
 This document is what every "should elmdb do X?" is checked against. The others:
 
@@ -14,7 +14,7 @@ This document is what every "should elmdb do X?" is checked against. The others:
 - [search.md](search.md): text and vector indexes, and search as plan steps.
 - [format.md](format.md): the key layout, values, format versions and upgrades.
 - [testing.md](testing.md): what proves it correct.
-- [roadmap.md](../roadmap.md): the order of work, starting with apack's move off lmdb-js.
+- [roadmap.md](../roadmap.md): what is built, and what waits on what.
 - [background.md](../background.md): why elmdb exists.
 
 ## Principles
@@ -45,7 +45,8 @@ This document is what every "should elmdb do X?" is checked against. The others:
   `heed3` variant, on stock `mdb.master3` (LMDB 1.0), is the path to LMDB 1.0 once it is released and the crates below
   support it.
 - **roaring** bitmaps for posting lists and sets of entities, **charabia** for tokenizing, **levenshtein_automata**
-  for fuzzy terms, **hannoy** for approximate nearest neighbours on LMDB.
+  for fuzzy terms, **hannoy** for approximate nearest neighbours on LMDB, **zstd** for stored values and **leiden-rs**
+  for communities.
 - **rmp** for values in Rust, under the value spec in `format.md`; callers encode with any msgpack implementation that
   meets it (apack uses msgpackr).
 - **napi-rs** for the Node binding. N-API is ABI-stable, so an Electron or Node upgrade needs no rebuild.
@@ -61,7 +62,7 @@ One product name, with the host language as the suffix:
 |---|---|---|
 | `elmdb` | (none) | the engine and its Rust API |
 | `elmdb-node` | `elmdb` | the N-API binding |
-| `elmdb-cli`, later | (none) | `inspect`, `check`, `backup`, `dump`, `load` |
+| `elmdb-cli` | (none) | the `elmdb` command: `inspect`, `check`, `backup`, `dump`, `load` |
 
 Another host follows the pattern (`elmdb-py`). A new crate needs a reason, such as independent reuse or compile time;
 otherwise it is a module.
@@ -73,9 +74,9 @@ Each word means one thing, in the code, the docs and the errors:
 | Word | Means |
 |---|---|
 | **database** | one directory holding one LMDB environment, opened by one `Database` |
-| **schema** | what the caller declares: **types**, their **fields**, **relation kinds**, and each type's **code** prefix |
+| **schema** | what the caller declares: **types**, their **fields**, **relation kinds**, **rank indexes**, and each type's **short code** prefix |
 | **entity**, **attribute**, **relation** | a typed row, one field's value on it, an edge of a kind between two entities |
-| **index** | derived data kept for a field: `value`, `text` or `vector` |
+| **index** | derived data kept for a type's fields, `value`, `text`, `trigram` or `vector`, or a **rank index** over a graph |
 | **plan** | a read, compiled: a start, steps, a terminal |
 | **batch** | a write, compiled: one unit's operations |
 | **unit**, **savepoint**, **commit** | a write transaction, a rollback point inside one, its end |
@@ -89,8 +90,8 @@ Not used: core, layer, adapter, plugin, store (for a database), record store. "A
 
 ## Conventions
 
-- **Rust modules are named by the vocabulary:** `schema`, `plan`, `batch`, `index::{value, text, vector}`, `change`,
-  `admin`, `format`.
+- **Rust modules are named by the vocabulary:** `schema`, `format`, and in `engine`: `plan`, `batch`, `unit`, `values`,
+  `text`, `trigram`, `vector`, `ranks`, `changes`, `watch`, `admin`.
 - **Operation names say what they do.** `get` may answer nothing, `find` searches and may answer an empty list, `read`
   runs a plan; a name never says who may call it or which database it acts on (the caller holds the `Database`).
 - **Errors are one Rust enum of stable `SCREAMING_CASE` codes**, each with a message naming the fix; the TypeScript is
@@ -109,8 +110,7 @@ elmdb's public API is its protocol: schemas, plans, batches, results, change set
 - value decoding, and the black-box, vocabulary and model specs, run against elmdb.
 
 The builders change with apack's vocabulary and the protocol changes far less, so each lives where it changes. If the
-builders settle and another program wants them, they move into elmdb then. apack's side of the move is
-`docs/plans/ears-on-elmdb.md` in apack.
+builders settle and another program wants them, they move into elmdb then.
 
 ## Not in scope
 
@@ -123,4 +123,4 @@ builders settle and another program wants them, they move into elmdb then. apack
 
 - **Growing the map.** The engine grows it itself, between units (`engine.md`, Opening).
 - **Tests without an in-memory backend.** There is none: a test opens a database in a temporary directory with
-  `syncs: false`. What that costs apack's suites is recorded during parity (`roadmap.md`), not gated.
+  `syncs: false`. What that costs apack's suites isn't gated.
