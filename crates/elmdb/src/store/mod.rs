@@ -130,6 +130,7 @@ impl Commit {
 pub(crate) struct RankPlans {
     pub(crate) applied: u64,
     pub(crate) redone: u64,
+    pub(crate) retried: u64,
     pub(crate) one_at_a_time: u64,
     pub(crate) every_node: u64,
 }
