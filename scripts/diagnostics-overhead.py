@@ -18,7 +18,7 @@ import subprocess
 import sys
 import tempfile
 
-from callgrind import allocations, grew_most
+from callgrind import allocator_instructions, grew_most
 from instruction_gates import FLOOR, GATED, REPORTED, SHARE, allowed_growth
 
 BASELINE = "off"
@@ -67,11 +67,11 @@ for function, given, old, new, directory in rows:
     if gated and grew > allowed:
         failures.append(f"`{function} {given}` grew {grew:,} instructions, past its bound of {allowed:,}. "
                         f"What grew: {grew_most(directory, BASELINE)}")
-    # Nothing collecting adds no allocation: an allocation costs the same everywhere, so this one needs no bound
-    allocated = allocations(directory, f"base@{BASELINE}"), allocations(directory)
-    if gated and allocated[1] != allocated[0]:
-        failures.append(f"`{function} {given}` allocated {allocated[1]:,} times with the feature and {allocated[0]:,} "
-                        f"without. What grew: {grew_most(directory, BASELINE)}")
+    # Nothing collecting adds no allocation, and an allocation costs the same everywhere, so this one has no bound
+    allocating = allocator_instructions(directory, f"base@{BASELINE}"), allocator_instructions(directory)
+    if gated and allocating[1] != allocating[0]:
+        failures.append(f"`{function} {given}` spends {allocating[1]:,} instructions allocating with the feature and "
+                        f"{allocating[0]:,} without. What grew: {grew_most(directory, BASELINE)}")
     bound = f"+{allowed:,}" if gated else "reported only"
     lines.append(f"| `{function} {given}` | {old:,} | {new:,} | {grew:+,} ({grew / old:+.4%}) | {bound} |")
 if undeclared:

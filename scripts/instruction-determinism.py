@@ -2,7 +2,7 @@
 
 `python3 scripts/instruction-determinism.py run OUT`: `benches/instructions.rs` under Valgrind, its counts and this
 machine's CPU written to OUT as JSON. `python3 scripts/instruction-determinism.py compare DIR`: the JSON files under DIR
-against each other, failing when a gated case differs past its bound or allocates a different number of times. Which
+against each other, failing when a gated case differs past its bound or spends differently on allocating. Which
 CPUs a run gets is luck, so it takes several machines: `.github/workflows/instruction-determinism.yml`, dispatched after
 a change of allocator, toolchain, Valgrind or runner image.
 """
@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-from callgrind import allocations
+from callgrind import allocator_instructions
 from instruction_gates import GATED, allowed_growth
 
 
@@ -30,7 +30,7 @@ def run(out):
         cases[f"{function} {given}"] = {
             "function": function,
             "instructions": data["profiles"][0]["data"]["total"]["metrics"]["Ir"]["values"]["new"],
-            "allocations": allocations(summary.parent),
+            "allocating": allocator_instructions(summary.parent),
         }
     cpu = next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
                if line.startswith("model name"))
@@ -53,14 +53,14 @@ def compare(directory):
         held = [machine["cases"][case] for machine in machines]
         counts = [each["instructions"] for each in held]
         spread = max(counts) - min(counts)
-        allocated = {each["allocations"] for each in held}
-        print(f"{case}: {min(counts):,} to {max(counts):,} (spread {spread:,}), allocations {sorted(allocated)}")
+        allocating = {each["allocating"] for each in held}
+        print(f"{case}: {min(counts):,} to {max(counts):,} (spread {spread:,}), allocating {sorted(allocating)}")
         if held[0]["function"] not in GATED:
             continue
         if spread > allowed_growth(min(counts)):
             failures.append(f"{case} differs by {spread:,} instructions between machines")
-        if len(allocated) > 1:
-            failures.append(f"{case} allocates {sorted(allocated)} times between machines")
+        if len(allocating) > 1:
+            failures.append(f"{case} spends {sorted(allocating)} instructions allocating between machines")
     for failure in failures:
         print(f"Failed: {failure}")
     sys.exit(1 if failures else 0)
