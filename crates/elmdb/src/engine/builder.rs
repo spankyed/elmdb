@@ -318,6 +318,8 @@ fn build_index(
 
 /// Adds a rank index's nodes a chunk at a time until every one is in it, then pushes a chunk at a time until none
 /// waits, and settles its totals
+/// Kept a function of its own for the instruction counts to enter at (`benches/instructions.rs`)
+#[inline(never)]
 fn build_rank(
     store: &Store,
     schema: &EngineSchema,

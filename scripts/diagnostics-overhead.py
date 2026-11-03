@@ -25,7 +25,7 @@ FLOOR = 100
 GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write", "graph"}
 # The tokenizer seeds its hash map per process, which moves a text rebuild's count by a fraction of a percent between
 # runs of one build (`docs/evidence/instruction-counts.md`)
-REPORTED = {"text_rebuild"}
+REPORTED = {"text_rebuild", "rank_drain", "rank_build"}
 
 root = Path.cwd()
 # `GUNGRAUN_HOME`, when set, names the directory the runs write, which CI keeps on a failure

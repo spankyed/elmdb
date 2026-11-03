@@ -340,7 +340,9 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare. Text
 work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
-(`../evidence/instruction-counts.md`). Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
+(`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
+own thread does none of a drain's work, so it holds the drains' commits and not the benchmark's. The fixture's build runs there too
+and is counted with it; `rank_build` counts that alone, and the drain is one less the other. Valgrind runs on Linux; elsewhere the benchmark says so and exits. From a Mac it
 runs in a Linux container, with Valgrind and the runner at the dependency's version installed:
 
 ```sh
@@ -399,6 +401,22 @@ buffers text memberships, and slows the timed key encoding by a millisecond: eac
 assertion and the slowdown must be reported as a regression. Run it serially, in a full history, after
 `cargo bench -p elmdb --bench maintenance -- --save-baseline <name>`; it reuses `target`, so rebuild afterwards. The
 evidence is [measurement tooling evidence](../evidence/maintenance-verification-2026-10-27.md).
+
+## Comparing two revisions
+
+```sh
+cargo xtask compare main --runs 2 -- cargo bench -p elmdb --bench maintenance -- 'graph/rankIndexChange/1e-6'
+cargo xtask compare main -- cargo run --release -p elmdb --example rank-write-stall -- --edges
+```
+
+One command on two revisions, in turn and each run in the other order, each in a worktree under `target/compare/` that stays
+between runs so its builds stay warm. The revisions are resolved once, from the checkout, and printed as commits. It prints
+each reading on each side, Criterion's medians and any `key=value` a command prints, a run that didn't print one as `-`, beside
+the load average as each run ended, and marks a load past the machine's core count. A first run includes its side's build, so
+the second is usually the one to read. Alternating is what keeps a spike or a drift in load from reading as a change. It clears
+`CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN` for the command, which other variables such as `ELMDB_BENCH_ROWS` pass through. It
+reports and decides nothing: it fails when the command does, after printing what it read, or when a side prints no reading. A
+count that doesn't move with the load is `benches/instructions.rs`'s.
 
 ## Read allocation and codec reports
 
