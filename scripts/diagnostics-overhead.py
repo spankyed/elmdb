@@ -3,8 +3,9 @@
 `python3 scripts/diagnostics-overhead.py`: `benches/instructions.rs` under Valgrind (`docs/architecture/testing.md`,
 Diagnostics), twice on this commit: built without the `diagnostics` feature, the default, and then with it and no
 collector, compared with the first. An instruction count doesn't move with the machine's load, so the comparison can be
-a gate. Exits nonzero when a gated case grew past its bound, when a case the benchmark runs is neither gated nor named
-as reported only, or when a gated case is missing, so it can't pass having compared nothing.
+a gate. Exits nonzero when a gated case grew past its bound or spends anything more on allocating, when a case the
+benchmark runs is neither gated nor named as reported only, or when a gated case is missing or shows no allocator, so it
+can't pass having compared nothing. A failure names the functions that grew.
 
 The bound is declared: with no collector a span costs one cached check of its callsite, an operation's spans a couple of hundred
 instructions, while what the gate is for — work per row, such as an event or a clock read — grows with the rows. One
@@ -19,7 +20,7 @@ import sys
 import tempfile
 
 from callgrind import allocator_instructions, grew_most
-from instruction_gates import FLOOR, GATED, REPORTED, SHARE, allowed_growth
+from instruction_gates import FLOOR, GATED, SHARE, allowed_growth, undeclared_or_missing
 
 BASELINE = "off"
 
@@ -48,9 +49,7 @@ for summary in sorted(home.rglob("summary.json")):
     rows.append((function, given, instructions["values"].get("old"), instructions["values"]["new"], summary.parent))
 
 seen = {row[0] for row in rows}
-undeclared = seen - GATED - REPORTED
-missing = GATED - seen
-failures = []
+failures = undeclared_or_missing(seen)
 lines = ["| Operation | Without | With, nothing collecting | Change | Bound |", "|---|---:|---:|---:|---|"]
 for function, given, old, new, directory in rows:
     if old is None:
@@ -69,18 +68,17 @@ for function, given, old, new, directory in rows:
                         f"What grew: {grew_most(directory, BASELINE)}")
     # Nothing collecting adds no allocation, and an allocation costs the same everywhere, so this one has no bound
     allocating = allocator_instructions(directory, f"base@{BASELINE}"), allocator_instructions(directory)
-    if gated and allocating[1] != allocating[0]:
+    if gated and 0 in allocating:
+        failures.append(f"`{function} {given}` shows no allocator ({allocating[0]:,} and {allocating[1]:,} instructions): "
+                        "scripts/callgrind.py finds it by the name benches/instructions.rs gives it")
+    elif gated and allocating[1] != allocating[0]:
         failures.append(f"`{function} {given}` spends {allocating[1]:,} instructions allocating with the feature and "
                         f"{allocating[0]:,} without. What grew: {grew_most(directory, BASELINE)}")
     bound = f"+{allowed:,}" if gated else "reported only"
     lines.append(f"| `{function} {given}` | {old:,} | {new:,} | {grew:+,} ({grew / old:+.4%}) | {bound} |")
-if undeclared:
-    failures.append(f"cases neither gated nor reported only: {sorted(undeclared)}; declare each in this script")
-if missing:
-    failures.append(f"gated cases the benchmark didn't run: {sorted(missing)}")
-
 report = ("## Diagnostics overhead\n\nOne commit's instruction counts without the `diagnostics` feature and with it, "
-          f"nothing collecting. A gated case may grow {SHARE:.2%} or {FLOOR} instructions, whichever is more.\n\n"
+          f"nothing collecting. A gated case may grow {SHARE:.2%} or {FLOOR} instructions, whichever is more, and spend nothing "
+          "more on allocating.\n\n"
           + "\n".join(lines) + "\n")
 if failures:
     report += "\n" + "\n".join(f"- **Failed:** {failure}" for failure in failures) + "\n"

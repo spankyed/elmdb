@@ -13,3 +13,14 @@ REPORTED = {"text_rebuild", "rank_drain", "rank_build"}
 
 def allowed_growth(count):
     return max(FLOOR, int(count * SHARE))
+
+
+def undeclared_or_missing(seen):
+    """What's wrong with the operations a run counted, so that neither script passes having compared too little"""
+    failures = []
+    if undeclared := seen - GATED - REPORTED:
+        failures.append(f"cases neither gated nor reported only: {sorted(undeclared)}; declare each in "
+                        "scripts/instruction_gates.py")
+    if missing := GATED - seen:
+        failures.append(f"gated cases the benchmark didn't run: {sorted(missing)}")
+    return failures

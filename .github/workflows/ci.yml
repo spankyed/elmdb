@@ -237,6 +237,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: gungraun-runner@0.20.0
+      - run: python3 -B scripts/test-callgrind.py
       - run: python3 scripts/diagnostics-overhead.py
         env:
           GUNGRAUN_HOME: ${{ runner.temp }}/gungraun

@@ -1,5 +1,5 @@
 //! Instruction counts of the operations the Criterion benchmarks time (`maintenance.rs`, `reads.rs`), each run once
-//! under Valgrind's Callgrind. A count doesn't move with the machine's load, so two runs of one commit read the same
+//! under Valgrind's Callgrind. A count doesn't move with the machine or its load, so two runs of one commit read the same
 //! and a change shows in one run of each (`docs/architecture/testing.md`, Instruction counts). Each setup, its fixture
 //! and its answer check are outside the count, but for `rank_drain`'s, which `rank_build` counts alone. Valgrind runs on Linux, so elsewhere this says so and exits.
 
@@ -34,6 +34,7 @@ mod bump {
     fn reserve() {
         const PROT_READ_WRITE: i32 = 1 | 2;
         const MAP_PRIVATE_ANONYMOUS_NORESERVE: i32 = 0x02 | 0x20 | 0x4000;
+        // SAFETY: a new anonymous mapping at an address the kernel chooses touches nothing existing
         let base =
             unsafe { mmap(std::ptr::null_mut(), RESERVED, PROT_READ_WRITE, MAP_PRIVATE_ANONYMOUS_NORESERVE, -1, 0) };
         if base as isize == -1 {
@@ -60,6 +61,8 @@ mod bump {
         start as *mut u8
     }
 
+    // SAFETY: `bump_allocation` hands out ranges the `fetch_add` keeps apart, inside a mapping nothing ever unmaps, each
+    // aligned as asked; it aborts rather than go past the mapping, and `dealloc` leaves every range alone
     unsafe impl GlobalAlloc for Bump {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             bump_allocation(layout)
@@ -114,12 +117,21 @@ fn key_encode(parts: [Part; 3]) -> Vec<u8> {
     black_box(encode(black_box(&parts)))
 }
 
+/// Waits out the read a setup leaves cached: a read within 100 ms of it reuses its transaction, and one later opens another
+/// (`store/idle_reads.rs`), so a case read just then would count either by how long its setup took on that machine. Past
+/// that, with the cache's worker given time to sweep, every read counted opens one
+#[cfg(target_os = "linux")]
+fn past_the_cached_read() {
+    std::thread::sleep(std::time::Duration::from_millis(300));
+}
+
 #[cfg(target_os = "linux")]
 fn fixture() -> support::Fixture {
     let fixture = support::Fixture::new(ROWS, true, false);
     fixture.assert_limited_query();
     // The store's directory lives as long as the fixture the benchmark hands back
     assert!(fixture.directory.path().is_dir());
+    past_the_cached_read();
     fixture
 }
 
@@ -178,6 +190,7 @@ fn workload(name: &str) -> (reads::Messages, Vec<u8>) {
     workload.assert_answer(&messages.db, messages.rows);
     assert!(messages.directory.path().is_dir());
     let request = rmp_serde::to_vec_named(&workload.reads).unwrap();
+    past_the_cached_read();
     (messages, request)
 }
 
@@ -225,6 +238,7 @@ fn graph_read(read: &str) -> (support::Fixture, Reads) {
     };
     fixture.assert_graph_read(read);
     let reads = fixture.graph_read(read);
+    past_the_cached_read();
     (fixture, reads)
 }
 

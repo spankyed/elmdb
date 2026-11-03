@@ -95,18 +95,24 @@ heap some way not traced here, and the binary with it: that job, whose cache siz
 feature and high with it, which failed the overhead gate on a change of comments alone. Under Valgrind the heap also runs
 out of its `brk` segment and falls back to `mmap`, which no process outside Valgrind does.
 
-So the benchmark allocates from an address range that only moves forward, and `free` does nothing. An allocation costs
-15 instructions, whatever came before it. Over 2026-11-03's eight runners, with EPYC 7763, 9V45 and 9V74 among them,
-`all_rows` read 395,211,653 on all eight, and the gated cases differ by at most 26 instructions.
+So the benchmark allocates from an address range that only moves forward, and `free` does nothing. An allocation costs a
+fixed number of instructions whatever came before it: 24 on x86_64 and 30 on aarch64, each dividing `all_rows`' allocating
+into the same 896,053 allocations. Over 2026-11-03's eight runners, with EPYC 7763, 9V45 and 9V74 among them, `all_rows` read
+395,211,653 on all eight, and the gated cases differ by at most 26 instructions.
 The largest case allocates 777 MB in its whole process, setup included (aarch64), inside the 4 GiB it reserves.
 
-What a count holds moved with it. On one aarch64 container `all_rows` fell from about 537 million to 349 million and
-`small_write` from about 1.2 million to 47,007, so most of a small write's count was glibc, and the 0.05% share of it that
-had covered one operation's spans fell below them: 172 instructions (`Op::live` and its drop) against a floor of 100. The
-floor is now 300, still under the 706 that share allowed.
+What a count holds moved with it. On one aarch64 container `all_rows` fell from about 537 million to 349 million, and on
+x86_64 `small_write` fell from 1.41 million to about 49,000, so most of a small write's count was glibc. 0.05% of the old
+count, 706, had covered one operation's spans; of the new one it fell to the floor of 100, below the spans' 172 (`Op::live`
+and its drop, aarch64). The floor is now 300, still under that 706.
 
-Allocations are gated apart, by the allocator's own instructions, since an allocation at 15 instructions is little in a
+Allocations are gated apart, by the allocator's own instructions, since an allocation at a few instructions is little in a
 share of a count. On a copy with one allocation per row added under the feature, `all_rows` grew 189,985 instructions against a
-bound of 174,586, `page` 943 against 940, narrowly, and both failed on allocating, 300,000 and 1,500 instructions more,
-each naming `bump_allocation`. Callgrind's call counts can't do this: they include the setup, so an 8,507-instruction read
-reported 1.1 million allocations.
+bound of 174,586 and `page` 943 against 940, narrowly, and both failed on allocating, 300,000 and 1,500 instructions more:
+10,000 and 50 allocations at 30 each. A case can grow less than its allocating did, the added code changing what the
+compiler inlines: `all_rows`' `fields` fell 1,050,000 and its `write_row` rose 939,745. Callgrind's call counts can't do
+this: they include the setup, so an 8,507-instruction read reported 1.1 million allocations.
+
+Time still reaches a count one way that isn't the machine's CPU: a read within 100 ms of the setup's last reuses its
+transaction (`store/idle_reads.rs`), and a later one opens another. No run has been seen to flip on it, but a stall could
+make one, so each setup waits past that window.
