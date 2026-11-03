@@ -153,6 +153,9 @@ pub struct Store {
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
     #[cfg(test)]
     rank_planned: PlainMutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// Run once on the builder's thread between a drain's check for staleness and its taking the write lock
+    #[cfg(test)]
+    rank_checked: PlainMutex<Option<Box<dyn FnOnce() + Send>>>,
     /// What became of the drains computed outside the write lock
     #[cfg(test)]
     pub(crate) rank_plans: PlainMutex<RankPlans>,
@@ -314,6 +317,8 @@ impl Store {
             mirror: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
+            #[cfg(test)]
+            rank_checked: PlainMutex::default(),
             #[cfg(test)]
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
@@ -570,6 +575,19 @@ impl Store {
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror
     pub(crate) fn deposit(&self, entries: Vec<EdgeDelta>) {
         *self.deposited.lock() = Some(entries);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn when_rank_checked(&self, run: impl FnOnce() + Send + 'static) {
+        *self.rank_checked.lock() = Some(Box::new(run));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn rank_checked(&self) {
+        let run = self.rank_checked.lock().take();
+        if let Some(run) = run {
+            run();
+        }
     }
 
     #[cfg(test)]

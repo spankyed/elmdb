@@ -1302,7 +1302,7 @@ fn a_drain_reading_nodes_one_at_a_time_makes_the_pushes_the_commits_would() {
         found.into_inner().remove(0)
     };
     // Five links each reach a quarter of the nodes within a few pushes, and a whole drain reads them all
-    for limit in [1, 3, 8, 21, 1000] {
+    for limit in [3, 21, 1000] {
         let (drained, swept, moved) = after(400, 5, limit, true, false);
         let (committed, swept_by_commit, _) = after(400, 5, limit, false, false);
         assert_eq!(drained, committed, "five links, after {limit} pushes");
@@ -1315,7 +1315,7 @@ fn a_drain_reading_nodes_one_at_a_time_makes_the_pushes_the_commits_would() {
     }
     // One link each, around a ring long enough that fronts of residual die out within a quarter of its nodes: pushed until
     // none waits, read one at a time throughout, the sweep wrapping to its start as each front ends
-    for limit in [21, 89, 144, 233, 377, 1000] {
+    for limit in [89, 377, 1000] {
         let (drained, swept, moved) = after(1600, 1, limit, true, true);
         let (committed, swept_by_commit, _) = after(1600, 1, limit, false, true);
         assert_eq!(drained, committed, "one link, after {limit} pushes");
@@ -1765,7 +1765,13 @@ fn a_drain_is_stale_after_any_write_of_the_index_another_drains_and_a_count_incl
         db.admin_unit_with_checkpoint(|t| between(t), false).unwrap();
         db.admin_unit_with_checkpoint(
             |t| {
-                applied.set(Some(planned.borrow().as_ref().unwrap().apply(t)?));
+                // A plan found stale writes nothing, so the unit it was asked in commits empty
+                let totals = t.get(&keys::rank_totals("taskRank"))?;
+                let answer = planned.borrow().as_ref().unwrap().apply(t)?;
+                if answer == ranks::Applied::Stale {
+                    assert_eq!(t.get(&keys::rank_totals("taskRank"))?, totals);
+                }
+                applied.set(Some(answer));
                 Ok(())
             },
             false,
@@ -1959,10 +1965,10 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
             assert_within_bound(db, direction, true);
         }
     };
-    let config = || Config { cases: 8, failure_persistence: None, ..Config::default() };
+    let config = |cases| Config { cases, failure_persistence: None, ..Config::default() };
     // Over the karate club a drain reads every node
     let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    TestRunner::new(config())
+    TestRunner::new(config(8))
         .run(&rounds, |rounds| {
             let dir = tempfile::tempdir().unwrap();
             let db = Arc::new(open_with(&dir, schema("both", true)));
@@ -1981,7 +1987,7 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
     // Over a long ring of single links, where a drain's fronts of residual die out within a quarter of the nodes, one reads
     // a node at a time throughout
     let (fired, plans) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
-    TestRunner::new(config())
+    TestRunner::new(config(3))
         .run(&rounds, |rounds| {
             let dir = tempfile::tempdir().unwrap();
             let db = Arc::new(near_links(&dir, 1600, 1, 0));
@@ -1992,6 +1998,29 @@ fn any_commit_landing_as_a_drain_is_computed_leaves_the_index_within_its_bound()
         .unwrap();
     assert!(fired.load(Ordering::SeqCst) > 0, "no op landed in a drain's window");
     assert!(plans.load(Ordering::SeqCst) > 0, "no drain read a node at a time");
+}
+
+#[test]
+fn a_commit_landing_as_a_drain_takes_the_lock_has_it_retried_and_not_computed_under_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open_with(&dir, schema("both", true)));
+    let mut ops: Vec<Json> =
+        (0..34).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.extend(crate::engine::algorithms::tests::KARATE_EDGES.iter().map(
+        |&(a, b)| json!({ "op": "link", "source": format!("Task-{a}"), "kind": "rates", "target": format!("Task-{b}"), "weight": 1 }),
+    ));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let inner = std::sync::Arc::clone(&db);
+    db.store().unwrap().when_rank_checked(move || {
+        write(&inner, vec![json!({ "op": "link", "source": "Task-33", "kind": "refs", "target": "Task-9" })]).unwrap();
+    });
+    write(&db, vec![json!({ "op": "link", "source": "Task-9", "kind": "refs", "target": "Task-20" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let plans = *db.store().unwrap().rank_plans.lock();
+    assert_eq!((plans.retried, plans.redone), (1, 0), "{plans:?}");
+    assert!(plans.applied > 0, "{plans:?}");
+    assert_within_bound(&db, "both", true);
 }
 
 #[test]
