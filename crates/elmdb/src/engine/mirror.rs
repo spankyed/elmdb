@@ -54,6 +54,8 @@ struct Entry {
 
 /// The weight an entry holding none keeps: a weight is from 0 to `relations::MAX_WEIGHT`, so no edge holds this one,
 /// and an entry is 24 bytes where an `Option<f64>` would make it 32
+// mutant-skip: delete -
+// The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
 const NO_WEIGHT: f64 = -1.0;
 
 impl Entry {
@@ -158,6 +160,9 @@ impl EdgeMirror {
         // A name stays once a list mentioned it: the entities deleted and the far ends unfiled leave theirs. Counting
         // afresh once more entries were removed than the lists hold keeps the names no list mentions within twice the
         // entries held, and costs each removal a constant share; a drain filling lists removes none, so never counts
+        // mutant-skip: replace > with >= in EdgeMirror::commit
+        // The edge mirror's count of removals against what it holds: one removal at the bound only moves when the names
+        // are counted afresh by one commit
         if self.removed > self.entries.max(REMOVED_KEPT) {
             self.compact();
         }

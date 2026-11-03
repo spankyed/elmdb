@@ -391,6 +391,38 @@ iteration, so about two changes:
 | 10,000 | 34.0, 31.2 ms | 60.0, 59.9 ms |
 | 100,000 | 270, 262 ms | 670, 713 ms |
 
+### A graph of groups
+
+Which side of near and spread documents that link in groups fall on: `clustered` is groups of 100 with each document's five
+links inside its group but for one in twenty, anywhere (`tests/support/mod.rs`). 2026-11-03, M1 Pro, one link and one unlink each
+drained, `benches/maintenance.rs`, two passes at a load of about 7 rising to about 20 from other work, so the 10,000 column's first
+pass is rough; at 100,000 the groups and hubs rows agree to within 4%, the near and spread ones to 13%:
+
+| Graph | 10,000 | 100,000 |
+|---|---:|---:|
+| near (`local`) | 18.7, 15.5 ms | 16.2, 18.3 ms |
+| **groups, the link within one** | 45.7, 32.1 ms | 67.5, 69.9 ms |
+| **groups, the link between two** | 46.2, 33.6 ms | 196.9, 196.2 ms |
+| hubs | 44.2, 29.9 ms | 232.0, 229.8 ms |
+| spread (`1e-5`) | 43.3, 36.0 ms | 415.3, 363.6 ms |
+
+So a change inside a group costs some 4 times one over near links and a sixth of one over spread links at 100,000; one that
+crosses groups costs a little less than one over a graph with hubs.
+
+Against exact PageRank, one history, seed 0, top results held of those asked:
+
+| Documents | Top | 1e-4 | **1e-5** | 1e-6 |
+|---:|---:|---:|---:|---:|
+| 10,000 | 10 | 10 | 10 | 10 |
+| | 100 | 93 | 100 | 100 |
+| | 1,000 | 985 | 1,000 | 1,000 |
+| 100,000 | 10 | 9 | 10 | 10 |
+| | 100 | 98 | 100 | 100 |
+| | 1,000 | 965 | 999 | 999 |
+
+The default holds here as it does over hubs, one seed being all this shows. A watch over the top 10 hears no change in place, and
+one over the top 100 hears 1.8 places move a change at 100,000 (1e-5), against some 70 over the spread graph.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting

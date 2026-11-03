@@ -187,6 +187,28 @@ fn maintenance(c: &mut Criterion) {
             });
         }
         black_box(&hubs.directory);
+        // One change over a graph of subjects, at the default tolerance: within one, and between two
+        let clustered = Fixture::ranked_clustered_graph_at(rows, 5, 1e-5);
+        for (name, target) in [("clustered", rows - 2), ("clusteredAcross", 0)] {
+            let change = |op: &str| elmdb::engine::batch::Batch {
+                ops: vec![
+                    serde_json::from_value(serde_json::json!({ "op": op, "source": format!("Doc-{:08}", rows - 1),
+                        "kind": "refs", "target": format!("Doc-{target:08}") }))
+                    .unwrap(),
+                ],
+                now: Some(1.0),
+            };
+            let (link, unlink) = (change("link"), change("unlink"));
+            group.bench_function(BenchmarkId::new(format!("rankIndexChange/{name}"), rows), |b| {
+                b.iter(|| {
+                    clustered.db.write(black_box(&link), false).unwrap();
+                    clustered.db.wait_for_index_builds().unwrap();
+                    clustered.db.write(black_box(&unlink), false).unwrap();
+                    clustered.db.wait_for_index_builds().unwrap();
+                })
+            });
+        }
+        black_box(&clustered.directory);
         // The same graph weighted: `rank` by weight, within 1.2× of the unweighted rank above
         let weighted = Fixture::weighted_graph(rows, 5);
         weighted.assert_graph_read("rankWeighted");

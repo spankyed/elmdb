@@ -1,6 +1,6 @@
 # Rank index
 
-Status: built in elmdb, 2026-10-31 ([the readings](../evidence/rank-index.md)); apack's side follows in its own PR.
+Status: built in elmdb, 2026-10-31 ([the readings](../evidence/rank-index.md)); apack's side (In apack, below) is not built.
 Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights ([rank-weights.md](../archive/roadmap/rank-weights.md), elmdb
 #44). A declared index that holds PageRank scores and keeps them current as commits change the graph, so a query reads
 scores rather than computing them. Where the build differs from the design below:

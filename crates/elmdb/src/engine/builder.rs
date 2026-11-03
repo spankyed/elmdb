@@ -318,6 +318,8 @@ fn build_index(
 
 /// Adds a rank index's nodes a chunk at a time until every one is in it, then pushes a chunk at a time until none
 /// waits, and settles its totals
+/// Kept a function of its own for the instruction counts to enter at (`benches/instructions.rs`)
+#[inline(never)]
 fn build_rank(
     store: &Store,
     schema: &EngineSchema,
@@ -391,6 +393,10 @@ fn build_rank(
                 }
                 // Stale with its retries spent: drained again, here, from what the commits left
                 let waiting = match applied {
+                    // mutant-skip: delete match arm Some\(super::ranks::Applied::Written\{waiting\}\) in build_rank
+                    // A drain written, then drained again in its unit: it stopped at the budget or with nothing
+                    // waiting, so this one finds nothing to push, and one that stopped at its limit takes up the sweep
+                    // where the next unit would
                     Some(super::ranks::Applied::Written { waiting }) => waiting,
                     _ => super::ranks::drain(t, name, DRAIN_PUSHES)?,
                 };

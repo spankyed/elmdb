@@ -26,6 +26,8 @@ enum Links {
     Near,
     /// Earlier documents far more often than later ones, a few of them hubs
     Hubs,
+    /// Mostly within its group of `CLUSTER`, as documents on one subject link, one link in twenty anywhere
+    Clustered,
     /// The same shape, by this seed, with its hubs anywhere among the documents, so a document's place says nothing of
     /// its score
     ShuffledHubs(u64),
@@ -39,6 +41,22 @@ fn hub_target(i: usize, j: usize, rows: usize, seed: u64) -> usize {
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     let uniform = ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64;
     ((uniform.powi(4) * rows as f64) as usize).min(rows - 1)
+}
+
+/// How many documents a clustered graph's groups hold
+pub const CLUSTER: usize = 100;
+
+/// The `j`th document the `i`th links in a clustered graph, by a hash of the two
+fn clustered_target(i: usize, j: usize, rows: usize) -> usize {
+    let mut z = ((i as u64) << 16 | j as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    if z.is_multiple_of(20) {
+        (z >> 8) as usize % rows
+    } else {
+        (i / CLUSTER * CLUSTER + (z >> 8) as usize % CLUSTER).min(rows - 1)
+    }
 }
 
 /// `0..rows` in an order fixed by `seed`
@@ -215,6 +233,15 @@ impl Fixture {
         fixture
     }
 
+    /// A graph of subjects, as documents on them have: each document refers to `degree` others, nearly all in its group of
+    /// `CLUSTER`. Ranked at `tolerance`
+    #[allow(dead_code)]
+    pub fn ranked_clustered_graph_at(rows: usize, degree: usize, tolerance: f64) -> Self {
+        let fixture = Self::graph_of(rows, degree, false, Some(tolerance), Links::Clustered);
+        fixture.db.wait_for_index_builds().unwrap();
+        fixture
+    }
+
     /// The same shape by `seed`, with its hubs anywhere among the documents
     #[allow(dead_code)]
     pub fn ranked_shuffled_hub_graph_at(rows: usize, degree: usize, tolerance: f64, seed: u64) -> Self {
@@ -261,6 +288,7 @@ impl Fixture {
             let target = |j: usize| match links {
                 Links::Spread => (i * 31 + j * 977) % rows,
                 Links::Near => (i + j) % rows,
+                Links::Clustered => clustered_target(i, j, rows),
                 Links::Hubs => hub_target(i, j, rows, 0),
                 Links::ShuffledHubs(seed) => place[hub_target(i, j, rows, seed)],
             };

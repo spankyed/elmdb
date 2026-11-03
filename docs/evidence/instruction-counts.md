@@ -55,3 +55,22 @@ The key-encoding cases nearly double. The text rebuild, which encodes its entrie
 
 A count is reported in the pull request's step summary and never fails it. A gate waits until it is known how much the
 counts move with a toolchain or Valgrind update, which only the runs to come will show.
+
+## The rank drain
+
+`rank_drain`, an edge linked and unlinked, each drained, over spread links at 1,000 documents and near ones at 4,000, counted from
+`build_rank` on the index's thread. A fixture's build goes through `build_rank` too, so `rank_build` counts that alone, and the
+drain is one less the other. The entry point names the function and not the closures in it: a `*build_rank*` pattern matched them
+as well, which toggled collection off for their length and left out a drain's writes, reading 15.6 million instructions for what
+is 43 million. In the Linux container, 2026-11-03:
+
+| Case | Runs of one commit | Their spread |
+|---|---:|---:|
+| `rank_drain`, spread | 92,832,565, 92,832,525, 92,832,512 | 53 |
+| `rank_build`, spread | 49,868,522, 49,868,566 | 44 |
+| `rank_drain`, near | 215,378,347, 215,378,357, 215,378,334 | 23 |
+| `rank_build`, near | 191,116,801, 191,116,789, 191,116,800 | 12 |
+
+So a drain is about 43.0 million over spread links and 24.3 million over near ones. A drain over every node sharing its arc read
+with the read of a few, a regression the timings of 2026-11-02 found only by bisecting, reads 44.9 million over spread links on a
+copy, +4.4%, where at 100,000 documents it cost 80% of the arc read's time; some of that no instruction count sees. Over near links it reads about the same, as that drain doesn't take that path, and its `rank_build` +0.2%; over spread links `rank_build` reads +2.9%, as the fixture's own drain takes that path.
