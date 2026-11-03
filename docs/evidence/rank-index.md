@@ -206,6 +206,79 @@ with a field write every 2 ms through twenty changes at 100,000: the first drain
 every drain after it reads none. Only the write lock resets the mirror, so a drain starting between a commit and its deltas
 can't empty it.
 
+### The score order's bits follow the tolerance
+
+Keeping 16 significant bits whatever the tolerance, an edge changed rewrote some 43,500 order keys a drain over spread
+links at 100,000 documents and 1e-6, under the write lock. What rewriting none would save, the most a coarser key could,
+from a copy that never moved a key, in turn with #58's build, two runs each, 2026-11-02, this Mac, a load average falling
+from 78 to 11, so the first runs' times are high:
+
+| 100,000 documents | writing keys | writing none |
+|---|---:|---:|
+| one change, 1e-6 | 447, 434 ms | 384, 370 ms |
+| ten and ten, 1e-6 | 523, 550 ms | 411, 393 ms |
+| ten and ten, 1e-4 | 679, 552 ms | 386, 399 ms |
+| a field's write beside them, p99 | 104, 105 ms | 68, 69 ms |
+| its slowest | 162, 158 ms | 73, 72 ms |
+
+The width of a cell, as multiples of the tolerance, over the same graph, each width run in turn twice at a load of 4 to 8.
+`rankIndexChange`-shaped loops timed from a probe, medians of 15; 16 bits is the build before this one:
+
+| Cell | one change, 1e-6 | ten and ten, 1e-6 | ten and ten, 1e-4 | a field's write, p99 | its slowest |
+|---:|---:|---:|---:|---:|---:|
+| 16 bits | 439, 413 ms | 551, 534 ms | 551, 506 ms | 105, 103 ms | 158, 155 ms |
+| 64 | 388, 377 ms | 468, 438 ms | 418, 442 ms | 82, 81 ms | 140, 178 ms |
+| **256** | 374, 371 ms | 433, 430 ms | 424, 419 ms | 78, 76 ms | 137, 131 ms |
+| 1024 | 356, 373 ms | 420, 425 ms | 416, 418 ms | 75, 76 ms | 135, 133 ms |
+| 4096 | 357, 361 ms | 396, 430 ms | 394, 406 ms | 74, 75 ms | 128, 133 ms |
+
+256 keeps what a wider cell only moves within how far runs differ, where a wider one lets more nodes hold a cell wider than
+the order promises, about half the multiple of them. It takes the keys a drain writes from some 43,500 to 12,250 at 1e-6.
+They stop near there at any width, some 11,000 at 4096: this graph's scores sit around 1, where the exponent changes, so a
+small move changes the key whatever the bits kept. The slowest write stays over the 72 ms of no key writes at any width.
+
+Read costs, at every width and at 16 bits alike, hits then ids, top 10 and top 1,000: 8.3 to 9.2 µs and 680 to 840 µs,
+3.0 µs and 69 µs. Over this graph of alike scores no cell is wider than promised, so these don't price reading through
+one. Reading through every cell instead, so that a read with `limit` always agreed with one without, took top 10 from 9 µs
+to 6 ms at 20,000 documents, as nearly every node is in one cell at 16 bits too.
+
+### Cutting how long a drain holds the lock
+
+Writing a drain's rows in key order, each prefix in one pass, doesn't pay: its write phase at 100,000 documents read 98.3
+and 97.6 ms in place order and 96.2 and 96.0 ms in key order, by a timer on a copy, 2026-11-02. Over spread links nearly
+every node moves, so every page of those rows is dirtied whichever order they go in. It wasn't kept.
+
+A drain that finds itself stale waits for the commits that made it so to pause, then computes outside the lock again, up to
+twice, before computing under it. From `examples/rank-write-stall.rs` at 100,000 documents, 2026-11-02, a load average of 4
+to 8, the two sides in turn, three runs each. `--bursts` is twenty edge writes 2 ms apart and then 300 ms of nothing,
+`--edges` an edge write every 2 ms:
+
+| The writer | Writes made, before | after | p50, before | after | p90, before | after | p99, before | after | Slowest, before | after | All its waits, before | after |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Bursts | 900, 920, 920 | 1,080, 1,080, 1,080 | 154, 157, 165 µs | 158, 147, 154 µs | 530, 574, 584 µs | 545, 590, 576 µs | 219, 200, 204 ms | 42, 29, 22 ms | 296, 297, 307 ms | 101, 101, 104 ms | 5.2, 4.5, 4.6 s | 1.28, 1.29, 1.33 s |
+| Steady | 4,131, 3,843, 3,785 | 6,458, 6,189, 6,377 | 113, 124, 123 µs | 139, 161, 151 µs | 432, 422, 407 µs | 497, 571, 545 µs | 4.1, 188, 206 ms | 1.2, 1.2, 1.0 ms | 291, 297, 401 ms | 462, 482, 271 ms | 9.9, 10.8, 10.9 s | 4.3, 5.9, 5.0 s |
+
+A steady write's p50 and p90 rise about a quarter, which fits more of them finding the index within its budget and so
+making a commit's pushes, though that wasn't measured. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
+the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
+
+Two retries were chosen from what a reader sampling every 5 ms found, the same runs at each count, two each, a load average
+of 5 to 13, the second run of each the quieter; `past tolerance` is the share of samples reporting more than a built index
+does, and the longest stretch of them:
+
+| Retries | Bursts p99 | Bursts slowest | Steady p99 | Steady slowest | Steady writes | Bursts past tolerance | longest | Steady past tolerance | longest |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 228, 211 ms | 270, 307 ms | 246, 239 ms | 573, 316 ms | 3,646, 3,515 | 67%, 67% | 818, 996 ms | 100%, 97% | 7.2, 1.9 s |
+| 2 | 58, 30 ms | 115, 95 ms | 2.8, 0.7 ms | 751, 307 ms | 5,758, 5,957 | 67%, 58% | 475, 383 ms | 83%, 84% | 1.3, 1.1 s |
+| 4 | 16, 76 ms | 84, 96 ms | 2.4, 0.7 ms | 317, 277 ms | 6,019, 6,353 | 65%, 56% | 785, 348 ms | 81%, 81% | 0.9, 0.8 s |
+| 8 | 47, 8 ms | 97, 127 ms | 1.8, 0.7 ms | 312, 301 ms | 6,358, 6,374 | 60%, 59% | 407, 497 ms | 80%, 81% | 1.3, 1.1 s |
+
+The rule was set before these were read: the smallest count past which those latencies stop improving by more than the runs
+differ, whose longest stretch is at most twice that of none. Waiting didn't cost freshness in these runs: the stretches past tolerance
+were shorter with retries than without, why not having been measured. The scores reported are well past the
+tolerance through most of these runs at any count, up to 2e-4 at a tolerance of 1e-6, since a change comes every half second
+and a drain then takes its time; a read reports that bound rather than hiding it.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting
