@@ -166,13 +166,15 @@ test profile without debug info), so `-j` is set by the disk as much as the core
 caught from the output directory's `previously_caught.txt`, so a pass is resumed, and narrowed, by running it again into
 the same directory.
 
-An exclusion that names a mutant by its line lives in the source: a `// mutant-skip: PATTERN` comment directly above the line
-it excuses, followed by its reason, or ` (as above)` where the comment before it gave that. `cargo xtask mutant-exclusions` writes
-those into a generated part of `.cargo/mutants.toml`, each with the line of the next code, so an edit above one moves nothing by
-hand. `cargo xtask check-mutant-exclusions`, a CI step, fails when that part isn't what the comments generate, and when an
-exclusion, or one line of a pattern naming several, matches no mutant
-cargo-mutants lists, so a line moved is fixed in the commit that moves it. It can't tell a moved line from one another
-mutant moved onto, so a pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
+A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
+exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
+an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. One that names
+a line lives in the source: a `// mutant-skip: PATTERN` comment directly above the line it excuses, followed by its reason, or
+` (as above)` where the comment before it gave that. `cargo xtask mutant-exclusions` writes those into a generated part of
+`.cargo/mutants.toml`, each with the line of the next code, so an edit above one moves nothing by hand. It can hide a mutant of
+the same kind that moves onto that line; the `--list --no-config` diff above shows what each exclusion hides. `cargo xtask
+check-mutant-exclusions`, a CI step, fails when that part isn't what the comments generate, and when an exclusion, or one line
+of a pattern naming several, matches no mutant cargo-mutants lists. A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`) make changes cargo-mutants
 doesn't: one expression swapped for another, and heap and timing regressions.
 
