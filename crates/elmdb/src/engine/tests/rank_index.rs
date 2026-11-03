@@ -1,4 +1,4 @@
-//! Rank indexes (`docs/roadmap/rank-index.md`): scores kept current by every commit, within the bound they report of
+//! Rank indexes (`docs/archive/roadmap/rank-index.md`): scores kept current by every commit, within the bound they report of
 //! the PageRank `rank` computes over the same graph; read by `ranked`, the top of them read alone; refused while
 //! building; held to that bound and to their own invariant by `check()`.
 

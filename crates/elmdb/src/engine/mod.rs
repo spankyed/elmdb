@@ -74,7 +74,7 @@ pub(crate) fn drain_commits(
 ) -> builder::Commits {
     Arc::new(move |chunk| {
         // mutant-skip: delete ! in drain_commits
-        // The rank index (`docs/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches
+        // The rank index (`docs/archive/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches
         // run again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch
         // and each hears the same
         let logging = !tracks.lock().is_empty();

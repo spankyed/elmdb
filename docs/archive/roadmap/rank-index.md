@@ -1,7 +1,7 @@
 # Rank index
 
-Status: built in elmdb, 2026-10-31 ([the readings](../evidence/rank-index.md)); apack's side (In apack, below) is not built.
-Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights ([rank-weights.md](../archive/roadmap/rank-weights.md), elmdb
+Status: built, 2026-10-31 ([the readings](../../evidence/rank-index.md)): elmdb #46, and apack's side in apack #317.
+Builds on `rank` (graph algorithms, stages 0–2, elmdb #35) and its weights ([rank-weights.md](rank-weights.md), elmdb
 #44). A declared index that holds PageRank scores and keeps them current as commits change the graph, so a query reads
 scores rather than computing them. Where the build differs from the design below:
 
@@ -46,7 +46,7 @@ scores rather than computing them. Where the build differs from the design below
 ## Where it starts
 
 `rank` computes at query time: it builds the projection from the plan's set, runs power iteration from nothing, and
-drops both when it answers ([graph-algorithms.md](../archive/roadmap/graph-algorithms.md), The projection is the plan's set). Every run
+drops both when it answers ([graph-algorithms.md](graph-algorithms.md), The projection is the plan's set). Every run
 reads every entity and edge in the set. Through the release binding, from one document over five `refs` edges a
 document, both ways, ten answered: 2.60 ms at 1,000 documents, 28.08 ms at 10,000 and 352.93 ms at 100,000 (2026-10-31,
 Apple M1 Pro, macOS, Rust 1.99.1, Node 23.11.1; #35's `docs/evidence/graph-algorithms.md`, Cost). A live view over a

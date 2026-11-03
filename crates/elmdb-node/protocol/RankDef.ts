@@ -2,7 +2,7 @@
 import type { Direction } from "./Direction.js";
 
 /**
- * A rank index (`docs/roadmap/rank-index.md`): the PageRank of a graph whose nodes are the live entities of `types`
+ * A rank index (`docs/archive/roadmap/rank-index.md`): the PageRank of a graph whose nodes are the live entities of `types`
  * and whose edges are those of `relations` between two of them, every node a seed, kept within `tolerance` of the
  * scores `rank` would answer for the same graph
  */

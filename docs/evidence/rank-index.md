@@ -1,6 +1,6 @@
 # Rank index: what it promises and what it costs
 
-The evidence for [the rank index](../roadmap/rank-index.md). 2026-10-31, on `session/rank-index` from `283c805`, on an
+The evidence for [the rank index](../archive/roadmap/rank-index.md). 2026-10-31, on `session/rank-index` from `283c805`, on an
 Apple M1 Pro (macOS), Rust 1.99.1, release builds, other sessions' builds running (a load average about 5.5).
 
 ## Correct

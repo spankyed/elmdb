@@ -357,7 +357,7 @@ unit is open.
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
   everything leaves such an index unbuilt, as a build does.
-- Rank indexes (`roadmap/rank-index.md`): every write that changes a rank index's graph — a link, an unlink, a weight
+- Rank indexes (`archive/roadmap/rank-index.md`): every write that changes a rank index's graph — a link, an unlink, a weight
   changed, an entity created, trashed, restored or destroyed — updates the index in its unit by forward push: each
   node holds an estimate and a residual, a change moves the residuals its edges touch, and pushing a node moves its
   residual into its estimate and on along its arcs. A commit that changed the index pushes up to 16 nodes, and one that left it alone
