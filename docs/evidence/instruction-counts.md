@@ -77,8 +77,8 @@ copy, +4.4%, where at 100,000 documents it cost 80% of the arc read's time; some
 
 ## The machine
 
-`read_bytes` `all_rows` read one of two counts in CI, about 524.95 million or 530.17 million, whatever the commit. Over 70
-CI jobs on one source the mode stayed within a job and moved between jobs at the same minute, so it wasn't the clock; one
+`read_bytes` `all_rows` read one of two counts in CI, about 524.95 million or 530.17 million, whatever the commit. Over about 70
+CI jobs the mode stayed within a job and moved between jobs at the same minute, so it wasn't the clock; one
 binary at 100%, about 50% and about 25% of a core read within 24 instructions, so it wasn't load (aarch64 container).
 A workflow ran one binary, by its SHA-256, three times each on eight runners on 2026-11-03:
 
@@ -91,13 +91,13 @@ A workflow ran one binary, by its SHA-256, three times each on eight runners on 
 
 Function by function from one job's two Callgrind profiles, every function of elmdb's reads the same and the 5.2 million
 is in glibc's `_int_malloc`, `malloc_consolidate` and `_int_free`: the heap settles in another shape. The CPU reaches the
-heap some way not traced here, and the binary with it: that job, on the Xeon 85xx, read low without the `diagnostics`
+heap some way not traced here, and the binary with it: that job, whose cache size is the Xeon 85xx's, read low without the `diagnostics`
 feature and high with it, which failed the overhead gate on a change of comments alone. Under Valgrind the heap also runs
 out of its `brk` segment and falls back to `mmap`, which no process outside Valgrind does.
 
 So the benchmark allocates from an address range that only moves forward, and `free` does nothing. An allocation costs
 15 instructions, whatever came before it. Over 2026-11-03's eight runners, with EPYC 7763, 9V45 and 9V74 among them,
-`all_rows` read 395,211,653 on all eight, and the gated cases differ by at most 22 instructions.
+`all_rows` read 395,211,653 on all eight, and the gated cases differ by at most 26 instructions.
 The largest case allocates 777 MB in its whole process, setup included (aarch64), inside the 4 GiB it reserves.
 
 What a count holds moved with it. On one aarch64 container `all_rows` fell from about 537 million to 349 million and
