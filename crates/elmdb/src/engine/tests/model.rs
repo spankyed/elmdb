@@ -920,6 +920,9 @@ fn derived_of(db: &Database) -> BTreeMap<String, Json> {
             entries.push(json!([format!("{:?}", parts[3]), values::decode(&v).unwrap().as_str().unwrap()]));
         }
         out.insert("Task index a".to_owned(), json!(entries));
+        for kind in ALL_KINDS {
+            out.insert(format!("{kind} relations"), json!(relations::count(s, kind).unwrap()));
+        }
         for id in IDS {
             for kind in ALL_KINDS {
                 let far = |outward| {
@@ -941,6 +944,9 @@ fn derived_of(db: &Database) -> BTreeMap<String, Json> {
 /// What the derived reads should answer, from the model
 fn derived_from(m: &Model) -> BTreeMap<String, Json> {
     let mut out = BTreeMap::new();
+    for kind in ALL_KINDS {
+        out.insert(format!("{kind} relations"), json!(all_edges(m).iter().filter(|e| e.1 == kind).count()));
+    }
     let mut by_seq: Vec<(&String, &Entity)> = m.entities.iter().collect();
     by_seq.sort_by_key(|(_, e)| e.seq);
     for t in ["Task", "Note"] {
@@ -1370,6 +1376,19 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         assert_eq!(state_of(&engine.db), model_state(&reference.model));
         assert_eq!(sorted_far_ends(derived_of(&engine.db)), derived_from(&reference.model));
         assert_eq!(plans_of(&engine.db), plans_from(&reference.model));
+        // A registered field outlives its values, so what the model holds is all it must include
+        engine
+            .db
+            .snapshot(|s| {
+                for (id, entity) in &reference.model.entities {
+                    for field in entity.fields.keys() {
+                        let key = keys::field_name(crate::engine::ids::type_of(id), field);
+                        assert!(s.get(&key).unwrap().is_some(), "{id}'s {field} isn't registered");
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
         // The drain waited for, so no commit of its own takes a refusal the next step armed
         let live: Vec<String> =
             reference.model.entities.iter().filter(|(_, e)| !e.trashed).map(|(id, _)| id.clone()).collect();

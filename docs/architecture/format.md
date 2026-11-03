@@ -18,6 +18,8 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `m/` | the format, the schema, the last synced transaction, the last commit's sequence | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
+| `d/rc` kind | a relation kind's count | derived |
+| `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a value index is built; a plan reads only a built one | derived |
 | `d/x` type field value seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |

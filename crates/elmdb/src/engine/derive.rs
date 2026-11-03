@@ -7,7 +7,7 @@ pub(super) mod sorted;
 #[cfg(test)]
 use audit::{PrimaryGraph, audit_cycles};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
@@ -153,6 +153,16 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
             }
         }
     }
+    let mut fields = BTreeSet::new();
+    for (key, _) in r.scan(&keys::all_values())? {
+        if let [_, Part::String(id), Part::String(field)] = decode_key(&key)?.as_slice() {
+            fields.insert(keys::field_name(ids::type_of(id), field));
+        }
+    }
+    for key in fields {
+        emit(key, Vec::new())?;
+    }
+    let mut kinds: BTreeMap<String, i64> = BTreeMap::new();
     for (key, bytes) in r.scan(&keys::all_relations())? {
         let relation = match decode_key(&key)?.pop() {
             Some(Part::String(id)) => id,
@@ -163,16 +173,22 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
         emit(keys::edge(true, &s.source, &s.kind, s.seq), relations::edge_value(&relation, &s.target, s.weight))?;
         emit(keys::edge(false, &s.target, &s.kind, s.seq), relations::edge_value(&relation, &s.source, s.weight))?;
         emit(keys::between(&s.source, &s.kind, &s.target, s.seq), values::encode(&relation.as_str().into()))?;
+        *kinds.entry(s.kind).or_default() += 1;
+    }
+    for (kind, n) in kinds {
+        emit(keys::relation_count(&kind), values::encode(&n.into()))?;
     }
     Ok(())
 }
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 15] = [
+const COMPARED: [Prefix; 17] = [
     Prefix::Live,
     Prefix::Trashed,
     Prefix::Count,
+    Prefix::RelationCount,
+    Prefix::FieldName,
     Prefix::Index,
     Prefix::Out,
     Prefix::In,
@@ -302,7 +318,8 @@ pub fn check(r: &impl Read) -> Result<CheckReport> {
                         changed.push(Difference { key: key_text(key), kind: "differs".into() });
                     }
                     next = expected.next()?;
-                } else {
+                } else if prefix != Prefix::FieldName {
+                    // A registered field stays when its last value goes, so only one missing is a difference
                     extra.push(Difference { key: key_text(key), kind: "extra".into() });
                 }
                 Ok(())
