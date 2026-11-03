@@ -19,7 +19,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [One plan algebra](plan-algebra.md) | The planner's three fixes and EXPLAIN built; designed: the smaller filter first, then value indexes as bitmaps and filters as operations on them |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
-| [Rank index](rank-index.md) | Designed: PageRank scores declared as an index and kept current by each commit, read instead of computed |
+| [Rank index](rank-index.md) | Built in elmdb: PageRank scores declared as an index and kept current by each commit, read instead of computed; apack's manifest key and `.ranked()` not built |
 
 ## Development improvements
 
