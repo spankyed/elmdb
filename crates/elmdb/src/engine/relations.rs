@@ -91,6 +91,20 @@ fn unfile(t: &mut Txn<'_, '_>, s: &Stored) -> Result<()> {
     t.del(&keys::between(&s.source, &s.kind, &s.target, s.seq))
 }
 
+fn add_count(t: &mut Txn<'_, '_>, kind: &str, by: i64) -> Result<()> {
+    let key = keys::relation_count(kind);
+    let now = count(t, kind)? as i64 + by;
+    if now > 0 { t.put(&key, &values::encode(&now.into())) } else { t.del(&key) }
+}
+
+/// A kind's count of relations
+pub fn count(t: &impl Read, kind: &str) -> Result<u64> {
+    Ok(match t.get(&keys::relation_count(kind))? {
+        Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),
+        None => 0,
+    })
+}
+
 /// An edge key's value: the relation and the far end
 pub fn edge_of(bytes: &[u8]) -> Result<(String, String)> {
     let value = values::decode(bytes)?;
@@ -405,6 +419,7 @@ pub fn link(
     };
     put(t, &relation, &stored)?;
     file(t, &relation, &stored)?;
+    add_count(t, kind, 1)?;
     super::ranks::edge_changed(t, kind, source, target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.clone(),
@@ -421,6 +436,7 @@ pub fn link(
 pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<()> {
     put(t, relation, stored)?;
     file(t, relation, stored)?;
+    add_count(t, &stored.kind, 1)?;
     super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, None, Some(stored.weight))?;
     t.event(Event::Linked {
         relation: relation.to_owned(),
@@ -435,6 +451,7 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
 pub fn remove(t: &mut Txn<'_, '_>, relation: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };
     unfile(t, &stored)?;
+    add_count(t, &stored.kind, -1)?;
     super::ranks::edge_changed(t, &stored.kind, &stored.source, &stored.target, Some(stored.weight), None)?;
     t.del(&keys::relation(relation))?;
     t.event(Event::Unlinked {

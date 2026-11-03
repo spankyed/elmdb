@@ -45,6 +45,10 @@ pub enum Prefix {
     Trashed,
     /// `d/c type` → a type's count of live entities
     Count,
+    /// `d/rc kind` → a relation kind's count of relations
+    RelationCount,
+    /// `d/f type field` → that a type's entities have held the field
+    FieldName,
     /// `d/x type index …` → a value index's entries
     Index,
     /// `d/xb type index` → that a value index is built
@@ -92,7 +96,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 30] = [
+    pub const ALL: [Prefix; 32] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -101,6 +105,8 @@ impl Prefix {
         Prefix::Live,
         Prefix::Trashed,
         Prefix::Count,
+        Prefix::RelationCount,
+        Prefix::FieldName,
         Prefix::Index,
         Prefix::IndexBuilt,
         Prefix::Out,
@@ -136,6 +142,8 @@ impl Prefix {
             Prefix::Live => "d/e",
             Prefix::Trashed => "d/t",
             Prefix::Count => "d/c",
+            Prefix::RelationCount => "d/rc",
+            Prefix::FieldName => "d/f",
             Prefix::Index => "d/x",
             Prefix::IndexBuilt => "d/xb",
             Prefix::Out => "d/o",

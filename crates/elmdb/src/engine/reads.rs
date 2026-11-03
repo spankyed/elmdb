@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rmpv::Value;
 
@@ -220,6 +220,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             }
             Ok(())
         }
+        ReadOp::Catalog => catalog(r, out),
         ReadOp::WouldCreateCycle { source, target, kinds } => {
             for kind in kinds {
                 relations::definition(r, kind)?;
@@ -259,6 +260,49 @@ fn write_relation(r: &impl Read, id: &str, s: &relations::Stored, w: &mut W<'_>)
 }
 
 /// A field's msgpack, decompressed where it is stored compressed; `entityType` is read from the id of an entity that exists
+/// `ReadOp::Catalog`'s answer
+fn catalog(r: &impl Read, out: &mut Vec<u8>) -> Result<()> {
+    let schema = r.schema();
+    let mut w = W(out);
+    w.map(4);
+    w.kind("catalog");
+    w.str("types");
+    w.array(schema.types.len() as u32);
+    for (name, def) in &schema.types {
+        let mut fields: BTreeSet<String> = def.fields.keys().cloned().collect();
+        for (key, _) in r.scan(&keys::field_names(name))? {
+            if let Some(Part::String(field)) = decode_key(&key)?.pop() {
+                fields.insert(field);
+            }
+        }
+        w.map(3);
+        w.str("name");
+        w.str(name);
+        w.str("count");
+        w.uint(entities::count(r, name)?);
+        w.str("fields");
+        w.array(fields.len() as u32);
+        for field in &fields {
+            w.str(field);
+        }
+    }
+    w.str("relations");
+    w.array(schema.relations.len() as u32);
+    for kind in schema.relations.keys() {
+        w.map(2);
+        w.str("kind");
+        w.str(kind);
+        w.str("count");
+        w.uint(relations::count(r, kind)?);
+    }
+    w.str("roles");
+    w.array(schema.roles.len() as u32);
+    for role in schema.roles.keys() {
+        w.str(role);
+    }
+    Ok(())
+}
+
 fn get(r: &impl Read, id: &str, name: &str) -> Result<Option<Vec<u8>>> {
     if name == field::ENTITY_TYPE {
         return Ok(entities::record(r, id)?.map(|_| values::encode(&ids::type_of(id).into())));
