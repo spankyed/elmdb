@@ -621,7 +621,7 @@ mod ranks {
         let rank = &parsed.ranks["noteRank"];
         assert_eq!(
             (rank.direction, rank.weights, rank.damping, rank.tolerance, rank.declared_by.as_deref()),
-            (Direction::Out, true, 0.85, 1e-6, None)
+            (Direction::Out, true, 0.85, 1e-5, None)
         );
         // A stored schema's defaults are serde's, and read the same
         let stored: RankDef =
