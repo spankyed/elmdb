@@ -158,37 +158,37 @@ exclude_re = [
     # them too
     "ranks.rs:560:.*replace == with != in Change<'i, 'a>::finish",
     # A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never land on
-    "ranks.rs:751:.*replace > with >= in Drained::write",
-    "ranks.rs:1184:.*replace > with >= in owes_work",
+    "ranks.rs:756:.*replace > with >= in Drained::write",
+    "ranks.rs:1189:.*replace > with >= in owes_work",
     "ranks.rs:(576|586):.*replace > with >= in Change<'i, 'a>::finish",
-    "ranks.rs:(811|848|849):.*replace > with >= in plan",
-    "ranks.rs:1044:.*replace > with >= in Reached::sweep_all",
-    "ranks.rs:(894|895):.*replace > with >= in Sweep::push",
-    "ranks.rs:945:.*replace > with >= in Reached::add",
-    "ranks.rs:1310:.*replace > with >= in unfinished",
+    "ranks.rs:(816|853|854):.*replace > with >= in plan",
+    "ranks.rs:1049:.*replace > with >= in Reached::sweep_all",
+    "ranks.rs:(899|900):.*replace > with >= in Sweep::push",
+    "ranks.rs:950:.*replace > with >= in Reached::add",
+    "ranks.rs:1315:.*replace > with >= in unfinished",
     # Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes no
     # push and writes nothing, so only its cost shows; index_status reads the build stage, not this
-    "ranks.rs:1310:.*replace && with \\|\\| in unfinished",
+    "ranks.rs:1315:.*replace && with \\|\\| in unfinished",
     # A drain written, then drained again in its unit: it stopped at the budget or with nothing waiting, so this one finds
     # nothing to push, and one that stopped at its limit takes up the sweep where the next unit would
     "builder.rs:370:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
     # The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
     # (`draining_in_chunks_makes_the_bits_one_drain_makes`)
-    "ranks.rs:811:.*replace < with <= in plan",
-    "ranks.rs:1044:.*replace < with <= in Reached::sweep_all",
+    "ranks.rs:816:.*replace < with <= in plan",
+    "ranks.rs:1049:.*replace < with <= in Reached::sweep_all",
     # Whether a drain reads its nodes one at a time or all in one pass: which nodes it pushes, and how, is the same, so
     # only its cost shows (the bench's spread and near graphs)
-    "ranks.rs:(785|788|789|791|812):.*in plan",
-    "ranks.rs:1136:.*in Reached::arcs",
-    "ranks.rs:1108:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
+    "ranks.rs:(790|793|794|796|817):.*in plan",
+    "ranks.rs:1141:.*in Reached::arcs",
+    "ranks.rs:1113:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
     # Where the sweep looks after the node it pushed: that one's residual is 0, so looking from it or from the next
     # finds the same
-    "ranks.rs:1061:.*replace \\+= with \\*= in Reached::sweep_all",
+    "ranks.rs:1066:.*replace \\+= with \\*= in Reached::sweep_all",
     # check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the tests make
     # moves a value far past them, so a tolerance off by a factor answers the same
-    "ranks.rs:(1384|1396|1434|1435):.*in violations",
+    "ranks.rs:(1389|1401|1439|1440):.*in violations",
     # check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the bound's
     # proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which the invariant
     # checks above it catch first
-    "ranks.rs:(1446|1457):.*in violations",
+    "ranks.rs:(1451|1462):.*in violations",
 ]

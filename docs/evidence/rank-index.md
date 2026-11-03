@@ -222,8 +222,8 @@ to 8, the two sides in turn, three runs each. `--bursts` is twenty edge writes 2
 | Bursts | 900, 920, 920 | 1,080, 1,080, 1,080 | 154, 157, 165 µs | 158, 147, 154 µs | 530, 574, 584 µs | 545, 590, 576 µs | 219, 200, 204 ms | 42, 29, 22 ms | 296, 297, 307 ms | 101, 101, 104 ms | 5.2, 4.5, 4.6 s | 1.28, 1.29, 1.33 s |
 | Steady | 4,131, 3,843, 3,785 | 6,458, 6,189, 6,377 | 113, 124, 123 µs | 139, 161, 151 µs | 432, 422, 407 µs | 497, 571, 545 µs | 4.1, 188, 206 ms | 1.2, 1.2, 1.0 ms | 291, 297, 401 ms | 462, 482, 271 ms | 9.9, 10.8, 10.9 s | 4.3, 5.9, 5.0 s |
 
-A steady write's p50 and p90 rise about a quarter: more of them now find the index within its budget, and so make a commit's
-pushes. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
+A steady write's p50 and p90 rise about a quarter, which fits more of them finding the index within its budget and so
+making a commit's pushes, though that wasn't measured. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
 the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
 
 ### What it took to get there
