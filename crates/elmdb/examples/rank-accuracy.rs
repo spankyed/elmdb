@@ -1,6 +1,6 @@
 //! How close a rank index's top is to exact PageRank at a tolerance, and what it costs:
 //! `rank-accuracy GRAPH DOCUMENTS TOLERANCE [SEED] [--accuracy]`, GRAPH `hubs`, `shuffled` (its hubs anywhere among the
-//! documents, by SEED) or `spread`, DOCUMENTS at least 1,000, built with `--release`. SEED also chooses the changes. A history of changes is made,
+//! documents, by SEED), `spread` or `clustered`, DOCUMENTS at least 1,000, built with `--release`. SEED also chooses the changes. A history of changes is made,
 //! each drained and timed, from an ordinary document and from the highest-scoring one, which `--accuracy` leaves out with
 //! the reads and the churn; then the top ten, hundred and thousand are compared with `rank` run far past the tolerance,
 //! and with the top a change before, as a watch sees it.
@@ -81,7 +81,7 @@ fn spread_of(mut ms: Vec<f64>) -> String {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let graph = args.next().expect("a graph: hubs, shuffled or spread");
+    let graph = args.next().expect("a graph: hubs, shuffled, spread or clustered");
     let rows: usize = args.next().expect("a document count").parse().unwrap();
     assert!(rows >= *SIZES.last().unwrap(), "at least {} documents, the largest top compared", SIZES.last().unwrap());
     let tolerance: f64 = args.next().expect("a tolerance").parse().unwrap();
@@ -94,6 +94,7 @@ fn main() {
         "hubs" => support::Fixture::ranked_hub_graph_at(rows, 5, tolerance),
         "shuffled" => support::Fixture::ranked_shuffled_hub_graph_at(rows, 5, tolerance, seed),
         "spread" => support::Fixture::ranked_graph_at(rows, 5, tolerance),
+        "clustered" => support::Fixture::ranked_clustered_graph_at(rows, 5, tolerance),
         other => panic!("no graph {other}"),
     };
     let db = &f.db;
