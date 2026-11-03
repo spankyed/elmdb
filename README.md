@@ -7,19 +7,16 @@
   <em>Say "LMDB" out loud: that's the name.</em>
 </p>
 
-An embedded database for Node.js and Electron, written in Rust on LMDB. It holds typed entities and the relations between
-them, keeps its value and text indexes in the same transaction as the data, and tells you what every commit changed.
+An embedded database for Node.js and Electron, with search, graphs and live queries built in. It runs inside your app,
+with no server, so you don't need a separate search index or your own cache invalidation. Written in Rust on LMDB.
 
-- **Typed data:** your schema declares types, fields and relation kinds. Every writer is held to it.
-- **Search:** ranked full text, fuzzy terms, substrings and regex, and vector and hybrid search.
-- **Graphs:** walks and shortest paths, components, communities and PageRank, computed in a read, or kept current as a rank index.
-- **Live queries:** each commit names the tracked reads it wrote into, so a view re-runs only when its answer could change.
-- **Repairable:** every index can be rebuilt from primary data, and `check()` compares them.
+- **Search:** full text and vectors, plus fuzzy, substring and regex matching.
+- **Graphs:** paths, communities and PageRank, over the relations between your data.
+- **Live queries:** every commit says which reads it affected, so a view re-runs only when it needs to.
+- **Enforced schemas:** you declare your types and relations, and every write is checked against them.
+- **Repairable indexes:** `check()` verifies them against your data, and `rebuild()` replaces them.
 
-Built for apps with connected data, search-heavy interfaces and views that stay current: knowledge workspaces, document
-libraries, desktop tools.
-
-Reads and writes are data: a read is a plan and a write is a batch, each crossing into Rust once as msgpack.
+A good fit for knowledge tools, document libraries and other desktop apps with connected data.
 
 ## Example
 
@@ -72,7 +69,7 @@ db.close();
 [ 1 ]
 ```
 
-The protocol's types are generated from the Rust: `crates/elmdb-node/protocol/`. [apack](https://github.com/spankyed/apack),
+Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. [apack](https://github.com/spankyed/apack),
 elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
 
 ## Status
