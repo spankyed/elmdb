@@ -18,14 +18,10 @@ import subprocess
 import sys
 import tempfile
 
+from callgrind import allocations, grew_most
+from instruction_gates import FLOOR, GATED, REPORTED, SHARE, allowed_growth
+
 BASELINE = "off"
-# Each case's allowed growth: this share of its count without the feature, or this many instructions if more
-SHARE = 0.0005
-FLOOR = 100
-GATED = {"key_encode", "value_rebuild", "export", "indexed_limit", "read_bytes", "small_write", "graph"}
-# The tokenizer seeds its hash map per process, which moves a text rebuild's count by a fraction of a percent between
-# runs of one build (`docs/evidence/instruction-counts.md`)
-REPORTED = {"text_rebuild", "rank_drain", "rank_build"}
 
 root = Path.cwd()
 # `GUNGRAUN_HOME`, when set, names the directory the runs write, which CI keeps on a failure
@@ -49,14 +45,14 @@ for summary in sorted(home.rglob("summary.json")):
     instructions = data["profiles"][0]["data"]["total"]["metrics"]["Ir"]
     function = data["module_path"].rsplit("::", 1)[-1]
     given = data["description"].removeprefix("(").removesuffix(")")
-    rows.append((function, given, instructions["values"].get("old"), instructions["values"]["new"]))
+    rows.append((function, given, instructions["values"].get("old"), instructions["values"]["new"], summary.parent))
 
-seen = {function for function, *_ in rows}
+seen = {row[0] for row in rows}
 undeclared = seen - GATED - REPORTED
 missing = GATED - seen
 failures = []
 lines = ["| Operation | Without | With, nothing collecting | Change | Bound |", "|---|---:|---:|---:|---|"]
-for function, given, old, new in rows:
+for function, given, old, new, directory in rows:
     if old is None:
         failures.append(f"`{function} {given}` has no count without the feature to compare with")
         continue
@@ -65,11 +61,17 @@ for function, given, old, new in rows:
         failures.append(f"`{function} {given}` counted {old:,} instructions without the feature and {new:,} with it: "
                         "Valgrind collected nothing in a run, so there is nothing to compare")
         continue
-    allowed = max(FLOOR, int(old * SHARE))
+    allowed = allowed_growth(old)
     grew = new - old
     gated = function in GATED
     if gated and grew > allowed:
-        failures.append(f"`{function} {given}` grew {grew:,} instructions, past its bound of {allowed:,}")
+        failures.append(f"`{function} {given}` grew {grew:,} instructions, past its bound of {allowed:,}. "
+                        f"What grew: {grew_most(directory, BASELINE)}")
+    # Nothing collecting adds no allocation: an allocation costs the same everywhere, so this one needs no bound
+    allocated = allocations(directory, f"base@{BASELINE}"), allocations(directory)
+    if gated and allocated[1] != allocated[0]:
+        failures.append(f"`{function} {given}` allocated {allocated[1]:,} times with the feature and {allocated[0]:,} "
+                        f"without. What grew: {grew_most(directory, BASELINE)}")
     bound = f"+{allowed:,}" if gated else "reported only"
     lines.append(f"| `{function} {given}` | {old:,} | {new:,} | {grew:+,} ({grew / old:+.4%}) | {bound} |")
 if undeclared:

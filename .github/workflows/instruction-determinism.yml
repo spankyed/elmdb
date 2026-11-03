@@ -1,0 +1,41 @@
+# Whether an instruction count depends on the machine: benches/instructions.rs on several runners, compared. Dispatched
+# after a change of the benchmark's allocator, the toolchain, Valgrind or the runner image, since which CPUs a run gets is
+# luck and so can't gate a pull request (docs/architecture/testing.md, Instruction counts).
+name: instruction determinism
+on:
+  workflow_dispatch:
+  push:
+    branches: [session/instruction-allocator]
+
+jobs:
+  count:
+    name: count (${{ matrix.machine }})
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@0.20.0
+      - run: python3 scripts/instruction-determinism.py run counts-${{ matrix.machine }}.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: counts-${{ matrix.machine }}
+          path: counts-${{ matrix.machine }}.json
+          retention-days: 7
+
+  compare:
+    needs: count
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: counts
+      - run: python3 scripts/instruction-determinism.py compare counts
