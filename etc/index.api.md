@@ -622,6 +622,21 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     pickOne(): ShapeOf<D['shapes'], E> | undefined;
     rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
     ranked(index: D['rankIndexes'], options?: RankedOptions): QueryBuilder<E, D>;
+    rankedHits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(options: {
+        fields: A;
+    }): {
+        hits: Array<SearchHit<E> & {
+            row: {
+                id: EARS.EntityId<E>;
+            } & Pick<ShapeOf<D['shapes'], E>, A[number]>;
+        }>;
+        bound: RankBound;
+    };
+    // (undocumented)
+    rankedHits(): {
+        hits: SearchHit<E>[];
+        bound: RankBound;
+    };
     // (undocumented)
     reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
     // (undocumented)
@@ -672,6 +687,19 @@ export interface QueryStage {
     visited: number;
     weight?: number;
 }
+
+// @public
+export type RankBound =
+/** A `ranked`: its index, and how far its scores may be from PageRank's, as an L1 distance */
+    {
+    index: string;
+    error: number;
+}
+/** A `rank`: the rounds it ran, and whether its scores settled within them */
+| {
+    converged: boolean;
+    iterations: number;
+};
 
 // @public
 export interface RankDeclaration {

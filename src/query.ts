@@ -330,6 +330,18 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
       return answer.hits;
     }
+    rankedHits({ fields }: { fields?: readonly string[]; } = {}) {
+      const ranks = (p: Pending) => 'step' in p && (p.step.step === 'rank' || p.step.step === 'ranked');
+      const ranked = this.#recipe.steps.reduce((last, p, at) => (ranks(p) ? at : last), -1);
+      const split = this.#recipe.steps.reduce((last, p, at) => ('step' in p ? last : at), -1);
+      if (ranked < 0 || split > ranked) {
+        throw new EarsError('NO_SEARCH', ranked < 0
+          ? 'rankedHits() answers what a rank or a ranked found: the query has no rank(...) or ranked(...)'
+          : 'rankedHits() answers what a rank or a ranked found, and a where(...) given a function follows it: put the rank or ranked after it');
+      }
+      const answer = run(this.#recipe, { answer: 'hits', highlights: false, ...(fields && { fields: [...fields] }) });
+      return { hits: answer.hits, bound: answer.rank };
+    }
     ids() { return this.#ids(); }
     explain() {
       if (this.#recipe.steps.some((p) => !('step' in p))) {

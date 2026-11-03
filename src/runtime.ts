@@ -163,6 +163,13 @@ export interface SearchHit<E extends string = string> {
   highlights?: SearchHighlights;
 }
 
+/** What a `ranked` or a `rank` says of the scores its hits hold */
+export type RankBound =
+  /** A `ranked`: its index, and how far its scores may be from PageRank's, as an L1 distance */
+  | { index: string; error: number }
+  /** A `rank`: the rounds it ran, and whether its scores settled within them */
+  | { converged: boolean; iterations: number };
+
 /** Which of an entity's edges a walk follows (`pathTo`, `degrees`, `rank`): those out of it, those into it, or both */
 export type EdgeDirection = 'out' | 'in' | 'both';
 
@@ -181,7 +188,9 @@ export interface RankedOptions {
   /**
    * `compute`, the default, answers the same as the index will, costing what a `rank` does on every read until the build
    * ends. `refuse` throws `INDEX_BUILDING` instead, for a read too large or too frequent to pay that: a caller wanting
-   * nothing yet catches it, which keeps "still building" apart from a graph with nothing in it
+   * nothing yet catches it, which keeps "still building" apart from a graph with nothing in it. A `watch` hears commits
+   * this process writes and not the index's own, so one that refused runs again at the next such commit, not when the
+   * build ends, and one over a top holds what it read until then, however far the index's pushes have moved since
    */
   whileBuilding?: 'compute' | 'refuse';
 }
@@ -506,6 +515,14 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     options: { fields: A; highlights?: boolean },
   ): Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>;
   hits(options?: { highlights?: boolean }): SearchHit<E>[];
+  /**
+   * `hits`, with what the query's `ranked` or `rank` says of their scores: a `ranked`'s `error`, the one number that tells
+   * a reader the index has fallen behind, without an `explain()` to ask. Refused (`NO_SEARCH`) for a query with neither
+   */
+  rankedHits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    options: { fields: A },
+  ): { hits: Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>; bound: RankBound };
+  rankedHits(): { hits: SearchHit<E>[]; bound: RankBound };
   ids(): EARS.EntityId<E>[];
   /**
    * The query's ids, with how the database found them: each stage of its plan — the index it read, the entities it

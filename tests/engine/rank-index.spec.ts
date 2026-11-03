@@ -61,6 +61,31 @@ describe('ranked', () => {
   });
 });
 
+describe('rankedHits', () => {
+  it('answers a ranked\'s hits with its index and bound, as explain reports it', () => {
+    const { e, hub } = hubbed();
+    const { hits, bound } = e.query('Task').ranked('taskRank').limit(2).rankedHits();
+    expect(hits[0]!.id).toBe(hub);
+    expect(hits).toEqual(e.query('Task').ranked('taskRank').limit(2).hits());
+    const stage = e.query('Task').ranked('taskRank').limit(2).explain().stages.find((at) => at.stage === 'ranked')!;
+    expect(bound).toEqual({ index: 'taskRank', error: stage.error });
+  });
+
+  it('answers a rank\'s hits with its rounds, and picks fields as hits does', () => {
+    const { e, hub } = hubbed();
+    const { hits, bound } = e.query('Task').rank('refs').limit(1).rankedHits({ fields: ['title'] });
+    expect(hits[0]).toMatchObject({ id: hub, row: { id: hub, title: 't0' } });
+    expect(bound).toMatchObject({ converged: true });
+    expect((bound as { iterations: number }).iterations).toBeGreaterThan(0);
+  });
+
+  it('refuses a query with neither, a search included, whose hits say nothing of a bound', () => {
+    const { e } = hubbed();
+    expect(() => e.query('Task').rankedHits()).toThrow(expect.objectContaining({ code: 'NO_SEARCH' }));
+    expect(() => e.query('Task').ranked('taskRank').where('title', () => true).rankedHits()).toThrow(expect.objectContaining({ code: 'NO_SEARCH' }));
+  });
+});
+
 describe('a rank index building', () => {
   /** An engine holding a graph with one hub and no rank index yet */
   function graph() {
