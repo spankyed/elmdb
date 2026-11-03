@@ -99,7 +99,7 @@ fn rank_damping() -> f64 {
 }
 
 fn rank_tolerance() -> f64 {
-    1e-6
+    1e-5
 }
 
 fn root_collation() -> String {

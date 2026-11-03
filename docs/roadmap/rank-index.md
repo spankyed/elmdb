@@ -32,7 +32,7 @@ scores rather than computing them. Where the build differs from the design below
   bound: nodes in one cell come by place, reading on past the limit only through a cell wider than that, which only a
   score over about 1/128 of the estimates' sum can be in.
 - **A drain runs to its budget, and no further.** Stopping below it to leave room for the next change wouldn't save a
-  drain at the default tolerance: at 100,000 documents one change leaves some 40 times the budget. Commits close together
+  drain at the default tolerance: at 100,000 documents a change from an average document leaves some 4 times the budget. Commits close together
   already share a drain (`QUIET`, `PATIENCE`), and at a tolerance loose enough for a change to fit, it drains nothing.
 - **Bits:** the same history of commits, each drained before the next, makes the same bits on every platform; a
   drain's timing can change where its pushes start, so across histories only the bound and the order are promised.
@@ -68,7 +68,7 @@ document beside `types` and `relations`, not on a type:
 ```json
 "ranks": {
   "noteRank": { "types": ["Note"], "relations": ["references"], "direction": "both",
-                "weights": true, "damping": 0.85, "tolerance": 1e-6 }
+                "weights": true, "damping": 0.85, "tolerance": 1e-5 }
 }
 ```
 
@@ -76,8 +76,9 @@ document beside `types` and `relations`, not on a type:
   `out`, `in` or `both` (`Direction`). A trashed entity leaves the graph and a restored one joins it.
 - **`weights`**, default `true`, as `rank`'s: an edge of a kind declared weighted counts by its weight, an edge of a
   kind not weighted by 1, and `false` counts every edge 1.
-- **`damping`** in (0, 1), default `0.85`. **`tolerance`** > 0, default `1e-6`: the bound on the scores' L1 error that
-  the index keeps (Error, below).
+- **`damping`** in (0, 1), default `0.85`. **`tolerance`** > 0, default `1e-5`: the bound on the scores' L1 error that
+  the index keeps (Error, below). The default is the loosest that kept the top 10 exact and the top 100 within 1% on a
+  graph with hubs, at every size measured (`docs/evidence/rank-index.md`).
 - **Names:** lowerCamelCase, unique across the schema's indexes. `types` and `relations` must be declared, and
   `relations` is required, as `rank`'s `kinds` is.
 

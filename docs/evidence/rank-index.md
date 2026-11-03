@@ -262,6 +262,53 @@ A steady write's p50 and p90 rise about a quarter, which fits more of them findi
 making a commit's pushes, though that wasn't measured. Its slowest stays near what a drain under the lock holds it for, once the retries are spent. The twenty changes took
 the same time. A fixed 5 ms sleep in place of the pause made the steady run's twenty changes take 27 s, not 21.
 
+### The default tolerance, against exact PageRank
+
+The readings above that say "the default tolerance" are at 1e-6, which it was then. `examples/rank-accuracy.rs`, 2026-11-02,
+this Mac, load 5 to 17 and 29 at the end of the second 100,000 pass, times the two runs at 100,000 documents: a rank index's top after 30 changes, against `rank` run to 1e-13, on
+a graph with hubs (the first document some 4% of the score at 100,000) and on the spread graph. One fixed history at each
+size, so the top lists are single samples.
+
+The share of each true top that the index's top holds, on the graph with hubs, the same at every run:
+
+| Documents | Top | 1e-3 | 1e-4 | 1e-5 | 1e-6 |
+|---:|---:|---:|---:|---:|---:|
+| 1,000 | 10 | 9 | 9 | **10** | 10 |
+| | 100 | 99 | 100 | **100** | 100 |
+| 10,000 | 10 | 9 | 9 | **10** | 10 |
+| | 100 | 98 | 100 | **100** | 100 |
+| 100,000 | 10 | 9 | 9 | **10** | 10 |
+| | 100 | 99 | 100 | **100** | 100 |
+| | 1,000 | 989 | 995 | **999** | 1,000 |
+
+What one change costs at 100,000 documents, its commit and its drain, median and 90th percentile of 40 from a document in
+the later half and of 20 from the highest-scoring one, and the median of 20 bursts of ten:
+
+| Graph | Tolerance | Ordinary | Highest-scoring | Burst |
+|---|---:|---:|---:|---:|
+| hubs | 1e-4 | 0.1 / 87 ms | 228, 231 ms | 136, 137 ms |
+| hubs | **1e-5** | 122, 123 / 135 ms | 307, 309 ms | 149, 151 ms |
+| hubs | 1e-6 | 153, 169 / 162, 213 ms | 351, 403 ms | 177, 198 ms |
+| spread | 1e-5 | 227, 244 / 261, 303 ms | 207, 227 ms | 233, 246 ms |
+| spread | 1e-6 | 230, 261 / 295, 333 ms | 211, 256 ms | 242, 338 ms |
+
+So the default is 1e-5, the loosest at which the top 10 was exact and the top 100 within 1% at every size, which was
+decided before these were read. It saves about a fifth over the graph with hubs at 100,000, and nothing to speak of at
+10,000 and below, where a change is 8 to 30 ms at any of these and the builder's waits are much of that, or on the spread
+graph. 1e-4 misses by one near tie in the top 10 at every size, costing that top 8.7e-5 of its score at 100,000, and makes
+at least half the ordinary changes at 100,000 commit-only. An application for which that swap is acceptable can declare it.
+
+A change from a hub is the costliest found: over twice an ordinary one on the same graph. It moves far more residual, as
+the estimate it redistributes is far larger.
+
+On the spread graph no tolerance tried gives a top list that is PageRank's. At 100,000 and 1e-6 the top 10 holds 3 of the
+true 10, at a score lost of 5.6e-5, as nearly every score is alike; a top list there says little at any tolerance. A watch
+over it hears it: some 70 of the top 100 change place with each change at any tolerance, where the graph with hubs moves
+none at 100,000. That is the roadmap's watch churn, on this graph alone.
+
+Reads on the graph with hubs are as on the spread graph for hits, 8.6 µs top 10 and 770 µs top 1,000 at 100,000 documents,
+so reading through a wide cell costs little there. Ids alone are 3.9 and 71 µs.
+
 ### What it took to get there
 
 The first build pushed through the store, one node read and written at a time, and its pushes took the first waiting

@@ -249,7 +249,7 @@ search step names its text, trigram or vector index only when the type has more 
 ```json
 "ranks": {
   "noteRank": { "types": ["Note"], "relations": ["references"], "direction": "both", "weights": true,
-                "damping": 0.85, "tolerance": 1e-6 }
+                "damping": 0.85, "tolerance": 1e-5 }
 }
 ```
 
@@ -263,8 +263,10 @@ beside `types` and `relations`.
 - `direction`: `out` (the default), `in` or `both`, as `rank` takes it.
 - `weights`: whether an edge of a kind declared `weighted` counts by its weight, `true` by default.
 - `damping`: in (0, 1), `0.85` by default.
-- `tolerance`: above 0, `1e-6` by default: the bound on the L1 distance between the index's scores and PageRank once
-  its pushes are done.
+- `tolerance`: above 0, `1e-5` by default: the bound on the L1 distance between the index's scores and PageRank once
+  its pushes are done. Tighten it where scores close together must come in their true order; loosen it where a change
+  should cost less and the top's near ties may swap. Where nearly all scores are alike, no tolerance tried made a top
+  list match PageRank's (`docs/evidence/rank-index.md`).
 - The name is lowerCamelCase, and no type has an index of the same name.
 
 ## Changing a schema
