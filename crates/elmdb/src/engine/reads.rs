@@ -397,6 +397,14 @@ fn find_relations(
 /// The most steps a plan holds: a long plan's walk would overflow a reading thread's stack, and no real query is near it
 pub const MAX_STEPS: usize = 256;
 
+/// Where a `ranked` read takes each entity's score from
+enum RankScores {
+    /// The index, its nodes' estimates as a share of these totals
+    Held(ranks::Totals),
+    /// `rank` over its graph, while it isn't built
+    Computed(HashMap<String, f64, Fixed>),
+}
+
 /// The most rounds `rank` runs for an index not built yet, which its tolerance stops long before
 const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
 
@@ -1465,10 +1473,9 @@ impl<R: Read> Query<'_, R> {
             .ok_or_else(|| Error::new(ErrorCode::UnknownIndex, format!("No rank index is named \"{index}\"")))
     }
 
-    /// A built rank index's rules and totals, and the step its scores are reported at, recording what a `hits` answer
-    /// and EXPLAIN say of its scores
-    fn rank_index(&self, stage: usize, index: &str) -> Result<(&crate::schema::RankDef, ranks::Totals, f64)> {
-        let def = self.rank_def(index)?;
+    /// A built rank index's totals, and the step its scores are reported at, recording what a `hits` answer and EXPLAIN
+    /// say of its scores
+    fn rank_index(&self, stage: usize, index: &str, def: &crate::schema::RankDef) -> Result<(ranks::Totals, f64)> {
         let totals = ranks::totals(self.r, index)?;
         let (error, step) = ranks::reported(totals.error(def.damping), totals.nodes);
         self.ranked.replace(Some(Scored::Ranked { index: index.to_owned(), error }));
@@ -1476,7 +1483,7 @@ impl<R: Read> Query<'_, R> {
             stages.reads_index_at(stage, index);
             stages.rank_error(stage, error);
         }
-        Ok((def, totals, step))
+        Ok((totals, step))
     }
 
     /// Whether `limit` after a `ranked` first step reads the index's top from its score order: the plan starts from
@@ -1494,7 +1501,8 @@ impl<R: Read> Query<'_, R> {
     /// and everything read when hits show them, stably, so equal scores keep their place as `ranked_by` keeps the set's.
     /// Cells narrow with the score, so past the first narrow one ids alone need no estimates
     fn rank_top(&self, index: &str, take: usize) -> Result<Vec<String>> {
-        let (def, totals, step) = self.rank_index(1, index)?;
+        let def = self.rank_def(index)?;
+        let (totals, step) = self.rank_index(1, index, def)?;
         let precision = ranks::order_precision(def.tolerance);
         let promised = 2.0 * def.tolerance * totals.estimates;
         let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
@@ -1610,9 +1618,9 @@ impl<R: Read> Query<'_, R> {
         visit: &mut Visit<'_>,
     ) -> Result<bool> {
         let def = self.rank_def(index)?;
-        let (totals, computed, step) = if ranks::is_built(self.r, index)? {
-            let (_, totals, step) = self.rank_index(upto, index)?;
-            (Some(totals), HashMap::default(), step)
+        let (scores, step) = if ranks::is_built(self.r, index)? {
+            let (totals, step) = self.rank_index(upto, index, def)?;
+            (RankScores::Held(totals), step)
         } else if while_building == WhileBuilding::Refuse {
             return Err(Error::new(
                 ErrorCode::IndexBuilding,
@@ -1620,7 +1628,7 @@ impl<R: Read> Query<'_, R> {
             ));
         } else {
             let (scores, step) = self.computed_scores(upto, index, def)?;
-            (None, scores, step)
+            (RankScores::Computed(scores), step)
         };
         let mut ids = self.collect(before)?;
         if !self.holds_each_once(before) {
@@ -1629,9 +1637,9 @@ impl<R: Read> Query<'_, R> {
         }
         let mut scored = Vec::with_capacity(ids.len());
         for id in ids {
-            let score = match &totals {
-                Some(totals) => ranks::node(self.r, index, &id)?.map(|node| node.x / totals.estimates),
-                None => computed.get(&id).copied(),
+            let score = match &scores {
+                RankScores::Held(totals) => ranks::node(self.r, index, &id)?.map(|node| node.x / totals.estimates),
+                RankScores::Computed(scores) => scores.get(&id).copied(),
             };
             let Some(score) = score else {
                 return Err(Error::new(

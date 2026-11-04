@@ -1027,3 +1027,14 @@ fn child_opens_after_reader_death() {
     assert_eq!(get(&store, "key").as_deref(), Some(b"value".as_slice()));
     println!("ELMDB_READER_RECOVERY_OPENED");
 }
+
+#[test]
+fn a_database_lets_go_of_the_read_it_keeps_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = crate::Database::open(dir.path(), crate::OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    let store = db.store().unwrap();
+    store.read(|_, _| Ok(())).unwrap();
+    assert_eq!(store.idle.len(), 1);
+    db.release_idle_reads().unwrap();
+    assert_eq!(store.idle.len(), 0);
+}

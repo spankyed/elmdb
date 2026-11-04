@@ -344,7 +344,7 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 doesn't move with the machine either: the benchmark allocates through a counter that only moves forward, since glibc's
 `malloc` costs what the heap's shape makes it and that follows the CPU. So a count here leaves out what an allocator
 costs, and an allocation shows at its few fixed instructions; real memory and time are the heap tests' and Criterion's.
-Each setup also waits out the read it leaves cached, whose 100 ms would otherwise make a count follow how long the setup
+Each setup also lets go of the read it leaves cached, whose 100 ms would otherwise make a count follow how long the setup
 took. The `instruction determinism` workflow (`gh workflow run instruction-determinism.yml`), dispatched after a change of
 that allocator, the toolchain, Valgrind or the runner image, runs the benchmark on eight runners and fails when they
 disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so

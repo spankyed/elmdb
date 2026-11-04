@@ -117,21 +117,13 @@ fn key_encode(parts: [Part; 3]) -> Vec<u8> {
     black_box(encode(black_box(&parts)))
 }
 
-/// Waits out the read a setup leaves cached: a read within 100 ms of it reuses its transaction, and one later opens another
-/// (`store/idle_reads.rs`), so a case read just then would count either by how long its setup took on that machine. Past
-/// that, with the cache's worker given time to sweep, every read counted opens one
-#[cfg(target_os = "linux")]
-fn past_the_cached_read() {
-    std::thread::sleep(std::time::Duration::from_millis(300));
-}
-
 #[cfg(target_os = "linux")]
 fn fixture() -> support::Fixture {
     let fixture = support::Fixture::new(ROWS, true, false);
     fixture.assert_limited_query();
     // The store's directory lives as long as the fixture the benchmark hands back
     assert!(fixture.directory.path().is_dir());
-    past_the_cached_read();
+    fixture.db.release_idle_reads().unwrap();
     fixture
 }
 
@@ -190,7 +182,7 @@ fn workload(name: &str) -> (reads::Messages, Vec<u8>) {
     workload.assert_answer(&messages.db, messages.rows);
     assert!(messages.directory.path().is_dir());
     let request = rmp_serde::to_vec_named(&workload.reads).unwrap();
-    past_the_cached_read();
+    messages.db.release_idle_reads().unwrap();
     (messages, request)
 }
 
@@ -238,7 +230,7 @@ fn graph_read(read: &str) -> (support::Fixture, Reads) {
     };
     fixture.assert_graph_read(read);
     let reads = fixture.graph_read(read);
-    past_the_cached_read();
+    fixture.db.release_idle_reads().unwrap();
     (fixture, reads)
 }
 

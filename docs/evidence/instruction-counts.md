@@ -122,4 +122,4 @@ this: they include the setup, so an 8,507-instruction read reported 1.1 million 
 
 Time still reaches a count one way that isn't the machine's CPU: a read within 100 ms of the setup's last reuses its
 transaction (`store/idle_reads.rs`), and a later one opens another. No run has been seen to flip on it, but a stall could
-make one, so each setup waits past that window.
+make one, so each setup lets its read go (`release_idle_reads`), and every read counted opens one.

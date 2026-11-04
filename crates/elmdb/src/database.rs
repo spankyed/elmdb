@@ -306,10 +306,18 @@ impl Database {
 
     /// Tells `listener` of each commit the index builder makes that wrote into a tracked read, with its sequence and those
     /// reads' tokens, or stops telling anyone: a write answers its own, and a builder's commit has nobody to answer to.
-    /// There is one listener, and closing the database drops it. It runs on the builder's thread, so it hands off and
-    /// returns
-    pub fn hear_builder_commits(&self, listener: Option<crate::engine::watch::BuilderCommitListener>) {
-        self.tracks.lock().hear_builder_commits(listener);
+    /// There is one listener: a second is refused (`ALREADY_LISTENING`), since it would leave the first unheard, and `None`
+    /// or closing the database drops it. It runs on the builder's thread, so it hands off and returns
+    pub fn hear_builder_commits(&self, listener: Option<crate::engine::watch::BuilderCommitListener>) -> Result<()> {
+        self.tracks.lock().hear_builder_commits(listener)
+    }
+
+    /// Lets go of the completed read transactions kept for a burst of reads, so that the next read opens one whatever time
+    /// has passed: what makes a benchmark's count not follow how long its setup took
+    #[doc(hidden)]
+    pub fn release_idle_reads(&self) -> Result<()> {
+        self.store()?.drop_idle();
+        Ok(())
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
@@ -319,7 +327,7 @@ impl Database {
                 "A watch listener is running on this thread: close the database after the listener returns",
             ));
         }
-        self.tracks.lock().hear_builder_commits(None);
+        self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for
