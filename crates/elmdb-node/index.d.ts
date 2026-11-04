@@ -49,7 +49,7 @@ export declare class Database {
   /**
    * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
    * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
-   * which keeps no process alive, and closing the database drops it
+   * a second being refused, which keeps no process alive, and closing the database drops it
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */

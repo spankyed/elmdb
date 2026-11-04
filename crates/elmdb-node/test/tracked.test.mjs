@@ -135,6 +135,7 @@ test('the index builder\'s commits reach a listener with the tokens they wrote i
   const alive = setInterval(() => {}, 1000);
   t.after(() => clearInterval(alive));
   const heard = new Promise((resolve) => db.hearBuilderCommits(resolve));
+  assert.throws(() => db.hearBuilderCommits(() => {}), { code: 'ALREADY_LISTENING' });
   write(ids.slice(1).map((id) => ({ op: 'link', source: id, kind: 'refs', target: 'Doc-0' })));
   const commit = await heard;
   assert.deepEqual(commit.touched, [9]);

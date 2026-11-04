@@ -2604,7 +2604,11 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
     let hearing = std::sync::Arc::clone(&heard);
     db.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
         hearing.lock().unwrap().push((sequence, touched));
-    })));
+    })))
+    .unwrap();
+    // One at a time, so the first isn't left unheard
+    let second = db.hear_builder_commits(Some(std::sync::Arc::new(|_, _| {}))).unwrap_err();
+    assert_eq!(second.code, ErrorCode::AlreadyListening);
 
     let links: Vec<Json> = (1..200)
         .map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }))
@@ -2633,14 +2637,14 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
     // Stops at the caller's word
     db.read(&tracked(json!({ "start": { "from": "types", "types": ["Task", "Note"] },
         "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }], "terminal": { "answer": "ids" } }), 7)).unwrap();
-    db.hear_builder_commits(None);
+    db.hear_builder_commits(None).unwrap();
     write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs", "target": "Task-0" })]).unwrap();
     db.wait_for_index_builds().unwrap();
     assert!(heard.lock().unwrap().is_empty());
 
     // Closing drops whoever is listening
     let listener: crate::engine::watch::BuilderCommitListener = std::sync::Arc::new(|_, _| {});
-    db.hear_builder_commits(Some(std::sync::Arc::clone(&listener)));
+    db.hear_builder_commits(Some(std::sync::Arc::clone(&listener))).unwrap();
     assert_eq!(std::sync::Arc::strong_count(&listener), 2);
     db.close().unwrap();
     assert_eq!(std::sync::Arc::strong_count(&listener), 1);

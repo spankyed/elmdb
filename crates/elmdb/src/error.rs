@@ -87,6 +87,8 @@ pub enum ErrorCode {
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
     /// `ranked` step naming no rank index
     UnknownIndex,
+    /// A second listener for a database's builder commits
+    AlreadyListening,
     /// A `ranked` read asked to be refused while its index builds
     IndexBuilding,
     /// A read of an index still being built, which has nothing to answer from in its place: a rank index
@@ -153,6 +155,7 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::AlreadyListening => "ALREADY_LISTENING",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::NotDurable => "NOT_DURABLE",
@@ -248,6 +251,7 @@ mod tests {
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
             ErrorCode::UnknownIndex,
+            ErrorCode::AlreadyListening,
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,

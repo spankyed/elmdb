@@ -450,7 +450,7 @@ impl Store {
 
     /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized
     /// or the environment closed, which no open transaction may outlast
-    fn drop_idle(&self) {
+    pub(crate) fn drop_idle(&self) {
         self.idle.clear();
     }
 

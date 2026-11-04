@@ -136,8 +136,15 @@ impl Tracks {
         self.index.is_empty() && self.pending_reads.is_empty()
     }
 
-    pub fn hear_builder_commits(&mut self, listener: Option<BuilderCommitListener>) {
+    pub fn hear_builder_commits(&mut self, listener: Option<BuilderCommitListener>) -> Result<()> {
+        if listener.is_some() && self.builder_commits.is_some() {
+            return Err(Error::new(
+                ErrorCode::AlreadyListening,
+                "Something already hears this database's builder commits: one listener at a time, so none goes unheard",
+            ));
+        }
         self.builder_commits = listener;
+        Ok(())
     }
 
     /// Who to tell of a builder's commit, taken so that it runs with the lock let go

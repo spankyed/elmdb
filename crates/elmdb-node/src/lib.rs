@@ -185,23 +185,29 @@ impl Database {
 
     /// Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
     /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
-    /// which keeps no process alive, and closing the database drops it
+    /// a second being refused, which keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: (commit: { sequence: number; touched: number[] }) => void")]
     pub fn hear_builder_commits(
         &self,
         listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
-    ) -> napi::Result<()> {
-        // mutant-skip: replace Database::hear_builder_commits -> napi::Result<\(\)> with Ok\(\(\)\)
+    ) -> Result<(), Code> {
+        // mutant-skip: replace Database::hear_builder_commits -> Result<\(\), Code> with Ok\(\(\)\)
         // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/tracked.test.mjs` never hears a
         // commit without it
-        let tell = listener.build_threadsafe_function().callee_handled::<false>().weak::<true>().build()?;
-        self.inner.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
-            tell.call(
-                BuilderCommit { sequence: sequence as f64, touched },
-                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-            );
-        })));
-        Ok(())
+        let tell = listener
+            .build_threadsafe_function()
+            .callee_handled::<false>()
+            .weak::<true>()
+            .build()
+            .map_err(|error| napi::Error::new(Code("IO"), error.to_string()))?;
+        self.inner
+            .hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
+                tell.call(
+                    BuilderCommit { sequence: sequence as f64, touched },
+                    napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+                );
+            })))
+            .map_err(to_js)
     }
 
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
