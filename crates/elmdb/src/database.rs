@@ -304,6 +304,14 @@ impl Database {
         self.close_as(Some(wait), true)
     }
 
+    /// Tells `listener` of each commit the index builder makes that wrote into a tracked read, with its sequence and those
+    /// reads' tokens, or stops telling anyone: a write answers its own, and a builder's commit has nobody to answer to.
+    /// There is one listener, and closing the database drops it. It runs on the builder's thread, so it hands off and
+    /// returns
+    pub fn hear_builder_commits(&self, listener: Option<crate::engine::watch::BuilderCommitListener>) {
+        self.tracks.lock().hear_builder_commits(listener);
+    }
+
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
         if crate::engine::watch::in_callback(&self.tracks) {
             return Err(Error::new(
@@ -311,6 +319,7 @@ impl Database {
                 "A watch listener is running on this thread: close the database after the listener returns",
             ));
         }
+        self.tracks.lock().hear_builder_commits(None);
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for

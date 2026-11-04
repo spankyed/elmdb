@@ -61,6 +61,13 @@ pub struct PurgeTarget {
     pub role: Option<String>,
 }
 
+/// A commit the index builder made
+#[napi(object)]
+pub struct BuilderCommit {
+    pub sequence: f64,
+    pub touched: Vec<u32>,
+}
+
 /// An open database: one directory holding one LMDB environment
 #[napi]
 pub struct Database {
@@ -173,6 +180,24 @@ impl Database {
             ));
         }
         self.inner.untrack(token as u32);
+        Ok(())
+    }
+
+    /// Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
+    /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
+    /// which keeps no process alive, and closing the database drops it
+    #[napi(ts_args_type = "listener: (commit: { sequence: number; touched: number[] }) => void")]
+    pub fn hear_builder_commits(
+        &self,
+        listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
+    ) -> napi::Result<()> {
+        let tell = listener.build_threadsafe_function().callee_handled::<false>().weak::<true>().build()?;
+        self.inner.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
+            tell.call(
+                BuilderCommit { sequence: sequence as f64, touched },
+                napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+            );
+        })));
         Ok(())
     }
 

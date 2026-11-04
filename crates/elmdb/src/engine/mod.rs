@@ -90,7 +90,13 @@ pub(crate) fn drain_commits(
             },
             false,
         )?;
-        finish_commit(&tracks, &store, &observing, ChangeSet::default(), written.as_ref(), commit)?;
+        let changes = finish_commit(&tracks, &store, &observing, ChangeSet::default(), written.as_ref(), commit)?;
+        if !changes.touched.is_empty() {
+            let listener = tracks.lock().builder_commit_listener();
+            if let Some(listener) = listener {
+                listener(changes.sequence, changes.touched);
+            }
+        }
         Ok(done)
     })
 }

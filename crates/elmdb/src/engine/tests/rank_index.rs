@@ -2580,3 +2580,56 @@ fn a_read_only_open_drains_nothing() {
     let status = db.index_status().unwrap();
     assert!(status.iter().any(|s| s.index == "taskRank" && !s.built && s.failure.is_none()), "{status:?}");
 }
+
+#[test]
+fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..200).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.push(json!({ "op": "create", "type": "Tag", "id": "Tag-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+
+    let tracked = |plan: Json, token: u32| -> Reads {
+        serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": plan }], "track": token })).unwrap()
+    };
+    let top = json!({ "start": { "from": "types", "types": ["Task", "Note"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }], "terminal": { "answer": "ids" } });
+    let tags = json!({ "start": { "from": "types", "types": ["Tag"] }, "terminal": { "answer": "ids" } });
+    db.read(&tracked(top, 7)).unwrap();
+    db.read(&tracked(tags, 8)).unwrap();
+
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, Vec<u32>)>::new()));
+    let hearing = std::sync::Arc::clone(&heard);
+    db.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
+        hearing.lock().unwrap().push((sequence, touched));
+    })));
+
+    let links: Vec<Json> = (1..200)
+        .map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }))
+        .collect();
+    write(&db, links).unwrap();
+    db.wait_for_index_builds().unwrap();
+
+    let commits = heard.lock().unwrap().clone();
+    assert!(!commits.is_empty(), "the drain's commits told nobody");
+    assert!(commits.iter().all(|(_, touched)| touched == &vec![7]), "{commits:?}");
+    assert!(commits.windows(2).all(|pair| pair[0].0 < pair[1].0), "{commits:?}");
+    assert!(commits.iter().all(|(sequence, _)| *sequence <= db.sequence().unwrap()), "{commits:?}");
+
+    // A commit that wrote into no tracked read tells nobody
+    heard.lock().unwrap().clear();
+    db.untrack(7);
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-2", "kind": "refs", "target": "Task-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
+
+    // Stops at the caller's word
+    db.read(&tracked(json!({ "start": { "from": "types", "types": ["Task", "Note"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }], "terminal": { "answer": "ids" } }), 7)).unwrap();
+    db.hear_builder_commits(None);
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs", "target": "Task-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(heard.lock().unwrap().is_empty());
+}

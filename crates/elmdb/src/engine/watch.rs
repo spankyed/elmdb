@@ -70,6 +70,10 @@ pub enum Owner {
 /// What a watch hands its listener: the reads' answer, as `read` gives it, or what they failed with
 pub type Listener = Box<dyn FnMut(&Result<Vec<u8>>) + Send>;
 
+/// What hears a commit the index builder made: its sequence and the tokens whose reads it wrote into. A write hands these
+/// back to whoever made it; nobody else is there to hand a builder's to. Called on the builder's thread
+pub type BuilderCommitListener = Arc<dyn Fn(u64, Vec<u32>) + Send + Sync>;
+
 struct Watching {
     reads: Reads,
     /// The last answer delivered
@@ -90,6 +94,7 @@ pub struct Tracks {
     next_read: u64,
     /// The watches whose listener a delivery holds, ended or not: one at a time per watch
     delivering: BTreeSet<u64>,
+    builder_commits: Option<BuilderCommitListener>,
 }
 
 /// The tracks behind their lock, and the signal that a delivery let go of a listener
@@ -129,6 +134,15 @@ impl Tracks {
     /// Whether anything is filed: a unit that begins when nothing is logs no keys
     pub fn is_empty(&self) -> bool {
         self.index.is_empty() && self.pending_reads.is_empty()
+    }
+
+    pub fn hear_builder_commits(&mut self, listener: Option<BuilderCommitListener>) {
+        self.builder_commits = listener;
+    }
+
+    /// Who to tell of a builder's commit, taken so that it runs with the lock let go
+    pub fn builder_commit_listener(&self) -> Option<BuilderCommitListener> {
+        self.builder_commits.clone()
     }
 
     pub fn file(&mut self, token: u32, reads: ReadSet) {

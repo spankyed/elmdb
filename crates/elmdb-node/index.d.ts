@@ -46,6 +46,12 @@ export declare class Database {
   read(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
+  /**
+   * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
+   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
+   * which keeps no process alive, and closing the database drops it
+   */
+  hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
   trackStats(): { owners: number; keys: number; ranges: number }
   /**
@@ -110,6 +116,12 @@ export declare class Unit {
   /** Ends the unit, keeping nothing of it */
   abort(): void
   get isOpen(): boolean
+}
+
+/** A commit the index builder made */
+export interface BuilderCommit {
+  sequence: number
+  touched: Array<number>
 }
 
 export interface OpenOptions {

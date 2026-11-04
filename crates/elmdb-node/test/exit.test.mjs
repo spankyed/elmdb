@@ -107,3 +107,18 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   db.close();
   assert.equal(reopened, sequence);
 });
+
+test('a listener for the builder\'s commits keeps no process alive, open database or not', { timeout: 60_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  const script = [
+    `const { Database } = require(${JSON.stringify(createRequire(import.meta.url).resolve('../index.js'))});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
+    'db.hearBuilderCommits(() => {});',
+  ].join('\n');
+  try {
+    execFileSync(process.execPath, ['-e', script], { timeout: 30_000, stdio: 'pipe' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
