@@ -90,6 +90,8 @@ const STREAMING: readonly string[] = [
 ];
 /** The steps whose hits `hits()` answers */
 const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'ranked', 'similar'];
+/** The steps whose scores `rankedHits()` can say something of */
+const RANKS: readonly string[] = ['rank', 'ranked'];
 
 /**
  * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
@@ -318,29 +320,21 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     like(id: EARS.EntityId, { k = 10 }: { k?: number; } = {}) { return this.#next({ step: 'like', id, k }); }
     hybrid(text: string, vector: readonly number[], { k = 10, ...options }: Record<string, unknown> & { k?: number; } = {}) { return this.#next({ step: 'hybrid', query: text, vector: [...vector], k, options }); }
     hits({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean; } = {}) {
-      // The search must be in the plan the terminal ends, after every function a `where` was given
-      const lastWhere = (test: (p: Pending) => boolean) => this.#recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
-      const searched = lastWhere((p) => 'step' in p && SEARCHES.includes(p.step.step as string));
-      const split = lastWhere((p) => !('step' in p));
-      if (searched < 0 || split > searched) {
-        throw new EarsError('NO_SEARCH', searched < 0
-          ? 'hits() answers what a search, a rank or a similar found: the query has no search(...), near(...), like(...), hybrid(...), rank(...), ranked(...) or similar(...)'
-          : 'hits() answers what a search, a rank or a similar found, and a where(...) given a function follows it: put the search, rank or similar after it');
-      }
-      const answer = run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) });
-      return answer.hits;
+      this.#requireStep('hits', SEARCHES, 'search, a rank or a similar', 'search(...), near(...), like(...), hybrid(...), rank(...), ranked(...) or similar(...)');
+      return run(this.#recipe, { answer: 'hits', highlights, ...(fields && { fields: [...fields] }) }).hits;
     }
     rankedHits({ fields }: { fields?: readonly string[]; } = {}) {
-      const ranks = (p: Pending) => 'step' in p && (p.step.step === 'rank' || p.step.step === 'ranked');
-      const ranked = this.#recipe.steps.reduce((last, p, at) => (ranks(p) ? at : last), -1);
-      const split = this.#recipe.steps.reduce((last, p, at) => ('step' in p ? last : at), -1);
-      if (ranked < 0 || split > ranked) {
-        throw new EarsError('NO_SEARCH', ranked < 0
-          ? 'rankedHits() answers what a rank or a ranked found: the query has no rank(...) or ranked(...)'
-          : 'rankedHits() answers what a rank or a ranked found, and a where(...) given a function follows it: put the rank or ranked after it');
-      }
+      this.#requireStep('rankedHits', RANKS, 'rank or a ranked', 'rank(...) or ranked(...)');
       const answer = run(this.#recipe, { answer: 'hits', highlights: false, ...(fields && { fields: [...fields] }) });
       return { hits: answer.hits, bound: answer.rank };
+    }
+    /** Refuses (`NO_SEARCH`) a terminal whose step isn't in the plan it ends, after every function a `where` was given */
+    #requireStep(terminal: string, steps: readonly string[], what: string, named: string) {
+      const lastWhere = (test: (p: Pending) => boolean) => this.#recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
+      const found = lastWhere((p) => 'step' in p && steps.includes(p.step.step as string));
+      const split = lastWhere((p) => !('step' in p));
+      if (found < 0) throw new EarsError('NO_SEARCH', `${terminal}() answers what a ${what} found: the query has no ${named}`);
+      if (split > found) throw new EarsError('NO_SEARCH', `${terminal}() answers what a ${what} found, and a where(...) given a function follows it: put it after that`);
     }
     ids() { return this.#ids(); }
     explain() {
