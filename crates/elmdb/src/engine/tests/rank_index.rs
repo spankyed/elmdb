@@ -2621,8 +2621,13 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
     // A commit that wrote into no tracked read tells nobody
     heard.lock().unwrap().clear();
     db.untrack(7);
-    write(&db, vec![json!({ "op": "unlink", "source": "Task-2", "kind": "refs", "target": "Task-0" })]).unwrap();
+    let unlinks: Vec<Json> = (2..200)
+        .map(|i| json!({ "op": "unlink", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }))
+        .collect();
+    write(&db, unlinks).unwrap();
+    let written = db.sequence().unwrap();
     db.wait_for_index_builds().unwrap();
+    assert!(db.sequence().unwrap() > written, "the builder committed nothing, so this looked at nothing");
     assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
 
     // Stops at the caller's word
