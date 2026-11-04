@@ -113,3 +113,31 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   try { assert.deepEqual(packr.unpack(reopened.readSync(packr.pack(reads)))[0].ids, ['Task-0']); }
   finally { reopened.close(); }
 });
+
+test('the index builder\'s commits reach a listener with the tokens they wrote into', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  const db = Database.open(dir, { syncs: false, schema: {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Doc: { fields: {} } },
+    relations: { refs: { cardinality: 'many-to-many' } },
+    ranks: { docRank: { types: ['Doc'], relations: ['refs'] } },
+  } });
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  const write = (ops) => db.write(packr.pack({ ops, now: 1000 }));
+  const ids = Array.from({ length: 500 }, (_, at) => `Doc-${at}`);
+  write(ids.map((id) => ({ op: 'create', type: 'Doc', id })));
+  db.waitForIndexBuilds();
+  const top = { read: 'query', plan: { start: { from: 'types', types: ['Doc'] },
+    steps: [{ step: 'ranked', index: 'docRank' }, { step: 'limit', n: 5 }], terminal: { answer: 'ids' } } };
+  db.readSync(packr.pack({ reads: [top], track: 9 }));
+
+  // The listener keeps no process alive, so this test holds its own wait open
+  const alive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(alive));
+  const heard = new Promise((resolve) => db.hearBuilderCommits(resolve));
+  write(ids.slice(1).map((id) => ({ op: 'link', source: id, kind: 'refs', target: 'Doc-0' })));
+  const commit = await heard;
+  assert.deepEqual(commit.touched, [9]);
+  assert.ok(commit.sequence > 0 && commit.sequence <= db.sequence);
+});
+

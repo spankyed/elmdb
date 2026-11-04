@@ -303,6 +303,10 @@ in either order. `db.sequence` is the last commit's.
   Nothing larger than a token crosses the boundary, and a view is told about exactly the commits
   that wrote into what it read. A commit whose writes aren't logged key by key — `reset`, `replaceWith`, `setSchema`,
   `bulkLoad` and the admin changes — is one the caller hears as writing everything.
+- `Database::hear_builder_commits(listener)` (`hearBuilderCommits` in the binding) tells one listener of each commit the
+  index builder makes that wrote into a tracked read, with its sequence and those reads' tokens: a write's result names
+  its own tokens, and a builder's commit has no result to read. Without it, a reader tracking a rank index holds what it
+  read until something else writes. The binding's listener keeps no process alive, and closing the database drops it.
 - `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
