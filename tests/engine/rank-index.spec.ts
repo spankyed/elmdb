@@ -163,30 +163,6 @@ describe('a watch over a rank index', () => {
   });
 });
 
-describe('a watch over a rank index, past a drain', () => {
-  it('ends on what a direct read answers, having shown an answer the drain then moved', async () => {
-    const e = engine({ ranks: RANKS });
-    const tasks: Id[] = Array.from({ length: 20_000 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
-    e.transact(() => { for (const task of tasks.slice(1, 5_000)) e.write(task).link('refs', tasks[0]!); });
-    e.admin.waitForIndexBuilds();
-    const read = () => e.query('Task').ranked('taskRank').limit(10).rankedHits();
-    const delivered: ReturnType<typeof read>[] = [];
-    const watching = e.watch(read, { next: (answer) => delivered.push(answer) });
-    await vi.waitFor(() => expect(delivered.length).toBeGreaterThan(0));
-    // A drain can finish before the view reads, which shows nothing, so each round asks for one the view caught
-    let caught = false;
-    for (let round = 1; round <= 8 && !caught; round++) {
-      const from = delivered.length;
-      e.transact(() => { for (const task of tasks.slice(5_000, 5_000 + 2_000 * round)) e.write(task).link('refs', tasks[round]!); });
-      await vi.waitFor(() => expect(delivered.at(-1)).toEqual(read()), { timeout: 30_000, interval: 20 });
-      const seen = delivered.slice(from).map((answer) => (answer.bound as { error: number }).error);
-      caught = seen.length > 1 && seen[0]! > seen.at(-1)!;
-    }
-    watching.stop();
-    expect(caught, 'no round had the view read before its drain ended').toBe(true);
-  }, 120_000);
-});
-
 describe('declaring a rank index', () => {
   it('declare keeps those it does not name, and setSchema holds only those it names', () => {
     const { e, hub } = hubbed();

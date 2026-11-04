@@ -202,6 +202,9 @@ const newRelationId = () => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix()}` as
  */
 export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): EarsEngine {
   const connection = createConnection(database, { freeze });
+  // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
+  // would otherwise hold its answer until something writes. One engine to a database: elmdb refuses a second listener
+  database.hearBuilderCommits(connection.heard);
   let declared = declaredNames(database.schema);
   const isEntityType = (name: string) => declared.types.has(name);
   const isRelationKind = (name: string) => declared.relationKinds.has(name);

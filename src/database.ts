@@ -232,6 +232,8 @@ export interface Connection {
    * unregistration
    */
   onCommit(listener: (commit: Commit) => void): () => void;
+  /** Tells the commit listeners of a commit no write of this connection made */
+  heard(changes: { sequence: number; touched: number[] }): void;
   /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
   committedEverything(): void;
   /** The last commit's sequence, or 0 */
@@ -268,9 +270,6 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) committed({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
-  // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
-  // would otherwise hold its answer until something writes
-  database.hearBuilderCommits(heard);
 
   const observation = createOperationObservation(
     () => ({ watch: tracking !== undefined, inUnit: levels.length > 0 }),
@@ -460,6 +459,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       const { keys, ranges } = database.trackStats();
       return { keys, ranges };
     },
+    heard,
     onCommit(listener) {
       listeners.add(listener);
       return () => { listeners.delete(listener); };
