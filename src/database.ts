@@ -58,6 +58,8 @@ export interface EarsDatabase {
   bulkLoad(loads: Uint8Array): void;
   /** The last commit's sequence, or 0: a number that only increases for as long as the database exists */
   readonly sequence: number;
+  /** Tells `listener` of each commit the index builder makes that wrote into a tracked read; closing the database stops it */
+  hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void;
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`) */
   untrack(token: number): void;
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
@@ -266,6 +268,9 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) committed({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
+  // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
+  // would otherwise hold its answer until something writes
+  database.hearBuilderCommits(heard);
 
   const observation = createOperationObservation(
     () => ({ watch: tracking !== undefined, inUnit: levels.length > 0 }),

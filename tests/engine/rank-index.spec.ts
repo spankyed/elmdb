@@ -142,6 +142,27 @@ describe('a rank index building', () => {
   });
 });
 
+describe('a watch over a rank index', () => {
+  it('runs again when the build ends, with nothing else writing, so one that refused recovers', async () => {
+    const { e, hub } = (() => {
+      const e = engine();
+      const tasks: Id[] = Array.from({ length: 2_000 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
+      for (const task of tasks.slice(1)) e.write(task).link('refs', tasks[0]!);
+      return { e, hub: tasks[0]! };
+    })();
+    const seen: unknown[] = [];
+    e.admin.declare(declared(RANKS));
+    const watching = e.watch(() => e.query('Task').ranked('taskRank', { whileBuilding: 'refuse' }).limit(1).ids(), {
+      next: (answer) => seen.push(answer),
+      error: (error) => seen.push((error as { code?: string }).code),
+    });
+    await vi.waitFor(() => expect(seen.at(-1)).toEqual([hub]), { timeout: 30_000, interval: 50 });
+    watching.stop();
+    // Refused first, or this showed only a build that beat the first read
+    expect(seen[0]).toBe('INDEX_BUILDING');
+  });
+});
+
 describe('declaring a rank index', () => {
   it('declare keeps those it does not name, and setSchema holds only those it names', () => {
     const { e, hub } = hubbed();

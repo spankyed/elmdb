@@ -188,9 +188,8 @@ export interface RankedOptions {
   /**
    * `compute`, the default, answers the same as the index will, costing what a `rank` does on every read until the build
    * ends. `refuse` throws `INDEX_BUILDING` instead, for a read too large or too frequent to pay that: a caller wanting
-   * nothing yet catches it, which keeps "still building" apart from a graph with nothing in it. A `watch` hears commits
-   * this process writes and not the index's own, so one that refused runs again at the next such commit, not when the
-   * build ends, and one over a top holds what it read until then, however far the index's pushes have moved since
+   * nothing yet catches it, which keeps "still building" apart from a graph with nothing in it. A `watch` that refused
+   * runs again as the index's build commits, and answers once it ends
    */
   whileBuilding?: 'compute' | 'refuse';
 }

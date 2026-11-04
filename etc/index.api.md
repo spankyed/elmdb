@@ -219,6 +219,10 @@ export interface EarsDatabase {
     close(): void;
     // (undocumented)
     durable(): Promise<void>;
+    hearBuilderCommits(listener: (commit: {
+        sequence: number;
+        touched: number[];
+    }) => void): void;
     // (undocumented)
     readonly isOpen: boolean;
     // (undocumented)
