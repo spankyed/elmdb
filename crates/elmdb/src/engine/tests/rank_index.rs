@@ -2637,4 +2637,11 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
     write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs", "target": "Task-0" })]).unwrap();
     db.wait_for_index_builds().unwrap();
     assert!(heard.lock().unwrap().is_empty());
+
+    // Closing drops whoever is listening
+    let listener: crate::engine::watch::BuilderCommitListener = std::sync::Arc::new(|_, _| {});
+    db.hear_builder_commits(Some(std::sync::Arc::clone(&listener)));
+    assert_eq!(std::sync::Arc::strong_count(&listener), 2);
+    db.close().unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&listener), 1);
 }

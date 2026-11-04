@@ -191,6 +191,9 @@ impl Database {
         &self,
         listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
     ) -> napi::Result<()> {
+        // mutant-skip: replace Database::hear_builder_commits -> napi::Result<\(\)> with Ok\(\(\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/tracked.test.mjs` never hears a
+        // commit without it
         let tell = listener.build_threadsafe_function().callee_handled::<false>().weak::<true>().build()?;
         self.inner.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
             tell.call(
