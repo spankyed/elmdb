@@ -54,6 +54,10 @@ export interface EarsDatabase {
   backup(target: string): void;
   /** Queues the index work the store says is owed, for a caller told another process committed */
   queueOwedWork(): void;
+  /** What the change log holds after `cursor`, up to `limit` commits: msgpack of elmdb's `Changes` */
+  changesSince(cursor: number, limit: number): Uint8Array;
+  /** Names this handle in the change log */
+  readonly origin: string;
   /** Every entry replaced by another database's primary data, the derived data rebuilt under this one's schema */
   replaceWith(source: string): void;
   stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
@@ -215,6 +219,16 @@ export interface Commit {
   readonly touched: ReadonlySet<number> | 'all';
 }
 
+const CHANGES_PER_READ = 256;
+
+/** What other processes changed since this connection last asked */
+export interface ChangedElsewhere {
+  /** Whether any other process committed at all */
+  readonly any: boolean;
+  /** The entity types they changed, or `all` when that isn't known: a commit that doesn't say, or a log that no longer reaches back */
+  readonly types: ReadonlySet<string> | 'all';
+}
+
 /** The engine's crossing to its database: reads and writes, in the unit `transact` holds open or each its own */
 export interface Connection {
   read(reads: ReadonlyArray<Record<string, unknown>>): Answer[];
@@ -238,8 +252,11 @@ export interface Connection {
   heard(changes: { sequence: number; touched: number[] }): void;
   /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
   committedEverything(): void;
-  /** Told that another process has committed: the commit listeners hear everything, and its commits so far aren't news */
-  changedElsewhere(): void;
+  /**
+   * Told that another process has committed: reads what from the change log, and if any did, the commit listeners hear
+   * everything, since which keys isn't known, and its commits so far aren't news. Answers what they changed.
+   */
+  changedElsewhere(): ChangedElsewhere;
   /** Calls `listener` soon after a commit here finds another process's that nobody told of. Returns the unregistration */
   onFoundElsewhere(listener: () => void): () => void;
   /** The last commit's sequence, or 0 */
@@ -286,15 +303,33 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) tellListeners({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
-  /** The latest of another process's commits this connection has acted on */
-  let reconciled = 0;
+  /** How far through the change log this connection has read */
+  let cursor = database.sequence;
   const foundElsewhere = new Set<() => void>();
+  const readChangedElsewhere = (): ChangedElsewhere => {
+    let any = false;
+    let types: Set<string> | 'all' = new Set();
+    for (;;) {
+      const changes = unpackr.unpack(database.changesSince(cursor, CHANGES_PER_READ)) as {
+        through: number; truncated: boolean;
+        commits: Array<{ origin: string; everything: boolean; types: string[] }>;
+      };
+      cursor = changes.through;
+      if (changes.truncated) return { any: true, types: 'all' };
+      const theirs = changes.commits.filter((commit) => commit.origin !== database.origin);
+      any ||= theirs.length > 0;
+      for (const commit of theirs) {
+        if (commit.everything) types = 'all';
+        else if (types !== 'all') for (const type of commit.types) types.add(type);
+      }
+      if (changes.commits.length < CHANGES_PER_READ) return { any, types };
+    }
+  };
   const made = (changes: { sequence: number; touched: number[]; elsewhereThrough?: number }) => {
     ownCommit = changes.sequence;
     heard(changes);
     // A commit found another process's that nobody said was coming. One already told of (`changedElsewhere`) isn't news
-    if (changes.elsewhereThrough !== undefined && changes.elsewhereThrough > reconciled) {
-      reconciled = changes.elsewhereThrough;
+    if (changes.elsewhereThrough !== undefined && changes.elsewhereThrough > cursor) {
       everyWatch();
       for (const listener of foundElsewhere) queueMicrotask(listener);
     }
@@ -495,10 +530,13 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
     committedEverything,
     changedElsewhere() {
-      reconciled = database.sequence;
-      // Watches first: what they show matters more than work the builder can resume at the next commit
-      everyWatch();
-      database.queueOwedWork();
+      const changed = readChangedElsewhere();
+      if (changed.any) {
+        // Watches first: what they show matters more than work the builder can resume at the next commit
+        everyWatch();
+        database.queueOwedWork();
+      }
+      return changed;
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);

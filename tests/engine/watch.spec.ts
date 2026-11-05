@@ -30,6 +30,23 @@ const settled = () => e.admin.watchesSettled();
 /** Every task's title, in creation order */
 const titles = () => e.query('Task').ids().map((id) => e.getAttr(id, 'title'));
 
+/** Commits to the database from a process of its own, as a tool killed before telling anyone leaves it */
+const commitElsewhere = async (database: EarsDatabase, create?: string) => {
+  const requireFromEars = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json'));
+  const elmdb = requireFromEars.resolve('elmdb');
+  const msgpackr = requireFromEars.resolve('msgpackr');
+  const [, type, id] = create?.match(/create\('(\w+)', '([\w-]+)'\)/) ?? [];
+  await promisify(execFile)(process.execPath, ['-e', [
+    `const { Database } = require(${JSON.stringify(elmdb)});`,
+    `const { Packr } = require(${JSON.stringify(msgpackr)});`,
+    'const database = Database.open(process.argv[1]);',
+    type
+      ? `database.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: ${JSON.stringify(type)}, id: ${JSON.stringify(id)}, fields: {} }], now: 1 }));`
+      : 'database.begin().commit(false);',
+    'database.close();',
+  ].join('\n'), database.path]);
+};
+
 it('runs again when told another process committed, which it cannot hear for itself', async () => {
   let database: EarsDatabase | undefined;
   const told = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
@@ -38,8 +55,8 @@ it('runs again when told another process committed, which it cannot hear for its
   await told.admin.watchesSettled();
   expect(seen).toEqual([[]]);
 
-  // Past the engine, as a commit from another process is: nothing here dispatches it
-  createConnection(database!).write([{ op: 'create', type: 'Task', id: 'Task-elsewhere', fields: { title: 'there' } }]);
+  // Nothing here dispatches it
+  await commitElsewhere(database!, "create('Task', 'Task-elsewhere')");
   await told.admin.watchesSettled();
   expect(seen, 'nobody has said so yet').toEqual([[]]);
 
@@ -66,17 +83,6 @@ it('counts its own commits as its own, not another process\'s', () => {
 });
 
 describe('a commit from another process that nobody told of', () => {
-  /** Commits to the database from a process of its own, as a tool killed before telling anyone leaves it */
-  const commitElsewhere = async (database: EarsDatabase) => {
-    const elmdb = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json')).resolve('elmdb');
-    await promisify(execFile)(process.execPath, ['-e', [
-      `const { Database } = require(${JSON.stringify(elmdb)});`,
-      'const database = Database.open(process.argv[1]);',
-      'database.begin().commit(false);',
-      'database.close();',
-    ].join('\n'), database.path]);
-  };
-
   it('runs every watch again at the next commit here, once, and says so', async () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
@@ -102,34 +108,61 @@ describe('a commit from another process that nobody told of', () => {
     watching.stop();
   });
 
-  it('asks the database to catch up on what it owes when told', () => {
+  it('asks the database to catch up on what it owes when told', async () => {
     const asked: string[] = [];
-    const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
+    let database: EarsDatabase | undefined;
+    const told = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
       get(target, key) {
         if (key === 'queueOwedWork') return () => { asked.push('queueOwedWork'); target.queueOwedWork(); };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
-    }) });
+    })) });
+    await commitElsewhere(database!);
     told.admin.changedElsewhere();
     expect(asked).toEqual(['queueOwedWork']);
   });
 
   it('runs every watch even if catching up fails', async () => {
-    const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
+    let database: EarsDatabase | undefined;
+    const told = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
       get(target, key) {
         if (key === 'queueOwedWork') return () => { throw new Error('The database is closed'); };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
-    }) });
+    })) });
     let runs = 0;
     const watching = told.watch(() => { runs++; return told.query('Task').count(); }, { next: () => {} });
     await told.admin.watchesSettled();
     expect(runs).toBe(1);
+    await commitElsewhere(database!);
     expect(() => told.admin.changedElsewhere()).toThrow('closed');
     await told.admin.watchesSettled();
     expect(runs).toBe(2);
+    watching.stop();
+  });
+
+  it('reads what another process changed, skipping its own, and runs nothing if none did', async () => {
+    let database: EarsDatabase | undefined;
+    const reader = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let runs = 0;
+    const watching = reader.watch(() => { runs++; return reader.query('Project').count(); }, { next: () => {} });
+    await reader.admin.watchesSettled();
+
+    reader.create('Task', { title: 'mine' });
+    await reader.admin.watchesSettled();
+    expect(reader.admin.changedElsewhere(), 'its own commits are not news').toEqual({ any: false, types: new Set() });
+    await reader.admin.watchesSettled();
+    expect(runs, 'and nothing ran').toBe(1);
+
+    await commitElsewhere(database!, "create('Task', 'Task-elsewhere')");
+    const changed = reader.admin.changedElsewhere();
+    expect(changed.any).toBe(true);
+    expect(changed.types).toEqual(new Set(['Task']));
+    await reader.admin.watchesSettled();
+    expect(runs).toBe(2);
+    expect(reader.admin.changedElsewhere().any, 'read once').toBe(false);
     watching.stop();
   });
 

@@ -63,6 +63,12 @@ export interface CallSite {
 }
 
 // @public
+export interface ChangedElsewhere {
+    readonly any: boolean;
+    readonly types: ReadonlySet<string> | 'all';
+}
+
+// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -188,7 +194,7 @@ export interface EarsAdmin {
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
     readonly calls: CallCounting;
-    changedElsewhere(): void;
+    changedElsewhere(): ChangedElsewhere;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
@@ -218,6 +224,7 @@ export interface EarsDatabase {
     begin(): EarsUnit;
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
+    changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     close(): void;
     // (undocumented)
@@ -228,6 +235,7 @@ export interface EarsDatabase {
     }) => void): void;
     // (undocumented)
     readonly isOpen: boolean;
+    readonly origin: string;
     // (undocumented)
     readonly path: string;
     queueOwedWork(): void;

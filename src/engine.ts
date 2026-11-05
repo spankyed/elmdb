@@ -6,7 +6,7 @@ import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
 import type { EarsOperationObserver } from './observation.ts';
-import { createConnection, runCommitted, type Answer, type SchemaChange, type UnitOptions } from './database.ts';
+import { createConnection, runCommitted, type Answer, type ChangedElsewhere, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
@@ -143,9 +143,10 @@ export interface EarsAdmin {
   /**
    * Another process committed to this database, and said so. Commits this engine didn't make dispatch no watch of its
    * own (elmdb's tracked reads belong to one process), and what they wrote isn't known key by key, so every watch runs
-   * again, as after `clear` or `replaceWith`.
+   * again, as after `clear` or `replaceWith`. Answers what they changed, read from the database's change log; if nothing
+   * else committed, nothing runs.
    */
-  changedElsewhere(): void;
+  changedElsewhere(): ChangedElsewhere;
   /**
    * Calls `listener` when a commit here finds another process committed and nobody said so, as when a tool was killed
    * first. Every watch has run again by then; this is for what a holder keeps beyond them. A process that never commits
