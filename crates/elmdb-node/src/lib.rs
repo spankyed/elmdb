@@ -261,6 +261,12 @@ impl Database {
         Ok(serde_json::to_value(status).expect("a status serializes"))
     }
 
+    /// Queues the index work the store says is owed, for a caller told another process committed
+    #[napi]
+    pub fn catch_up(&self) -> Result<(), Code> {
+        self.inner.catch_up().map_err(to_js)
+    }
+
     /// Blocks until every index waiting to be built is built or has failed
     #[napi]
     pub fn wait_for_index_builds(&self) -> Result<(), Code> {
