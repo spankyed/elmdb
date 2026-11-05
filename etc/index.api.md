@@ -188,12 +188,14 @@ export interface EarsAdmin {
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
     readonly calls: CallCounting;
+    changedElsewhere(): void;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
+    lastOwnCommit(): number;
     observe(observer: EarsOperationObserver): () => void;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;
