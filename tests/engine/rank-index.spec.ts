@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { engine, NAMES, type Id } from './helpers.ts';
-import type { EngineSchema } from '../../src/index.ts';
+import { freshEngine } from './engine-under-test.ts';
+import type { EarsDatabase, EngineSchema } from '../../src/index.ts';
 
 const RANKS = { taskRank: { types: ['Task'], relations: ['refs'] } };
 const declared = (ranks?: EngineSchema['ranks']): EngineSchema => ({
@@ -144,22 +145,22 @@ describe('a rank index building', () => {
 
 describe('a watch over a rank index', () => {
   it('runs again when the build ends, with nothing else writing, so one that refused recovers', async () => {
-    const { e, hub } = (() => {
-      const e = engine();
-      const tasks: Id[] = Array.from({ length: 2_000 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
-      for (const task of tasks.slice(1)) e.write(task).link('refs', tasks[0]!);
-      return { e, hub: tasks[0]! };
-    })();
+    let database: EarsDatabase | undefined;
+    const e = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    const tasks: Id[] = Array.from({ length: 2_000 }, (_, at) => e.create('Task', { title: `t${at}` }).id());
+    for (const task of tasks.slice(1)) e.write(task).link('refs', tasks[0]!);
     const seen: unknown[] = [];
     e.admin.declare(declared(RANKS));
+    // Holds the write lock the build has to commit under, so it cannot finish before the watch's first read
+    const holding = database!.begin();
     const watching = e.watch(() => e.query('Task').ranked('taskRank', { whileBuilding: 'refuse' }).limit(1).ids(), {
       next: (answer) => seen.push(answer),
       error: (error) => seen.push((error as { code?: string }).code),
     });
-    await vi.waitFor(() => expect(seen.at(-1)).toEqual([hub]), { timeout: 30_000, interval: 50 });
+    await vi.waitFor(() => expect(seen).toEqual(['INDEX_BUILDING']), { timeout: 30_000, interval: 10 });
+    holding.abort();
+    await vi.waitFor(() => expect(seen.at(-1)).toEqual([tasks[0]]), { timeout: 30_000, interval: 50 });
     watching.stop();
-    // Refused first, or this showed only a build that beat the first read
-    expect(seen[0]).toBe('INDEX_BUILDING');
   });
 });
 
