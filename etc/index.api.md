@@ -195,6 +195,7 @@ export interface EarsAdmin {
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
+    lastOwnCommit(): number;
     observe(observer: EarsOperationObserver): () => void;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;

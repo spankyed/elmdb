@@ -146,6 +146,8 @@ export interface EarsAdmin {
    * again, as after `clear` or `replaceWith`.
    */
   changedElsewhere(): void;
+  /** The sequence of the last commit this engine made, or 0: unlike `lastCommit`, another process's don't move it */
+  lastOwnCommit(): number;
   /** Every entity's id, those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, those in the trash included, whether or not the schema declares the type: a raw listing */
@@ -348,6 +350,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
     },
     changedElsewhere: () => connection.committedEverything(),
+    lastOwnCommit: () => connection.lastOwnCommit(),
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
     getEntitiesOfType: (type) => {

@@ -46,6 +46,22 @@ it('runs again when told another process committed, which it cannot hear for its
   watching.stop();
 });
 
+it('counts its own commits as its own, not another process\'s', () => {
+  let database: EarsDatabase | undefined;
+  const counting = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+  expect(counting.admin.lastOwnCommit()).toBe(0);
+  counting.create('Task', { title: 'mine' });
+  const mine = counting.admin.lastOwnCommit();
+  expect(mine).toBe(counting.lastCommit());
+
+  createConnection(database!).write([{ op: 'create', type: 'Task', id: 'Task-elsewhere', fields: { title: 'there' } }]);
+  expect(counting.lastCommit()).toBeGreaterThan(mine);
+  expect(counting.admin.lastOwnCommit()).toBe(mine);
+
+  counting.transact(() => { counting.create('Task', { title: 'mine too' }); });
+  expect(counting.admin.lastOwnCommit()).toBe(counting.lastCommit());
+});
+
 describe('watch', () => {
   it('delivers the first result after the call returns, not during it', async () => {
     e.create('Task', { title: 'one' });
