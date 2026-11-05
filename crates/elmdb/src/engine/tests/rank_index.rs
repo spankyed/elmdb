@@ -2698,11 +2698,11 @@ fn owes(db: &Database) -> bool {
 }
 
 #[test]
-fn catching_up_finishes_what_a_process_that_exited_left_owed() {
+fn queueing_owed_work_finishes_what_a_process_that_exited_left_owed() {
     let dir = tempfile::tempdir().unwrap();
     let db = left_owing(&dir);
     assert!(owes(&db), "the process left the index owed");
-    db.catch_up().unwrap();
+    db.queue_owed_work().unwrap();
     db.wait_for_index_builds().unwrap();
     assert!(!owes(&db), "drained without a commit here");
 }
@@ -2718,10 +2718,11 @@ fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
 }
 
 #[test]
-fn catching_up_with_nothing_owed_queues_nothing() {
+fn with_nothing_owed_no_builder_starts() {
     let dir = tempfile::tempdir().unwrap();
-    let db = near_links(&dir, 40, 2, 0);
+    let db = open_with(&dir, near_schema());
     assert!(!owes(&db));
-    db.catch_up().unwrap();
-    assert!(db.builder().as_ref().map(|builder| builder.pending().is_empty()).unwrap_or(true));
+    assert!(db.builder().is_none(), "nothing has needed one yet");
+    db.queue_owed_work().unwrap();
+    assert!(db.builder().is_none(), "nothing was queued");
 }

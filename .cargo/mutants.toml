@@ -150,6 +150,6 @@ exclude_re = [
     "crates/elmdb/src/store/sync.rs:333:.*replace > with >= in run",
     "crates/elmdb/src/store/sync.rs:349:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
     "crates/elmdb-node/src/lib.rs:197:.*replace Database::hear_builder_commits -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:270:.*replace Database::catch_up -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:270:.*replace Database::queue_owed_work -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
     # END generated
 ]

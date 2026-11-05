@@ -134,13 +134,13 @@ test('an open refuses a sync or map option that is not a whole number in range, 
   Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
 });
 
-test('catchUp reaches the database, and is refused once it has closed', () => {
+test('queueOwedWork reaches the database, and is refused once it has closed', () => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-catch-up-'));
   try {
     const db = Database.open(join(dir, 'db'));
-    db.catchUp();
+    db.queueOwedWork();
     db.close();
-    assert.throws(() => db.catchUp(), { code: 'CLOSED' });
+    assert.throws(() => db.queueOwedWork(), { code: 'CLOSED' });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

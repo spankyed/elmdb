@@ -263,11 +263,11 @@ impl Database {
 
     /// Queues the index work the store says is owed, for a caller told another process committed
     #[napi]
-    pub fn catch_up(&self) -> Result<(), Code> {
-        // mutant-skip: replace Database::catch_up -> Result<\(\), Code> with Ok\(\(\)\)
+    pub fn queue_owed_work(&self) -> Result<(), Code> {
+        // mutant-skip: replace Database::queue_owed_work -> Result<\(\), Code> with Ok\(\(\)\)
         // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/database.test.mjs` is refused
         // through it on a closed database
-        self.inner.catch_up().map_err(to_js)
+        self.inner.queue_owed_work().map_err(to_js)
     }
 
     /// Blocks until every index waiting to be built is built or has failed

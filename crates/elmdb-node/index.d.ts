@@ -71,7 +71,7 @@ export declare class Database {
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Queues the index work the store says is owed, for a caller told another process committed */
-  catchUp(): void
+  queueOwedWork(): void
   /** Blocks until every index waiting to be built is built or has failed */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */

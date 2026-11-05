@@ -504,12 +504,9 @@ impl Database {
     /// Queues the index work the store says is owed. A commit here queues what it owes, and opening what the store does,
     /// but another process's commit tells this handle nothing, and that process may have exited with its builder part way:
     /// a caller told of one calls this so the work resumes without waiting for a commit here
-    pub fn catch_up(&self) -> Result<()> {
+    pub fn queue_owed_work(&self) -> Result<()> {
         let Some(builders) = self.builders()? else { return Ok(()) };
-        let owed = remaining_indexes(&*self.store()?, &self.schema_guard())?;
-        if !owed.is_empty() {
-            builders.queue(owed);
-        }
+        builders.queue(remaining_indexes(&*self.store()?, &self.schema_guard())?);
         Ok(())
     }
 
