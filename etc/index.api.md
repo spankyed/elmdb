@@ -218,7 +218,6 @@ export interface EarsDatabase {
     begin(): EarsUnit;
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
-    catchUp(): void;
     // (undocumented)
     close(): void;
     // (undocumented)
@@ -231,6 +230,7 @@ export interface EarsDatabase {
     readonly isOpen: boolean;
     // (undocumented)
     readonly path: string;
+    queueOwedWork(): void;
     // (undocumented)
     readonly readOnly: boolean;
     // (undocumented)

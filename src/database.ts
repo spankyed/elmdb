@@ -53,7 +53,7 @@ export interface EarsDatabase {
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void;
   /** Queues the index work the store says is owed, for a caller told another process committed */
-  catchUp(): void;
+  queueOwedWork(): void;
   /** Every entry replaced by another database's primary data, the derived data rebuilt under this one's schema */
   replaceWith(source: string): void;
   stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
@@ -498,7 +498,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       reconciled = database.sequence;
       // Watches first: what they show matters more than work the builder can resume at the next commit
       everyWatch();
-      database.catchUp();
+      database.queueOwedWork();
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);

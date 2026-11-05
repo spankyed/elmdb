@@ -106,19 +106,19 @@ describe('a commit from another process that nobody told of', () => {
     const asked: string[] = [];
     const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
       get(target, key) {
-        if (key === 'catchUp') return () => { asked.push('catchUp'); target.catchUp(); };
+        if (key === 'queueOwedWork') return () => { asked.push('queueOwedWork'); target.queueOwedWork(); };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
     }) });
     told.admin.changedElsewhere();
-    expect(asked).toEqual(['catchUp']);
+    expect(asked).toEqual(['queueOwedWork']);
   });
 
   it('runs every watch even if catching up fails', async () => {
     const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
       get(target, key) {
-        if (key === 'catchUp') return () => { throw new Error('The database is closed'); };
+        if (key === 'queueOwedWork') return () => { throw new Error('The database is closed'); };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
