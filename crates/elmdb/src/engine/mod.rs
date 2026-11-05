@@ -634,7 +634,9 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
+        let mut changes =
+            finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
+        changes.elsewhere_through = store.take_elsewhere();
         if let Some(builders) = self.builders()? {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
@@ -808,7 +810,7 @@ impl Unit {
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        let changes = finish_commit(
+        let mut changes = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
@@ -816,6 +818,7 @@ impl Unit {
             self.state.written.as_ref(),
             Commit { sequence, synced },
         )?;
+        changes.elsewhere_through = self.store.take_elsewhere();
         if let Some(builders) = &self.builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }

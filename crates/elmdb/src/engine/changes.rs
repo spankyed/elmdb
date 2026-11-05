@@ -36,6 +36,12 @@ pub struct ChangeSet {
     pub sequence: u64,
     /// The tokens of the tracked reads whose keys and ranges the commit wrote into
     pub touched: Vec<u32>,
+    /// The latest commit another process made that this handle hadn't yet said it found, if any: those commits dispatch no
+    /// watch here, so this is how a holder of tracked reads learns its reads may be stale. A write and a unit's commit say
+    /// it, including what a builder's commit found since
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(type = "number | undefined", optional))]
+    pub elsewhere_through: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
