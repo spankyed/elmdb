@@ -218,6 +218,7 @@ export interface EarsDatabase {
     begin(): EarsUnit;
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
+    catchUp(): void;
     // (undocumented)
     close(): void;
     // (undocumented)

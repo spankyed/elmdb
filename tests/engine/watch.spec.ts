@@ -102,6 +102,19 @@ describe('a commit from another process that nobody told of', () => {
     watching.stop();
   });
 
+  it('asks the database to catch up on what it owes when told', () => {
+    const asked: string[] = [];
+    const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
+      get(target, key) {
+        if (key === 'catchUp') return () => { asked.push('catchUp'); target.catchUp(); };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) });
+    told.admin.changedElsewhere();
+    expect(asked).toEqual(['catchUp']);
+  });
+
   it('is not news once the engine has been told', async () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });

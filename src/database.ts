@@ -52,6 +52,8 @@ export interface EarsDatabase {
   reset(): void;
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void;
+  /** Queues the index work the store says is owed, for a caller told another process committed */
+  catchUp(): void;
   /** Every entry replaced by another database's primary data, the derived data rebuilt under this one's schema */
   replaceWith(source: string): void;
   stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
@@ -275,9 +277,11 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       }
     }
   };
-  const committed = (commit: Commit) => {
-    ownCommit = commit.sequence;
-    tellListeners(commit);
+  const everyWatch = () => tellListeners({ sequence: database.sequence, touched: 'all' });
+  /** A commit this connection made whose writes aren't known key by key */
+  const committedEverything = () => {
+    ownCommit = database.sequence;
+    everyWatch();
   };
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) tellListeners({ sequence: changes.sequence, touched: new Set(changes.touched) });
@@ -285,7 +289,6 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   /** The latest of another process's commits this connection has acted on */
   let reconciled = 0;
   const foundElsewhere = new Set<() => void>();
-  const everyWatch = () => tellListeners({ sequence: database.sequence, touched: 'all' });
   const made = (changes: { sequence: number; touched: number[]; elsewhereThrough?: number }) => {
     ownCommit = changes.sequence;
     heard(changes);
@@ -393,7 +396,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       if (open) held.abort();
       unitEnded();
       // A durable commit whose sync failed was made all the same, and its change set didn't cross with the error
-      if (!open && (error as { code?: unknown })?.code === 'NOT_DURABLE') committed({ sequence: database.sequence, touched: 'all' });
+      if (!open && (error as { code?: unknown })?.code === 'NOT_DURABLE') committedEverything();
       throw error;
     }
     return value;
@@ -465,7 +468,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     load(loads) {
       runCommitted(
         () => observation.run('load', loads.length, () => crossing(() => database.bulkLoad(observation.request(pack(loads))))),
-        () => committed({ sequence: database.sequence, touched: 'all' }),
+        committedEverything,
       );
     },
     transact,
@@ -490,9 +493,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
-    committedEverything: () => committed({ sequence: database.sequence, touched: 'all' }),
+    committedEverything,
     changedElsewhere() {
       reconciled = database.sequence;
+      database.catchUp();
       everyWatch();
     },
     onFoundElsewhere(listener) {
