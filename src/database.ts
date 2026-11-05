@@ -54,8 +54,8 @@ export interface EarsDatabase {
   reset(): void;
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void;
-  /** Queues the index work the store says is owed, for a caller told another process committed */
-  queueOwedWork(): void;
+  /** Tells `listener` of each commit another process makes, having queued any index work it left owed. One listener; a second is refused */
+  hearCommitsElsewhere(listener: (sequence: number) => void): void;
   /** What the change log holds after `cursor`, up to `limit` commits: msgpack of elmdb's `Changes` */
   changesSince(cursor: number, limit: number): Uint8Array;
   /** Names this handle in the change log */
@@ -276,12 +276,10 @@ export interface Connection {
   beforeCommit(hook: BeforeCommit): void;
   /** Runs `fn` in a unit that what's set to run before a commit stays out of */
   transactWithoutHook<T>(fn: () => T): T;
-  /** Calls `listener` soon after a commit here finds another process's that nobody told of. Returns the unregistration */
+  /** Calls `listener` soon after another process commits, starting this database hearing of that. Returns the unregistration */
   onFoundElsewhere(listener: () => void): () => void;
   /** The last commit's sequence, or 0 */
   lastCommit(): number;
-  /** The sequence of the last commit made through this connection, or 0: another process's and a builder's aren't */
-  lastOwnCommit(): number;
   /** Counting the calls this connection makes, off until started */
   readonly calls: CallCounting;
   /** The count being kept, while counting runs: what the watch scheduler records each watch's runs into */
@@ -302,8 +300,6 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   let tracking: number | undefined;
   const listeners = new Set<(commit: Commit) => void>();
   /** Calls every commit listener; a listener's throw is reported, not handed to the writer */
-  /** The sequence of the last commit this connection made, or 0 */
-  let ownCommit = 0;
   const tellListeners = (commit: Commit) => {
     for (const listener of listeners) {
       try {
@@ -316,7 +312,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   const everyWatch = () => tellListeners({ sequence: database.sequence, touched: 'all' });
   /** A commit this connection made whose writes aren't known key by key */
   const committedEverything = () => {
-    ownCommit = database.sequence;
+    known = database.sequence;
     everyWatch();
   };
   const heard = (changes: { sequence: number; touched: number[] }) => {
@@ -324,7 +320,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   };
   /** How far through the change log this connection has read */
   let cursor = database.sequence;
+  /** The latest commit this connection knows of: a commit here further past it than one says something else committed */
+  let known = database.sequence;
   const foundElsewhere = new Set<() => void>();
+  let hearing = false;
   const readChangesSince = (from: number, limit: number): LoggedChanges =>
     unpackr.unpack(unit ? crossing(() => unit!.changesSince(from, limit)) : database.changesSince(from, limit)) as LoggedChanges;
   /** Moves the cursor to the end of the log, answering whether another process committed since it */
@@ -333,6 +332,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     for (;;) {
       const changes = readChangesSince(cursor, CHANGES_PER_READ);
       cursor = changes.through;
+      known = Math.max(known, cursor);
       if (changes.truncated) return true;
       any ||= changes.commits.some((commit) => commit.origin !== database.origin);
       if (changes.commits.length < CHANGES_PER_READ) return any;
@@ -346,14 +346,13 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     const id = named.id ?? named.source;
     return typeof id === 'string' ? id.slice(0, id.indexOf('-')) : undefined;
   };
-  const made = (changes: { sequence: number; touched: number[]; elsewhereThrough?: number }) => {
-    ownCommit = changes.sequence;
+  const made = (changes: { sequence: number; touched: number[] }) => {
+    const skipped = changes.sequence > known + 1;
+    known = changes.sequence;
     heard(changes);
-    // A commit found another process's that nobody said was coming. One already told of (`changedElsewhere`) isn't news
-    if (changes.elsewhereThrough !== undefined && changes.elsewhereThrough > cursor) {
-      everyWatch();
-      for (const listener of foundElsewhere) queueMicrotask(listener);
-    }
+    // The wake a process's commit sends can be lost, and its sender can die first. What skipped may be this process's
+    // own builder: reading the log is what tells them apart
+    if (skipped) for (const listener of foundElsewhere) queueMicrotask(listener);
   };
 
   const observation = createOperationObservation(
@@ -557,11 +556,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     committedEverything,
     changedElsewhere() {
       const changed = readChangedElsewhere();
-      if (changed) {
-        // Watches first: what they show matters more than work the builder can resume at the next commit
-        everyWatch();
-        database.queueOwedWork();
-      }
+      if (changed) everyWatch();
       return changed;
     },
     changesSince: readChangesSince,
@@ -572,10 +567,13 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);
+      if (!hearing) {
+        database.hearCommitsElsewhere(() => { for (const each of foundElsewhere) each(); });
+        hearing = true;
+      }
       return () => { foundElsewhere.delete(listener); };
     },
     lastCommit: () => database.sequence,
-    lastOwnCommit: () => ownCommit,
     calls,
     tally: () => tally,
     observe: observation.observe,

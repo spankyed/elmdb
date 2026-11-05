@@ -203,7 +203,6 @@ export interface EarsAdmin {
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
-    lastOwnCommit(): number;
     observe(observer: EarsOperationObserver): () => void;
     onFoundElsewhere(listener: () => void): () => void;
     origin(): string;
@@ -237,12 +236,12 @@ export interface EarsDatabase {
         sequence: number;
         touched: number[];
     }) => void): void;
+    hearCommitsElsewhere(listener: (sequence: number) => void): void;
     // (undocumented)
     readonly isOpen: boolean;
     readonly origin: string;
     // (undocumented)
     readonly path: string;
-    queueOwedWork(): void;
     // (undocumented)
     readonly readOnly: boolean;
     // (undocumented)

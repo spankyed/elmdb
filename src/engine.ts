@@ -159,13 +159,12 @@ export interface EarsAdmin {
   /** Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up */
   transactWithoutHook<T>(fn: () => T): T;
   /**
-   * Calls `listener` when a commit here finds another process committed and nobody said so, as when a tool was killed
-   * first. Every watch has run again by then; this is for what a holder keeps beyond them. A process that never commits
-   * doesn't find out. Returns the unregistration.
+   * Calls `listener` soon after another process commits, which `changedElsewhere` then answers, or after a commit here
+   * shows something else committed, since a wake can be lost. It may be called for a commit that turns out to be this
+   * process's own builder's. Throws when this database can't hear of commits, keeping the listener for that second way.
+   * Returns the unregistration.
    */
   onFoundElsewhere(listener: () => void): () => void;
-  /** The sequence of the last commit this engine made, or 0: unlike `lastCommit`, another process's don't move it */
-  lastOwnCommit(): number;
   /** Every entity's id, those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, those in the trash included, whether or not the schema declares the type: a raw listing */
@@ -373,7 +372,6 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     beforeCommit: (hook) => connection.beforeCommit(hook),
     transactWithoutHook: (fn) => connection.transactWithoutHook(fn),
     onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),
-    lastOwnCommit: () => connection.lastOwnCommit(),
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
     getEntitiesOfType: (type) => {

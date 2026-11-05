@@ -66,81 +66,65 @@ it('runs again when told another process committed, which it cannot hear for its
   watching.stop();
 });
 
-it('counts its own commits as its own, not another process\'s', () => {
-  let database: EarsDatabase | undefined;
-  const counting = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
-  expect(counting.admin.lastOwnCommit()).toBe(0);
-  counting.create('Task', { title: 'mine' });
-  const mine = counting.admin.lastOwnCommit();
-  expect(mine).toBe(counting.lastCommit());
-
-  createConnection(database!).write([{ op: 'create', type: 'Task', id: 'Task-elsewhere', fields: { title: 'there' } }]);
-  expect(counting.lastCommit()).toBeGreaterThan(mine);
-  expect(counting.admin.lastOwnCommit()).toBe(mine);
-
-  counting.transact(() => { counting.create('Task', { title: 'mine too' }); });
-  expect(counting.admin.lastOwnCommit()).toBe(counting.lastCommit());
-});
-
-describe('a commit from another process that nobody told of', () => {
-  it('runs every watch again at the next commit here, once, and says so', async () => {
+describe('a commit from another process', () => {
+  it('wakes a listener with nothing committed here, and the watches run when it asks', async () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
     let runs = 0;
-    let told = 0;
-    found.admin.onFoundElsewhere(() => { told++; });
-    // Reads what no commit here writes, so only a commit heard as writing everything runs it again
+    let told = () => {};
+    const woken = new Promise<void>((resolve) => { told = resolve; });
+    found.admin.onFoundElsewhere(() => told());
     const watching = found.watch(() => { runs++; return found.query('Project').count(); }, { next: () => {} });
     await found.admin.watchesSettled();
     expect(runs).toBe(1);
 
     await commitElsewhere(database!);
+    await woken;
+    expect(found.admin.changedElsewhere()).toBe(true);
     await found.admin.watchesSettled();
-    expect([runs, told], 'nothing here has committed').toEqual([1, 0]);
-
-    found.create('Task', { title: 'mine' });
-    await found.admin.watchesSettled();
-    expect([runs, told]).toEqual([2, 1]);
-
-    found.create('Task', { title: 'mine too' });
-    await found.admin.watchesSettled();
-    expect([runs, told], 'said once').toEqual([2, 1]);
-    watching.stop();
-  });
-
-  it('asks the database to catch up on what it owes when told', async () => {
-    const asked: string[] = [];
-    let database: EarsDatabase | undefined;
-    const told = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
-      get(target, key) {
-        if (key === 'queueOwedWork') return () => { asked.push('queueOwedWork'); target.queueOwedWork(); };
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    })) });
-    await commitElsewhere(database!);
-    told.admin.changedElsewhere();
-    expect(asked).toEqual(['queueOwedWork']);
-  });
-
-  it('runs every watch even if catching up fails', async () => {
-    let database: EarsDatabase | undefined;
-    const told = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
-      get(target, key) {
-        if (key === 'queueOwedWork') return () => { throw new Error('The database is closed'); };
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    })) });
-    let runs = 0;
-    const watching = told.watch(() => { runs++; return told.query('Task').count(); }, { next: () => {} });
-    await told.admin.watchesSettled();
-    expect(runs).toBe(1);
-    await commitElsewhere(database!);
-    expect(() => told.admin.changedElsewhere()).toThrow('closed');
-    await told.admin.watchesSettled();
     expect(runs).toBe(2);
     watching.stop();
+  });
+
+  it('is found at the next commit here when the wake never came, and said once', async () => {
+    let database: EarsDatabase | undefined;
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
+      get(target, key) {
+        if (key === 'hearCommitsElsewhere') return () => {};
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    })) });
+    let told = 0;
+    found.admin.onFoundElsewhere(() => { told++; });
+    await commitElsewhere(database!);
+    await Promise.resolve();
+    expect(told, 'nothing here has committed').toBe(0);
+
+    found.create('Task', { title: 'mine' });
+    await Promise.resolve();
+    expect(told).toBe(1);
+    expect(found.admin.changedElsewhere()).toBe(true);
+    found.create('Task', { title: 'mine too' });
+    await Promise.resolve();
+    expect(told, 'said once').toBe(1);
+  });
+
+  it('keeps the listener for the next commit here when the database cannot hear', async () => {
+    let database: EarsDatabase | undefined;
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
+      get(target, key) {
+        if (key === 'hearCommitsElsewhere') return () => { throw new Error('no loopback here'); };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    })) });
+    let told = 0;
+    expect(() => found.admin.onFoundElsewhere(() => { told++; })).toThrow('no loopback here');
+    await commitElsewhere(database!);
+    found.create('Task', { title: 'mine' });
+    await Promise.resolve();
+    expect(told).toBe(1);
   });
 
   it('reads whether another process committed, skipping its own, and runs nothing if none did', async () => {
@@ -164,18 +148,6 @@ describe('a commit from another process that nobody told of', () => {
     watching.stop();
   });
 
-  it('is not news once the engine has been told', async () => {
-    let database: EarsDatabase | undefined;
-    const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
-    let told = 0;
-    found.admin.onFoundElsewhere(() => { told++; });
-
-    await commitElsewhere(database!);
-    found.admin.changedElsewhere();
-    found.create('Task', { title: 'mine' });
-    await found.admin.watchesSettled();
-    expect(told).toBe(0);
-  });
 });
 
 describe('watch', () => {
