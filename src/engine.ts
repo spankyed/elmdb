@@ -6,7 +6,7 @@ import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
 import type { EarsOperationObserver } from './observation.ts';
-import { createConnection, runCommitted, type Answer, type ChangedElsewhere, type SchemaChange, type UnitOptions } from './database.ts';
+import { createConnection, runCommitted, type Answer, type BeforeCommit, type LoggedChanges, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
@@ -143,10 +143,21 @@ export interface EarsAdmin {
   /**
    * Another process committed to this database, and said so. Commits this engine didn't make dispatch no watch of its
    * own (elmdb's tracked reads belong to one process), and what they wrote isn't known key by key, so every watch runs
-   * again, as after `clear` or `replaceWith`. Answers what they changed, read from the database's change log; if nothing
-   * else committed, nothing runs.
+   * again, as after `clear` or `replaceWith`. If nothing else committed, read from the change log, nothing runs. Answers
+   * whether something did.
    */
-  changedElsewhere(): ChangedElsewhere;
+  changedElsewhere(): boolean;
+  /** What the database's change log holds after `cursor`, up to `limit` commits, as the open unit sees it when there is one */
+  changesSince(cursor: number, limit: number): LoggedChanges;
+  /** Names this engine's handle in the change log, so a reader can tell its own commits from another process's */
+  origin(): string;
+  /**
+   * Sets what runs in every unit before it commits, so what it writes commits with what caused it. A write outside a unit
+   * that `hook.wants` runs in one of its own.
+   */
+  beforeCommit(hook: BeforeCommit): void;
+  /** Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up */
+  transactWithoutHook<T>(fn: () => T): T;
   /**
    * Calls `listener` when a commit here finds another process committed and nobody said so, as when a tool was killed
    * first. Every watch has run again by then; this is for what a holder keeps beyond them. A process that never commits
@@ -357,6 +368,10 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
     },
     changedElsewhere: () => connection.changedElsewhere(),
+    changesSince: (cursor, limit) => connection.changesSince(cursor, limit),
+    origin: () => database.origin,
+    beforeCommit: (hook) => connection.beforeCommit(hook),
+    transactWithoutHook: (fn) => connection.transactWithoutHook(fn),
     onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),
     lastOwnCommit: () => connection.lastOwnCommit(),
     getAllEntities: () => query.withTrashed.all().ids(),

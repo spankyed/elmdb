@@ -6,7 +6,7 @@ export {
   createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,
   type EntityRow, type DatabaseCatalog, type SchemaStats, type RelationMatch, type RelationRow, type RelationStats,
 } from './engine.ts';
-export type { ChangedElsewhere, EarsDatabase, EarsUnit, SchemaChange, UnitOptions } from './database.ts';
+export type { BeforeCommit, EarsDatabase, LoggedChanges, EarsUnit, SchemaChange, UnitOptions } from './database.ts';
 export { WATCH_SCHEDULE } from './watch.ts';
 export type { WatchObserver, WatchOptions, WatchReadContext, Watching, WatchSchedule } from './watch.ts';
 export type { CallCounting, CallKind, CallReport, CallSite, WatchCount } from './calls.ts';

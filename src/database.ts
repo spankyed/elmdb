@@ -24,6 +24,8 @@ export interface EarsUnit {
   rollbackTo(depth: number): void;
   release(depth: number): void;
   commit(durable?: boolean | null): Uint8Array;
+  /** What the change log holds after `cursor`, with the unit's own changes so far: msgpack of elmdb's `Changes` */
+  changesSince(cursor: number, limit: number): Uint8Array;
   abort(): void;
   readonly isOpen: boolean;
 }
@@ -221,12 +223,23 @@ export interface Commit {
 
 const CHANGES_PER_READ = 256;
 
-/** What other processes changed since this connection last asked */
-export interface ChangedElsewhere {
-  /** Whether any other process committed at all */
-  readonly any: boolean;
-  /** The entity types they changed, or `all` when that isn't known: a commit that doesn't say, or a log that no longer reaches back */
-  readonly types: ReadonlySet<string> | 'all';
+/** What came after a cursor in the change log (elmdb's `Changes`) */
+export interface LoggedChanges {
+  /** The cursor to ask from next */
+  through: number;
+  /** The log no longer reaches the cursor, so `commits` doesn't say everything since it */
+  truncated: boolean;
+  commits: Array<{ sequence: number; origin: string; everything: boolean; types: string[]; entities?: string[] }>;
+  /** A unit's own changes so far, when one is open */
+  pending?: { entities: Record<string, unknown> };
+}
+
+/** What runs in a unit before it commits */
+export interface BeforeCommit {
+  /** Whether a write to an entity of this type has to run in a unit, so that `run` sees it */
+  wants(type: string): boolean;
+  /** Runs inside the unit: what it writes commits with it, and what it throws undoes it */
+  run(): void;
 }
 
 /** The engine's crossing to its database: reads and writes, in the unit `transact` holds open or each its own */
@@ -253,10 +266,16 @@ export interface Connection {
   /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
   committedEverything(): void;
   /**
-   * Told that another process has committed: reads what from the change log, and if any did, the commit listeners hear
-   * everything, since which keys isn't known, and its commits so far aren't news. Answers what they changed.
+   * Told that another process has committed: reads the change log, and if one did, the commit listeners hear everything,
+   * since which keys isn't known, and its commits so far aren't news. Answers whether one did.
    */
-  changedElsewhere(): ChangedElsewhere;
+  changedElsewhere(): boolean;
+  /** What the change log holds after `cursor`, as the open unit sees it when there is one */
+  changesSince(cursor: number, limit: number): LoggedChanges;
+  /** Sets what runs in a unit before it commits */
+  beforeCommit(hook: BeforeCommit): void;
+  /** Runs `fn` in a unit that what's set to run before a commit stays out of */
+  transactWithoutHook<T>(fn: () => T): T;
   /** Calls `listener` soon after a commit here finds another process's that nobody told of. Returns the unregistration */
   onFoundElsewhere(listener: () => void): () => void;
   /** The last commit's sequence, or 0 */
@@ -306,24 +325,26 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   /** How far through the change log this connection has read */
   let cursor = database.sequence;
   const foundElsewhere = new Set<() => void>();
-  const readChangedElsewhere = (): ChangedElsewhere => {
+  const readChangesSince = (from: number, limit: number): LoggedChanges =>
+    unpackr.unpack(unit ? crossing(() => unit!.changesSince(from, limit)) : database.changesSince(from, limit)) as LoggedChanges;
+  /** Moves the cursor to the end of the log, answering whether another process committed since it */
+  const readChangedElsewhere = (): boolean => {
     let any = false;
-    let types: Set<string> | 'all' = new Set();
     for (;;) {
-      const changes = unpackr.unpack(database.changesSince(cursor, CHANGES_PER_READ)) as {
-        through: number; truncated: boolean;
-        commits: Array<{ origin: string; everything: boolean; types: string[] }>;
-      };
+      const changes = readChangesSince(cursor, CHANGES_PER_READ);
       cursor = changes.through;
-      if (changes.truncated) return { any: true, types: 'all' };
-      const theirs = changes.commits.filter((commit) => commit.origin !== database.origin);
-      any ||= theirs.length > 0;
-      for (const commit of theirs) {
-        if (commit.everything) types = 'all';
-        else if (types !== 'all') for (const type of commit.types) types.add(type);
-      }
-      if (changes.commits.length < CHANGES_PER_READ) return { any, types };
+      if (changes.truncated) return true;
+      any ||= changes.commits.some((commit) => commit.origin !== database.origin);
+      if (changes.commits.length < CHANGES_PER_READ) return any;
     }
+  };
+  let hook: BeforeCommit | undefined;
+  let hookPaused = false;
+  const typeOfOp = (op: Op): string | undefined => {
+    const named = op as { type?: unknown; id?: unknown; source?: unknown };
+    if (typeof named.type === 'string') return named.type;
+    const id = named.id ?? named.source;
+    return typeof id === 'string' ? id.slice(0, id.indexOf('-')) : undefined;
   };
   const made = (changes: { sequence: number; touched: number[]; elsewhereThrough?: number }) => {
     ownCommit = changes.sequence;
@@ -390,6 +411,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
         (value as unknown as PromiseLike<unknown>).then(undefined, () => {});
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
+      if (outermost && unit && hook && !hookPaused) hook.run();
     } catch (error) {
       levels.pop();
       const held = unit;
@@ -480,7 +502,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
   };
 
-  return {
+  const connection: Connection = {
     read(reads) {
       return counting('read', reads.length, () => {
         const bytes = observation.request(pack(tracking === undefined ? { reads } : { reads, track: tracking }));
@@ -490,6 +512,10 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       });
     },
     write(ops, now = Date.now()) {
+      // A write the hook has to see runs in a unit of its own. One it doesn't pays for this check and nothing else
+      if (hook && levels.length === 0 && ops.some((op) => { const type = typeOfOp(op); return type !== undefined && hook!.wants(type); })) {
+        return transact(() => connection.write(ops, now));
+      }
       const written = counting('write', ops.length, () => {
         const bytes = observation.request(pack({ ops, now }));
         const target = levels.length ? writable() : undefined;
@@ -531,12 +557,18 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     committedEverything,
     changedElsewhere() {
       const changed = readChangedElsewhere();
-      if (changed.any) {
+      if (changed) {
         // Watches first: what they show matters more than work the builder can resume at the next commit
         everyWatch();
         database.queueOwedWork();
       }
       return changed;
+    },
+    changesSince: readChangesSince,
+    beforeCommit(given) { hook = given; },
+    transactWithoutHook(fn) {
+      hookPaused = true;
+      try { return transact(fn); } finally { hookPaused = false; }
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);
@@ -548,4 +580,5 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     tally: () => tally,
     observe: observation.observe,
   };
+  return connection;
 }

@@ -24,6 +24,12 @@ export interface BaseEntity {
 }
 
 // @public
+export interface BeforeCommit {
+    run(): void;
+    wants(type: string): boolean;
+}
+
+// @public
 export interface CallCounting {
     report(): CallReport;
     start(): void;
@@ -60,12 +66,6 @@ export interface CallSite {
     site: string;
     watch: boolean;
     writes: number;
-}
-
-// @public
-export interface ChangedElsewhere {
-    readonly any: boolean;
-    readonly types: ReadonlySet<string> | 'all';
 }
 
 // @public
@@ -190,11 +190,13 @@ export interface Ears {
 // @public
 export interface EarsAdmin {
     addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
+    beforeCommit(hook: BeforeCommit): void;
     bulkLoad<T>(fn: () => T): T;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
     readonly calls: CallCounting;
-    changedElsewhere(): ChangedElsewhere;
+    changedElsewhere(): boolean;
+    changesSince(cursor: number, limit: number): LoggedChanges;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
@@ -204,9 +206,11 @@ export interface EarsAdmin {
     lastOwnCommit(): number;
     observe(observer: EarsOperationObserver): () => void;
     onFoundElsewhere(listener: () => void): () => void;
+    origin(): string;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
+    transactWithoutHook<T>(fn: () => T): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;
     watchesSettled(): Promise<void>;
@@ -394,6 +398,7 @@ export interface EarsSchema {
 export interface EarsUnit {
     // (undocumented)
     abort(): void;
+    changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
@@ -503,6 +508,23 @@ export interface LinkOptions {
 
 // @public
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+
+// @public
+export interface LoggedChanges {
+    // (undocumented)
+    commits: Array<{
+        sequence: number;
+        origin: string;
+        everything: boolean;
+        types: string[];
+        entities?: string[];
+    }>;
+    pending?: {
+        entities: Record<string, unknown>;
+    };
+    through: number;
+    truncated: boolean;
+}
 
 // @public
 export type OptionalField<S extends EntityShapes, E extends string> = [

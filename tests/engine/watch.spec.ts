@@ -143,7 +143,7 @@ describe('a commit from another process that nobody told of', () => {
     watching.stop();
   });
 
-  it('reads what another process changed, skipping its own, and runs nothing if none did', async () => {
+  it('reads whether another process committed, skipping its own, and runs nothing if none did', async () => {
     let database: EarsDatabase | undefined;
     const reader = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
     let runs = 0;
@@ -152,17 +152,15 @@ describe('a commit from another process that nobody told of', () => {
 
     reader.create('Task', { title: 'mine' });
     await reader.admin.watchesSettled();
-    expect(reader.admin.changedElsewhere(), 'its own commits are not news').toEqual({ any: false, types: new Set() });
+    expect(reader.admin.changedElsewhere(), 'its own commits are not news').toBe(false);
     await reader.admin.watchesSettled();
     expect(runs, 'and nothing ran').toBe(1);
 
     await commitElsewhere(database!, "create('Task', 'Task-elsewhere')");
-    const changed = reader.admin.changedElsewhere();
-    expect(changed.any).toBe(true);
-    expect(changed.types).toEqual(new Set(['Task']));
+    expect(reader.admin.changedElsewhere()).toBe(true);
     await reader.admin.watchesSettled();
     expect(runs).toBe(2);
-    expect(reader.admin.changedElsewhere().any, 'read once').toBe(false);
+    expect(reader.admin.changedElsewhere(), 'read once').toBe(false);
     watching.stop();
   });
 
