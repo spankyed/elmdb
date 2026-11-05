@@ -264,6 +264,9 @@ impl Database {
     /// Queues the index work the store says is owed, for a caller told another process committed
     #[napi]
     pub fn catch_up(&self) -> Result<(), Code> {
+        // mutant-skip: replace Database::catch_up -> Result<\(\), Code> with Ok\(\(\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/database.test.mjs` is refused
+        // through it on a closed database
         self.inner.catch_up().map_err(to_js)
     }
 
