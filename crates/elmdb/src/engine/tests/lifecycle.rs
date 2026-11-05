@@ -168,7 +168,7 @@ fn a_reader_learns_what_another_process_committed() {
     assert_ne!(theirs.origin, db.origin().unwrap(), "named as another's");
     assert!(!theirs.everything);
     assert!(theirs.types.contains("Task"));
-    assert!(theirs.entities.as_ref().unwrap().contains_key("Task-elsewhere"));
+    assert_eq!(theirs.entities.as_deref(), Some(&["Task-elsewhere".to_owned()][..]));
     assert_eq!(db.changes_since(changes.through, 100).unwrap().commits, vec![], "nothing since");
 }
 
@@ -196,7 +196,8 @@ fn a_reader_past_the_log_is_told_it_is() {
     let db = open(&dir);
     let start = db.sequence().unwrap();
     let store = db.store().unwrap();
-    for _ in 0..=crate::engine::changelog::LOG_COMMITS {
+    // Past the log's reach by more than it trims at a time
+    for _ in 0..crate::engine::changelog::LOG_COMMITS + 128 {
         store.write(|_, _| Ok(()), false).unwrap();
     }
     let behind = db.changes_since(start, 10).unwrap();
@@ -224,4 +225,27 @@ fn a_unit_sees_its_own_changes_before_they_are_logged() {
     assert!(changes.pending.unwrap().entities.contains_key("Task-pending"));
     unit.commit(false).unwrap();
     assert!(db.changes_since(cursor, 10).unwrap().commits[0].types.contains("Task"));
+}
+
+#[test]
+fn the_log_stays_within_its_bound() {
+    use crate::engine::changelog::{LOG_COMMITS, LOG_TRIM_EVERY};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let store = db.store().unwrap();
+    for _ in 0..LOG_COMMITS + 3 * LOG_TRIM_EVERY {
+        store.write(|_, _| Ok(()), false).unwrap();
+    }
+    let held = db
+        .snapshot(|s| {
+            let mut held = 0u64;
+            crate::engine::unit::Read::visit(s, &crate::engine::keys::change_log_prefix(), |_, _| {
+                held += 1;
+                true
+            })?;
+            Ok(held)
+        })
+        .unwrap();
+    assert!(held >= LOG_COMMITS, "it holds what it promises: {held}");
+    assert!(held <= LOG_COMMITS + LOG_TRIM_EVERY, "and no more than a trim's worth over: {held}");
 }
