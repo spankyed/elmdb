@@ -496,8 +496,9 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     committedEverything,
     changedElsewhere() {
       reconciled = database.sequence;
-      database.catchUp();
+      // Watches first: what they show matters more than work the builder can resume at the next commit
       everyWatch();
+      database.catchUp();
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);

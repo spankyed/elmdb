@@ -115,6 +115,24 @@ describe('a commit from another process that nobody told of', () => {
     expect(asked).toEqual(['catchUp']);
   });
 
+  it('runs every watch even if catching up fails', async () => {
+    const told = freshEngine({ ...NAMES, wrap: (held) => new Proxy(held, {
+      get(target, key) {
+        if (key === 'catchUp') return () => { throw new Error('The database is closed'); };
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) });
+    let runs = 0;
+    const watching = told.watch(() => { runs++; return told.query('Task').count(); }, { next: () => {} });
+    await told.admin.watchesSettled();
+    expect(runs).toBe(1);
+    expect(() => told.admin.changedElsewhere()).toThrow('closed');
+    await told.admin.watchesSettled();
+    expect(runs).toBe(2);
+    watching.stop();
+  });
+
   it('is not news once the engine has been told', async () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
