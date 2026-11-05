@@ -3,7 +3,8 @@
 // misses a change, whatever writes it — is the model-based harness's (model-based.spec.ts); these cases are the
 // contract's edges, each with a reading of how many times a read ran where that is the point.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { engine, type Id } from './helpers.ts';
+import { engine, NAMES, type Id } from './helpers.ts';
+import { freshEngine } from './engine-under-test.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 import { createConnection, runCommitted, type Commit, type EarsDatabase } from '../../src/database.ts';
 
@@ -25,6 +26,25 @@ function watched<T>(read: () => T) {
 const settled = () => e.admin.watchesSettled();
 /** Every task's title, in creation order */
 const titles = () => e.query('Task').ids().map((id) => e.getAttr(id, 'title'));
+
+it('runs again when told another process committed, which it cannot hear for itself', async () => {
+  let database: EarsDatabase | undefined;
+  const told = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+  const seen: string[][] = [];
+  const watching = told.watch(() => told.query('Task').ids().map(String), { next: (value) => { seen.push(value); } });
+  await told.admin.watchesSettled();
+  expect(seen).toEqual([[]]);
+
+  // Past the engine, as a commit from another process is: nothing here dispatches it
+  createConnection(database!).write([{ op: 'create', type: 'Task', id: 'Task-elsewhere', fields: { title: 'there' } }]);
+  await told.admin.watchesSettled();
+  expect(seen, 'nobody has said so yet').toEqual([[]]);
+
+  told.admin.changedElsewhere();
+  await told.admin.watchesSettled();
+  expect(seen).toEqual([[], ['Task-elsewhere']]);
+  watching.stop();
+});
 
 describe('watch', () => {
   it('delivers the first result after the call returns, not during it', async () => {

@@ -140,6 +140,12 @@ export interface EarsAdmin {
    * the database staying open (elmdb's `replaceWith`); refused while a unit is open
    */
   replaceWith(source: string): void;
+  /**
+   * Another process committed to this database, and said so. Commits this engine didn't make dispatch no watch of its
+   * own (elmdb's tracked reads belong to one process), and what they wrote isn't known key by key, so every watch runs
+   * again, as after `clear` or `replaceWith`.
+   */
+  changedElsewhere(): void;
   /** Every entity's id, those in the trash included: a raw listing */
   getAllEntities(): EARS.EntityId[];
   /** Every id of a type, those in the trash included, whether or not the schema declares the type: a raw listing */
@@ -341,6 +347,7 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       outsideUnit('replaceWith()');
       runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
     },
+    changedElsewhere: () => connection.committedEverything(),
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
     getEntitiesOfType: (type) => {
