@@ -261,6 +261,18 @@ impl Database {
         Ok(serde_json::to_value(status).expect("a status serializes"))
     }
 
+    /// What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes`
+    #[napi]
+    pub fn changes_since(&self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
+        self.inner.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
+    }
+
+    /// Names this handle in the change log
+    #[napi(getter)]
+    pub fn origin(&self) -> Result<String, Code> {
+        self.inner.origin().map_err(to_js)
+    }
+
     /// Queues the index work the store says is owed, for a caller told another process committed
     #[napi]
     pub fn queue_owed_work(&self) -> Result<(), Code> {
@@ -446,6 +458,12 @@ impl Unit {
     #[napi]
     pub fn write(&mut self, batch: Buffer) -> Result<Buffer, Code> {
         self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
+    }
+
+    /// What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes`
+    #[napi]
+    pub fn changes_since(&mut self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
+        self.open()?.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
     }
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes

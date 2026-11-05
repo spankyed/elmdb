@@ -93,10 +93,12 @@ pub enum Prefix {
     RankQueue,
     /// `d/rs index` → a rank index's totals: its nodes, their estimates and residuals summed, and how far it is built
     RankTotals,
+    /// `l/c sequence` → what a commit changed (`engine::changelog`)
+    ChangeLog,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 32] = [
+    pub const ALL: [Prefix; 33] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -129,6 +131,7 @@ impl Prefix {
         Prefix::RankOrder,
         Prefix::RankQueue,
         Prefix::RankTotals,
+        Prefix::ChangeLog,
     ];
 
     /// The string the key's first part holds
@@ -166,6 +169,7 @@ impl Prefix {
             Prefix::RankOrder => "d/rk",
             Prefix::RankQueue => "d/rq",
             Prefix::RankTotals => "d/rs",
+            Prefix::ChangeLog => "l/c",
         }
     }
 
@@ -174,7 +178,7 @@ impl Prefix {
             Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
                 PrefixKind::Primary
             }
-            Prefix::Meta => PrefixKind::Meta,
+            Prefix::Meta | Prefix::ChangeLog => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
     }

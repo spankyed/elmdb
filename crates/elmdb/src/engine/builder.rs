@@ -302,6 +302,7 @@ fn build_index(
                 let next = build_chunk(&mut t, entity_type, index, after, CHUNK)?;
                 // An index's chunk files no edge: the mirror moves to its commit unchanged
                 store.deposit(std::mem::take(&mut state.edges));
+                store.deposit_logged(super::changelog::LoggedCommit::derived());
                 Ok(next)
             },
             false,

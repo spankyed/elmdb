@@ -129,3 +129,99 @@ fn the_sequence_follows_what_the_database_holds() {
     let (_, changes) = db.write(&batch(vec![]), false).unwrap();
     assert_eq!(changes.sequence, 42);
 }
+
+/// What another process leaves: one commit, naming a task, and it has gone
+#[test]
+#[ignore = "run by a_reader_learns_what_another_process_committed, as a process of its own"]
+fn child_commits_a_task() {
+    let Ok(path) = std::env::var("ELMDB_LOGGING_DB") else { return };
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![large_task("Task-elsewhere")]).unwrap();
+    db.close().unwrap();
+}
+
+#[test]
+fn a_reader_learns_what_another_process_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![large_task("Task-mine")]).unwrap();
+    let cursor = db.sequence().unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_commits_a_task",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_LOGGING_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the other process failed");
+
+    let changes = db.changes_since(cursor, 100).unwrap();
+    assert!(!changes.truncated);
+    assert_eq!(changes.through, db.sequence().unwrap());
+    let [theirs] = changes.commits.as_slice() else { panic!("one commit, not {:?}", changes.commits) };
+    assert_ne!(theirs.origin, db.origin().unwrap(), "named as another's");
+    assert!(!theirs.everything);
+    assert!(theirs.types.contains("Task"));
+    assert!(theirs.entities.as_ref().unwrap().contains_key("Task-elsewhere"));
+    assert_eq!(db.changes_since(changes.through, 100).unwrap().commits, vec![], "nothing since");
+}
+
+#[test]
+fn the_log_says_what_each_kind_of_commit_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let before = db.sequence().unwrap();
+    write(&db, vec![large_task("Task-1")]).unwrap();
+    let unit = db.begin().unwrap();
+    unit.commit(false).unwrap();
+    db.store().unwrap().write(|_, _| Ok(()), false).unwrap();
+    let changes = db.changes_since(before, 100).unwrap();
+    let origin = db.origin().unwrap();
+    assert!(changes.commits.iter().all(|commit| commit.origin == origin), "this handle's");
+    let [row, empty_unit, unknown] = changes.commits.as_slice() else { panic!("{:?}", changes.commits) };
+    assert!(row.types.contains("Task") && !row.everything);
+    assert!(empty_unit.types.is_empty() && !empty_unit.everything, "a unit that wrote nothing changed nothing");
+    assert!(unknown.everything, "a write that didn't say what it changed");
+}
+
+#[test]
+fn a_reader_past_the_log_is_told_it_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let start = db.sequence().unwrap();
+    let store = db.store().unwrap();
+    for _ in 0..=crate::engine::changelog::LOG_COMMITS {
+        store.write(|_, _| Ok(()), false).unwrap();
+    }
+    let behind = db.changes_since(start, 10).unwrap();
+    assert!(behind.truncated, "the commit after the cursor has gone");
+    assert_eq!(behind.through, db.sequence().unwrap(), "a truncated reader starts again from now");
+
+    let kept = db.sequence().unwrap() - crate::engine::changelog::LOG_COMMITS + 1;
+    let at_the_edge = db.changes_since(kept - 1, 10).unwrap();
+    assert!(!at_the_edge.truncated, "the log holds exactly as many as it says");
+    assert_eq!(at_the_edge.commits[0].sequence, kept);
+    assert_eq!(at_the_edge.commits.len(), 10);
+    assert_eq!(at_the_edge.through, kept + 9, "the limit says how far this answer goes");
+    assert!(db.changes_since(db.sequence().unwrap() + 5, 10).unwrap().truncated, "a cursor from the future");
+}
+
+#[test]
+fn a_unit_sees_its_own_changes_before_they_are_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let cursor = db.sequence().unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![large_task("Task-pending")])).unwrap();
+    let changes = unit.changes_since(cursor, 10).unwrap();
+    assert_eq!(changes.commits, vec![], "not until it commits");
+    assert!(changes.pending.unwrap().entities.contains_key("Task-pending"));
+    unit.commit(false).unwrap();
+    assert!(db.changes_since(cursor, 10).unwrap().commits[0].types.contains("Task"));
+}
