@@ -197,6 +197,7 @@ export interface EarsAdmin {
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     lastOwnCommit(): number;
     observe(observer: EarsOperationObserver): () => void;
+    onFoundElsewhere(listener: () => void): () => void;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];

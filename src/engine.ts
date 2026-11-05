@@ -146,6 +146,12 @@ export interface EarsAdmin {
    * again, as after `clear` or `replaceWith`.
    */
   changedElsewhere(): void;
+  /**
+   * Calls `listener` when a commit here finds another process committed and nobody said so, as when a tool was killed
+   * first. Every watch has run again by then; this is for what a holder keeps beyond them. A process that never commits
+   * doesn't find out. Returns the unregistration.
+   */
+  onFoundElsewhere(listener: () => void): () => void;
   /** The sequence of the last commit this engine made, or 0: unlike `lastCommit`, another process's don't move it */
   lastOwnCommit(): number;
   /** Every entity's id, those in the trash included: a raw listing */
@@ -349,7 +355,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
       outsideUnit('replaceWith()');
       runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
     },
-    changedElsewhere: () => connection.committedEverything(),
+    changedElsewhere: () => connection.changedElsewhere(),
+    onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),
     lastOwnCommit: () => connection.lastOwnCommit(),
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
