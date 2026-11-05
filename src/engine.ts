@@ -151,6 +151,10 @@ export interface EarsAdmin {
   changesSince(cursor: number, limit: number): LoggedChanges;
   /** Names this engine's handle in the change log, so a reader can tell its own commits from another process's */
   origin(): string;
+  /** Whether another process has replaced every row since this engine last adopted that. Until it does its writes are refused (`DATA_REPLACED`) and its reads read what's there now */
+  replacedElsewhere(): boolean;
+  /** Takes that as seen, so writes are taken again and every watch runs */
+  adoptReplacement(): void;
   /**
    * Sets what runs in every unit before it commits, so what it writes commits with what caused it. A write outside a unit
    * that `hook.wants` runs in one of its own.
@@ -369,6 +373,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     changedElsewhere: () => connection.changedElsewhere(),
     changesSince: (cursor, limit) => connection.changesSince(cursor, limit),
     origin: () => database.origin,
+    replacedElsewhere: () => connection.replacedElsewhere(),
+    adoptReplacement: () => connection.adoptReplacement(),
     beforeCommit: (hook) => connection.beforeCommit(hook),
     transactWithoutHook: (fn) => connection.transactWithoutHook(fn),
     onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),

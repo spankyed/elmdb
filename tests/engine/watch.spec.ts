@@ -150,6 +150,53 @@ describe('a commit from another process', () => {
 
 });
 
+describe('another process replacing every row', () => {
+  const resetElsewhere = async (database: EarsDatabase) => {
+    const elmdb = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json')).resolve('elmdb');
+    await promisify(execFile)(process.execPath, ['-e', [
+      `const { Database } = require(${JSON.stringify(elmdb)});`,
+      'const database = Database.open(process.argv[1]);',
+      'database.reset();',
+      'database.close();',
+    ].join('\n'), database.path]);
+  };
+
+  it('refuses writes until adopted, saying so even without a wake, and runs every watch when it is', async () => {
+    let database: EarsDatabase | undefined;
+    const held = freshEngine({ ...NAMES, wrap: (given) => (database = new Proxy(given, {
+      get(target, key) {
+        if (key === 'hearCommitsElsewhere') return () => {};
+        const value = Reflect.get(target, key);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    })) });
+    let told = 0;
+    held.admin.onFoundElsewhere(() => { told++; });
+    held.create('Task', { title: 'before' });
+    let runs = 0;
+    const watching = held.watch(() => { runs++; return held.query('Task').count(); }, { next: () => {} });
+    await held.admin.watchesSettled();
+    expect(runs).toBe(1);
+
+    await resetElsewhere(database!);
+    expect(held.admin.replacedElsewhere()).toBe(true);
+    expect(held.query('Task').count(), 'reads read what is there now').toBe(0);
+    expect(() => held.create('Task', { title: 'plain' })).toThrow(expect.objectContaining({ code: 'DATA_REPLACED' }));
+    expect(() => held.transact(() => { held.create('Task', { title: 'in a unit' }); })).toThrow(expect.objectContaining({ code: 'DATA_REPLACED' }));
+    await Promise.resolve();
+    expect(told).toBe(2);
+
+    held.admin.adoptReplacement();
+    await held.admin.watchesSettled();
+    expect(runs).toBe(2);
+    expect(held.admin.replacedElsewhere()).toBe(false);
+    expect(held.admin.changedElsewhere(), 'adopting moved past it').toBe(false);
+    held.create('Task', { title: 'after' });
+    expect(held.query('Task').count()).toBe(1);
+    watching.stop();
+  });
+});
+
 describe('watch', () => {
   it('delivers the first result after the call returns, not during it', async () => {
     e.create('Task', { title: 'one' });

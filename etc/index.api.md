@@ -190,6 +190,7 @@ export interface Ears {
 // @public
 export interface EarsAdmin {
     addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
+    adoptReplacement(): void;
     beforeCommit(hook: BeforeCommit): void;
     bulkLoad<T>(fn: () => T): T;
     bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
@@ -207,6 +208,7 @@ export interface EarsAdmin {
     onFoundElsewhere(listener: () => void): () => void;
     origin(): string;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
+    replacedElsewhere(): boolean;
     replaceWith(source: string): void;
     setSchema(schema: EngineSchema): SchemaChange[];
     transactWithoutHook<T>(fn: () => T): T;
@@ -222,6 +224,7 @@ export interface EarsAdmin {
 
 // @public
 export interface EarsDatabase {
+    adoptReplacement(): void;
     backup(target: string): void;
     // (undocumented)
     begin(): EarsUnit;
@@ -246,6 +249,7 @@ export interface EarsDatabase {
     readonly readOnly: boolean;
     // (undocumented)
     readSync(reads: Uint8Array): Uint8Array;
+    replacedElsewhere(): boolean;
     replaceWith(source: string): void;
     reset(): void;
     readonly schema: unknown;

@@ -56,6 +56,10 @@ export interface EarsDatabase {
   backup(target: string): void;
   /** Tells `listener` of each commit another process makes, having queued any index work it left owed. One listener; a second is refused */
   hearCommitsElsewhere(listener: (sequence: number) => void): void;
+  /** Whether another process has replaced every row since this handle last adopted that. Until it does, commits here are refused (`DATA_REPLACED`) */
+  replacedElsewhere(): boolean;
+  /** Takes another process's replacement of every row as seen, so commits here are taken again */
+  adoptReplacement(): void;
   /** What the change log holds after `cursor`, up to `limit` commits: msgpack of elmdb's `Changes` */
   changesSince(cursor: number, limit: number): Uint8Array;
   /** Names this handle in the change log */
@@ -272,6 +276,10 @@ export interface Connection {
   changedElsewhere(): boolean;
   /** What the change log holds after `cursor`, as the open unit sees it when there is one */
   changesSince(cursor: number, limit: number): LoggedChanges;
+  /** Whether another process has replaced every row since this connection last adopted that */
+  replacedElsewhere(): boolean;
+  /** Takes that as seen, moving past it in the change log and running every watch again */
+  adoptReplacement(): void;
   /** Sets what runs in a unit before it commits */
   beforeCommit(hook: BeforeCommit): void;
   /** Runs `fn` in a unit that what's set to run before a commit stays out of */
@@ -345,6 +353,15 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     if (typeof named.type === 'string') return named.type;
     const id = named.id ?? named.source;
     return typeof id === 'string' ? id.slice(0, id.indexOf('-')) : undefined;
+  };
+  /** A write refused because another process replaced every row says the same as a wake, and a wake can be lost */
+  const noticing = <T>(write: () => T): T => {
+    try {
+      return write();
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === 'DATA_REPLACED') for (const listener of foundElsewhere) queueMicrotask(listener);
+      throw error;
+    }
   };
   const made = (changes: { sequence: number; touched: number[] }) => {
     const skipped = changes.sequence > known + 1;
@@ -444,7 +461,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     }
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
-      const changes = timedInUnit(() => unpackr.unpack(crossing(() => held.commit(options?.durable ?? false))));
+      const changes = timedInUnit(() => unpackr.unpack(noticing(() => crossing(() => held.commit(options?.durable ?? false)))));
       unitEnded();
       made(changes as { sequence: number; touched: number[] });
     } catch (error) {
@@ -518,7 +535,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       const written = counting('write', ops.length, () => {
         const bytes = observation.request(pack({ ops, now }));
         const target = levels.length ? writable() : undefined;
-        const answer = observation.response(crossing(() => (target ? target.write(bytes) : database.write(bytes, false))));
+        const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
         if (target) levels.at(-1)!.kept = true;
         return unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
       });
@@ -560,6 +577,12 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       return changed;
     },
     changesSince: readChangesSince,
+    replacedElsewhere: () => database.replacedElsewhere(),
+    adoptReplacement() {
+      database.adoptReplacement();
+      readChangedElsewhere();
+      everyWatch();
+    },
     beforeCommit(given) { hook = given; },
     transactWithoutHook(fn) {
       hookPaused = true;
