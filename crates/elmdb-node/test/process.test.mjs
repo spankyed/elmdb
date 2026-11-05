@@ -225,3 +225,33 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   assert.ok(wakes.at(-1) > first, 'heard the commit of a process that was then killed');
   await writeElsewhere('Task-c', 'other.close();');
 });
+
+test('a reset from another process wakes a listener, refuses commits here until adopted, and leaves reads', async (t) => {
+  const { Database } = require(loader);
+  const { Packr } = require('msgpackr');
+  const packr = new Packr({ useRecords: false });
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-epoch-'));
+  const db = Database.open(dir, { syncs: false, schema });
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const write = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  write('Task-a');
+  const woken = new Promise((resolve) => db.hearCommitsElsewhere(resolve));
+
+  run(`
+    const { Database } = require(${JSON.stringify(loader)});
+    const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
+    other.reset();
+    other.close();
+  `);
+  await woken;
+  assert.equal(db.replacedElsewhere(), true);
+  assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
+
+  db.adoptReplacement();
+  assert.equal(db.replacedElsewhere(), false);
+  write('Task-c');
+});

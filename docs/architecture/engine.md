@@ -86,6 +86,10 @@ listener as soon as another process commits (`store/wake.rs`: loopback UDP to th
 `wake/`), having queued any index work the store says is owed. A wake carries nothing a reader depends on, since what
 changed is in the log, so one lost costs delay.
 
+`reset` and `replace_with` move a stored epoch on. A handle's commit under an epoch it hasn't seen is refused
+(`DATA_REPLACED`), since whatever it read before writing has gone, while its reads carry on over what's there now. The
+holder asks `replaced_elsewhere` when woken, or when a write is refused, and `adopt_replacement` takes it as seen.
+
 ## Reads: plans
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack

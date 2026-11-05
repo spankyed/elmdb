@@ -229,6 +229,18 @@ impl Database {
             .map_err(to_js)
     }
 
+    /// Whether another process has replaced every row since this handle last adopted that
+    #[napi]
+    pub fn replaced_elsewhere(&self) -> Result<bool, Code> {
+        self.inner.replaced_elsewhere().map_err(to_js)
+    }
+
+    /// Takes another process's replacement of every row as seen, so commits here are taken again
+    #[napi]
+    pub fn adopt_replacement(&self) -> Result<(), Code> {
+        self.inner.adopt_replacement().map_err(to_js)
+    }
+
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
     #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
     pub fn track_stats(&self) -> serde_json::Value {

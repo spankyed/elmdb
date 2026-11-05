@@ -57,6 +57,10 @@ export declare class Database {
    * being refused. It keeps no process alive, and closing the database drops it
    */
   hearCommitsElsewhere(listener: (sequence: number) => void): void
+  /** Whether another process has replaced every row since this handle last adopted that */
+  replacedElsewhere(): boolean
+  /** Takes another process's replacement of every row as seen, so commits here are taken again */
+  adoptReplacement(): void
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
   trackStats(): { owners: number; keys: number; ranges: number }
   /**

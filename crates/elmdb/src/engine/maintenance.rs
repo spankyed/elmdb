@@ -272,6 +272,7 @@ impl Database {
     /// Atomically removes every entry but the database's own (its format and schema), with durable completion,
     /// the database staying open
     pub fn reset(&self) -> Result<()> {
+        let store = self.store()?;
         self.admin_unit_with_checkpoint(
             |t| {
                 let kept = t.scan(&Prefix::Meta.key().to_vec())?;
@@ -285,11 +286,29 @@ impl Database {
                 for (key, value) in kept {
                     t.put(&key, &value)?;
                 }
+                store.replacing_every_row(t.txn, t.db)?;
                 super::settle_indexes_in(t)?;
                 Ok(())
             },
             true,
         )
+    }
+
+    /// Whether another process has replaced every row (`reset`, `replace_with`) since this handle last adopted that. Until
+    /// it does, its commits are refused (`DATA_REPLACED`) and its reads read what's there now
+    pub fn replaced_elsewhere(&self) -> Result<bool> {
+        self.store()?.replaced_elsewhere()
+    }
+
+    /// Takes another process's replacement of every row as seen, so commits here are taken again, and queues the index
+    /// work the store says is owed
+    pub fn adopt_replacement(&self) -> Result<()> {
+        let store = self.store()?;
+        store.adopt_replacement()?;
+        if let Some(builders) = self.builders()? {
+            builders.queue(super::remaining_indexes(&store, &self.schema_guard())?);
+        }
+        Ok(())
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
@@ -327,12 +346,14 @@ impl Database {
         }
         // Retain one immutable source snapshot through retries, copying primary ranges directly into the write.
         // No source values are retained after each put, and derived source rows are never traversed.
+        let store = self.store()?;
         let result = self.admin_unit(|t| {
             let kept = t.scan(&Prefix::Meta.key().to_vec())?;
             t.db.clear(t.txn)?;
             for (key, value) in &kept {
                 t.put(key, value)?;
             }
+            store.replacing_every_row(t.txn, t.db)?;
             for prefix in Prefix::ALL.into_iter().filter(|prefix| prefix.kind() == PrefixKind::Primary) {
                 let (low, high) = crate::format::key::prefix_range(&prefix.key().to_vec());
                 let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
