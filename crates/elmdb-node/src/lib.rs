@@ -210,6 +210,25 @@ impl Database {
             .map_err(to_js)
     }
 
+    /// Tells `listener` of commits other processes make, with the latest one's sequence, as soon as each lands, a second
+    /// being refused. It keeps no process alive, and closing the database drops it
+    #[napi(ts_args_type = "listener: (sequence: number) => void")]
+    pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, f64, ()>) -> Result<(), Code> {
+        // mutant-skip: replace Database::hear_commits_elsewhere -> Result<\(\), Code> with Ok\(\(\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` hears a commit through it
+        let tell = listener
+            .build_threadsafe_function()
+            .callee_handled::<false>()
+            .weak::<true>()
+            .build()
+            .map_err(|error| napi::Error::new(Code("IO"), error.to_string()))?;
+        self.inner
+            .hear_commits_elsewhere(std::sync::Arc::new(move |sequence| {
+                tell.call(sequence as f64, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+            }))
+            .map_err(to_js)
+    }
+
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
     #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
     pub fn track_stats(&self) -> serde_json::Value {
@@ -277,15 +296,6 @@ impl Database {
         // mutant-skip: replace Database::origin -> Result<String, Code> with Ok\("xyzzy".into\(\)\)
         // The same
         self.inner.origin().map_err(to_js)
-    }
-
-    /// Queues the index work the store says is owed, for a caller told another process committed
-    #[napi]
-    pub fn queue_owed_work(&self) -> Result<(), Code> {
-        // mutant-skip: replace Database::queue_owed_work -> Result<\(\), Code> with Ok\(\(\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/database.test.mjs` is refused
-        // through it on a closed database
-        self.inner.queue_owed_work().map_err(to_js)
     }
 
     /// Blocks until every index waiting to be built is built or has failed

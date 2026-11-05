@@ -5,12 +5,14 @@ import assert from 'node:assert/strict';
 import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const here = fileURLToPath(new URL('..', import.meta.url));
 const binary = join(here, readdirSync(here).find((file) => file.endsWith('.node')));
 const loader = join(here, 'index.js');
+const require = createRequire(import.meta.url);
 
 /** Runs `source` in a fresh Node process, answering what it prints */
 const run = (source) => execFileSync(process.execPath, ['-e', source], { encoding: 'utf8', timeout: 15000 }).trim();
@@ -177,3 +179,49 @@ if (process.platform !== 'win32') {
     `), 'unchanged');
   });
 }
+
+test('a commit from another process wakes a listener, and a killed writer leaves it listening', async (t) => {
+  const { Database } = require(loader);
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-wake-'));
+  const db = Database.open(dir, { syncs: false, schema });
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const wakes = [];
+  let woken = () => {};
+  db.hearCommitsElsewhere((sequence) => {
+    wakes.push(sequence);
+    woken();
+  });
+  assert.throws(() => db.hearCommitsElsewhere(() => {}), { code: 'ALREADY_LISTENING' });
+
+  /** Writes a row from a process of its own, which then does `then`, and waits for the wake */
+  const writeElsewhere = async (id, then) => {
+    const source = `
+      const { Database } = require(${JSON.stringify(loader)});
+      const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
+      const other = Database.open(${JSON.stringify(dir)}, { syncs: false, schema: ${JSON.stringify(schema)} });
+      other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
+      ${then}
+    `;
+    const heard = new Promise((resolve) => (woken = resolve));
+    const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let errors = '';
+    child.stderr.on('data', (chunk) => (errors += chunk));
+    const refused = new Promise((_, reject) => {
+      child.on('exit', (code) => {
+        if (code) reject(new Error(errors));
+      });
+    });
+    await Promise.race([heard, refused]);
+  };
+
+  await writeElsewhere('Task-a', 'other.close();');
+  const first = wakes.at(-1);
+  assert.ok(first > 0);
+  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");');
+  assert.ok(wakes.at(-1) > first, 'heard the commit of a process that was then killed');
+  await writeElsewhere('Task-c', 'other.close();');
+});

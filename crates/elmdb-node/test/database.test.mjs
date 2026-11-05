@@ -135,18 +135,6 @@ test('an open refuses a sync or map option that is not a whole number in range, 
   Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
 });
 
-test('queueOwedWork reaches the database, and is refused once it has closed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-catch-up-'));
-  try {
-    const db = Database.open(join(dir, 'db'));
-    db.queueOwedWork();
-    db.close();
-    assert.throws(() => db.queueOwedWork(), { code: 'CLOSED' });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('changesSince reads a commit through the binding, under the name of the handle that made it', () => {
   const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));

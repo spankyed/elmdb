@@ -52,6 +52,11 @@ export declare class Database {
    * a second being refused, which keeps no process alive, and closing the database drops it
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
+  /**
+   * Tells `listener` of commits other processes make, with the latest one's sequence, as soon as each lands, a second
+   * being refused. It keeps no process alive, and closing the database drops it
+   */
+  hearCommitsElsewhere(listener: (sequence: number) => void): void
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
   trackStats(): { owners: number; keys: number; ranges: number }
   /**
@@ -74,8 +79,6 @@ export declare class Database {
   changesSince(cursor: number, limit: number): Buffer
   /** Names this handle in the change log */
   get origin(): string
-  /** Queues the index work the store says is owed, for a caller told another process committed */
-  queueOwedWork(): void
   /** Blocks until every index waiting to be built is built or has failed */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */

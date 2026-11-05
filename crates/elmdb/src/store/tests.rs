@@ -421,12 +421,15 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
 }
 
 #[test]
-fn a_commit_finds_what_another_process_committed() {
+fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
+    let (told, heard) = std::sync::mpsc::channel();
+    store.wake.listen(Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    assert!(store.wake.listen(Arc::new(|_| {})).is_err_and(|error| error.code == ErrorCode::AlreadyListening));
+
     put(&store, "a", b"1").unwrap();
-    put(&store, "a", b"2").unwrap();
-    assert_eq!(store.take_elsewhere(), None, "this process's own commits");
+    assert!(heard.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "its own commits aren't news");
 
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "store::tests::child_overwriter", "--nocapture", "--test-threads=1"])
@@ -436,14 +439,36 @@ fn a_commit_finds_what_another_process_committed() {
         .status()
         .unwrap();
     assert!(status.success(), "the child's write failed");
-    let theirs = store.sequence();
-    assert_eq!(store.take_elsewhere(), None, "nothing here has committed since");
+    let sequence = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("told of the other process's commit");
+    assert_eq!(sequence, store.sequence());
 
-    put(&store, "a", b"3").unwrap();
-    assert_eq!(store.take_elsewhere(), Some(theirs));
-    assert_eq!(store.take_elsewhere(), None, "said once");
-    put(&store, "a", b"4").unwrap();
-    assert_eq!(store.take_elsewhere(), None);
+    store.wake.stop();
+    assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "a listener that stopped files nothing");
+}
+
+#[test]
+fn a_commit_with_nobody_listening_files_and_binds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(!dir.path().join("wake").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_port_a_gone_process_filed_is_removed_at_the_next_read_of_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let wake = dir.path().join("wake");
+    std::fs::create_dir(&wake).unwrap();
+    let mut child = Command::new("true").spawn().unwrap();
+    let gone = child.id();
+    child.wait().unwrap();
+    std::fs::File::create(wake.join(format!("{gone}-1"))).unwrap();
+    std::fs::File::create(wake.join(format!("{}-1", std::process::id()))).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(!wake.join(format!("{gone}-1")).exists(), "gone");
+    assert!(wake.join(format!("{}-1", std::process::id())).exists(), "alive");
 }
 
 #[test]
