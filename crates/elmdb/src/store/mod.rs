@@ -148,6 +148,8 @@ pub struct Store {
     idle: IdleReads,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
+    /// The latest sequence a commit here found another process had committed, until `take_elsewhere`; 0 for none
+    elsewhere: AtomicU64,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
@@ -314,6 +316,7 @@ impl Store {
             unit: UnitSlot::new(),
             idle,
             sequence: AtomicU64::new(sequence),
+            elsewhere: AtomicU64::new(0),
             mirror: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
@@ -565,11 +568,21 @@ impl Store {
         failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
         failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
         txn.commit()?;
+        if last > self.sequence.load(Ordering::Acquire) {
+            self.elsewhere.store(last, Ordering::Release);
+        }
         self.sequence.fetch_max(next, Ordering::AcqRel);
         // Still this process's one writer, so commits reach the mirror in their order
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
         Ok(next)
+    }
+
+    /// The latest sequence another process committed, as commits here have found since this was last asked. A commit reads
+    /// the stored sequence under the write lock, so it can tell another process's commit from this process's own, its
+    /// builder's included
+    pub(crate) fn take_elsewhere(&self) -> Option<u64> {
+        Some(self.elsewhere.swap(0, Ordering::AcqRel)).filter(|&sequence| sequence > 0)
     }
 
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror

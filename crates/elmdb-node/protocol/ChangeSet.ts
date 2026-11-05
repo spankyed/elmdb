@@ -29,4 +29,10 @@ sequence: number,
 /**
  * The tokens of the tracked reads whose keys and ranges the commit wrote into
  */
-touched: Array<number>, };
+touched: Array<number>, 
+/**
+ * The latest commit another process made that this handle hadn't yet said it found, if any: those commits dispatch no
+ * watch here, so this is how a holder of tracked reads learns its reads may be stale. A write and a unit's commit say
+ * it, including what a builder's commit found since
+ */
+elsewhereThrough?: number | undefined, };

@@ -79,7 +79,10 @@ releasing that guard for callbacks. Post-commit watch queries fetch the current 
 
 Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
 snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
-callbacks. Coordinate writes in one process when observers must hear every commit.
+callbacks. Coordinate writes in one process when observers must hear every commit. The next write or unit commit here
+that finds another process has committed says so: its change set's `elsewhereThrough` is the latest such sequence, read
+under the write lock, so a builder's commits here never read as another process's. It says each once. A caller told out
+of band can compare it against the `sequence()` it read then.
 
 ## Reads: plans
 

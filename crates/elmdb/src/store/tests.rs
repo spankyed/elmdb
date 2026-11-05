@@ -421,6 +421,32 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
 }
 
 #[test]
+fn a_commit_finds_what_another_process_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    put(&store, "a", b"2").unwrap();
+    assert_eq!(store.take_elsewhere(), None, "this process's own commits");
+
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_overwriter", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_OVERWRITE_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let theirs = store.sequence();
+    assert_eq!(store.take_elsewhere(), None, "nothing here has committed since");
+
+    put(&store, "a", b"3").unwrap();
+    assert_eq!(store.take_elsewhere(), Some(theirs));
+    assert_eq!(store.take_elsewhere(), None, "said once");
+    put(&store, "a", b"4").unwrap();
+    assert_eq!(store.take_elsewhere(), None);
+}
+
+#[test]
 fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
