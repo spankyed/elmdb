@@ -2,6 +2,9 @@
 // changed, after the writing code has returned, never inside a write. The guarantee that matters most — a watch never
 // misses a change, whatever writes it — is the model-based harness's (model-based.spec.ts); these cases are the
 // contract's edges, each with a reading of how many times a read ran where that is the point.
+import { execFile } from 'node:child_process';
+import { createRequire } from 'node:module';
+import { promisify } from 'node:util';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { engine, NAMES, type Id } from './helpers.ts';
 import { freshEngine } from './engine-under-test.ts';
@@ -60,6 +63,57 @@ it('counts its own commits as its own, not another process\'s', () => {
 
   counting.transact(() => { counting.create('Task', { title: 'mine too' }); });
   expect(counting.admin.lastOwnCommit()).toBe(counting.lastCommit());
+});
+
+describe('a commit from another process that nobody told of', () => {
+  /** Commits to the database from a process of its own, as a tool killed before telling anyone leaves it */
+  const commitElsewhere = async (database: EarsDatabase) => {
+    const elmdb = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json')).resolve('elmdb');
+    await promisify(execFile)(process.execPath, ['-e', [
+      `const { Database } = require(${JSON.stringify(elmdb)});`,
+      'const database = Database.open(process.argv[1]);',
+      'database.begin().commit(false);',
+      'database.close();',
+    ].join('\n'), database.path]);
+  };
+
+  it('runs every watch again at the next commit here, once, and says so', async () => {
+    let database: EarsDatabase | undefined;
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let runs = 0;
+    let told = 0;
+    found.admin.onFoundElsewhere(() => { told++; });
+    // Reads what no commit here writes, so only a commit heard as writing everything runs it again
+    const watching = found.watch(() => { runs++; return found.query('Project').count(); }, { next: () => {} });
+    await found.admin.watchesSettled();
+    expect(runs).toBe(1);
+
+    await commitElsewhere(database!);
+    await found.admin.watchesSettled();
+    expect([runs, told], 'nothing here has committed').toEqual([1, 0]);
+
+    found.create('Task', { title: 'mine' });
+    await found.admin.watchesSettled();
+    expect([runs, told]).toEqual([2, 1]);
+
+    found.create('Task', { title: 'mine too' });
+    await found.admin.watchesSettled();
+    expect([runs, told], 'said once').toEqual([2, 1]);
+    watching.stop();
+  });
+
+  it('is not news once the engine has been told', async () => {
+    let database: EarsDatabase | undefined;
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let told = 0;
+    found.admin.onFoundElsewhere(() => { told++; });
+
+    await commitElsewhere(database!);
+    found.admin.changedElsewhere();
+    found.create('Task', { title: 'mine' });
+    await found.admin.watchesSettled();
+    expect(told).toBe(0);
+  });
 });
 
 describe('watch', () => {
