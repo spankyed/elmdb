@@ -82,7 +82,9 @@ snapshots and `sequence()` reads the persisted commit counter, but those writes 
 callbacks. Coordinate writes in one process when observers must hear every commit. The next write or unit commit here
 that finds another process has committed says so: its change set's `elsewhereThrough` is the latest such sequence, read
 under the write lock, so a builder's commits here never read as another process's. It says each once. A caller told out
-of band can compare it against the `sequence()` it read then.
+of band can compare it against the `sequence()` it read then, and calls `catchUp()`, which queues the index work the
+store says is owed: that process may have exited with its builder part way, and a commit here would otherwise be what
+resumes it.
 
 ## Reads: plans
 

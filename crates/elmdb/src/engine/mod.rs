@@ -501,6 +501,18 @@ impl Database {
         finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
+    /// Queues the index work the store says is owed. A commit here queues what it owes, and opening what the store does,
+    /// but another process's commit tells this handle nothing, and that process may have exited with its builder part way:
+    /// a caller told of one calls this so the work resumes without waiting for a commit here
+    pub fn catch_up(&self) -> Result<()> {
+        let Some(builders) = self.builders()? else { return Ok(()) };
+        let owed = remaining_indexes(&*self.store()?, &self.schema_guard())?;
+        if !owed.is_empty() {
+            builders.queue(owed);
+        }
+        Ok(())
+    }
+
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
     /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would
     pub fn wait_for_index_builds(&self) -> Result<()> {

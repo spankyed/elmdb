@@ -1393,10 +1393,14 @@ fn the_totals_are_counted_afresh_once_as_many_changes_as_nodes_have_added_to_the
 
 /// A ring of `nodes` tasks each linking the `degree` after it, built at a tolerance whose drains stay near a change, its
 /// sequence starting from `from`
-fn near_links(dir: &tempfile::TempDir, nodes: usize, degree: usize, from: u64) -> Database {
+fn near_schema() -> Schema {
     let mut near = serde_json::to_value(schema("out", true)).unwrap();
     near["ranks"]["taskRank"]["tolerance"] = json!(1e-6);
-    let db = open_with(dir, Schema::from_json(&near).unwrap());
+    Schema::from_json(&near).unwrap()
+}
+
+fn near_links(dir: &tempfile::TempDir, nodes: usize, degree: usize, from: u64) -> Database {
+    let db = open_with(dir, near_schema());
     db.store()
         .unwrap()
         .write(
@@ -2648,4 +2652,76 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
     assert_eq!(std::sync::Arc::strong_count(&listener), 2);
     db.close().unwrap();
     assert_eq!(std::sync::Arc::strong_count(&listener), 1);
+}
+
+/// What a process leaves when it exits straight after a commit: the commit's pushes owed, its builder gone
+#[test]
+#[ignore = "run by leaves_an_owed_index, as a process of its own"]
+fn child_exits_owing_a_rank_index() {
+    let Ok(path) = std::env::var("ELMDB_OWING_DB") else { return };
+    let db = Database::open(
+        std::path::Path::new(&path),
+        OpenOptions { schema: Some(near_schema()), syncs: false, ..Default::default() },
+    )
+    .unwrap();
+    let ops = (0..400)
+        .flat_map(|i| {
+            (6..12).map(move |step| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", (i + step) % 400) }))
+        })
+        .collect();
+    write(&db, ops).unwrap();
+    std::process::exit(0);
+}
+
+/// A database a process of its own has just exited from, owing the index
+fn left_owing(dir: &tempfile::TempDir) -> Database {
+    let db = near_links(dir, 400, 5, 0);
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::rank_index::child_exits_owing_a_rank_index",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_OWING_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the owing process failed");
+    db
+}
+
+fn owes(db: &Database) -> bool {
+    db.snapshot(|s| ranks::owes_work(s, "taskRank")).unwrap()
+}
+
+#[test]
+fn catching_up_finishes_what_a_process_that_exited_left_owed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = left_owing(&dir);
+    assert!(owes(&db), "the process left the index owed");
+    db.catch_up().unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained without a commit here");
+}
+
+#[test]
+fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = left_owing(&dir);
+    assert!(owes(&db), "the process left the index owed");
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-after" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained after a commit here");
+}
+
+#[test]
+fn catching_up_with_nothing_owed_queues_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 40, 2, 0);
+    assert!(!owes(&db));
+    db.catch_up().unwrap();
+    assert!(db.builder().as_ref().map(|builder| builder.pending().is_empty()).unwrap_or(true));
 }
