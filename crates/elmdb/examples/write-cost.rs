@@ -10,6 +10,7 @@ fn row(id: String) -> Value {
 }
 
 /// CPU this process has used, user and system, in microseconds
+#[cfg(unix)]
 fn cpu_micros() -> f64 {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
     // SAFETY: `getrusage` fills the struct it's handed when it answers 0, which the assert holds it to
@@ -19,6 +20,15 @@ fn cpu_micros() -> f64 {
     };
     let micros = |time: libc::timeval| time.tv_sec as f64 * 1e6 + time.tv_usec as f64;
     micros(usage.ru_utime) + micros(usage.ru_stime)
+}
+
+/// Wall time on a platform without `getrusage`, which a busy machine inflates: a reading only against itself
+#[cfg(not(unix))]
+fn cpu_micros() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64() * 1e6
 }
 
 fn commits(db: &Database, count: usize, per: usize, tag: &str) -> f64 {
