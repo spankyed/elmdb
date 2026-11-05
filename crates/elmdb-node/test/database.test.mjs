@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { Packr } from 'msgpackr';
 
 const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
@@ -141,6 +142,33 @@ test('queueOwedWork reaches the database, and is refused once it has closed', ()
     db.queueOwedWork();
     db.close();
     assert.throws(() => db.queueOwedWork(), { code: 'CLOSED' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('changesSince reads a commit through the binding, under the name of the handle that made it', () => {
+  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
+  try {
+    const db = Database.open(join(dir, 'db'), { schema: {
+      $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
+    } });
+    const cursor = db.sequence;
+    db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
+    const changes = packr.unpack(db.changesSince(cursor, 10));
+    assert.equal(changes.truncated, false);
+    assert.deepEqual(changes.commits[0].entities, ['Task-1']);
+    assert.equal(changes.commits[0].origin, db.origin);
+    assert.match(db.origin, /^[0-9a-f]{16}$/);
+
+    const unit = db.begin();
+    unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
+    const pending = packr.unpack(unit.changesSince(changes.through, 10));
+    assert.deepEqual(Object.keys(pending.pending.entities), ['Task-2']);
+    assert.deepEqual(pending.commits, []);
+    unit.abort();
+    db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

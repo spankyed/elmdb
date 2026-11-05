@@ -169,7 +169,10 @@ fn a_reader_learns_what_another_process_committed() {
     assert!(!theirs.everything);
     assert!(theirs.types.contains("Task"));
     assert_eq!(theirs.entities.as_deref(), Some(&["Task-elsewhere".to_owned()][..]));
-    assert_eq!(db.changes_since(changes.through, 100).unwrap().commits, vec![], "nothing since");
+    let since = db.changes_since(changes.through, 100).unwrap();
+    assert_eq!(since.commits, vec![], "nothing since");
+    assert_eq!(since.through, changes.through, "and the cursor stays where it is");
+    assert!(!since.truncated);
 }
 
 #[test]
@@ -186,6 +189,12 @@ fn the_log_says_what_each_kind_of_commit_changed() {
     assert!(changes.commits.iter().all(|commit| commit.origin == origin), "this handle's");
     let [row, empty_unit, unknown] = changes.commits.as_slice() else { panic!("{:?}", changes.commits) };
     assert!(row.types.contains("Task") && !row.everything);
+    assert!(row.kinds.is_empty(), "no edge changed");
+    write(&db, vec![large_task("Task-2")]).unwrap();
+    let cursor = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" })]).unwrap();
+    let linked = db.changes_since(cursor, 1).unwrap();
+    assert!(linked.commits[0].kinds.contains("refs"), "{:?}", linked.commits[0]);
     assert!(empty_unit.types.is_empty() && !empty_unit.everything, "a unit that wrote nothing changed nothing");
     assert!(unknown.everything, "a write that didn't say what it changed");
 }
@@ -233,7 +242,8 @@ fn the_log_stays_within_its_bound() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     let store = db.store().unwrap();
-    for _ in 0..LOG_COMMITS + 3 * LOG_TRIM_EVERY {
+    // Stopped between trims, so it holds as many past its bound as it has committed since the last
+    while db.sequence().unwrap() < LOG_COMMITS + 3 * LOG_TRIM_EVERY + 5 {
         store.write(|_, _| Ok(()), false).unwrap();
     }
     let held = db
@@ -246,6 +256,5 @@ fn the_log_stays_within_its_bound() {
             Ok(held)
         })
         .unwrap();
-    assert!(held >= LOG_COMMITS, "it holds what it promises: {held}");
-    assert!(held <= LOG_COMMITS + LOG_TRIM_EVERY, "and no more than a trim's worth over: {held}");
+    assert_eq!(held, LOG_COMMITS + 5, "what it promises, and what it has committed since it last trimmed");
 }

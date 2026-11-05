@@ -264,12 +264,18 @@ impl Database {
     /// What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes`
     #[napi]
     pub fn changes_since(&self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
+        // mutant-skip: replace Database::changes_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/database.test.mjs` reads a commit through it
         self.inner.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
     }
 
     /// Names this handle in the change log
     #[napi(getter)]
     pub fn origin(&self) -> Result<String, Code> {
+        // mutant-skip: replace Database::origin -> Result<String, Code> with Ok\(String::new\(\)\)
+        // Only JavaScript reaches this: `test/database.test.mjs` holds it to the name a commit is logged under
+        // mutant-skip: replace Database::origin -> Result<String, Code> with Ok\("xyzzy".into\(\)\)
+        // The same
         self.inner.origin().map_err(to_js)
     }
 
@@ -463,6 +469,8 @@ impl Unit {
     /// What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes`
     #[napi]
     pub fn changes_since(&mut self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
+        // mutant-skip: replace Unit::changes_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
+        // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's pending changes through it
         self.open()?.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
     }
 

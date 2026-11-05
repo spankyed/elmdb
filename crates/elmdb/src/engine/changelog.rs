@@ -56,6 +56,8 @@ impl LoggedCommit {
 
     /// A commit that wrote only derived data, a builder's: no row changed, whatever a reader of an index may now see
     pub(crate) fn derived() -> Self {
+        // mutant-skip: replace LoggedCommit::derived -> Self with Default::default()
+        // This is what the name says of it: a record that names nothing and doesn't say everything
         Self::default()
     }
 
@@ -131,7 +133,7 @@ pub(crate) fn since(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db, cursor: u64, li
         })?;
         commits.push(commit);
     }
-    let truncated = cursor > last || commits.first().is_none_or(|first| first.sequence != cursor + 1);
+    let truncated = commits.first().is_none_or(|first| first.sequence != cursor + 1);
     let through = if truncated { last } else { commits.last().map_or(last, |commit| commit.sequence) };
     Ok(Changes { through, truncated, commits, pending: None })
 }
