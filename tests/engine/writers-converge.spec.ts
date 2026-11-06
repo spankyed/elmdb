@@ -1,4 +1,4 @@
-// The invariant the database's change log exists for: with another process writing in any order, killed part way or
+// The invariant hearing of another process's commits exists for: with another process writing in any order, killed part way or
 // not, a watch here ends up showing what its read answers afresh, once this engine has heard. A random history of real
 // commits from a real second process, against every read the model-based harness watches.
 import { spawn, type ChildProcess } from 'node:child_process';
