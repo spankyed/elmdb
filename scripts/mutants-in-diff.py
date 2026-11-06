@@ -1,10 +1,11 @@
-"""Mutate what a change touches, each crate against its own suite, and report the survivors without failing on them.
+"""Mutate what a change touches, each crate against its own suite, and fail on a survivor.
 
 `python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only]`: cargo-mutants over
 `git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, since `.cargo/mutants.toml` tests
-every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero only
-when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass); a missed mutant or a timeout is listed, and in
-GitHub Actions annotated on its line and written to the step summary.
+every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero when a
+mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass): a survivor is a test
+missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed and doesn't fail the run, since
+load alone can cause one. In GitHub Actions each is annotated on its line and written to the step summary.
 
 `--shard K/N` tests the Kth of N shares of the mutants, so N runners split them; each runs the unmutated baseline,
 which is what its timeouts are measured from. `--windows-only` mutates only the code that compiles on Windows alone,
@@ -183,9 +184,12 @@ for line in timeouts:
 if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
     for line in missed:
         file, number, _ = line.split(":", 2)
-        print(f"::warning file={file},line={number},title=Missed mutant::{line}")
+        print(f"::error file={file},line={number},title=Missed mutant::{line}")
     with open(summary, "a", encoding="utf-8") as written:
         written.write(f"## Mutants in {what}\n\n{len(missed)} missed, {len(timeouts)} timeouts\n\n")
         for heading, lines in (("Missed", missed), ("Timeouts", timeouts)):
             if lines:
                 written.write(f"### {heading}\n\n" + "".join(f"- `{line}`\n" for line in lines) + "\n")
+
+# A survivor fails the run: kill it with a test, or name it in a `// mutant-skip:` with why it is equivalent
+sys.exit(1 if missed else 0)
