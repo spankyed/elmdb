@@ -43,6 +43,30 @@ fn task(id: &str) -> serde_json::Value {
 }
 
 #[test]
+fn a_reader_from_the_start_reads_the_entities_a_type_held_before_it_kept_an_order() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let unordered = crate::schema::Schema::from_json(&super::schema_json()).unwrap();
+        let db =
+            Database::open(dir.path(), OpenOptions { schema: Some(unordered), syncs: false, ..Default::default() })
+                .unwrap();
+        write(&db, vec![task("Task-before-1"), task("Task-before-2")]).unwrap();
+        db.close().unwrap();
+    }
+    // Kept in order only now: what it held then no commit stamped
+    let db = open(&dir);
+    write(&db, vec![task("Task-after")]).unwrap();
+    let all = since(&db, &from(0), 100);
+    assert_eq!(all.ids, ["Task-before-1", "Task-before-2", "Task-after"], "everything, the unstamped first");
+    assert!(!all.complete, "a reader from before the order was built can't know what was destroyed");
+    assert_eq!(
+        since(&db, &from(1), 100).ids,
+        ["Task-after"],
+        "a reader past the start has read what no commit stamped"
+    );
+}
+
+#[test]
 fn a_write_moves_what_it_wrote_to_its_commit_and_a_reader_reads_only_that() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
