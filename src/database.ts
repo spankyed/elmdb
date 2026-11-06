@@ -56,10 +56,10 @@ export interface EarsDatabase {
   backup(target: string): void;
   /** Tells `listener` of each commit another process makes, having queued any index work it left owed. One listener; a second is refused */
   hearCommitsElsewhere(listener: (sequence: number) => void): void;
-  /** Whether another process has replaced every row since this handle last adopted that. Until it does, commits here are refused (`DATA_REPLACED`) */
-  replacedElsewhere(): boolean;
-  /** Takes another process's replacement of every row as seen, so commits here are taken again */
-  adoptReplacement(): void;
+  /** The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it. Until it does, commits here are refused (`DATA_REPLACED`) */
+  replacedElsewhere(): number | null;
+  /** Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting nothing, when another has landed since */
+  adoptReplacement(epoch: number): boolean;
   /** What the change log holds after `cursor`, up to `limit` commits: msgpack of elmdb's `Changes` */
   changesSince(cursor: number, limit: number): Uint8Array;
   /** Names this handle in the change log */
@@ -276,10 +276,10 @@ export interface Connection {
   changedElsewhere(): boolean;
   /** What the change log holds after `cursor`, as the open unit sees it when there is one */
   changesSince(cursor: number, limit: number): LoggedChanges;
-  /** Whether another process has replaced every row since this connection last adopted that */
-  replacedElsewhere(): boolean;
-  /** Takes that as seen, moving past it in the change log and running every watch again */
-  adoptReplacement(): void;
+  /** The epoch another process's replacement of every row moved the database to, when this connection hasn't adopted it */
+  replacedElsewhere(): number | undefined;
+  /** Takes that epoch as seen, moving past it in the change log and running every watch again; false when another replacement has landed since */
+  adoptReplacement(epoch: number): boolean;
   /** Sets what runs in a unit before it commits */
   beforeCommit(hook: BeforeCommit): void;
   /** Runs `fn` in a unit that what's set to run before a commit stays out of */
@@ -584,11 +584,12 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       return changed;
     },
     changesSince: readChangesSince,
-    replacedElsewhere: () => database.replacedElsewhere(),
-    adoptReplacement() {
-      database.adoptReplacement();
+    replacedElsewhere: () => database.replacedElsewhere() ?? undefined,
+    adoptReplacement(epoch) {
+      if (!database.adoptReplacement(epoch)) return false;
       readChangedElsewhere();
       everyWatch();
+      return true;
     },
     beforeCommit(given) { hook = given; },
     transactWithoutHook(fn) {

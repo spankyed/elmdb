@@ -191,17 +191,19 @@ describe('another process replacing every row', () => {
     expect(runs).toBe(1);
 
     await resetElsewhere(database!);
-    expect(held.admin.replacedElsewhere()).toBe(true);
+    const epoch = held.admin.replacedElsewhere();
+    expect(epoch).toBeTypeOf('number');
     expect(held.query('Task').count(), 'reads read what is there now').toBe(0);
     expect(() => held.create('Task', { title: 'plain' })).toThrow(expect.objectContaining({ code: 'DATA_REPLACED' }));
     expect(() => held.transact(() => { held.create('Task', { title: 'in a unit' }); })).toThrow(expect.objectContaining({ code: 'DATA_REPLACED' }));
     await Promise.resolve();
     expect(told).toBe(2);
 
-    held.admin.adoptReplacement();
+    expect(held.admin.adoptReplacement(epoch! + 1), 'not the replacement that landed').toBe(false);
+    expect(held.admin.adoptReplacement(epoch!)).toBe(true);
     await held.admin.watchesSettled();
     expect(runs).toBe(2);
-    expect(held.admin.replacedElsewhere()).toBe(false);
+    expect(held.admin.replacedElsewhere()).toBeUndefined();
     expect(held.admin.changedElsewhere(), 'adopting moved past it').toBe(false);
     held.create('Task', { title: 'after' });
     expect(held.query('Task').count()).toBe(1);
