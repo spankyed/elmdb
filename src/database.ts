@@ -30,6 +30,10 @@ export interface EarsUnit {
   changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
   /** The sequence the unit commits as, which what it writes is stamped with */
   nextSequence(): number;
+  /** Records `value` as the checkpoint `name`, committing with the unit or not at all */
+  setCheckpoint(name: string, value: Uint8Array): void;
+  /** The checkpoint `name` as the unit sees it */
+  checkpoint(name: string): Uint8Array | null;
   abort(): void;
   readonly isOpen: boolean;
 }
@@ -59,7 +63,9 @@ export interface EarsDatabase {
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void;
   /** Tells `listener` of each commit another process makes, having queued any index work it left owed. One listener; a second is refused */
-  hearCommitsElsewhere(listener: (sequence: number) => void): void;
+  hearCommitsElsewhere(listener: () => void): void;
+  /** The checkpoint `name` as the latest commit left it: a reader's place, kept with the rows it describes */
+  checkpoint(name: string): Uint8Array | null;
   /** The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it. Until it does, commits here are refused (`DATA_REPLACED`) */
   replacedElsewhere(): number | null;
   /** Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting nothing, when another has landed since */
@@ -298,6 +304,10 @@ export interface Connection {
   changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
   /** The sequence the open unit commits as; none outside a unit */
   nextSequence(): number | undefined;
+  /** The checkpoint `name`, read in the unit when one is open */
+  checkpoint(name: string): unknown;
+  /** Records `value` as the checkpoint `name` in the open unit, opening its write transaction as a write would */
+  setCheckpoint(name: string, value: unknown): void;
   /** The epoch another process's replacement of every row moved the database to, when this connection hasn't adopted it */
   replacedElsewhere(): number | undefined;
   /** Takes that epoch as seen, moving past it in the change log and running every watch again; false when another replacement has landed since */
@@ -589,6 +599,16 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     changedSince: readChangedSince,
     // A unit opens its write transaction at its first write; asked first, it opens it now, as that write would
     nextSequence: () => (levels.length ? crossing(() => writable().nextSequence()) : undefined),
+    checkpoint(name) {
+      const bytes = unit ? crossing(() => unit!.checkpoint(name)) : database.checkpoint(name);
+      return bytes ? unpackr.unpack(bytes) : undefined;
+    },
+    setCheckpoint(name, value) {
+      if (!levels.length) throw new Error('A checkpoint is set inside a unit, with the work it records');
+      const bytes = pack(value);
+      crossing(() => writable().setCheckpoint(name, bytes));
+      levels.at(-1)!.kept = true;
+    },
     replacedElsewhere: () => database.replacedElsewhere() ?? undefined,
     adoptReplacement(epoch) {
       if (!database.adoptReplacement(epoch)) return false;

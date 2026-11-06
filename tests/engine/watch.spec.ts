@@ -113,13 +113,13 @@ describe('a commit from another process', () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
       get(target, key) {
-        if (key === 'hearCommitsElsewhere') return () => { throw new Error('no loopback here'); };
+        if (key === 'hearCommitsElsewhere') return () => { throw new Error('nothing may listen here'); };
         const value = Reflect.get(target, key);
         return typeof value === 'function' ? value.bind(target) : value;
       },
     })) });
     let told = 0;
-    expect(() => found.admin.onFoundElsewhere(() => { told++; })).toThrow('no loopback here');
+    expect(() => found.admin.onFoundElsewhere(() => { told++; })).toThrow('nothing may listen here');
     await commitElsewhere(database!);
     found.create('Task', { title: 'mine' });
     await Promise.resolve();

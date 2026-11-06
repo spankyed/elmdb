@@ -158,6 +158,13 @@ export interface EarsAdmin {
   changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
   /** The sequence the open unit commits as, which what it writes is stamped with; none outside a unit */
   nextSequence(): number | undefined;
+  /**
+   * The checkpoint `name`: a reader's place in what it has read, read in the open unit when there is one. A backup keeps
+   * it with the rows it describes; a dump leaves it out, and `clear` and `replaceWith` drop it
+   */
+  checkpoint(name: string): unknown;
+  /** Records `value` as the checkpoint `name` in the open unit, so it commits with the work it records or not at all */
+  setCheckpoint(name: string, value: unknown): void;
   /** The epoch another process's replacement of every row moved the database to, when this engine hasn't adopted it. Until it does its writes are refused (`DATA_REPLACED`) and its reads read what's there now */
   replacedElsewhere(): number | undefined;
   /**
@@ -384,6 +391,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     pendingChanges: () => connection.pendingChanges(),
     changedSince: (types, from, limit) => connection.changedSince(types, from, limit),
     nextSequence: () => connection.nextSequence(),
+    checkpoint: (name) => connection.checkpoint(name),
+    setCheckpoint: (name, value) => connection.setCheckpoint(name, value),
     replacedElsewhere: () => connection.replacedElsewhere(),
     adoptReplacement: (epoch) => connection.adoptReplacement(epoch),
     beforeCommit: (hook) => connection.beforeCommit(hook),

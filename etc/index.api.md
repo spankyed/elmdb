@@ -216,6 +216,7 @@ export interface EarsAdmin {
     readonly calls: CallCounting;
     changedElsewhere(): boolean;
     changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
+    checkpoint(name: string): unknown;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
@@ -229,6 +230,7 @@ export interface EarsAdmin {
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replacedElsewhere(): number | undefined;
     replaceWith(source: string): void;
+    setCheckpoint(name: string, value: unknown): void;
     setSchema(schema: EngineSchema): SchemaChange[];
     transactWithoutHook<T>(fn: () => T): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
@@ -250,6 +252,7 @@ export interface EarsDatabase {
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
+    checkpoint(name: string): Uint8Array | null;
     // (undocumented)
     close(): void;
     committedElsewhere(): boolean;
@@ -259,7 +262,7 @@ export interface EarsDatabase {
         sequence: number;
         touched: number[];
     }) => void): void;
-    hearCommitsElsewhere(listener: (sequence: number) => void): void;
+    hearCommitsElsewhere(listener: () => void): void;
     // (undocumented)
     readonly isOpen: boolean;
     // (undocumented)
@@ -421,6 +424,7 @@ export interface EarsUnit {
     // (undocumented)
     abort(): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
+    checkpoint(name: string): Uint8Array | null;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
@@ -435,6 +439,7 @@ export interface EarsUnit {
     rollbackTo(depth: number): void;
     // (undocumented)
     savepoint(): number;
+    setCheckpoint(name: string, value: Uint8Array): void;
     // (undocumented)
     write(batch: Uint8Array): Uint8Array;
 }
