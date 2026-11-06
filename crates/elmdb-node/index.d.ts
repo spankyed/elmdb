@@ -82,15 +82,13 @@ export declare class Database {
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
-  /** What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes` */
-  changesSince(cursor: number, limit: number): Buffer
+  /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
+  committedElsewhere(): boolean
   /**
    * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
    * its `Changed`
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
-  /** Names this handle in the change log */
-  get origin(): string
   /** Blocks until every index waiting to be built is built or has failed */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
@@ -124,8 +122,8 @@ export declare class Unit {
    * bytes of `{ results: OpResult[] }`
    */
   write(batch: Buffer): Buffer
-  /** What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes` */
-  changesSince(cursor: number, limit: number): Buffer
+  /** What the unit has changed so far: msgpack bytes of its `ChangeSet` */
+  pendingChanges(): Buffer
   /** `Database.changedSince` read in the unit, before its own writes are stamped */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /** The sequence this unit commits as, which what it writes is stamped with */

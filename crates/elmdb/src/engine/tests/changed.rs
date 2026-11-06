@@ -6,7 +6,7 @@ use serde_json::json;
 
 use super::{batch, write};
 use crate::engine::changed::{Changed, Position};
-use crate::engine::{changelog, keys};
+use crate::engine::{changed, keys};
 use crate::error::ErrorCode;
 use crate::store::meta_key;
 use crate::{Database, OpenOptions};
@@ -141,13 +141,40 @@ fn a_reader_older_than_the_kept_tombstones_is_told_it_may_have_missed_a_destroy(
     let old = db.sequence().unwrap();
     write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
     let store = db.store().unwrap();
-    for _ in 0..changelog::LOG_COMMITS + changelog::LOG_TRIM_EVERY {
+    for _ in 0..changed::TOMBSTONE_COMMITS + changed::TRIM_EVERY {
         store.write(|_, _| Ok(()), false).unwrap();
     }
     let stale = since(&db, &from(old), 100);
     assert!(!stale.complete, "its tombstone was trimmed");
     assert!(db.changed_since(&["Note".to_owned()], &from(old), 100).unwrap().complete, "no Note was destroyed");
     assert!(since(&db, &from(db.sequence().unwrap() - 1), 100).complete, "a reader since then missed nothing");
+}
+
+#[test]
+fn the_tombstones_stay_within_their_bound() {
+    use changed::{TOMBSTONE_COMMITS, TRIM_EVERY};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-0")]).unwrap();
+    // A destroy in every commit, stopped between trims
+    for n in 1..TOMBSTONE_COMMITS + 3 * TRIM_EVERY + 5 {
+        write(&db, vec![json!({ "op": "destroy", "id": format!("Task-{}", n - 1) }), task(&format!("Task-{n}"))])
+            .unwrap();
+    }
+    let held = db
+        .snapshot(|s| {
+            let mut held = 0u64;
+            crate::engine::unit::Read::visit(s, &crate::engine::keys::destroyed_prefix(), |_, _| {
+                held += 1;
+                true
+            })?;
+            Ok(held)
+        })
+        .unwrap();
+    assert!(
+        (TOMBSTONE_COMMITS..TOMBSTONE_COMMITS + TRIM_EVERY).contains(&held),
+        "what it promises, and what it has destroyed since it last trimmed: {held}"
+    );
 }
 
 #[test]

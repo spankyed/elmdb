@@ -201,10 +201,6 @@ fn idle_process_releases_pages_without_another_database_call() {
     let directory = tempfile::tempdir().unwrap();
     let writer = Store::open(directory.path(), quiet()).unwrap();
     overwrite(&writer, 0);
-    // The change log grows until it reaches its bound, which is a growth of its own to take out of what's measured
-    for _ in 0..crate::engine::changelog::LOG_COMMITS + crate::engine::changelog::LOG_TRIM_EVERY {
-        writer.write(|_, _| Ok(()), false).unwrap();
-    }
     let mut reader = Reader::start(directory.path(), "expired");
     for round in 1..=8 {
         overwrite(&writer, round);

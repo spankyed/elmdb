@@ -5,8 +5,8 @@
 //! - `p/i id` → `[place, trashed, changed]`: `changed` is the sequence of the commit that last wrote the entity, a
 //!   field, its trash state or a relation at either end; 0 for one no commit has stamped
 //! - `d/h type changed place` → id: a type's entities in change order, derived from `p/i`
-//! - `l/d sequence type id`: an entity a commit destroyed, which leaves no `p/i`; the newest kept as the change log keeps
-//!   its records, with what trimming dropped recorded (`m/destroyedFloor`) and each type's newest destroy
+//! - `l/d sequence type id`: an entity a commit destroyed, which leaves no `p/i`; those of the last `TOMBSTONE_COMMITS`
+//!   commits kept, with what trimming dropped recorded (`m/destroyedFloor`) and each type's newest destroy
 //!   (`m/destroyed:<type>`), so a reader that may have missed one is told so
 //!
 //! A commit stamps what it wrote once, as it commits (`Store::commit_txn`), whatever number of fields it wrote.
@@ -27,6 +27,14 @@ use super::{entities, ids, keys, values};
 fn destroyed_meta(entity_type: &str) -> Vec<u8> {
     meta_key(&format!("destroyed:{entity_type}"))
 }
+
+/// How many commits' tombstones are kept. A reader further behind is told it may have missed a destroy, and starts again
+pub const TOMBSTONE_COMMITS: u64 = 4096;
+
+/// How often a commit also drops the tombstones that have fallen out of reach, which may run over by this many until then.
+/// A delete copies the pages down to the oldest key, so deleting one per commit would add a second path to every commit:
+/// trimming in batches pays that once in a while
+pub const TRIM_EVERY: u64 = 64;
 
 /// The meta key saying how far tombstones have been trimmed
 pub(crate) const DESTROYED_FLOOR: &str = "destroyedFloor";
@@ -157,8 +165,13 @@ fn all_ids(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Drops the tombstones of commits up to `oldest`, which the change log has dropped too, recording how far that went
-pub(crate) fn trim_tombstones(txn: &mut heed::RwTxn<'_>, db: Db, oldest: u64) -> Result<()> {
+/// At the commit with `sequence`, every `TRIM_EVERY` commits: drops the tombstones of commits up to `TOMBSTONE_COMMITS`
+/// before it, recording how far that went
+pub(crate) fn trim_tombstones(txn: &mut heed::RwTxn<'_>, db: Db, sequence: u64) -> Result<()> {
+    if !sequence.is_multiple_of(TRIM_EVERY) {
+        return Ok(());
+    }
+    let Some(oldest) = sequence.checked_sub(TOMBSTONE_COMMITS) else { return Ok(()) };
     let prefix = keys::destroyed_prefix();
     let reach = keys::destroyed_through(oldest);
     let stale: Vec<Vec<u8>> = db

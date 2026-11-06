@@ -221,6 +221,8 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   await writeElsewhere('Task-a', 'other.close();');
   const first = wakes.at(-1);
   assert.ok(first > 0);
+  assert.equal(db.committedElsewhere(), true, 'the other process committed');
+  assert.equal(db.committedElsewhere(), false, 'and nothing since this asked');
   await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");');
   assert.ok(wakes.at(-1) > first, 'heard the commit of a process that was then killed');
   await writeElsewhere('Task-c', 'other.close();');

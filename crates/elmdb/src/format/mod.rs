@@ -93,16 +93,14 @@ pub enum Prefix {
     RankQueue,
     /// `d/rs index` → a rank index's totals: its nodes, their estimates and residuals summed, and how far it is built
     RankTotals,
-    /// `l/c sequence` → what a commit changed (`engine::changelog`)
-    ChangeLog,
     /// `d/h type changed place` → id: a type's entities in the order of the commits that last wrote them (`engine::changed`)
     Changed,
-    /// `l/d sequence type id`: an entity a commit destroyed, kept as the change log keeps its records (`engine::changed`)
+    /// `l/d sequence type id`: an entity a commit destroyed, kept for the last `TOMBSTONE_COMMITS` commits (`engine::changed`)
     Destroyed,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 35] = [
+    pub const ALL: [Prefix; 34] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -135,7 +133,6 @@ impl Prefix {
         Prefix::RankOrder,
         Prefix::RankQueue,
         Prefix::RankTotals,
-        Prefix::ChangeLog,
         Prefix::Changed,
         Prefix::Destroyed,
     ];
@@ -175,7 +172,6 @@ impl Prefix {
             Prefix::RankOrder => "d/rk",
             Prefix::RankQueue => "d/rq",
             Prefix::RankTotals => "d/rs",
-            Prefix::ChangeLog => "l/c",
             Prefix::Changed => "d/h",
             Prefix::Destroyed => "l/d",
         }
@@ -186,7 +182,7 @@ impl Prefix {
             Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
                 PrefixKind::Primary
             }
-            Prefix::Meta | Prefix::ChangeLog | Prefix::Destroyed => PrefixKind::Meta,
+            Prefix::Meta | Prefix::Destroyed => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
     }

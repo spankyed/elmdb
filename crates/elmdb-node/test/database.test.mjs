@@ -135,26 +135,19 @@ test('an open refuses a sync or map option that is not a whole number in range, 
   Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
 });
 
-test('changesSince reads a commit through the binding, under the name of the handle that made it', () => {
+test("committedElsewhere is never a handle's own commit, and a unit reads its pending changes", () => {
   const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
   try {
     const db = Database.open(join(dir, 'db'), { schema: {
       $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
     } });
-    const cursor = db.sequence;
     db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
-    const changes = packr.unpack(db.changesSince(cursor, 10));
-    assert.equal(changes.truncated, false);
-    assert.deepEqual(changes.commits[0].types, ['Task']);
-    assert.equal(changes.commits[0].origin, db.origin);
-    assert.match(db.origin, /^[0-9a-f]{16}$/);
+    assert.equal(db.committedElsewhere(), false);
 
     const unit = db.begin();
     unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
-    const pending = packr.unpack(unit.changesSince(changes.through, 10));
-    assert.deepEqual(Object.keys(pending.pending.entities), ['Task-2']);
-    assert.deepEqual(pending.commits, []);
+    assert.deepEqual(Object.keys(packr.unpack(unit.pendingChanges()).entities), ['Task-2']);
     unit.abort();
     db.close();
   } finally {

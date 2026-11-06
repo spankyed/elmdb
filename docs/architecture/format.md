@@ -39,10 +39,10 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to as many significant bits as a cell of 256 times the tolerance takes, 4 to 52 | derived |
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
-| `l/c` sequence | what a commit changed: its handle's name, the types and relation kinds it changed or that it isn't known which; the newest 4096 commits; which entities changed is `d/h`'s to answer | log |
-| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the commits the change log still holds | log |
+| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the last 4096 commits (`TOMBSTONE_COMMITS`) | log |
 
-The log is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and `check()` doesn't read it.
+A tombstone is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and `check()` doesn't
+read it.
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` derives the same from a read snapshot into scratch files and
