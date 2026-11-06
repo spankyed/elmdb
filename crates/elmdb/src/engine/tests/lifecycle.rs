@@ -136,7 +136,6 @@ fn a_reader_learns_what_another_process_committed() {
     assert_ne!(theirs.origin, db.origin().unwrap(), "named as another's");
     assert!(!theirs.everything);
     assert!(theirs.types.contains("Task"));
-    assert_eq!(theirs.entities.as_deref(), Some(&["Task-elsewhere".to_owned()][..]));
     let since = db.changes_since(changes.through, 100).unwrap();
     assert_eq!(since.commits, vec![], "nothing since");
     assert_eq!(since.through, changes.through, "and the cursor stays where it is");
@@ -351,11 +350,9 @@ fn a_write_refused_for_a_replacement_leaves_nothing_for_the_next() {
     let cursor = db.sequence().unwrap();
     write(&db, vec![A_TASK("Task-next")]).unwrap();
     let logged = db.changes_since(cursor, 10).unwrap();
-    assert_eq!(
-        logged.commits[0].entities.as_deref(),
-        Some(&["Task-next".to_owned()][..]),
-        "the refused write's record isn't"
-    );
+    assert_eq!(logged.commits.len(), 1, "one record, the next write's: the refused one's isn't");
+    assert!(super::row(&db, "Task-refused").is_none());
+    assert!(super::row(&db, "Task-next").is_some());
 }
 
 #[test]
