@@ -200,6 +200,23 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
 
+    /// A directory opened so its times can be set: Windows opens one only with backup semantics, and to write its times
+    fn directory(path: &Path) -> std::fs::File {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(path)
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        std::fs::File::open(path).unwrap()
+    }
+
     fn heard(wake: &Wake) -> mpsc::Receiver<u64> {
         let (told, heard) = mpsc::channel();
         wake.listen(Arc::new(move |sequence| {
@@ -225,7 +242,7 @@ mod tests {
         let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
         std::fs::create_dir(dir.path().join("wake")).unwrap();
         let long_ago = SystemTime::now() - Duration::from_secs(60);
-        std::fs::File::open(dir.path().join("wake")).unwrap().set_modified(long_ago).unwrap();
+        directory(&dir.path().join("wake")).set_modified(long_ago).unwrap();
         writer.notify(1);
         assert_eq!(
             writer.peers.lock().settled,
