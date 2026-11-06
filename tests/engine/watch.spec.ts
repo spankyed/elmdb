@@ -86,28 +86,15 @@ describe('a commit from another process', () => {
     watching.stop();
   });
 
-  it('is found at the next commit here when the wake never came, and said once', async () => {
+  it('is found at the next commit here when the wake never came', async () => {
     let database: EarsDatabase | undefined;
-    const found = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
-      get(target, key) {
-        if (key === 'hearCommitsElsewhere') return () => {};
-        const value = Reflect.get(target, key);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-    })) });
-    let told = 0;
-    found.admin.onFoundElsewhere(() => { told++; });
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
     await commitElsewhere(database!);
-    await Promise.resolve();
-    expect(told, 'nothing here has committed').toBe(0);
-
+    // Listening only now, so the other process's wake went to nobody
+    const told = new Promise<void>((resolve) => { found.admin.onFoundElsewhere(resolve); });
     found.create('Task', { title: 'mine' });
-    await Promise.resolve();
-    expect(told).toBe(1);
+    await told;
     expect(found.admin.changedElsewhere()).toBe(true);
-    found.create('Task', { title: 'mine too' });
-    await Promise.resolve();
-    expect(told, 'said once').toBe(1);
   });
 
   it('is not found in a sequence this process skipped itself, as its index builder does', async () => {
@@ -137,6 +124,11 @@ describe('a commit from another process', () => {
     found.create('Task', { title: 'mine' });
     await Promise.resolve();
     expect(told).toBe(1);
+    found.create('Task', { title: 'mine too' });
+    await Promise.resolve();
+    expect(told, 'said once').toBe(1);
+    expect(found.admin.changedElsewhere(), 'and answered when asked').toBe(true);
+    expect(found.admin.changedElsewhere()).toBe(false);
   });
 
   it('reads whether another process committed, skipping its own, and runs nothing if none did', async () => {

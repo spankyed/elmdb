@@ -24,8 +24,8 @@ export interface EarsUnit {
   rollbackTo(depth: number): void;
   release(depth: number): void;
   commit(durable?: boolean | null): Uint8Array;
-  /** What the change log holds after `cursor`, with the unit's own changes so far: msgpack of elmdb's `Changes` */
-  changesSince(cursor: number, limit: number): Uint8Array;
+  /** What the unit has changed so far: msgpack of elmdb's `ChangeSet` */
+  pendingChanges(): Uint8Array;
   /** `EarsDatabase.changedSince` read in the unit, before its own writes are stamped */
   changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
   /** The sequence the unit commits as, which what it writes is stamped with */
@@ -64,12 +64,10 @@ export interface EarsDatabase {
   replacedElsewhere(): number | null;
   /** Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting nothing, when another has landed since */
   adoptReplacement(epoch: number): boolean;
-  /** What the change log holds after `cursor`, up to `limit` commits: msgpack of elmdb's `Changes` */
-  changesSince(cursor: number, limit: number): Uint8Array;
+  /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
+  committedElsewhere(): boolean;
   /** The entities of types keeping a change order that changed after `from` (msgpack of a `ChangedPosition`): msgpack of elmdb's `Changed` */
   changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-  /** Names this handle in the change log */
-  readonly origin: string;
   /** Every entry replaced by another database's primary data, the derived data rebuilt under this one's schema */
   replaceWith(source: string): void;
   stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
@@ -231,17 +229,9 @@ export interface Commit {
   readonly touched: ReadonlySet<number> | 'all';
 }
 
-const CHANGES_PER_READ = 256;
-
-/** What came after a cursor in the change log (elmdb's `Changes`) */
-export interface LoggedChanges {
-  /** The cursor to ask from next */
-  through: number;
-  /** The log no longer reaches the cursor, so `commits` doesn't say everything since it */
-  truncated: boolean;
-  commits: Array<{ sequence: number; origin: string; everything: boolean; types: string[] }>;
-  /** A unit's own changes so far, when one is open */
-  pending?: { entities: Record<string, unknown> };
+/** What an open unit has changed so far (elmdb's `ChangeSet`): the entities it wrote, by id */
+export interface PendingChanges {
+  entities: Record<string, unknown>;
 }
 
 /** Where a reader of what changed has read to: everything at or before `sequence`, and within it up to `after` */
@@ -298,12 +288,12 @@ export interface Connection {
   /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
   committedEverything(): void;
   /**
-   * Told that another process has committed: reads the change log, and if one did, the commit listeners hear everything,
-   * since which keys isn't known, and its commits so far aren't news. Answers whether one did.
+   * Told that another process may have committed: asks the database, and if one did, the commit listeners hear
+   * everything, since which keys isn't known. Answers whether one did.
    */
   changedElsewhere(): boolean;
-  /** What the change log holds after `cursor`, as the open unit sees it when there is one */
-  changesSince(cursor: number, limit: number): LoggedChanges;
+  /** What the open unit has changed so far; none outside a unit */
+  pendingChanges(): PendingChanges | undefined;
   /** What of `types` changed after `from`, read in the unit when one is open */
   changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
   /** The sequence the open unit commits as; none outside a unit */
@@ -351,36 +341,15 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
   };
   const everyWatch = () => tellListeners({ sequence: database.sequence, touched: 'all' });
   /** A commit this connection made whose writes aren't known key by key */
-  const committedEverything = () => {
-    known = database.sequence;
-    everyWatch();
-  };
+  const committedEverything = everyWatch;
   const heard = (changes: { sequence: number; touched: number[] }) => {
     if (listeners.size > 0) tellListeners({ sequence: changes.sequence, touched: new Set(changes.touched) });
   };
-  /** How far through the change log this connection has read */
-  let cursor = database.sequence;
-  /** The latest commit this connection knows of: a commit here further past it than one says something else committed */
-  let known = database.sequence;
   const foundElsewhere = new Set<() => void>();
   let hearing = false;
   const readChangedSince = (types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities => {
     const position = pack(from);
     return unpackr.unpack(unit ? crossing(() => unit!.changedSince([...types], position, limit)) : database.changedSince([...types], position, limit)) as ChangedEntities;
-  };
-  const readChangesSince = (from: number, limit: number): LoggedChanges =>
-    unpackr.unpack(unit ? crossing(() => unit!.changesSince(from, limit)) : database.changesSince(from, limit)) as LoggedChanges;
-  /** Moves the cursor to the end of the log, answering whether another process committed since it */
-  const readChangedElsewhere = (): boolean => {
-    let any = false;
-    for (;;) {
-      const changes = readChangesSince(cursor, CHANGES_PER_READ);
-      cursor = changes.through;
-      known = Math.max(known, cursor);
-      if (changes.truncated) return true;
-      any ||= changes.commits.some((commit) => commit.origin !== database.origin);
-      if (changes.commits.length < CHANGES_PER_READ) return any;
-    }
   };
   let hook: BeforeCommit | undefined;
   let hookPaused = false;
@@ -399,18 +368,14 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       throw error;
     }
   };
-  /** Whether a commit between `after` and `before` is another process's: an index builder's are this process's own */
-  const elsewhereBetween = (after: number, before: number): boolean => {
-    const between = readChangesSince(after, Math.min(before - after - 1, CHANGES_PER_READ));
-    return between.truncated || between.commits.some((commit) => commit.sequence < before && commit.origin !== database.origin);
-  };
+  /** Another process's commit found at a commit here, not yet answered by `changedElsewhere` */
+  let foundUnasked = false;
   const made = (changes: { sequence: number; touched: number[] }) => {
-    const after = known;
-    known = changes.sequence;
     heard(changes);
-    // The wake a process's commit sends can be lost, and its sender can die first, so a commit here that skipped a
-    // sequence looks at what it skipped
-    if (changes.sequence > after + 1 && elsewhereBetween(after, changes.sequence)) {
+    // A database that hears other processes wakes its listener itself when a commit here skips one of theirs. One that
+    // can't hear them, as where nothing may listen, finds them at its own commits instead
+    if (!hearing && foundElsewhere.size > 0 && database.committedElsewhere()) {
+      foundUnasked = true;
       for (const listener of foundElsewhere) queueMicrotask(listener);
     }
   };
@@ -615,18 +580,20 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     },
     committedEverything,
     changedElsewhere() {
-      const changed = readChangedElsewhere();
+      const changed = database.committedElsewhere() || foundUnasked;
+      foundUnasked = false;
       if (changed) everyWatch();
       return changed;
     },
-    changesSince: readChangesSince,
+    pendingChanges: () => (unit ? (unpackr.unpack(crossing(() => unit!.pendingChanges())) as PendingChanges) : undefined),
     changedSince: readChangedSince,
     // A unit opens its write transaction at its first write; asked first, it opens it now, as that write would
     nextSequence: () => (levels.length ? crossing(() => writable().nextSequence()) : undefined),
     replacedElsewhere: () => database.replacedElsewhere() ?? undefined,
     adoptReplacement(epoch) {
       if (!database.adoptReplacement(epoch)) return false;
-      readChangedElsewhere();
+      // The replacement is news already acted on
+      database.committedElsewhere();
       everyWatch();
       return true;
     },

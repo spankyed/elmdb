@@ -216,7 +216,6 @@ export interface EarsAdmin {
     readonly calls: CallCounting;
     changedElsewhere(): boolean;
     changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
-    changesSince(cursor: number, limit: number): LoggedChanges;
     clear(): void;
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
@@ -226,7 +225,7 @@ export interface EarsAdmin {
     nextSequence(): number | undefined;
     observe(observer: EarsOperationObserver): () => void;
     onFoundElsewhere(listener: () => void): () => void;
-    origin(): string;
+    pendingChanges(): PendingChanges | undefined;
     putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
     replacedElsewhere(): number | undefined;
     replaceWith(source: string): void;
@@ -251,9 +250,9 @@ export interface EarsDatabase {
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     close(): void;
+    committedElsewhere(): boolean;
     // (undocumented)
     durable(): Promise<void>;
     hearBuilderCommits(listener: (commit: {
@@ -263,7 +262,6 @@ export interface EarsDatabase {
     hearCommitsElsewhere(listener: (sequence: number) => void): void;
     // (undocumented)
     readonly isOpen: boolean;
-    readonly origin: string;
     // (undocumented)
     readonly path: string;
     // (undocumented)
@@ -423,12 +421,12 @@ export interface EarsUnit {
     // (undocumented)
     abort(): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
     readonly isOpen: boolean;
     nextSequence(): number;
+    pendingChanges(): Uint8Array;
     // (undocumented)
     read(reads: Uint8Array): Uint8Array;
     // (undocumented)
@@ -537,27 +535,17 @@ export interface LinkOptions {
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
 // @public
-export interface LoggedChanges {
-    // (undocumented)
-    commits: Array<{
-        sequence: number;
-        origin: string;
-        everything: boolean;
-        types: string[];
-    }>;
-    pending?: {
-        entities: Record<string, unknown>;
-    };
-    through: number;
-    truncated: boolean;
-}
-
-// @public
 export type OptionalField<S extends EntityShapes, E extends string> = [
 E
 ] extends [keyof S] ? Extract<{
     [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
 }[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
+
+// @public
+export interface PendingChanges {
+    // (undocumented)
+    entities: Record<string, unknown>;
+}
 
 // @public
 export interface PendingEmbeddings {
