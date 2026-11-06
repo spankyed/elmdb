@@ -382,7 +382,9 @@ mod tests {
         let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
         let heard = heard(&reader);
         std::thread::sleep(Duration::from_millis(100));
-        let thread = reader.listening.lock().as_ref().unwrap().thread.as_pthread_t();
+        // The handle's id as libc names it: the same type on glibc and macOS, a pointer on musl
+        #[allow(clippy::unnecessary_cast)]
+        let thread = reader.listening.lock().as_ref().unwrap().thread.as_pthread_t() as libc::pthread_t;
         // SAFETY: the listening thread, still running
         assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGUSR2) }, 0);
         std::thread::sleep(Duration::from_millis(100));
