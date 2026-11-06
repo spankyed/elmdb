@@ -180,9 +180,9 @@ export interface EarsAdmin {
   /** Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up */
   transactWithoutHook<T>(fn: () => T): T;
   /**
-   * Calls `listener` soon after another process commits, which `changedElsewhere` then answers, or after a commit here
-   * shows something else committed, since a wake can be lost. It may be called for a commit that turns out to be this
-   * process's own builder's. Throws when this database can't hear of commits, keeping the listener for that second way.
+   * Calls `listener` soon after another process commits, which `changedElsewhere` then answers. The database hears of
+   * one whose wake was lost at its own next commit, and of one that may not be news, so the answer can be false. Throws
+   * when this database can't hear of commits, keeping the listener: a commit here then asks, and calls it when one did.
    * Returns the unregistration.
    */
   onFoundElsewhere(listener: () => void): () => void;

@@ -312,7 +312,7 @@ export interface Connection {
   setCheckpoint(name: string, value: unknown): void;
   /** The epoch another process's replacement of every row moved the database to, when this connection hasn't adopted it */
   replacedElsewhere(): number | undefined;
-  /** Takes that epoch as seen, moving past it in the change log and running every watch again; false when another replacement has landed since */
+  /** Takes that epoch as seen, its commits taken as news already acted on, and runs every watch again; false when another replacement has landed since */
   adoptReplacement(epoch: number): boolean;
   /** Sets what runs in a unit before it commits */
   beforeCommit(hook: BeforeCommit): void;
