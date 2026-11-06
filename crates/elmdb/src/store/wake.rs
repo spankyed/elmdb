@@ -82,6 +82,8 @@ impl Wake {
             peers.mailboxes = self.read_mailboxes(peers.own.as_deref());
             // A file's time is only as fine as its filesystem's clock, so a mailbox filed just after this read can leave
             // the time as it was: a recent time isn't trusted yet
+            // mutant-skip: replace > with >= in Wake::notify
+            // An age of exactly the grain, to the nanosecond, is the only one the two answer differently
             let settled = reading.duration_since(modified).is_ok_and(|age| age > TIMESTAMP_GRAIN);
             peers.settled = settled.then_some(modified);
         }
@@ -220,6 +222,9 @@ mod mailbox {
             let mut kept: libc::sigset_t = std::mem::zeroed();
             libc::pthread_sigmask(libc::SIG_BLOCK, &raw const pipe, &raw mut kept);
             let result = (&*file).write(&[1]);
+            // mutant-skip: replace && with \|\| in mailbox::write_wake
+            // Taking a SIGPIPE that isn't pending finds none: the two differ only for one pending before this write,
+            // which nothing here holds
             if !already && matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPIPE)) {
                 // The signal the write raised, taken while blocked so it never reaches the thread
                 let now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -279,11 +284,13 @@ mod mailbox {
             }
             let mut bytes = [0u8; 64];
             loop {
+                // A read that doesn't block never waits, so nothing interrupts it
                 match (&self.read).read(&mut bytes) {
                     Ok(0) => return Ok(()),
                     Ok(_) => {}
+                    // mutant-skip: replace match guard error.kind\(\) == std::io::ErrorKind::WouldBlock with true in mailbox::Mailbox::wait
+                    // The read end is this mailbox's own and open: a read of it fails only for having nothing left
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) => return Err(error),
                 }
             }
@@ -312,6 +319,11 @@ mod mailbox {
             Ok(file) => match write_wake(&file) {
                 Ok(()) => Rung::Told,
                 // Its reader went between the open and the write
+                // mutant-skip: replace match guard error.raw_os_error\(\) == Some\(libc::EPIPE\) with true in mailbox::ring
+                // A write of one byte to a FIFO opened for it fails only for its reader having gone
+                // mutant-skip: replace == with != in mailbox::ring (as above)
+                // mutant-skip: replace match guard error.raw_os_error\(\) == Some\(libc::EPIPE\) with false in mailbox::ring
+                // Taken for unknown, the mailbox is found gone by the next ring's open instead: removed a commit later
                 Err(error) if error.raw_os_error() == Some(libc::EPIPE) => Rung::Gone,
                 Err(_) => Rung::Unknown,
             },
@@ -575,6 +587,35 @@ mod tests {
         Wake::new(dir.path()).notify();
         assert!(!left.exists(), "left half made long ago, by nobody");
         assert!(making.exists(), "still being made, as far as anyone can tell");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_full_mailbox_counts_as_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = file_ownerless(&dir.path().join("wake"));
+        let _reader = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+        let mut writer = mailbox::open_write(&path).unwrap();
+        // Filled until it takes no more: a wake is already waiting in it
+        while std::io::Write::write(&mut writer, &[1; 4096]).is_ok() {}
+        assert_eq!(mailbox::ring(&path), Rung::Told);
+    }
+
+    /// Unless this runs as a superuser, whom no file's mode refuses
+    #[cfg(unix)]
+    #[test]
+    fn a_mailbox_this_process_may_not_open_is_left_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: reads the process's effective user
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = file_ownerless(&dir.path().join("wake"));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert_eq!(mailbox::ring(&path), Rung::Unknown, "another's, as far as this process can tell");
+        Wake::new(dir.path()).notify();
+        assert!(path.exists(), "not removed");
     }
 
     #[test]

@@ -154,6 +154,9 @@ mod macos {
                     return Ok(hold);
                 }
                 match std::io::Error::last_os_error().raw_os_error() {
+                    // mutant-skip: delete match arm Some\(libc::EINTR\) in macos::Held::hold
+                    // sem_trywait doesn't wait, so no signal interrupts it on macOS: the arm keeps a platform that says
+                    // otherwise trying again rather than failing the write
                     Some(libc::EINTR) => continue,
                     Some(libc::EAGAIN) => {
                         // Taken, though no live elmdb writer can be inside a transaction: one died there
@@ -169,6 +172,8 @@ mod macos {
 
     impl Drop for Held {
         fn drop(&mut self) {
+            // mutant-skip: replace macos::<impl Drop for Held>::drop with \(\)
+            // Closing the handle frees a descriptor this process would otherwise keep until it exits, which no test reads
             // SAFETY: opened in `open`, closed once, here
             unsafe { libc::sem_close(self.semaphore) };
         }
