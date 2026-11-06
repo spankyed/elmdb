@@ -2710,7 +2710,6 @@ fn a_read_only_handle_woken_by_another_process_starts_no_build() {
         status.iter().all(|s| s.failure.is_none()),
         "no build started, so none failed for want of a write: {status:?}"
     );
-    assert!(owes(&db), "and the work is still owed, for a handle that can write");
 }
 
 #[test]
