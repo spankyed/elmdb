@@ -317,14 +317,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
         let (entered, running) = mpsc::channel();
-        let (release, released) = mpsc::channel::<()>();
-        let released = std::sync::Mutex::new(released);
-        let finished = Arc::new(AtomicBool::new(false));
-        let done = Arc::clone(&finished);
+        let (released, finished) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        let (release, done) = (Arc::clone(&released), Arc::clone(&finished));
         reader
             .listen(Arc::new(move |_| {
                 let _ = entered.send(());
-                let _ = released.lock().unwrap().recv();
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
                 done.store(true, Ordering::Release);
             }))
             .unwrap();
@@ -333,7 +333,7 @@ mod tests {
         std::thread::scope(|scope| {
             scope.spawn(|| {
                 std::thread::sleep(Duration::from_millis(300));
-                let _ = release.send(());
+                released.store(true, Ordering::Release);
             });
             reader.stop();
             assert!(finished.load(Ordering::Acquire), "stop returned before the listener did");
@@ -366,7 +366,7 @@ mod tests {
         // SAFETY: a handler that does nothing, installed without SA_RESTART so the wait it interrupts fails
         unsafe {
             let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = nothing as usize;
+            action.sa_sigaction = nothing as *const () as usize;
             libc::sigaction(libc::SIGUSR2, &raw const action, std::ptr::null_mut());
         }
         let dir = tempfile::tempdir().unwrap();
