@@ -2707,7 +2707,7 @@ fn being_woken_finishes_what_a_process_left_owed_without_a_commit_here() {
     let dir = tempfile::tempdir().unwrap();
     let db = near_links(&dir, 400, 5, 0);
     let (told, heard) = std::sync::mpsc::channel();
-    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
     run_owing_child(&dir);
     heard.recv_timeout(std::time::Duration::from_secs(10)).expect("woken");
     db.wait_for_index_builds().unwrap();
@@ -2734,7 +2734,7 @@ fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
     let dir = tempfile::tempdir().unwrap();
     let db = near_links(&dir, 400, 5, 0);
     let (told, heard) = std::sync::mpsc::channel();
-    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
     let unit = db.begin().unwrap();
     assert_eq!(db.close().unwrap_err().code, crate::error::ErrorCode::UnitOpen);
     drop(unit);

@@ -210,10 +210,10 @@ impl Database {
             .map_err(to_js)
     }
 
-    /// Tells `listener` of commits other processes make, with the latest one's sequence, as soon as each lands, a second
-    /// being refused. It keeps no process alive, and closing the database drops it
-    #[napi(ts_args_type = "listener: (sequence: number) => void")]
-    pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, f64, ()>) -> Result<(), Code> {
+    /// Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
+    /// second being refused. It keeps no process alive, and closing the database drops it
+    #[napi(ts_args_type = "listener: () => void")]
+    pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, (), ()>) -> Result<(), Code> {
         // mutant-skip: replace Database::hear_commits_elsewhere -> Result<\(\), Code> with Ok\(\(\)\)
         // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` hears a commit through it
         let tell = listener
@@ -223,8 +223,8 @@ impl Database {
             .build()
             .map_err(|error| napi::Error::new(Code("IO"), error.to_string()))?;
         self.inner
-            .hear_commits_elsewhere(std::sync::Arc::new(move |sequence| {
-                tell.call(sequence as f64, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+            .hear_commits_elsewhere(std::sync::Arc::new(move || {
+                tell.call((), napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
             }))
             .map_err(to_js)
     }

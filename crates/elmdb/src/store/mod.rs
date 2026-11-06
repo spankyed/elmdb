@@ -638,9 +638,9 @@ impl Store {
         // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died
         // first: this handle hears it now as if it had arrived
         if skipped {
-            self.wake.wake_self(last);
+            self.wake.wake_self();
         }
-        self.wake.notify(next);
+        self.wake.notify();
         Ok(next)
     }
 

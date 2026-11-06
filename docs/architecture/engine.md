@@ -83,8 +83,9 @@ callbacks. Coordinate writes in one process when observers must hear every commi
 whether another handle has committed since this one last asked, as SQLite's `data_version` does, with no log: every
 commit raises the sequence by one and every commit a handle makes, its index builder's included, passes through its
 `Store::commit_txn`, so a handle that keeps the sequence it has accounted for knows any commit past it is another's.
-`hear_commits_elsewhere(listener)` wakes a listener as soon as another process commits (`store/wake.rs`: loopback UDP
-to the ports listening handles file under `wake/`), having queued any index work the store says is owed. A wake
+`hear_commits_elsewhere(listener)` wakes a listener as soon as another process commits (`store/wake.rs`: a mailbox
+each listening handle files under `wake/`, a FIFO on Unix as Realm uses and a named event on Windows, which a committer
+that finds nobody owning removes), having queued any index work the store says is owed. A wake
 carries nothing a reader depends on, so one lost costs delay, and a commit here that finds a commit it hadn't
 accounted for wakes its own listener as the lost wake would have.
 

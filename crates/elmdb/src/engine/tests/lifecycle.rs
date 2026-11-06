@@ -160,15 +160,9 @@ fn a_commit_here_after_an_unheard_one_elsewhere_wakes_this_handles_listener() {
     commit_elsewhere(&dir);
     // Listening only now: the other process's wake went to nobody
     let (told, heard) = std::sync::mpsc::channel();
-    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
-    // The other process's commit, the last there is
-    let theirs = db.sequence().unwrap();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
     write(&db, vec![large_task("Task-here")]).unwrap();
-    assert_eq!(
-        heard.recv_timeout(Duration::from_secs(10)).expect("woken by its own commit"),
-        theirs,
-        "for the commit it skipped"
-    );
+    heard.recv_timeout(Duration::from_secs(10)).expect("woken by its own commit");
     assert!(db.committed_elsewhere().unwrap());
 }
 

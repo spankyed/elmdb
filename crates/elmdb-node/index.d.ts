@@ -53,10 +53,10 @@ export declare class Database {
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /**
-   * Tells `listener` of commits other processes make, with the latest one's sequence, as soon as each lands, a second
-   * being refused. It keeps no process alive, and closing the database drops it
+   * Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
+   * second being refused. It keeps no process alive, and closing the database drops it
    */
-  hearCommitsElsewhere(listener: (sequence: number) => void): void
+  hearCommitsElsewhere(listener: () => void): void
   /** The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it */
   replacedElsewhere(): number | null
   /**

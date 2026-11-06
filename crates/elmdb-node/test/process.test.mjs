@@ -189,10 +189,10 @@ test('a commit from another process wakes a listener, and a killed writer leaves
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const wakes = [];
+  let wakes = 0;
   let woken = () => {};
-  db.hearCommitsElsewhere((sequence) => {
-    wakes.push(sequence);
+  db.hearCommitsElsewhere(() => {
+    wakes++;
     woken();
   });
   assert.throws(() => db.hearCommitsElsewhere(() => {}), { code: 'ALREADY_LISTENING' });
@@ -219,12 +219,12 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   };
 
   await writeElsewhere('Task-a', 'other.close();');
-  const first = wakes.at(-1);
+  const first = wakes;
   assert.ok(first > 0);
   assert.equal(db.committedElsewhere(), true, 'the other process committed');
   assert.equal(db.committedElsewhere(), false, 'and nothing since this asked');
   await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");');
-  assert.ok(wakes.at(-1) > first, 'heard the commit of a process that was then killed');
+  assert.ok(wakes > first, 'heard the commit of a process that was then killed');
   await writeElsewhere('Task-c', 'other.close();');
 });
 
