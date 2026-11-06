@@ -57,8 +57,12 @@ function anotherProcess(path: string) {
     process.stdout.write('ready\\n');
   `, path], { stdio: ['pipe', 'pipe', 'inherit'] });
   const heard: Array<() => void> = [];
+  // A chunk is any part of the output, so a line counts once its newline has arrived
+  let partial = '';
   child.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
-    for (const _ of chunk.trim().split('\n')) heard.shift()?.();
+    const lines = (partial + chunk).split('\n');
+    partial = lines.pop()!;
+    for (const _ of lines) heard.shift()?.();
   });
   const answered = () => new Promise<void>((resolve) => { heard.push(resolve); });
   const gone = new Promise<void>((resolve) => { child.once('close', () => resolve()); });
