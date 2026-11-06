@@ -200,7 +200,7 @@ pub struct TypeDef {
     /// The store keeps the type's entities in the order of the commits that last wrote them, which `changed_since`
     /// reads; a write to the type then costs that much more
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    #[cfg_attr(feature = "codegen", ts(optional))]
+    #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
     pub change_order: bool,
 }
 

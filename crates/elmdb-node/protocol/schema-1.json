@@ -506,6 +506,10 @@
             "$ref": "#/$defs/IndexDef"
           },
           "default": {}
+        },
+        "changeOrder": {
+          "description": "The store keeps the type's entities in the order of the commits that last wrote them, which `changed_since`\nreads; a write to the type then costs that much more",
+          "type": "boolean"
         }
       }
     },
