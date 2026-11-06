@@ -269,3 +269,21 @@ fn the_log_stays_within_its_bound() {
         .unwrap();
     assert_eq!(held, LOG_COMMITS + 5, "what it promises, and what it has committed since it last trimmed");
 }
+
+#[test]
+fn what_the_binding_reads_is_the_change_log_answer_in_msgpack() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let cursor = db.sequence().unwrap();
+    write(&db, vec![large_task("Task-1")]).unwrap();
+    let decoded: crate::engine::changelog::Changes =
+        rmp_serde::from_slice(&db.changes_since_bytes(cursor, 10).unwrap()).unwrap();
+    assert_eq!(decoded, db.changes_since(cursor, 10).unwrap());
+    assert_eq!(decoded.commits.len(), 1, "something to say");
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![large_task("Task-2")])).unwrap();
+    let decoded: crate::engine::changelog::Changes =
+        rmp_serde::from_slice(&unit.changes_since_bytes(cursor, 10).unwrap()).unwrap();
+    assert_eq!(decoded, unit.changes_since(cursor, 10).unwrap());
+    assert!(decoded.pending.is_some_and(|pending| pending.entities.contains_key("Task-2")), "the unit's own");
+}
