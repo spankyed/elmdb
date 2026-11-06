@@ -363,13 +363,20 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       throw error;
     }
   };
+  /** Whether a commit between `after` and `before` is another process's: an index builder's are this process's own */
+  const elsewhereBetween = (after: number, before: number): boolean => {
+    const between = readChangesSince(after, Math.min(before - after - 1, CHANGES_PER_READ));
+    return between.truncated || between.commits.some((commit) => commit.sequence < before && commit.origin !== database.origin);
+  };
   const made = (changes: { sequence: number; touched: number[] }) => {
-    const skipped = changes.sequence > known + 1;
+    const after = known;
     known = changes.sequence;
     heard(changes);
-    // The wake a process's commit sends can be lost, and its sender can die first. What skipped may be this process's
-    // own builder: reading the log is what tells them apart
-    if (skipped) for (const listener of foundElsewhere) queueMicrotask(listener);
+    // The wake a process's commit sends can be lost, and its sender can die first, so a commit here that skipped a
+    // sequence looks at what it skipped
+    if (changes.sequence > after + 1 && elsewhereBetween(after, changes.sequence)) {
+      for (const listener of foundElsewhere) queueMicrotask(listener);
+    }
   };
 
   const observation = createOperationObservation(

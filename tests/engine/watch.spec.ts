@@ -110,6 +110,18 @@ describe('a commit from another process', () => {
     expect(told, 'said once').toBe(1);
   });
 
+  it('is not found in a sequence this process skipped itself, as its index builder does', async () => {
+    let database: EarsDatabase | undefined;
+    const found = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let told = 0;
+    found.admin.onFoundElsewhere(() => { told++; });
+    // Another handle on the same database commits as this process does: under its origin, unheard here
+    createConnection(database!).write([{ op: 'create', type: 'Task', id: 'Task-mine-too', fields: { title: 'here' } }]);
+    found.create('Task', { title: 'mine' });
+    await Promise.resolve();
+    expect(told).toBe(0);
+  });
+
   it('keeps the listener for the next commit here when the database cannot hear', async () => {
     let database: EarsDatabase | undefined;
     const found = freshEngine({ ...NAMES, wrap: (held) => (database = new Proxy(held, {
