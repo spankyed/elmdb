@@ -101,6 +101,10 @@ const UNMODELLED: &[(&str, &str)] = &[
         "the writer gate, a parking_lot RecursiveRwLock no model provides, and the paths open in the process",
     ),
     ("store/sync.rs", "the group commit sync worker, tested by its own deterministic harness (store/sync/tests.rs)"),
+    (
+        "store/writers.rs",
+        "macOS's writer turn: a file lock across processes and a mutex across threads, tested with real killed processes",
+    ),
 ];
 
 /// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, and on a listed file that no

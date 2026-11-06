@@ -370,16 +370,17 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     let quiet_for = Duration::from_millis(100);
 
     // Ended by the unit's end
-    let (txn, gate) = store.begin().unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
     let ended = waiter(Arc::new(AtomicBool::new(false)));
     assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
     txn.abort();
     drop(gate);
+    drop(writer);
     store.end_unit();
     ended.recv_timeout(Duration::from_secs(5)).expect("returned once the unit ended");
 
     // Ended by its stop, the unit still open
-    let (txn, gate) = store.begin().unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let ended = waiter(Arc::clone(&stop));
     assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
@@ -388,6 +389,7 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     ended.recv_timeout(Duration::from_secs(5)).expect("returned once stopped");
     txn.abort();
     drop(gate);
+    drop(writer);
     store.end_unit();
 }
 
@@ -452,7 +454,7 @@ fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
     put(&store, "a", b"1").unwrap();
-    let (txn, gate) = store.begin().unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
     let grower = {
         let store = Arc::clone(&store);
         std::thread::spawn(move || store.grow())
@@ -468,6 +470,7 @@ fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     assert_eq!(value.as_deref(), Some(&b"1"[..]));
     txn.abort();
     drop(gate);
+    drop(writer);
     store.end_unit();
     grower.join().unwrap().unwrap();
 }
@@ -804,9 +807,10 @@ fn a_unit_grows_the_map_first_once_the_map_is_more_than_half_used() {
         n += 1;
     }
     let before = store.map_size();
-    let (txn, gate) = store.begin().unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
     txn.abort();
     drop(gate);
+    drop(writer);
     store.end_unit();
     assert!(store.map_size() > before, "the map grew from {before} before the unit began");
 }

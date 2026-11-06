@@ -413,3 +413,118 @@ fn a_failed_reset_leaves_the_handle_refusing_nothing() {
     unit.abort();
     write(&db, vec![A_TASK("Task-1")]).unwrap();
 }
+
+/// Holds a unit open on the database `ELMDB_UNIT_DB` names, having written in it, until it is killed; says so by
+/// creating `holding` beside it
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_holds_a_unit_until_killed() {
+    let Ok(path) = std::env::var("ELMDB_UNIT_DB") else { return };
+    let path = std::path::PathBuf::from(path);
+    let db = Database::open(&path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-held")])).unwrap();
+    std::fs::write(path.join("holding"), b"").unwrap();
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Another process holding a unit open on `dir`, ready once it has written in it
+fn a_writer_holding_a_unit(dir: &tempfile::TempDir) -> std::process::Child {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_holds_a_unit_until_killed",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_UNIT_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let holding = dir.path().join("holding");
+    let started = std::time::Instant::now();
+    while !holding.exists() {
+        assert!(started.elapsed() < Duration::from_secs(30), "the other process never held its unit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+}
+
+#[test]
+fn a_writer_killed_inside_a_unit_leaves_the_write_lock_to_the_next_while_another_holds_the_database_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let mut child = a_writer_holding_a_unit(&dir);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let writing = std::sync::Arc::clone(&db);
+    within_ten_seconds(move || write(&writing, vec![A_TASK("Task-after")]).unwrap());
+    assert!(super::row(&db, "Task-held").is_none(), "the killed unit committed nothing");
+}
+
+#[test]
+fn a_writer_waiting_when_the_holder_is_killed_is_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let mut child = a_writer_holding_a_unit(&dir);
+    let (done, finished) = mpsc::channel();
+    let writing = std::sync::Arc::clone(&db);
+    std::thread::spawn(move || {
+        let _ = done.send(write(&writing, vec![A_TASK("Task-waiting")]).map(|_| ()));
+    });
+    assert!(finished.recv_timeout(Duration::from_millis(300)).is_err(), "it waits while the holder is alive");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    finished.recv_timeout(Duration::from_secs(10)).expect("let go once the holder died").unwrap();
+}
+
+/// Asks which process holds the record lock LMDB keeps on the first byte of the lock file `ELMDB_LOCK_FILE` names, by
+/// which an opener knows it isn't the first, printing its process id or 0. Readers' locks, one byte at each reader's
+/// process id, are left out of the question
+#[cfg(unix)]
+#[test]
+#[ignore = "a helper the test below runs as another process"]
+fn child_asks_who_holds_the_lock_file() {
+    let Ok(path) = std::env::var("ELMDB_LOCK_FILE") else { return };
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+    // SAFETY: a zeroed `flock` is a valid query for the whole file once its type and whence are set
+    let mut query: libc::flock = unsafe { std::mem::zeroed() };
+    query.l_type = libc::F_WRLCK as libc::c_short;
+    query.l_whence = libc::SEEK_SET as libc::c_short;
+    query.l_start = 0;
+    query.l_len = 1;
+    // SAFETY: the descriptor is open, and F_GETLK writes only into `query`
+    assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut query) }, 0);
+    let unlocked = query.l_type == libc::F_UNLCK as libc::c_short;
+    println!("holder={}", if unlocked { 0 } else { query.l_pid });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_writing_handle_keeps_the_lock_lmdb_holds_on_its_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_asks_who_holds_the_lock_file",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_LOCK_FILE", dir.path().join("lock.mdb"))
+        .output()
+        .unwrap();
+    let printed = String::from_utf8_lossy(&output.stdout);
+    // The test harness prints its own words on the same line
+    let holder = printed.split("holder=").nth(1).and_then(|rest| rest.split_whitespace().next()).unwrap_or_else(|| {
+        panic!("the other process didn't answer: {printed} {}", String::from_utf8_lossy(&output.stderr))
+    });
+    assert_eq!(holder, std::process::id().to_string(), "the next opener would otherwise take itself for the first");
+}
