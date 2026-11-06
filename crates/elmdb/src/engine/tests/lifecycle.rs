@@ -188,6 +188,17 @@ fn a_reader_past_the_log_is_told_it_is() {
     assert_eq!(at_the_edge.commits.len(), 10);
     assert_eq!(at_the_edge.through, kept + 9, "the limit says how far this answer goes");
     assert!(db.changes_since(db.sequence().unwrap() + 5, 10).unwrap().truncated, "a cursor from the future");
+    let farthest = db.changes_since(u64::MAX, 10).unwrap();
+    assert!(
+        farthest.truncated && farthest.commits.is_empty(),
+        "the largest cursor, which a float from JavaScript saturates to"
+    );
+    assert_eq!(farthest.through, db.sequence().unwrap());
+    assert_eq!(
+        db.changes_since(start, 0).unwrap_err().code,
+        ErrorCode::BatchInvalid,
+        "a read of no commits says nothing"
+    );
 }
 
 #[test]

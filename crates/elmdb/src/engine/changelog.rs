@@ -117,11 +117,21 @@ pub(crate) fn since(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db, cursor: u64, li
         .get(txn, &meta_key(meta::SEQUENCE))?
         .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
         .map_or(0, u64::from_be_bytes);
+    if limit == 0 {
+        return Err(crate::error::Error::new(
+            crate::error::ErrorCode::BatchInvalid,
+            "A read of the change log asks for at least one commit",
+        ));
+    }
     if cursor == last {
         return Ok(Changes { through: last, ..Changes::default() });
     }
+    // A cursor past every commit this database has made isn't one of its own: the log can't say what it missed
+    let Some(next) = cursor.checked_add(1).filter(|_| cursor < last) else {
+        return Ok(Changes { through: last, truncated: true, ..Changes::default() });
+    };
     let prefix = keys::change_log_prefix();
-    let start = keys::change_log(cursor + 1);
+    let start = keys::change_log(next);
     let mut commits = Vec::new();
     for item in db.main.range(txn, &(Bound::Included(start.as_slice()), Bound::Unbounded))? {
         let (key, value) = item?;
@@ -133,7 +143,7 @@ pub(crate) fn since(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db, cursor: u64, li
         })?;
         commits.push(commit);
     }
-    let truncated = commits.first().is_none_or(|first| first.sequence != cursor + 1);
+    let truncated = commits.first().is_none_or(|first| first.sequence != next);
     let through = if truncated { last } else { commits.last().map_or(last, |commit| commit.sequence) };
     Ok(Changes { through, truncated, commits, pending: None })
 }
