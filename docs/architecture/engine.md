@@ -86,6 +86,14 @@ listener as soon as another process commits (`store/wake.rs`: loopback UDP to th
 `wake/`), having queued any index work the store says is owed. A wake carries nothing a reader depends on, since what
 changed is in the log, so one lost costs delay.
 
+**Changed since.** Every entity keeps the sequence of the commit that last wrote it, a field, its trash state or a
+relation at either end, and `d/h` keeps each type's entities in that order (`engine/changed.rs`). `changed_since(types,
+from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
+entities (`Position.after`), with the entities destroyed since from tombstones the change log's bound keeps. A reader
+older than the kept tombstones, of a type with a destroy since, is told the answer is incomplete. A commit stamps what
+it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
+before it commits, so a reader inside it can say where it will have read to.
+
 `reset` and `replace_with` move a stored epoch on. A handle's commit under an epoch it hasn't seen is refused
 (`DATA_REPLACED`), since whatever it read before writing has gone, while its reads carry on over what's there now. The
 holder asks `replaced_elsewhere` when woken, or when a write is refused, which names the epoch; once it has acted on what's

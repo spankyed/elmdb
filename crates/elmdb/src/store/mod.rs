@@ -173,6 +173,8 @@ pub struct Store {
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
     /// What the write about to commit changed, for the change log; a commit that deposits nothing logs `everything`
     logged: PlainMutex<Option<LoggedCommit>>,
+    /// The entities the write about to commit wrote, which its commit stamps with its sequence
+    touched: PlainMutex<Option<crate::engine::changed::Touched>>,
     /// Names this handle in the change log
     origin: String,
 }
@@ -352,6 +354,7 @@ impl Store {
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
             logged: PlainMutex::default(),
+            touched: PlainMutex::default(),
             origin: new_origin()?,
         })
     }
@@ -557,6 +560,7 @@ impl Store {
             // Only what this write hands over reaches its commit, not what an aborted one left
             *self.deposited.lock() = None;
             *self.logged.lock() = None;
+            *self.touched.lock() = None;
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -597,13 +601,15 @@ impl Store {
                  Open the database again, or adopt the replacement, before writing",
             ));
         }
-        let stored = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
-        let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
-        let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
+        let next = self.next_sequence(&txn)?;
+        let last = next - 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
         let mut logged = self.logged.lock().take().unwrap_or_else(LoggedCommit::everything);
         logged.sequence = next;
         logged.origin.clone_from(&self.origin);
+        if let Some(touched) = self.touched.lock().take().filter(|touched| !touched.is_empty()) {
+            crate::engine::changed::stamp(&mut txn, self.db, &touched, next)?;
+        }
         changelog::file(&mut txn, self.db, &logged)?;
         // A test's stand-in for a full disk, armed on its thread or for this environment's path; the transaction
         // aborts as it drops
@@ -617,6 +623,14 @@ impl Store {
         self.mirror.lock().commit(last, next, entries.as_deref());
         self.wake.notify(next);
         Ok(next)
+    }
+
+    /// The sequence the write transaction `txn` commits as. It holds the environment's one write lock, so the stored
+    /// sequence it reads is the last any process committed
+    pub(crate) fn next_sequence(&self, txn: &heed::RoTxn<'_, heed::AnyTls>) -> Result<u64> {
+        let stored = self.db.get(txn, &meta_key(meta::SEQUENCE))?;
+        let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+        Ok(last.max(self.sequence.load(Ordering::Acquire)) + 1)
     }
 
     /// Moves the stored epoch on, in the transaction replacing every row, which this handle's commit may then finish
@@ -641,6 +655,15 @@ impl Store {
         }
         self.epoch.store(epoch, Ordering::Release);
         Ok(true)
+    }
+
+    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too
+    pub(crate) fn deposit_touched(&self, touched: crate::engine::changed::Touched) {
+        let mut slot = self.touched.lock();
+        match slot.as_mut() {
+            Some(held) => held.merge(touched),
+            None => *slot = Some(touched),
+        }
     }
 
     /// What the write about to commit changed, for the change log

@@ -257,3 +257,40 @@ test('a reset from another process wakes a listener, refuses commits here until 
   assert.equal(db.replacedElsewhere(), null);
   write('Task-c');
 });
+
+test('a reader reads what another process changed since its position, and a unit says what it commits as', (t) => {
+  const { Database } = require(loader);
+  const { Packr } = require('msgpackr');
+  const packr = new Packr({ useRecords: false });
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} }, Note: { fields: {} } } };
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changed-'));
+  const db = Database.open(dir, { syncs: false, schema });
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const create = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  create('Task-mine');
+  const read = (from) => packr.unpack(db.changedSince(['Task'], packr.pack(from), 100));
+  const cursor = read({ sequence: 0 }).next;
+
+  run(`
+    const { Database } = require(${JSON.stringify(loader)});
+    const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
+    const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
+    other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
+    other.close();
+  `);
+  const changed = read(cursor);
+  assert.deepEqual(changed.ids, ['Task-theirs']);
+  assert.equal(changed.done, true);
+  assert.equal(changed.complete, true);
+
+  const unit = db.begin();
+  const next = unit.nextSequence();
+  unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-unit' }], now: 1000 }));
+  assert.deepEqual(packr.unpack(unit.changedSince(['Task'], packr.pack(changed.next), 100)).ids, [], 'stamped only as it commits');
+  const committed = packr.unpack(unit.commit(false));
+  assert.equal(committed.sequence, next);
+  assert.deepEqual(read(changed.next).ids, ['Task-unit']);
+});

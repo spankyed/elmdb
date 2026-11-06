@@ -1,6 +1,7 @@
 //! Entities and their attributes in the store's keys (`docs/architecture/format.md`, Keys):
 //!
-//! - `p/i id` → `[seq, trashed]`: that the entity exists, its place in the store's sequence, and the trash
+//! - `p/i id` → `[seq, trashed, changed]`: that the entity exists, its place in the store's sequence, the trash, and
+//!   the sequence of the commit that last wrote it (`changed`), with its place in `d/h` there; the trash
 //! - `p/v id field` → the field's value, so an entity's fields are one range and a row is one read
 //! - `d/e type seq` → id for a live entity, `d/t type seq` → id for a trashed one: a type's entities in creation order
 //! - `d/c type` → the type's count of live entities
@@ -42,20 +43,32 @@ pub mod field {
 pub struct Record {
     pub seq: u64,
     pub trashed: bool,
+    /// The sequence of the commit that last wrote it, 0 before one has
+    pub changed: u64,
 }
 
 pub fn record(t: &impl Read, id: &str) -> Result<Option<Record>> {
     let Some(bytes) = t.get(&keys::entity(id))? else { return Ok(None) };
+    decode_record(id, &bytes).map(Some)
+}
+
+/// A record as `p/i` holds it; one written before records kept their change reads as changed at 0
+pub fn decode_record(id: &str, bytes: &[u8]) -> Result<Record> {
     let corrupt = || Error::new(ErrorCode::Corrupted, format!("{id}'s record doesn't read"));
-    let value = values::decode(&bytes)?;
+    let value = values::decode(bytes)?;
     let items = value.as_array().ok_or_else(corrupt)?;
     let seq = items.first().and_then(Value::as_u64).ok_or_else(corrupt)?;
     let trashed = items.get(1).and_then(Value::as_bool).ok_or_else(corrupt)?;
-    Ok(Some(Record { seq, trashed }))
+    let changed = items.get(2).and_then(Value::as_u64).unwrap_or(0);
+    Ok(Record { seq, trashed, changed })
+}
+
+pub fn encode_record(record: Record) -> Vec<u8> {
+    values::encode(&Value::Array(vec![record.seq.into(), record.trashed.into(), record.changed.into()]))
 }
 
 fn put_record(t: &mut Txn<'_, '_>, id: &str, record: Record) -> Result<()> {
-    t.put(&keys::entity(id), &values::encode(&Value::Array(vec![record.seq.into(), record.trashed.into()])))
+    t.put(&keys::entity(id), &encode_record(record))
 }
 
 /// The store's sequence, which places entities and relations in the order they were made
@@ -88,10 +101,12 @@ pub fn count(t: &impl Read, entity_type: &str) -> Result<u64> {
 /// Puts a new entity in the store, last in its type's order
 pub fn insert(t: &mut Txn<'_, '_>, id: &str) -> Result<Record> {
     let seq = next_seq(t)?;
-    let record = Record { seq, trashed: false };
+    let record = Record { seq, trashed: false, changed: 0 };
     put_record(t, id, record)?;
     let entity_type = ids::type_of(id).to_owned();
     t.put(&keys::of_type(false, &entity_type, seq), &values::encode(&id.into()))?;
+    // Moved to its commit's sequence as that commits
+    t.put(&keys::changed(&entity_type, 0, seq), &values::encode(&id.into()))?;
     add_count(t, &entity_type, 1)?;
     super::ranks::liveness(t, id, true)?;
     t.event(Event::Created { id: id.to_owned() });
@@ -107,7 +122,7 @@ fn set_trashed(t: &mut Txn<'_, '_>, id: &str, trashed: bool) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     t.del(&keys::of_type(record.trashed, &entity_type, record.seq))?;
     t.put(&keys::of_type(trashed, &entity_type, record.seq), &values::encode(&id.into()))?;
-    put_record(t, id, Record { seq: record.seq, trashed })?;
+    put_record(t, id, Record { trashed, ..record })?;
     add_count(t, &entity_type, if trashed { -1 } else { 1 })?;
     super::ranks::liveness(t, id, !trashed)?;
     t.event(if trashed { Event::Trashed { id: id.to_owned() } } else { Event::Restored { id: id.to_owned() } });
@@ -215,6 +230,7 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     if let Some(record) = record(t, id)? {
         let entity_type = ids::type_of(id).to_owned();
         t.del(&keys::of_type(record.trashed, &entity_type, record.seq))?;
+        t.del(&keys::changed(&entity_type, record.changed, record.seq))?;
         if !record.trashed {
             add_count(t, &entity_type, -1)?;
         }

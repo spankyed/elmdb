@@ -15,6 +15,7 @@ mod sync;
 pub use database::{Database, OpenOptions, OpenReport};
 pub use engine::Unit;
 pub use engine::batch::{Batch, BatchResult, Op, OpResult};
+pub use engine::changed::{After, Changed, Position};
 pub use engine::changelog::{Changes, LoggedCommit};
 pub use engine::changes::ChangeSet;
 pub use error::{Error, ErrorCode, Result};

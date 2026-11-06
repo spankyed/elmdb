@@ -349,6 +349,39 @@ pub fn change_log(sequence: u64) -> Vec<u8> {
     })
 }
 
+/// An entity's place in its type's change order
+pub fn changed(entity_type: &str, changed: u64, place: u64) -> Vec<u8> {
+    with(Prefix::Changed, |w| {
+        w.string(entity_type).number(changed as f64).number(place as f64);
+    })
+}
+
+/// A type's change order
+pub fn changed_of_type(entity_type: &str) -> Vec<u8> {
+    with(Prefix::Changed, |w| {
+        w.string(entity_type);
+    })
+}
+
+/// A tombstone of an entity a commit destroyed
+pub fn destroyed(sequence: u64, entity_type: &str, id: &str) -> Vec<u8> {
+    with(Prefix::Destroyed, |w| {
+        w.number(sequence as f64).string(entity_type).string(id);
+    })
+}
+
+/// The first tombstone at or after `sequence`
+pub fn destroyed_through(sequence: u64) -> Vec<u8> {
+    with(Prefix::Destroyed, |w| {
+        w.number(sequence as f64);
+    })
+}
+
+/// Every tombstone
+pub fn destroyed_prefix() -> Vec<u8> {
+    with(Prefix::Destroyed, |_| {})
+}
+
 /// The change log
 pub fn change_log_prefix() -> Vec<u8> {
     with(Prefix::ChangeLog, |_| {})
