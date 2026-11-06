@@ -114,6 +114,8 @@ impl Wake {
                 .and_then(|found| found.modified())
                 .ok()
                 .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                // mutant-skip: replace > with >= in Wake::read_mailboxes
+                // An age of exactly HALF_MADE, to the nanosecond, is the only one the two answer differently
                 .is_some_and(|age| age > HALF_MADE);
             if old && mailbox::ring(&path) == Rung::Gone {
                 let _ = std::fs::remove_file(&path);
@@ -616,6 +618,33 @@ mod tests {
         assert_eq!(mailbox::ring(&path), Rung::Unknown, "another's, as far as this process can tell");
         Wake::new(dir.path()).notify();
         assert!(path.exists(), "not removed");
+    }
+
+    /// A signal the listening thread takes while it waits in poll, which then fails as interrupted
+    #[cfg(unix)]
+    #[test]
+    fn a_wait_a_signal_interrupts_goes_on_listening() {
+        use std::os::unix::thread::JoinHandleExt;
+        extern "C" fn nothing(_: libc::c_int) {}
+        // SAFETY: a handler that does nothing, installed without SA_RESTART so the wait it interrupts fails
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = nothing as *const () as usize;
+            libc::sigaction(libc::SIGUSR2, &raw const action, std::ptr::null_mut());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
+        let heard = heard(&reader);
+        std::thread::sleep(Duration::from_millis(100));
+        // The handle's id as libc names it: the same type on glibc and macOS, a pointer on musl
+        #[allow(clippy::unnecessary_cast)]
+        let thread = reader.listening.lock().as_ref().unwrap().thread.as_pthread_t() as libc::pthread_t;
+        // SAFETY: the listening thread, still running
+        assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGUSR2) }, 0);
+        std::thread::sleep(Duration::from_millis(100));
+        writer.notify();
+        heard.recv_timeout(SETTLES).expect("still listening");
+        reader.stop();
     }
 
     #[test]
