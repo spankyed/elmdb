@@ -183,6 +183,7 @@ pub struct Store {
 /// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
 /// `committed_elsewhere` last answered. Every commit raises the sequence by one and every commit here passes through
 /// `commit_txn`, so a sequence between `through` and the next commit here is another handle's
+#[derive(Default)]
 struct Accounted {
     through: u64,
     elsewhere: bool,
@@ -334,6 +335,8 @@ impl Store {
         let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);
+        let accounted = PlainMutex::<Accounted>::default();
+        accounted.lock().through = sequence;
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
@@ -357,7 +360,7 @@ impl Store {
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
             touched: PlainMutex::default(),
-            accounted: PlainMutex::new(Accounted { through: sequence, elsewhere: false }),
+            accounted,
         })
     }
 
