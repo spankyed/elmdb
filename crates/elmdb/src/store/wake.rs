@@ -90,6 +90,8 @@ impl Wake {
             peers.addresses = self.read_peers(peers.own_port);
             // A file's time is only as fine as its filesystem's clock, so a port filed just after this read can leave the
             // time as it was: a recent time isn't trusted yet
+            // mutant-skip: replace > with >= in Wake::notify
+            // An age of exactly the grain, to the nanosecond, is the only one the two answer differently
             let settled = reading.duration_since(modified).is_ok_and(|age| age > TIMESTAMP_GRAIN);
             peers.settled = settled.then_some(modified);
         }
@@ -152,6 +154,8 @@ impl Wake {
             loop {
                 match socket.recv(&mut bytes) {
                     Ok(_) => {}
+                    // mutant-skip: replace match guard passing\(&error\) with true in Wake::listen
+                    // Any other failure is of a socket this thread holds for as long as it runs, which nothing here breaks
                     Err(error) if passing(&error) => continue,
                     // Nothing wakes this again, and what was missed is in the log for whoever reads it next
                     Err(_) => return,
@@ -290,6 +294,91 @@ mod tests {
             }
         }
         assert_eq!(last, 9, "still listening");
+        reader.stop();
+    }
+
+    #[test]
+    fn a_failure_a_later_recv_comes_back_from_is_told_from_one_that_ends_the_listener() {
+        use std::io::{Error, ErrorKind};
+        #[cfg(windows)]
+        const MESSAGE_TOO_LONG: i32 = 10040;
+        #[cfg(not(windows))]
+        const MESSAGE_TOO_LONG: i32 = libc::EMSGSIZE;
+        for kind in [ErrorKind::Interrupted, ErrorKind::ConnectionReset, ErrorKind::ConnectionRefused] {
+            assert!(passing(&Error::from(kind)), "{kind:?}");
+        }
+        assert!(passing(&Error::from_raw_os_error(MESSAGE_TOO_LONG)), "a datagram larger than a wake");
+        assert!(!passing(&Error::from(ErrorKind::NotFound)), "anything else ends it");
+    }
+
+    #[test]
+    fn stopping_waits_for_a_listener_that_is_running() {
+        use std::sync::atomic::AtomicBool;
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
+        let (entered, running) = mpsc::channel();
+        let (release, released) = mpsc::channel::<()>();
+        let released = std::sync::Mutex::new(released);
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = Arc::clone(&finished);
+        reader
+            .listen(Arc::new(move |_| {
+                let _ = entered.send(());
+                let _ = released.lock().unwrap().recv();
+                done.store(true, Ordering::Release);
+            }))
+            .unwrap();
+        writer.notify(1);
+        running.recv_timeout(Duration::from_secs(10)).expect("the listener is running");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(300));
+                let _ = release.send(());
+            });
+            reader.stop();
+            assert!(finished.load(Ordering::Acquire), "stop returned before the listener did");
+        });
+    }
+
+    #[test]
+    fn a_listener_stopping_itself_returns() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = Wake::new(dir.path());
+        let reader = Arc::new(Wake::new(dir.path()));
+        let (told, heard) = mpsc::channel();
+        let own = Arc::clone(&reader);
+        reader
+            .listen(Arc::new(move |_| {
+                own.stop();
+                let _ = told.send(());
+            }))
+            .unwrap();
+        writer.notify(1);
+        heard.recv_timeout(Duration::from_secs(10)).expect("stopping from its own thread returns");
+    }
+
+    /// A signal the listening thread takes while it waits in recv, which then fails as interrupted
+    #[cfg(unix)]
+    #[test]
+    fn a_recv_a_signal_interrupts_goes_on_listening() {
+        use std::os::unix::thread::JoinHandleExt;
+        extern "C" fn nothing(_: libc::c_int) {}
+        // SAFETY: a handler that does nothing, installed without SA_RESTART so the wait it interrupts fails
+        unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = nothing as usize;
+            libc::sigaction(libc::SIGUSR2, &raw const action, std::ptr::null_mut());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
+        let heard = heard(&reader);
+        std::thread::sleep(Duration::from_millis(100));
+        let thread = reader.listening.lock().as_ref().unwrap().thread.as_pthread_t();
+        // SAFETY: the listening thread, still running
+        assert_eq!(unsafe { libc::pthread_kill(thread, libc::SIGUSR2) }, 0);
+        std::thread::sleep(Duration::from_millis(100));
+        writer.notify(4);
+        assert_eq!(heard.recv_timeout(Duration::from_secs(10)).unwrap(), 4, "still listening");
         reader.stop();
     }
 }
