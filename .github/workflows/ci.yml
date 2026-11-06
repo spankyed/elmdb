@@ -5,7 +5,7 @@ name: CI
 # ships for (design.md, Packages), each building the binding and running every suite on it, and the instruction counts.
 # A change to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch
 # cancels the run before it. `ci-pass` is the one check a merge waits on. Mutants of a pull request's change run beside
-# this, advisory, in mutants.yml.
+# this in mutants.yml, which a surviving mutant fails.
 on:
   push:
     branches: [main]
