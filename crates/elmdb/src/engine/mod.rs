@@ -369,6 +369,8 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
                     let mut state = UnitState::default();
                     let unbuilt = settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })?;
                     store.deposit(std::mem::take(&mut state.edges));
+                    // Markers for indexes, which no row is: another process reading the log has nothing to read again
+                    store.deposit_logged(changelog::LoggedCommit::derived());
                     Ok(unbuilt)
                 },
                 true,
@@ -739,9 +741,9 @@ impl Unit {
     /// What the change log holds after `cursor`, as this unit's transaction sees it, with the unit's own changes so far:
     /// they aren't in the log until it commits, and something running inside the unit may need to act on them
     pub fn changes_since(&mut self, cursor: u64, limit: usize) -> Result<changelog::Changes> {
-        let txn = self.txn.as_ref().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
-        let mut changes = changelog::since(txn, self.store.db(), cursor, limit)?;
-        changes.pending = Some(ChangeSet::of(&self.state.events));
+        let view = self.view(0.0)?;
+        let mut changes = changelog::since(view.txn, view.db, cursor, limit)?;
+        changes.pending = Some(ChangeSet::of(&view.state.events));
         Ok(changes)
     }
 
