@@ -84,6 +84,8 @@ export declare class Database {
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
   committedElsewhere(): boolean
+  /** The checkpoint named `name`, as the latest commit left it */
+  checkpoint(name: string): Buffer | null
   /**
    * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
    * its `Changed`
@@ -122,6 +124,10 @@ export declare class Unit {
    * bytes of `{ results: OpResult[] }`
    */
   write(batch: Buffer): Buffer
+  /** Records `value` as the checkpoint `name`, committing with this unit or not at all */
+  setCheckpoint(name: string, value: Buffer): void
+  /** The checkpoint named `name`, as this unit sees it */
+  checkpoint(name: string): Buffer | null
   /** What the unit has changed so far: msgpack bytes of its `ChangeSet` */
   pendingChanges(): Buffer
   /** `Database.changedSince` read in the unit, before its own writes are stamped */

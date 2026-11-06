@@ -310,6 +310,15 @@ impl Database {
         self.inner.committed_elsewhere().map_err(to_js)
     }
 
+    /// The checkpoint named `name`, as the latest commit left it
+    #[napi]
+    pub fn checkpoint(&self, name: String) -> Result<Option<Buffer>, Code> {
+        // mutant-skip: replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\(None\)
+        // mutant-skip: replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\(Some\(Default::default\(\)\)\)
+        // Only JavaScript reaches this: `test/database.test.mjs` reads a committed checkpoint through it
+        Ok(self.inner.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
+    }
+
     /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
     /// its `Changed`
     #[napi]
@@ -496,6 +505,23 @@ impl Unit {
     #[napi]
     pub fn write(&mut self, batch: Buffer) -> Result<Buffer, Code> {
         self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
+    }
+
+    /// Records `value` as the checkpoint `name`, committing with this unit or not at all
+    #[napi]
+    pub fn set_checkpoint(&mut self, name: String, value: Buffer) -> Result<(), Code> {
+        // mutant-skip: replace Unit::set_checkpoint -> Result<\(\), Code> with Ok\(\(\)\)
+        // Only JavaScript reaches this: `test/database.test.mjs` sets a checkpoint through it
+        self.open()?.set_checkpoint(&name, &value).map_err(to_js)
+    }
+
+    /// The checkpoint named `name`, as this unit sees it
+    #[napi]
+    pub fn checkpoint(&mut self, name: String) -> Result<Option<Buffer>, Code> {
+        // mutant-skip: replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\(None\)
+        // mutant-skip: replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\(Some\(Default::default\(\)\)\)
+        // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's checkpoint through it
+        Ok(self.open()?.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
     }
 
     /// What the unit has changed so far: msgpack bytes of its `ChangeSet`

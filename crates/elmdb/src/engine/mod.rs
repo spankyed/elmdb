@@ -512,6 +512,12 @@ impl Database {
         finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
+    /// The checkpoint named `name`, as the latest commit left it (`Unit::set_checkpoint`)
+    pub fn checkpoint(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        checkpoint_name(name)?;
+        self.store()?.read(|txn, db| Ok(db.get(txn, &keys::checkpoint(name))?.map(<[u8]>::to_vec)))
+    }
+
     /// Whether another handle has committed since this one last asked, or since it opened: like SQLite's `data_version`,
     /// it moves for another's commits and never for this handle's own, its index builder's included
     pub fn committed_elsewhere(&self) -> Result<bool> {
@@ -741,7 +747,31 @@ pub struct Unit {
     _thread: PhantomData<*const ()>,
 }
 
+/// A checkpoint is named by its reader, and every reader needs a name
+fn checkpoint_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::new(ErrorCode::BatchInvalid, "A checkpoint has a name"));
+    }
+    Ok(())
+}
+
 impl Unit {
+    /// Records `value` as the checkpoint `name`, in this unit, so it commits with the work it records or not at all: a
+    /// reader's place in what it has read (CouchDB's local documents, Kafka's committed offsets). A checkpoint is no
+    /// entity and changes no change order. A backup keeps it with the rows it describes; a dump leaves it out, and
+    /// `reset` and `replace_with` drop it with them, so a reader starts again from nothing
+    pub fn set_checkpoint(&mut self, name: &str, value: &[u8]) -> Result<()> {
+        checkpoint_name(name)?;
+        self.view(0.0)?.put(&keys::checkpoint(name), value)
+    }
+
+    /// The checkpoint named `name`, as this unit sees it
+    pub fn checkpoint(&mut self, name: &str) -> Result<Option<Vec<u8>>> {
+        checkpoint_name(name)?;
+        let view = self.view(0.0)?;
+        unit::Read::get(&view, &keys::checkpoint(name))
+    }
+
     /// What this unit has changed so far, which something running inside it may need to act on before it commits
     pub fn pending_changes(&mut self) -> Result<ChangeSet> {
         let view = self.view(0.0)?;
