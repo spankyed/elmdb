@@ -27,17 +27,21 @@ cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
 cargo xtask check-mutant-exclusions  # every exclude_re in .cargo/mutants.toml still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
+python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BASE what it merges into; fails on a survivor
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
 - **Moved a line a `// mutant-skip:` excuses?** `cargo xtask mutant-exclusions`, and commit `.cargo/mutants.toml`.
+- **A mutant survived?** Kill it with a test that fails on it, or, when no input tells it from the code, name it in a
+  `// mutant-skip:` with why. A mutant in code this machine doesn't compile survives whatever the tests: macOS-only code
+  is read on a Mac, Linux-only and Windows-only code by CI, which mutates only what each runner compiles. Breaking a line
+  by hand checks the cases you thought of; the script checks the ones you didn't, so it runs before the push, not after.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
   tier, adding Apple silicon and Windows; a pull request ready for review runs every target the binding ships for.
   Open a pull request as a draft while iterating, mark it ready (`gh pr ready`) for the full tier, and merge when
-  `ci-pass`, the one required check, is green. Mutants of the change (`mutants (advisory)`) are read in their
-  summary, not waited on.
+  `ci-pass`, the one required check, and the `mutants` jobs, which a surviving mutant fails, are green.
 
 The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supported Rust version.
 
