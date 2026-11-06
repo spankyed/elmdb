@@ -21,6 +21,11 @@ pub(crate) struct WriterLock {
     _held: Option<macos::Hold>,
 }
 
+impl WriterLock {
+    /// Lets the next writer in, as dropping it would; spelled out where that has to happen before the scope ends
+    pub(crate) fn release(self) {}
+}
+
 /// What a writer takes before LMDB's write lock
 pub(crate) struct Writers {
     #[cfg(target_os = "macos")]

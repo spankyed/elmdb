@@ -708,7 +708,7 @@ impl Database {
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
-            drop(writer);
+            writer.release();
             store.end_unit();
             return Err(error);
         }

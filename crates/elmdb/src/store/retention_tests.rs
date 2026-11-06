@@ -287,7 +287,7 @@ fn unit_keeps_its_uncommitted_view_across_idle_expiry() {
     assert_eq!(store.db.get(&unit, b"block0000").unwrap(), Some(b"uncommitted".as_slice()));
     unit.abort();
     drop(gate);
-    drop(writer);
+    writer.release();
     store.end_unit();
     store
         .read(|txn, db| {

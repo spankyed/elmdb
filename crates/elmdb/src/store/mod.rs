@@ -421,7 +421,7 @@ impl Store {
             })?
             .unwrap_commit();
         // Let go before the graphs' transaction, which takes it again
-        drop(writer);
+        writer.release();
         env.force_sync()?;
         Self::with_graphs(env, db, read_only, writers)
     }
