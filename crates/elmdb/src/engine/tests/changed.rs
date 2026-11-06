@@ -148,6 +148,15 @@ fn a_reader_older_than_the_kept_tombstones_is_told_it_may_have_missed_a_destroy(
     assert!(!stale.complete, "its tombstone was trimmed");
     assert!(db.changed_since(&["Note".to_owned()], &from(old), 100).unwrap().complete, "no Note was destroyed");
     assert!(since(&db, &from(db.sequence().unwrap() - 1), 100).complete, "a reader since then missed nothing");
+    assert!(since(&db, &from(old + 1), 100).complete, "a reader from the destroy's own commit has read it");
+    // A reader exactly at what trimming dropped has every tombstone after it, a destroy since included
+    let floor = store
+        .read(|txn, d| Ok(d.get(txn, &meta_key(crate::engine::changed::DESTROYED_FLOOR))?.map(<[u8]>::to_vec)))
+        .unwrap()
+        .map(|bytes| u64::from_be_bytes(bytes.try_into().unwrap()))
+        .expect("trimmed");
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-2" })]).unwrap();
+    assert!(since(&db, &from(floor), 100).complete, "from the floor itself");
 }
 
 #[test]
@@ -301,4 +310,111 @@ fn a_type_keeps_an_order_only_as_its_schema_says_and_a_reader_of_one_that_doesnt
         Database::open(dir.path(), OpenOptions { schema: Some(super::schema()), syncs: false, ..Default::default() })
             .unwrap();
     assert!(db.check().unwrap().is_clean(), "the order went with the schema that kept it");
+}
+
+fn note(id: &str) -> serde_json::Value {
+    json!({ "op": "create", "type": "Note", "id": id, "fields": {} })
+}
+
+#[test]
+fn pages_that_end_within_one_commit_across_types_read_each_entity_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let start = db.sequence().unwrap();
+    // Tasks first, so the Notes' places are past theirs though the Notes come first in the order
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3"), note("Note-1"), note("Note-2"), note("Note-3")])
+        .unwrap();
+    for limit in 1..=4 {
+        let (mut position, mut read) = (from(start), Vec::new());
+        for _ in 0..20 {
+            let page = since(&db, &position, limit);
+            assert!(page.ids.len() <= limit, "a page holds at most its limit");
+            read.extend(page.ids);
+            position = page.next;
+            if page.done {
+                break;
+            }
+        }
+        assert_eq!(read, ["Note-1", "Note-2", "Note-3", "Task-1", "Task-2", "Task-3"], "in pages of {limit}");
+    }
+}
+
+#[test]
+fn a_page_ending_within_a_commit_names_what_that_commit_destroyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-gone")]).unwrap();
+    let start = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-gone" }), task("Task-1"), task("Task-2"), task("Task-3")])
+        .unwrap();
+    let page = since(&db, &from(start), 2);
+    assert!(!page.done);
+    assert_eq!(page.next.sequence, db.sequence().unwrap(), "the page ends within the destroying commit");
+    assert_eq!(page.destroyed, ["Task-gone"]);
+}
+
+#[test]
+fn a_reader_from_the_commit_an_order_was_built_at_is_told_everything() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let built = db
+        .store()
+        .unwrap()
+        .read(|txn, d| Ok(d.get(txn, &meta_key("changeOrder:Task"))?.map(<[u8]>::to_vec)))
+        .unwrap()
+        .map(|bytes| u64::from_be_bytes(bytes.try_into().unwrap()))
+        .expect("Task keeps an order");
+    assert!(since(&db, &from(built), 10).complete, "from the commit it was built at");
+}
+
+#[test]
+fn a_type_that_keeps_no_order_is_given_none_at_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut json = super::schema_json();
+    json["types"]["Task"]["changeOrder"] = json!(true);
+    let schema = crate::schema::Schema::from_json(&json).unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![note("Note-1"), task("Task-1")]).unwrap();
+    db.close().unwrap();
+    let db = Database::open(
+        dir.path(),
+        OpenOptions {
+            schema: Some(crate::schema::Schema::from_json(&json).unwrap()),
+            syncs: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let held = |entity_type: &str| {
+        db.snapshot(|s| {
+            let mut held = 0;
+            crate::engine::unit::Read::visit(s, &keys::changed_of_type(entity_type), |_, _| {
+                held += 1;
+                true
+            })?;
+            Ok(held)
+        })
+        .unwrap()
+    };
+    assert_eq!((held("Note"), held("Task")), (0, 1), "only the type that asks keeps one");
+}
+
+#[test]
+fn what_the_binding_reads_is_what_changed_in_msgpack_from_the_position_it_gave() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let start = db.sequence().unwrap();
+    write(&db, vec![task("Task-2")]).unwrap();
+    let position = rmp_serde::to_vec_named(&from(start)).unwrap();
+    let decoded: Changed = rmp_serde::from_slice(&db.changed_since_bytes(&types(), &position, 10).unwrap()).unwrap();
+    assert_eq!(decoded, since(&db, &from(start), 10));
+    assert_eq!(decoded.ids, ["Task-2"], "from the position given, not the start");
+    let mut unit = db.begin().unwrap();
+    let read = unit.changed_since(&types(), &from(start), 10).unwrap();
+    assert_eq!(read.ids, ["Task-2"], "a unit reads what changed too");
+    let decoded: Changed = rmp_serde::from_slice(&unit.changed_since_bytes(&types(), &position, 10).unwrap()).unwrap();
+    assert_eq!(decoded, read);
 }

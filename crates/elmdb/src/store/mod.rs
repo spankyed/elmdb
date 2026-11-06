@@ -557,10 +557,12 @@ impl Store {
                 continue;
             };
             op.record_elapsed(names::WAITED_US);
-            // Only what this write hands over reaches its commit, not what an aborted one left
+            // Only what this write hands over reaches its commit, not what an aborted one left: a replacement that failed
+            // before committing can't vouch for this write
             *self.deposited.lock() = None;
             *self.logged.lock() = None;
             *self.touched.lock() = None;
+            self.replacing.store(0, Ordering::Release);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -594,6 +596,9 @@ impl Store {
     pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
         let replacing = self.replacing.swap(0, Ordering::AcqRel);
         let epoch = stored_epoch(&txn, self.db)?;
+        // mutant-skip: replace \|\| with && in Store::commit_txn
+        // A replacement's transaction stores the epoch it moves to, and a write's start clears one a failed replacement
+        // left: a replacing commit reads back its own epoch, so the second clause adds nothing a test can tell apart
         if epoch != self.epoch.load(Ordering::Acquire) && (replacing == 0 || epoch != replacing) {
             return Err(Error::new(
                 ErrorCode::DataReplaced,
@@ -607,7 +612,7 @@ impl Store {
         let mut logged = self.logged.lock().take().unwrap_or_else(LoggedCommit::everything);
         logged.sequence = next;
         logged.origin.clone_from(&self.origin);
-        if let Some(touched) = self.touched.lock().take().filter(|touched| !touched.is_empty()) {
+        if let Some(touched) = self.touched.lock().take() {
             crate::engine::changed::stamp(&mut txn, self.db, &touched, next)?;
         }
         changelog::file(&mut txn, self.db, &logged)?;
@@ -657,7 +662,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too
+    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too, as a
+    /// replacement deposits every entity before its unit deposits what it wrote
     pub(crate) fn deposit_touched(&self, touched: crate::engine::changed::Touched) {
         let mut slot = self.touched.lock();
         match slot.as_mut() {
@@ -784,6 +790,8 @@ impl Store {
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
+                        // A replacement that failed before committing can't vouch for this unit
+                        self.replacing.store(0, Ordering::Release);
                         return Ok((txn, guard));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
