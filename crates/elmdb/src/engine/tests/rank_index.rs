@@ -2715,7 +2715,7 @@ fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
     run_owing_child(&dir);
     assert!(owes(&db), "the process left the index owed");
     // A commit that pushes nothing of its own: only finding the other process's commit queues the work
-    let mut unit = db.begin().unwrap();
+    let unit = db.begin().unwrap();
     unit.commit(false).unwrap();
     db.wait_for_index_builds().unwrap();
     assert!(!owes(&db), "drained after a commit here, with no wake heard");
