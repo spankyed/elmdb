@@ -322,7 +322,10 @@ impl Database {
         let (slot, schemas, tracks) = (Arc::clone(&self.builder), self.observing_schema(), Arc::clone(&self.tracks));
         let read_only = self.read_only;
         store.wake.listen(Arc::new(move |sequence| {
-            if let Some(store) = weak.upgrade().filter(|_| !read_only) {
+            // Work over rows another process has replaced can't commit until the holder adopts that, which queues it
+            let current =
+                |store: &Arc<crate::store::Store>| store.replaced_elsewhere().is_ok_and(|replaced| replaced.is_none());
+            if let Some(store) = weak.upgrade().filter(|store| !read_only && current(store)) {
                 let schema = Arc::clone(&schemas.read());
                 if let Ok(owed) = crate::engine::remaining_indexes(&store, &schema) {
                     let builders = Builders {

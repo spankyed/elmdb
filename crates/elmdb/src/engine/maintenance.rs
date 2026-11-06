@@ -294,21 +294,25 @@ impl Database {
         )
     }
 
-    /// Whether another process has replaced every row (`reset`, `replace_with`) since this handle last adopted that. Until
-    /// it does, its commits are refused (`DATA_REPLACED`) and its reads read what's there now
-    pub fn replaced_elsewhere(&self) -> Result<bool> {
+    /// The epoch another process's replacement of every row (`reset`, `replace_with`) moved the database to, when this
+    /// handle hasn't adopted it. Until it does, its commits are refused (`DATA_REPLACED`) and its reads read what's there
+    /// now
+    pub fn replaced_elsewhere(&self) -> Result<Option<u64>> {
         self.store()?.replaced_elsewhere()
     }
 
-    /// Takes another process's replacement of every row as seen, so commits here are taken again, and queues the index
-    /// work the store says is owed
-    pub fn adopt_replacement(&self) -> Result<()> {
+    /// Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again, and queues the
+    /// index work the store says is owed. Answers false, adopting nothing, when another replacement has landed since
+    /// `replaced_elsewhere` named `epoch`: the caller starts over from what is there now
+    pub fn adopt_replacement(&self, epoch: u64) -> Result<bool> {
         let store = self.store()?;
-        store.adopt_replacement()?;
+        if !store.adopt_replacement(epoch)? {
+            return Ok(false);
+        }
         if let Some(builders) = self.builders()? {
             builders.queue(super::remaining_indexes(&store, &self.schema_guard())?);
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's

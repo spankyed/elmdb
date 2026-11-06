@@ -248,10 +248,12 @@ test('a reset from another process wakes a listener, refuses commits here until 
     other.close();
   `);
   await woken;
-  assert.equal(db.replacedElsewhere(), true);
+  const epoch = db.replacedElsewhere();
+  assert.equal(typeof epoch, 'number');
   assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
 
-  db.adoptReplacement();
-  assert.equal(db.replacedElsewhere(), false);
+  assert.equal(db.adoptReplacement(epoch + 1), false, 'not the stored one');
+  assert.equal(db.adoptReplacement(epoch), true);
+  assert.equal(db.replacedElsewhere(), null);
   write('Task-c');
 });

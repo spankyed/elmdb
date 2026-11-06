@@ -88,7 +88,8 @@ changed is in the log, so one lost costs delay.
 
 `reset` and `replace_with` move a stored epoch on. A handle's commit under an epoch it hasn't seen is refused
 (`DATA_REPLACED`), since whatever it read before writing has gone, while its reads carry on over what's there now. The
-holder asks `replaced_elsewhere` when woken, or when a write is refused, and `adopt_replacement` takes it as seen.
+holder asks `replaced_elsewhere` when woken, or when a write is refused, which names the epoch; once it has acted on what's
+there, `adopt_replacement(epoch)` takes it as seen, and answers false if another replacement has landed since.
 
 ## Reads: plans
 
