@@ -544,7 +544,6 @@ export interface LoggedChanges {
         origin: string;
         everything: boolean;
         types: string[];
-        entities?: string[];
     }>;
     pending?: {
         entities: Record<string, unknown>;

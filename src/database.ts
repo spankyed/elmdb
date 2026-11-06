@@ -239,7 +239,7 @@ export interface LoggedChanges {
   through: number;
   /** The log no longer reaches the cursor, so `commits` doesn't say everything since it */
   truncated: boolean;
-  commits: Array<{ sequence: number; origin: string; everything: boolean; types: string[]; entities?: string[] }>;
+  commits: Array<{ sequence: number; origin: string; everything: boolean; types: string[] }>;
   /** A unit's own changes so far, when one is open */
   pending?: { entities: Record<string, unknown> };
 }
