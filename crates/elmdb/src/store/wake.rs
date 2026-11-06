@@ -54,6 +54,9 @@ pub(crate) struct Wake {
 /// Coarser than any filesystem's directory times here: FAT's 2 seconds is the worst of them
 const TIMESTAMP_GRAIN: Duration = Duration::from_secs(3);
 
+/// Far longer than making a mailbox takes, from its FIFO to its filing: one still half made after this was left
+const HALF_MADE: Duration = Duration::from_secs(60);
+
 /// What ringing a mailbox found
 #[derive(Debug, PartialEq)]
 enum Rung {
@@ -91,15 +94,30 @@ impl Wake {
         });
     }
 
-    /// The mailboxes filed, without this handle's and those being made
+    /// The mailboxes filed, without this handle's and those being made. One left half made, by a listener that ended
+    /// between making it and filing it, is removed once it is older than any making takes and nobody owns it
     fn read_mailboxes(&self, own: Option<&Path>) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(&self.directory) else { return Vec::new() };
-        entries
-            .flatten()
-            .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
-            .map(|entry| entry.path())
-            .filter(|path| Some(path.as_path()) != own)
-            .collect()
+        let mut mailboxes = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !entry.file_name().to_string_lossy().starts_with('.') {
+                if Some(path.as_path()) != own {
+                    mailboxes.push(path);
+                }
+                continue;
+            }
+            let old = entry
+                .metadata()
+                .and_then(|found| found.modified())
+                .ok()
+                .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                .is_some_and(|age| age > HALF_MADE);
+            if old && mailbox::ring(&path) == Rung::Gone {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        mailboxes
     }
 
     /// Tells this handle's own listener, as a wake from another process would: on its thread, so whoever calls this holds
@@ -176,8 +194,48 @@ mod mailbox {
         write: File,
     }
 
-    fn open_write(path: &Path) -> std::io::Result<File> {
+    pub(super) fn open_write(path: &Path) -> std::io::Result<File> {
         std::fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(path)
+    }
+
+    /// Writes a wake to a FIFO whose reader may have gone since it was opened, without the `SIGPIPE` that would end a
+    /// process not ignoring it: elmdb is a library, and its host decides what that signal does. A full FIFO already
+    /// holds a wake, so `EAGAIN` is as good as written
+    pub(super) fn write_wake(file: &File) -> std::io::Result<()> {
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: a descriptor this function's caller holds open; the flag only says what a broken pipe does
+            unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETNOSIGPIPE, 1) };
+            written((&*file).write(&[1]))
+        }
+        #[cfg(not(target_os = "macos"))]
+        // SAFETY: signal sets made here and the calling thread's own mask, restored before returning
+        unsafe {
+            let mut pipe: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&raw mut pipe);
+            libc::sigaddset(&raw mut pipe, libc::SIGPIPE);
+            let mut pending: libc::sigset_t = std::mem::zeroed();
+            libc::sigpending(&raw mut pending);
+            let already = libc::sigismember(&raw const pending, libc::SIGPIPE) == 1;
+            let mut kept: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &raw const pipe, &raw mut kept);
+            let result = (&*file).write(&[1]);
+            if !already && matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPIPE)) {
+                // The signal the write raised, taken while blocked so it never reaches the thread
+                let now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+                libc::sigtimedwait(&raw const pipe, std::ptr::null_mut(), &raw const now);
+            }
+            libc::pthread_sigmask(libc::SIG_SETMASK, &raw const kept, std::ptr::null_mut());
+            written(result)
+        }
+    }
+
+    fn written(result: std::io::Result<usize>) -> std::io::Result<()> {
+        match result {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(error),
+        }
     }
 
     impl Mailbox {
@@ -251,11 +309,12 @@ mod mailbox {
             Err(_) => return Rung::Unknown,
         }
         match open_write(path) {
-            Ok(mut file) => {
-                // A full FIFO already holds a wake
-                let _ = file.write(&[1]);
-                Rung::Told
-            }
+            Ok(file) => match write_wake(&file) {
+                Ok(()) => Rung::Told,
+                // Its reader went between the open and the write
+                Err(error) if error.raw_os_error() == Some(libc::EPIPE) => Rung::Gone,
+                Err(_) => Rung::Unknown,
+            },
             Err(error) if error.raw_os_error() == Some(libc::ENXIO) => Rung::Gone,
             Err(_) => Rung::Unknown,
         }
@@ -355,6 +414,8 @@ mod mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
     use std::sync::mpsc;
 
     /// A directory opened so its times can be set: Windows opens one only with backup semantics, and to write its times
@@ -450,6 +511,70 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 1);
         reader.stop();
         assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "a stopped listener files nothing");
+    }
+
+    /// Leaves `SIGPIPE` to end the process, as a host that doesn't ignore it does, and writes a wake to a FIFO whose
+    /// reader has gone since it was opened
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "a helper a_wake_to_a_reader_gone_since_the_open_ends_no_process runs as a process of its own"]
+    fn child_writes_to_a_fifo_whose_reader_has_gone() {
+        let Ok(dir) = std::env::var("ELMDB_PIPE_DIR") else { return };
+        // SAFETY: the default action, in a process of its own
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+        let path = file_ownerless(Path::new(&dir));
+        let reader = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(&path).unwrap();
+        let writer = mailbox::open_write(&path).unwrap();
+        drop(reader);
+        let error = mailbox::write_wake(&writer).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(libc::EPIPE));
+        println!("survived");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_wake_to_a_reader_gone_since_the_open_ends_no_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "store::wake::tests::child_writes_to_a_fifo_whose_reader_has_gone",
+                "--nocapture",
+            ])
+            .env("ELMDB_PIPE_DIR", dir.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success() && stdout.contains("survived"), "{:?}: {stdout}", output.status);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_mailbox_left_half_made_is_removed_once_it_is_old_and_one_being_made_is_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = dir.path().join("wake");
+        let made = |name: &str| {
+            let path = file_ownerless(&wake);
+            let renamed = wake.join(name);
+            std::fs::rename(&path, &renamed).unwrap();
+            renamed
+        };
+        let left = made(".left");
+        let long_ago = SystemTime::now() - Duration::from_secs(600);
+        let times = std::fs::FileTimes::new().set_modified(long_ago);
+        // A FIFO's times are set through a handle that doesn't wait for a reader
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&left)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        let making = made(".making");
+        Wake::new(dir.path()).notify();
+        assert!(!left.exists(), "left half made long ago, by nobody");
+        assert!(making.exists(), "still being made, as far as anyone can tell");
     }
 
     #[test]
