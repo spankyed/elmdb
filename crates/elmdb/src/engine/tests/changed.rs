@@ -180,9 +180,12 @@ fn the_tombstones_stay_within_their_bound() {
             Ok(held)
         })
         .unwrap();
-    assert!(
-        (TOMBSTONE_COMMITS..TOMBSTONE_COMMITS + TRIM_EVERY).contains(&held),
-        "what it promises, and what it has destroyed since it last trimmed: {held}"
+    // Trimmed at the last multiple of TRIM_EVERY to the TOMBSTONE_COMMITS before it, and none trimmed since
+    let sequence = db.sequence().unwrap();
+    assert_eq!(
+        held,
+        TOMBSTONE_COMMITS + sequence % TRIM_EVERY + 1,
+        "what it promises, and every destroy since it last trimmed"
     );
 }
 

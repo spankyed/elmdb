@@ -179,6 +179,8 @@ fn a_unit_sees_its_own_changes_before_it_commits() {
     let mut unit = db.begin().unwrap();
     unit.write(&batch(vec![large_task("Task-pending")])).unwrap();
     assert!(unit.pending_changes().unwrap().entities.contains_key("Task-pending"));
+    let decoded: crate::ChangeSet = rmp_serde::from_slice(&unit.pending_changes_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, unit.pending_changes().unwrap(), "what the binding reads, in msgpack");
     unit.commit(false).unwrap();
 }
 
