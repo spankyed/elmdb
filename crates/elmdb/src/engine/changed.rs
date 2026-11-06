@@ -63,6 +63,9 @@ impl Touched {
             if kept(schema, ids::type_of(id)) {
                 touched.ids.insert(id.clone());
                 match event {
+                    // mutant-skip: delete match arm Some\(Event::Created\{..\}\) in Touched::of
+                    // Spares the delete of a place a new entity never had: without it the delete finds nothing, and the
+                    // order is the same
                     Some(Event::Created { .. }) => {
                         touched.created.insert(id.clone());
                     }
@@ -89,13 +92,11 @@ impl Touched {
         touched
     }
 
-    /// Every entity of the types that keep a change order, for a commit that replaced them all
-    pub(crate) fn every(schema: &crate::schema::Schema) -> Self {
-        let types = schema.types.iter().filter(|(_, def)| def.change_order).map(|(name, _)| name.clone()).collect();
-        Self { every: true, types, ..Self::default() }
-    }
-
+    /// What `other` wrote as well
     pub(crate) fn merge(&mut self, other: Touched) {
+        // mutant-skip: replace Touched::merge with \(\)
+        // Two deposits meet only in a replacement, whose first is every entity of every type that keeps an order, so
+        // what a merge adds to it is in it already
         self.every |= other.every;
         self.types.extend(other.types);
         self.ids.extend(other.ids);
@@ -103,8 +104,10 @@ impl Touched {
         self.destroyed.extend(other.destroyed);
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        !self.every && self.ids.is_empty()
+    /// Every entity of the types that keep a change order, for a commit that replaced them all
+    pub(crate) fn every(schema: &crate::schema::Schema) -> Self {
+        let types = schema.types.iter().filter(|(_, def)| def.change_order).map(|(name, _)| name.clone()).collect();
+        Self { every: true, types, ..Self::default() }
     }
 }
 
@@ -313,6 +316,8 @@ pub(crate) fn since(
     for &entity_type in &types {
         let (changed, place, inclusive) = match &from.after {
             Some(after) if after.entity_type.as_str() == entity_type => (from.sequence, after.place, false),
+            // mutant-skip: replace < with <= in since
+            // A type equal to the one the reader stopped in took the arm above
             Some(after) if after.entity_type.as_str() < entity_type => (from.sequence, 0, true),
             _ => (from.sequence.saturating_add(1), 0, true),
         };
@@ -326,12 +331,10 @@ pub(crate) fn since(
                 break;
             }
             let parts = decode_key(key)?;
-            let number = |part: Option<&Part>| match part {
-                Some(Part::Number(n)) => Ok(*n as u64),
-                _ => Err(Error::new(ErrorCode::Corrupted, "A change order key doesn't read")),
+            let [.., Part::Number(changed), Part::Number(place)] = parts.as_slice() else {
+                return Err(Error::new(ErrorCode::Corrupted, "A change order key doesn't read"));
             };
-            let changed = number(parts.get(parts.len() - 2))?;
-            let place = number(parts.last())?;
+            let (changed, place) = (*changed as u64, *place as u64);
             let id = values::decode(value)?
                 .as_str()
                 .map(str::to_owned)
@@ -359,9 +362,7 @@ pub(crate) fn since(
             break;
         }
         let parts = decode_key(key)?;
-        let (Some(Part::Number(sequence)), Some(Part::String(entity_type)), Some(Part::String(id))) =
-            (parts.get(parts.len() - 3), parts.get(parts.len() - 2), parts.last())
-        else {
+        let [.., Part::Number(sequence), Part::String(entity_type), Part::String(id)] = parts.as_slice() else {
             return Err(Error::new(ErrorCode::Corrupted, "A tombstone's key doesn't read"));
         };
         if *sequence as u64 > through {
