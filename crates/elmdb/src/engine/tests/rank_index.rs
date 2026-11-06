@@ -2703,6 +2703,25 @@ fn the_index_builders_commits_are_this_handles_own() {
 }
 
 #[test]
+fn a_read_only_handle_woken_by_another_process_starts_no_build() {
+    let dir = tempfile::tempdir().unwrap();
+    near_links(&dir, 400, 5, 0).close().unwrap();
+    run_owing_child(&dir);
+    let db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("woken");
+    db.wait_for_index_builds().unwrap();
+    let status = db.index_status().unwrap();
+    assert!(
+        status.iter().all(|s| s.failure.is_none()),
+        "no build started, so none failed for want of a write: {status:?}"
+    );
+    assert!(owes(&db), "and the work is still owed, for a handle that can write");
+}
+
+#[test]
 fn being_woken_finishes_what_a_process_left_owed_without_a_commit_here() {
     let dir = tempfile::tempdir().unwrap();
     let db = near_links(&dir, 400, 5, 0);

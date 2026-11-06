@@ -1104,3 +1104,31 @@ fn a_database_lets_go_of_the_read_it_keeps_when_asked() {
     db.release_idle_reads().unwrap();
     assert_eq!(store.idle.len(), 0);
 }
+
+#[test]
+fn a_replacement_that_failed_before_committing_vouches_for_no_later_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // A replacement that moves the epoch and then fails, as a reset whose index settling fails does
+    let failed = store.write(
+        |txn, db| {
+            store.replacing_every_row(txn, db)?;
+            Err::<(), _>(Error::new(ErrorCode::Io, "the replacement failed"))
+        },
+        false,
+    );
+    assert!(failed.is_err());
+    // Another process replaces every row, moving the stored epoch to the same number
+    let mut txn = store.env.write_txn().unwrap();
+    let next = stored_epoch(&txn, store.db).unwrap() + 1;
+    put_meta(&mut txn, store.db.main, meta::EPOCH, &next.to_be_bytes()).unwrap();
+    txn.commit().unwrap();
+    assert_eq!(
+        put(&store, "a", b"2").unwrap_err().code,
+        ErrorCode::DataReplaced,
+        "refused, the replacement not its own"
+    );
+    let (txn, _gate, _writer) = store.begin().unwrap();
+    assert_eq!(store.commit_txn(txn).unwrap_err().code, ErrorCode::DataReplaced, "a unit refused too");
+}
