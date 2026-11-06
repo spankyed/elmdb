@@ -262,7 +262,7 @@ test('a reader reads what another process changed since its position, and a unit
   const { Database } = require(loader);
   const { Packr } = require('msgpackr');
   const packr = new Packr({ useRecords: false });
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} }, Note: { fields: {} } } };
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {}, changeOrder: true }, Note: { fields: {} } } };
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-changed-'));
   const db = Database.open(dir, { syncs: false, schema });
   t.after(() => {

@@ -18,7 +18,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `m/` | the format, the kind, the schema and its hash, the last commit's sequence, how many times every row has been replaced, whether the change order is built, and how far tombstones are trimmed and each type's newest destroy | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
-| `d/h` type changed place | a type's entities in the order of the commits that last wrote them | derived |
+| `d/h` type changed place | a type's entities in the order of the commits that last wrote them, for a type whose schema sets `changeOrder` | derived |
 | `d/rc` kind | a relation kind's count | derived |
 | `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |

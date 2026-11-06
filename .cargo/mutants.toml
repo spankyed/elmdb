@@ -91,7 +91,7 @@ exclude_re = [
     "crates/elmdb/src/engine/changelog.rs:61:.*replace LoggedCommit::derived -> Self with Default::default()",
     "crates/elmdb/src/engine/derive/sorted.rs:15:.*replace \\* with",
     "crates/elmdb/src/engine/derive.rs:614:.*replace == with != in build_chunk",
-    "crates/elmdb/src/engine/entities.rs:383:.*replace == with != in check_unique",
+    "crates/elmdb/src/engine/entities.rs:380:.*replace == with != in check_unique",
     "crates/elmdb/src/engine/mirror.rs:59:.*delete -",
     "crates/elmdb/src/engine/mirror.rs:166:.*replace > with >= in EdgeMirror::commit",
     "crates/elmdb/src/engine/mod.rs:82:.*delete ! in drain_commits",

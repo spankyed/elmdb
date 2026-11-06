@@ -87,7 +87,10 @@ listener as soon as another process commits (`store/wake.rs`: loopback UDP to th
 changed is in the log, so one lost costs delay.
 
 **Changed since.** Every entity keeps the sequence of the commit that last wrote it, a field, its trash state or a
-relation at either end, and `d/h` keeps each type's entities in that order (`engine/changed.rs`). `changed_since(types,
+relation at either end, and for a type whose schema sets `changeOrder`, `d/h` keeps its entities in that order
+(`engine/changed.rs`). The order is built at open from the entities the type holds, and dropped when the schema stops
+asking. A commit to a type that keeps one costs about a fifth more (`examples/write-cost.rs`, 2026-11-06, load 6 to 9),
+so only a type something reads it from sets it; a type that keeps none pays nothing. `changed_since(types,
 from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
 entities (`Position.after`), with the entities destroyed since from tombstones the change log's bound keeps. A reader
 older than the kept tombstones, of a type with a destroy since, is told the answer is incomplete. A commit stamps what

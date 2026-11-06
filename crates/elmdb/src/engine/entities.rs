@@ -105,10 +105,7 @@ pub fn insert(t: &mut Txn<'_, '_>, id: &str) -> Result<Record> {
     put_record(t, id, record)?;
     let entity_type = ids::type_of(id).to_owned();
     t.put(&keys::of_type(false, &entity_type, seq), &values::encode(&id.into()))?;
-    // Moved to its commit's sequence as that commits
-    if super::changed::kept(t.schema(), &entity_type) {
-        t.put(&keys::changed(&entity_type, 0, seq), &values::encode(&id.into()))?;
-    }
+    // Its place in its type's change order is put as its commit stamps it (`changed::stamp`)
     add_count(t, &entity_type, 1)?;
     super::ranks::liveness(t, id, true)?;
     t.event(Event::Created { id: id.to_owned() });

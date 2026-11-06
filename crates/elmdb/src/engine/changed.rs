@@ -46,6 +46,8 @@ pub(crate) fn kept(schema: &crate::schema::Schema, entity_type: &str) -> bool {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Touched {
     ids: BTreeSet<String>,
+    /// Those created by the commit, which have no place in the change order yet
+    created: BTreeSet<String>,
     destroyed: BTreeSet<String>,
     /// Every entity of `types`, for a commit that replaced them all
     every: bool,
@@ -57,25 +59,30 @@ impl Touched {
     /// ends
     pub(crate) fn of(events: &[Event], schema: &crate::schema::Schema) -> Self {
         let mut touched = Self::default();
-        let mut add = |id: &String, destroyed: bool| {
+        let mut add = |id: &String, event: Option<&Event>| {
             if kept(schema, ids::type_of(id)) {
                 touched.ids.insert(id.clone());
-                if destroyed {
-                    touched.destroyed.insert(id.clone());
+                match event {
+                    Some(Event::Created { .. }) => {
+                        touched.created.insert(id.clone());
+                    }
+                    Some(Event::Destroyed { .. }) => {
+                        touched.created.remove(id);
+                        touched.destroyed.insert(id.clone());
+                    }
+                    _ => {}
                 }
             }
         };
         for event in events {
             match event {
-                Event::Created { id } | Event::Field { id, .. } | Event::Trashed { id } | Event::Restored { id } => {
-                    add(id, false);
-                }
-                Event::Destroyed { id } => add(id, true),
+                Event::Created { id } | Event::Destroyed { id } => add(id, Some(event)),
+                Event::Field { id, .. } | Event::Trashed { id } | Event::Restored { id } => add(id, None),
                 Event::Linked { source, target, .. }
                 | Event::Unlinked { source, target, .. }
                 | Event::RelationChanged { source, target, .. } => {
-                    add(source, false);
-                    add(target, false);
+                    add(source, None);
+                    add(target, None);
                 }
             }
         }
@@ -92,6 +99,7 @@ impl Touched {
         self.every |= other.every;
         self.types.extend(other.types);
         self.ids.extend(other.ids);
+        self.created.extend(other.created);
         self.destroyed.extend(other.destroyed);
     }
 
@@ -123,7 +131,9 @@ pub(crate) fn stamp(txn: &mut heed::RwTxn<'_>, db: Db, touched: &Touched, sequen
         if record.changed == sequence {
             continue;
         }
-        db.main.delete(txn, &keys::changed(entity_type, record.changed, record.seq))?;
+        if !touched.created.contains(id) {
+            db.main.delete(txn, &keys::changed(entity_type, record.changed, record.seq))?;
+        }
         db.main.put(txn, &keys::changed(entity_type, sequence, record.seq), &values::encode(&id.as_str().into()))?;
         db.main.put(
             txn,

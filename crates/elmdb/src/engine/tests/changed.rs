@@ -55,6 +55,7 @@ fn a_write_moves_what_it_wrote_to_its_commit_and_a_reader_reads_only_that() {
     assert!(all.done && all.complete);
     assert_eq!(all.next, from(db.sequence().unwrap()));
 
+    assert!(db.check().unwrap().is_clean());
     let later = since(&db, &from(after_create), 100);
     assert_eq!(later.ids, ["Task-1"], "only what changed after the cursor");
     assert_eq!(since(&db, &all.next, 100).ids, Vec::<String>::new(), "nothing since");
@@ -81,6 +82,7 @@ fn a_trash_a_restore_and_a_relation_at_either_end_move_an_entity() {
         moved(vec![json!({ "op": "unlink", "source": "Task-2", "kind": "refs", "target": "Task-3" })]),
         ["Task-2", "Task-3"]
     );
+    assert!(db.check().unwrap().is_clean(), "each move left one place per entity");
 }
 
 #[test]
