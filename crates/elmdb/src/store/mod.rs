@@ -612,7 +612,7 @@ impl Store {
         let mut logged = self.logged.lock().take().unwrap_or_else(LoggedCommit::everything);
         logged.sequence = next;
         logged.origin.clone_from(&self.origin);
-        if let Some(touched) = self.touched.lock().take().filter(|touched| !touched.is_empty()) {
+        if let Some(touched) = self.touched.lock().take() {
             crate::engine::changed::stamp(&mut txn, self.db, &touched, next)?;
         }
         changelog::file(&mut txn, self.db, &logged)?;
@@ -662,7 +662,8 @@ impl Store {
         Ok(true)
     }
 
-    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too
+    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too, as a
+    /// replacement deposits every entity before its unit deposits what it wrote
     pub(crate) fn deposit_touched(&self, touched: crate::engine::changed::Touched) {
         let mut slot = self.touched.lock();
         match slot.as_mut() {
