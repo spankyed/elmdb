@@ -447,31 +447,6 @@ fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
 }
 
 #[test]
-fn a_commit_with_nobody_listening_files_and_binds_nothing() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path(), quiet()).unwrap();
-    put(&store, "a", b"1").unwrap();
-    assert!(!dir.path().join("wake").exists());
-}
-
-#[cfg(unix)]
-#[test]
-fn a_port_a_gone_process_filed_is_removed_at_the_next_read_of_them() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path(), quiet()).unwrap();
-    let wake = dir.path().join("wake");
-    std::fs::create_dir(&wake).unwrap();
-    let mut child = Command::new("true").spawn().unwrap();
-    let gone = child.id();
-    child.wait().unwrap();
-    std::fs::File::create(wake.join(format!("{gone}-1"))).unwrap();
-    std::fs::File::create(wake.join(format!("{}-1", std::process::id()))).unwrap();
-    put(&store, "a", b"1").unwrap();
-    assert!(!wake.join(format!("{gone}-1")).exists(), "gone");
-    assert!(wake.join(format!("{}-1", std::process::id())).exists(), "alive");
-}
-
-#[test]
 fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();

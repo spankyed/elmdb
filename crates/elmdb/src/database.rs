@@ -312,13 +312,10 @@ impl Database {
         self.tracks.lock().hear_builder_commits(listener)
     }
 
-    /// Lets go of the completed read transactions kept for a burst of reads, so that the next read opens one whatever time
-    /// has passed: what makes a benchmark's count not follow how long its setup took
-    #[doc(hidden)]
     /// Tells `listener` of commits other processes make, right after each, with the latest one's sequence. There is one
     /// listener: a second is refused (`ALREADY_LISTENING`), and closing the database drops it. It runs on a thread of its
     /// own, so it hands off and returns. Index work those commits left owed is queued first, since that process may have
-    /// exited with its builder part way
+    /// exited with its builder part way. It files a port in the database's directory, which has to be writable
     pub fn hear_commits_elsewhere(&self, listener: crate::store::wake::WakeListener) -> Result<()> {
         let store = self.store()?;
         let weak = Arc::downgrade(&store);
@@ -341,6 +338,9 @@ impl Database {
         }))
     }
 
+    /// Lets go of the completed read transactions kept for a burst of reads, so that the next read opens one whatever time
+    /// has passed: what makes a benchmark's count not follow how long its setup took
+    #[doc(hidden)]
     pub fn release_idle_reads(&self) -> Result<()> {
         self.store()?.drop_idle();
         Ok(())
@@ -354,10 +354,6 @@ impl Database {
             ));
         }
         self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
-        // Before the store is taken: what it's telling holds the store while it runs
-        if let Ok(store) = self.store() {
-            store.wake.stop();
-        }
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for

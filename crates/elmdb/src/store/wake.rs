@@ -3,9 +3,12 @@
 //! nothing a reader depends on: one lost costs delay, and a stray packet costs a read of the log.
 //!
 //! A handle that wants waking binds a loopback UDP port and files it as `wake/<pid>-<port>` in the database's directory,
-//! and every other handle's commits send to what's filed there. Loopback UDP is the one mechanism that behaves alike on
-//! every platform here, with nothing to authenticate since a wake asks only for a read. A handle that doesn't listen binds
-//! nothing, and a commit with nobody to tell costs a `stat` of the directory.
+//! holding a lock on that file for as long as it listens, and every other handle's commits send to what's filed there. A
+//! file nobody holds locked was left by a process that has gone, which a reader removes: the lock goes with its holder
+//! however it ends, on every platform and across PID namespaces, where a process id says nothing. Loopback UDP is the one
+//! mechanism that behaves alike on every platform here, with nothing to authenticate since a wake asks only for a read. A
+//! handle that doesn't listen binds nothing, and a commit with nobody to tell costs a `stat` of the directory. Listening
+//! writes into the database's directory, so a handle on a directory it can't write can't listen.
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
@@ -35,7 +38,11 @@ struct Peers {
 struct Listening {
     stopping: Arc<AtomicBool>,
     port: u16,
-    file: PathBuf,
+    /// The listening socket, cloned, which `stop` wakes the thread from: binding another could fail
+    waker: UdpSocket,
+    path: PathBuf,
+    /// Held locked while listening, which is what says the port is live
+    file: std::fs::File,
     thread: JoinHandle<()>,
 }
 
@@ -50,17 +57,22 @@ const LOOPBACK: (Ipv4Addr, u16) = (Ipv4Addr::LOCALHOST, 0);
 /// Coarser than any filesystem's directory times here: FAT's 2 seconds is the worst of them
 const TIMESTAMP_GRAIN: Duration = Duration::from_secs(3);
 
-#[cfg(unix)]
-fn process_is_gone(pid: i32) -> bool {
-    // SAFETY: signal 0 delivers nothing and only asks whether the process exists
-    let answer = unsafe { libc::kill(pid, 0) };
-    answer != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+/// Whether a filed port's listener has gone: nobody holds its file locked. One that can't be opened is left alone
+fn listener_is_gone(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    file.try_lock().is_ok()
 }
 
-/// No cheap way to ask without a dependency for it: a file a crash left costs a packet nobody reads
-#[cfg(not(unix))]
-fn process_is_gone(_pid: i32) -> bool {
-    false
+/// A failure of a listening socket's `recv` that a later one can come back from: a datagram larger than a wake, which
+/// Windows refuses rather than cutting short, or the reset a send to a closed port can leave
+fn passing(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    #[cfg(windows)]
+    const MESSAGE_TOO_LONG: i32 = 10040;
+    #[cfg(not(windows))]
+    const MESSAGE_TOO_LONG: i32 = libc::EMSGSIZE;
+    matches!(error.kind(), ErrorKind::Interrupted | ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused)
+        || error.raw_os_error() == Some(MESSAGE_TOO_LONG)
 }
 
 impl Wake {
@@ -101,13 +113,16 @@ impl Wake {
             .flatten()
             .filter_map(|entry| {
                 let name = entry.file_name();
-                let (pid, port) = name.to_str()?.split_once('-')?;
-                let (pid, port): (i32, u16) = (pid.parse().ok()?, port.parse().ok()?);
-                if process_is_gone(pid) {
+                let (_, port) = name.to_str()?.split_once('-')?;
+                let port: u16 = port.parse().ok()?;
+                if Some(port) == own_port {
+                    return None;
+                }
+                if listener_is_gone(&entry.path()) {
                     let _ = std::fs::remove_file(entry.path());
                     return None;
                 }
-                (Some(port) != own_port).then(|| SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+                Some(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
             })
             .collect()
     }
@@ -124,9 +139,11 @@ impl Wake {
         }
         let socket = UdpSocket::bind(LOOPBACK)?;
         let port = socket.local_addr()?.port();
+        let waker = socket.try_clone()?;
         std::fs::create_dir_all(&self.directory)?;
-        let file = self.directory.join(format!("{}-{port}", std::process::id()));
-        std::fs::File::create(&file)?;
+        let path = self.directory.join(format!("{}-{port}", std::process::id()));
+        let file = std::fs::File::create(&path)?;
+        file.lock()?;
         self.peers.lock().own_port = Some(port);
         let stopping = Arc::new(AtomicBool::new(false));
         let stop = Arc::clone(&stopping);
@@ -135,7 +152,7 @@ impl Wake {
             loop {
                 match socket.recv(&mut bytes) {
                     Ok(_) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) if passing(&error) => continue,
                     // Nothing wakes this again, and what was missed is in the log for whoever reads it next
                     Err(_) => return,
                 }
@@ -157,21 +174,105 @@ impl Wake {
                 listener(latest);
             }
         })?;
-        *listening = Some(Listening { stopping, port, file, thread });
+        *listening = Some(Listening { stopping, port, waker, path, file, thread });
         Ok(())
     }
 
     /// Stops listening, waiting for a listener that's running, unless this is it
     pub(crate) fn stop(&self) {
-        let Some(Listening { stopping, port, file, thread }) = self.listening.lock().take() else { return };
+        let Some(Listening { stopping, port, waker, path, file, thread }) = self.listening.lock().take() else {
+            return;
+        };
         stopping.store(true, Ordering::Release);
-        let _ = std::fs::remove_file(file);
+        // Unlocked and closed first: Windows removes no file a handle holds open
+        drop(file);
+        let _ = std::fs::remove_file(path);
         self.peers.lock().own_port = None;
-        if let Ok(socket) = UdpSocket::bind(LOOPBACK) {
-            let _ = socket.send_to(&[0; 8], (Ipv4Addr::LOCALHOST, port));
-        }
+        let _ = waker.send_to(&[0; 8], (Ipv4Addr::LOCALHOST, port));
         if thread.thread().id() != std::thread::current().id() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc;
+
+    fn heard(wake: &Wake) -> mpsc::Receiver<u64> {
+        let (told, heard) = mpsc::channel();
+        wake.listen(Arc::new(move |sequence| {
+            let _ = told.send(sequence);
+        }))
+        .unwrap();
+        heard
+    }
+
+    #[test]
+    fn a_commit_with_nobody_listening_binds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = Wake::new(dir.path());
+        wake.notify(1);
+        std::fs::create_dir(dir.path().join("wake")).unwrap();
+        wake.notify(2);
+        assert!(wake.peers.lock().socket.is_none());
+    }
+
+    #[test]
+    fn a_settled_directory_is_read_again_once_a_listener_files_its_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
+        std::fs::create_dir(dir.path().join("wake")).unwrap();
+        let long_ago = SystemTime::now() - Duration::from_secs(60);
+        std::fs::File::open(dir.path().join("wake")).unwrap().set_modified(long_ago).unwrap();
+        writer.notify(1);
+        assert_eq!(
+            writer.peers.lock().settled,
+            Some(long_ago),
+            "an old time is trusted, so the next commit only stats"
+        );
+
+        let heard = heard(&reader);
+        writer.notify(2);
+        assert_eq!(heard.recv_timeout(Duration::from_secs(5)).unwrap(), 2);
+        assert_eq!(writer.peers.lock().settled, None, "a time this recent isn't trusted yet");
+        reader.stop();
+    }
+
+    #[test]
+    fn a_port_whose_listener_has_gone_is_removed_and_a_live_one_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let (writer, reader) = (Wake::new(dir.path()), Wake::new(dir.path()));
+        let heard = heard(&reader);
+        let left = dir.path().join("wake").join("1-9");
+        std::fs::File::create(&left).unwrap();
+        writer.notify(3);
+        assert!(!left.exists(), "nobody held it");
+        assert_eq!(heard.recv_timeout(Duration::from_secs(5)).unwrap(), 3, "the live one was told");
+        assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 1);
+        reader.stop();
+        assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "a stopped listener files nothing");
+    }
+
+    #[test]
+    fn a_datagram_larger_than_a_wake_does_not_end_the_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let reader = Wake::new(dir.path());
+        let heard = heard(&reader);
+        let port = reader.peers.lock().own_port.unwrap();
+        let stray = UdpSocket::bind(LOOPBACK).unwrap();
+        stray.send_to(&[7; 64], (Ipv4Addr::LOCALHOST, port)).unwrap();
+        let _ = heard.recv_timeout(Duration::from_secs(5));
+        stray.send_to(&9u64.to_be_bytes(), (Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut last = 0;
+        while let Ok(sequence) = heard.recv_timeout(Duration::from_secs(5)) {
+            last = sequence;
+            if last == 9 {
+                break;
+            }
+        }
+        assert_eq!(last, 9, "still listening");
+        reader.stop();
     }
 }

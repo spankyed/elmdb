@@ -2673,13 +2673,6 @@ fn child_exits_owing_a_rank_index() {
     std::process::exit(0);
 }
 
-/// A database a process of its own has just exited from, owing the index
-fn left_owing(dir: &tempfile::TempDir) -> Database {
-    let db = near_links(dir, 400, 5, 0);
-    run_owing_child(dir);
-    db
-}
-
 fn run_owing_child(dir: &tempfile::TempDir) {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
@@ -2716,9 +2709,27 @@ fn being_woken_finishes_what_a_process_left_owed_without_a_commit_here() {
 #[test]
 fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
     let dir = tempfile::tempdir().unwrap();
-    let db = left_owing(&dir);
-    assert!(owes(&db), "the process left the index owed");
-    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-after" })]).unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    // Its own work done first, so a builder still draining it can't take the other process's work as well
     db.wait_for_index_builds().unwrap();
-    assert!(!owes(&db), "drained after a commit here");
+    run_owing_child(&dir);
+    assert!(owes(&db), "the process left the index owed");
+    // A commit that pushes nothing of its own: only finding the other process's commit queues the work
+    let mut unit = db.begin().unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained after a commit here, with no wake heard");
+}
+
+#[test]
+fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    let unit = db.begin().unwrap();
+    assert_eq!(db.close().unwrap_err().code, crate::error::ErrorCode::UnitOpen);
+    drop(unit);
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("still woken");
 }
