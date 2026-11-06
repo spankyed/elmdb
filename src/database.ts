@@ -252,6 +252,8 @@ export interface ChangedPosition {
 export interface ChangedEntities {
   /** The entities that changed and are still there, in the order of the commits that changed them */
   ids: string[];
+  /** The sequence of the commit that last changed each of `ids`, in the same order */
+  sequences: number[];
   /** The entities destroyed since */
   destroyed: string[];
   /** Where to read from next */

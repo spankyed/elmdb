@@ -75,6 +75,7 @@ export interface ChangedEntities {
     done: boolean;
     ids: string[];
     next: ChangedPosition;
+    sequences: number[];
 }
 
 // @public
