@@ -127,6 +127,8 @@ pub(crate) fn since(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db, cursor: u64, li
         return Ok(Changes { through: last, ..Changes::default() });
     }
     // A cursor past every commit this database has made isn't one of its own: the log can't say what it missed
+    // mutant-skip: replace < with <= in since
+    // A cursor equal to the last commit answered above, so this sees only one before it or past it
     let Some(next) = cursor.checked_add(1).filter(|_| cursor < last) else {
         return Ok(Changes { through: last, truncated: true, ..Changes::default() });
     };
