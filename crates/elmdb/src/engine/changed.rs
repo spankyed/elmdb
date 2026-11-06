@@ -31,49 +31,66 @@ fn destroyed_meta(entity_type: &str) -> Vec<u8> {
 /// The meta key saying how far tombstones have been trimmed
 pub(crate) const DESTROYED_FLOOR: &str = "destroyedFloor";
 
-/// The meta key saying every entity has its `d/h` key, which a database from before this index lacks until it is built
-pub(crate) const CHANGE_INDEX: &str = "changeIndex";
+/// The meta key under which a type keeping a change order says from which sequence it has: built over the entities it
+/// held then, so a reader from before that can't know what changed before it
+fn built_meta(entity_type: &str) -> Vec<u8> {
+    meta_key(&format!("changeOrder:{entity_type}"))
+}
+
+/// Whether the schema has the type keep a change order
+pub(crate) fn kept(schema: &crate::schema::Schema, entity_type: &str) -> bool {
+    schema.types.get(entity_type).is_some_and(|def| def.change_order)
+}
 
 /// The entities a commit wrote, which it stamps with its sequence
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Touched {
     ids: BTreeSet<String>,
     destroyed: BTreeSet<String>,
-    /// Every entity the store holds, for a commit that replaced them all
+    /// Every entity of `types`, for a commit that replaced them all
     every: bool,
+    types: BTreeSet<String>,
 }
 
 impl Touched {
-    /// What these events wrote: the entities they name, a relation's at both its ends
-    pub(crate) fn of(events: &[Event]) -> Self {
+    /// What these events wrote of the types that keep a change order: the entities they name, a relation's at both its
+    /// ends
+    pub(crate) fn of(events: &[Event], schema: &crate::schema::Schema) -> Self {
         let mut touched = Self::default();
+        let mut add = |id: &String, destroyed: bool| {
+            if kept(schema, ids::type_of(id)) {
+                touched.ids.insert(id.clone());
+                if destroyed {
+                    touched.destroyed.insert(id.clone());
+                }
+            }
+        };
         for event in events {
             match event {
                 Event::Created { id } | Event::Field { id, .. } | Event::Trashed { id } | Event::Restored { id } => {
-                    touched.ids.insert(id.clone());
+                    add(id, false);
                 }
-                Event::Destroyed { id } => {
-                    touched.ids.insert(id.clone());
-                    touched.destroyed.insert(id.clone());
-                }
+                Event::Destroyed { id } => add(id, true),
                 Event::Linked { source, target, .. }
                 | Event::Unlinked { source, target, .. }
                 | Event::RelationChanged { source, target, .. } => {
-                    touched.ids.insert(source.clone());
-                    touched.ids.insert(target.clone());
+                    add(source, false);
+                    add(target, false);
                 }
             }
         }
         touched
     }
 
-    /// Every entity, for a commit that replaced them all
-    pub(crate) fn every() -> Self {
-        Self { every: true, ..Self::default() }
+    /// Every entity of the types that keep a change order, for a commit that replaced them all
+    pub(crate) fn every(schema: &crate::schema::Schema) -> Self {
+        let types = schema.types.iter().filter(|(_, def)| def.change_order).map(|(name, _)| name.clone()).collect();
+        Self { every: true, types, ..Self::default() }
     }
 
     pub(crate) fn merge(&mut self, other: Touched) {
         self.every |= other.every;
+        self.types.extend(other.types);
         self.ids.extend(other.ids);
         self.destroyed.extend(other.destroyed);
     }
@@ -88,7 +105,7 @@ impl Touched {
 pub(crate) fn stamp(txn: &mut heed::RwTxn<'_>, db: Db, touched: &Touched, sequence: u64) -> Result<()> {
     let every;
     let ids: Box<dyn Iterator<Item = &String>> = if touched.every {
-        every = all_ids(txn, db)?;
+        every = all_ids(txn, db)?.into_iter().filter(|id| touched.types.contains(ids::type_of(id))).collect::<Vec<_>>();
         Box::new(every.iter())
     } else {
         Box::new(touched.ids.iter())
@@ -149,27 +166,79 @@ pub(crate) fn trim_tombstones(txn: &mut heed::RwTxn<'_>, db: Db, oldest: u64) ->
     Ok(())
 }
 
-/// Builds every entity's `d/h` key from `p/i`, for a database from before the index, and says it is built
-pub(crate) fn ensure_index(txn: &mut heed::RwTxn<'_>, db: Db) -> Result<()> {
-    if db.main.get(txn, &meta_key(CHANGE_INDEX))?.is_some() {
-        return Ok(());
+/// Brings each type's change order into line with the schema: built, from the entities it holds, for a type that keeps
+/// one and has none, which names the sequence it has it from; dropped for a type that no longer keeps one
+pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::Schema) -> Result<()> {
+    let sequence = db
+        .get(txn, &meta_key(crate::format::meta::SEQUENCE))?
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .map_or(0, u64::from_be_bytes);
+    for (entity_type, def) in &schema.types {
+        let built = db.main.get(txn, &built_meta(entity_type))?.is_some();
+        if def.change_order && !built {
+            for trashed in [false, true] {
+                let entries: Vec<(Vec<u8>, Vec<u8>)> = db
+                    .main
+                    .prefix_iter(txn, &keys::type_range(trashed, entity_type))?
+                    .map(|item| item.map(|(key, value)| (key.to_vec(), value.to_vec())))
+                    .collect::<std::result::Result<_, _>>()?;
+                for (_, value) in entries {
+                    let Some(id) = values::decode(&value)?.as_str().map(str::to_owned) else { continue };
+                    let Some(bytes) = db.main.get(txn, &keys::entity(&id))?.map(<[u8]>::to_vec) else { continue };
+                    let record = entities::decode_record(&id, &bytes)?;
+                    db.main.put(
+                        txn,
+                        &keys::changed(entity_type, record.changed, record.seq),
+                        &values::encode(&id.as_str().into()),
+                    )?;
+                }
+            }
+            db.main.put(txn, &built_meta(entity_type), &sequence.to_be_bytes())?;
+        }
     }
-    for id in all_ids(txn, db)? {
-        let Some(bytes) = db.main.get(txn, &keys::entity(&id))?.map(<[u8]>::to_vec) else { continue };
-        let record = entities::decode_record(&id, &bytes)?;
-        db.main.put(
-            txn,
-            &keys::changed(ids::type_of(&id), record.changed, record.seq),
-            &values::encode(&id.as_str().into()),
-        )?;
+    // A type no longer kept, or no longer declared: its order goes, so check() finds nothing it doesn't derive
+    let prefix = {
+        let mut key = crate::format::Prefix::Meta.key();
+        key.string_prefix("changeOrder:");
+        key.to_vec()
+    };
+    let held: Vec<String> = db
+        .main
+        .prefix_iter(txn, &prefix)?
+        .map(|item| {
+            let (key, _) = item?;
+            match decode_key(key)?.pop() {
+                Some(Part::String(name)) => Ok(name.trim_start_matches("changeOrder:").to_owned()),
+                _ => Err(Error::new(ErrorCode::Corrupted, "A change order's meta key doesn't read")),
+            }
+        })
+        .collect::<Result<_>>()?;
+    for entity_type in held.iter().filter(|name| !kept(schema, name)) {
+        let order: Vec<Vec<u8>> = db
+            .main
+            .prefix_iter(txn, &keys::changed_of_type(entity_type))?
+            .map(|item| item.map(|(key, _)| key.to_vec()))
+            .collect::<std::result::Result<_, _>>()?;
+        for key in order {
+            db.main.delete(txn, &key)?;
+        }
+        db.main.delete(txn, &built_meta(entity_type))?;
     }
-    db.main.put(txn, &meta_key(CHANGE_INDEX), &[1])?;
     Ok(())
 }
 
-/// Whether every entity has its `d/h` key
-pub(crate) fn index_is_built(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db) -> Result<bool> {
-    Ok(db.main.get(txn, &meta_key(CHANGE_INDEX))?.is_some())
+/// Whether some type keeping a change order hasn't built it, or one no longer kept still has one: what `settle` does
+pub(crate) fn needs_settling(
+    txn: &heed::RoTxn<'_, heed::AnyTls>,
+    db: Db,
+    schema: &crate::schema::Schema,
+) -> Result<bool> {
+    for (entity_type, def) in &schema.types {
+        if def.change_order != db.main.get(txn, &built_meta(entity_type))?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Where a reader of what changed has read to: everything at or before `sequence`, and at `sequence` itself the
@@ -217,6 +286,7 @@ pub struct Changed {
 pub(crate) fn since(
     txn: &heed::RoTxn<'_, heed::AnyTls>,
     db: Db,
+    schema: &crate::schema::Schema,
     types: &[String],
     from: &Position,
     limit: usize,
@@ -295,7 +365,18 @@ pub(crate) fn since(
         .get(txn, &meta_key(DESTROYED_FLOOR))?
         .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
         .map_or(0, u64::from_be_bytes);
-    let mut complete = index_is_built(txn, db)?;
+    // A type that keeps no order, or keeps one built after the reader's position, can't say what changed before
+    let mut complete = true;
+    for &entity_type in &types {
+        let built = db
+            .main
+            .get(txn, &built_meta(entity_type))?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_be_bytes);
+        if !kept(schema, entity_type) || built.is_none_or(|built| from.sequence < built) {
+            complete = false;
+        }
+    }
     if from.sequence < floor {
         for &entity_type in &types {
             let newest = db

@@ -334,7 +334,7 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
 
 /// Marks empty types' indexes built inside the mutation that changes their contents or declaration.
 pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
-    changed::ensure_index(t.txn, t.db)?;
+    changed::settle(t.txn, t.db, t.schema)?;
     let (empty, unbuilt) = unbuilt_indexes(t)?;
     for work in empty {
         match work {
@@ -363,8 +363,8 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
         schema.validate(txn, db)?;
         unbuilt_indexes(&unit::Snapshot { txn, db, schema })
     })?;
-    let index_built = store.read(|txn, db| changed::index_is_built(txn, db))?;
-    if (!empty.is_empty() || !index_built) && !store.is_read_only() {
+    let order_settled = !store.read(|txn, db| changed::needs_settling(txn, db, schema))?;
+    if (!empty.is_empty() || !order_settled) && !store.is_read_only() {
         return store
             .write_committed(
                 |txn, db| {
@@ -493,7 +493,7 @@ impl Database {
                 f(&mut t)?;
                 vector::flush(&mut t)?;
                 let waiting = ranks::push_at_commit(&mut t)?;
-                store.deposit_touched(changed::Touched::of(&state.events));
+                store.deposit_touched(changed::Touched::of(&state.events, &schema));
                 Ok(waiting)
             },
             !recycle,
@@ -529,7 +529,8 @@ impl Database {
     /// The entities of `types` that changed after `from`, in the order of the commits that changed them, at most
     /// `limit`, with the ones destroyed since, from one snapshot (`docs/architecture/engine.md`, Changed since)
     pub fn changed_since(&self, types: &[String], from: &changed::Position, limit: usize) -> Result<changed::Changed> {
-        self.store()?.read(|txn, db| changed::since(txn, db, types, from, limit))
+        let schema = self.schema_guard();
+        self.store()?.read(|txn, db| changed::since(txn, db, &schema, types, from, limit))
     }
 
     /// `changed_since` with its position and answer as msgpack bytes, as the binding takes them
@@ -673,7 +674,7 @@ impl Database {
                 store.deposit(std::mem::take(&mut state.edges));
                 let changes = ChangeSet::of(&state.events);
                 store.deposit_logged(changelog::LoggedCommit::of(&changes));
-                store.deposit_touched(changed::Touched::of(&state.events));
+                store.deposit_touched(changed::Touched::of(&state.events, &schema));
                 Ok((results, changes, state.written.take(), waiting))
             },
             durable,
@@ -774,7 +775,7 @@ impl Unit {
         limit: usize,
     ) -> Result<changed::Changed> {
         let view = self.view(0.0)?;
-        changed::since(view.txn, view.db, types, from, limit)
+        changed::since(view.txn, view.db, view.schema, types, from, limit)
     }
 
     /// `changed_since` with its position and answer as msgpack bytes, as the binding takes them
@@ -890,7 +891,7 @@ impl Unit {
         let txn = self.txn.take().expect("an open unit has its transaction");
         self.store.deposit(std::mem::take(&mut self.state.edges));
         self.store.deposit_logged(changelog::LoggedCommit::of(&changes));
-        self.store.deposit_touched(changed::Touched::of(&self.state.events));
+        self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.store.end_unit();

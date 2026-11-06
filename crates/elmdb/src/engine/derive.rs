@@ -116,7 +116,9 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     for e in &all {
         let t = ids::type_of(&e.id);
         emit(keys::of_type(e.trashed, t, e.seq), values::encode(&e.id.as_str().into()))?;
-        emit(keys::changed(t, e.changed, e.seq), values::encode(&e.id.as_str().into()))?;
+        if super::changed::kept(r.schema(), t) {
+            emit(keys::changed(t, e.changed, e.seq), values::encode(&e.id.as_str().into()))?;
+        }
         if !e.trashed {
             *live.entry(t).or_default() += 1;
         }

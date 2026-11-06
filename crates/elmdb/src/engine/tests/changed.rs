@@ -4,7 +4,7 @@
 
 use serde_json::json;
 
-use super::{batch, open, write};
+use super::{batch, write};
 use crate::engine::changed::{Changed, Position};
 use crate::engine::{changelog, keys};
 use crate::error::ErrorCode;
@@ -23,6 +23,19 @@ fn since(db: &Database, from: &Position, limit: usize) -> Changed {
 
 fn from(sequence: u64) -> Position {
     Position { sequence, after: None }
+}
+
+/// The suites' schema, Tasks and Notes keeping a change order
+fn ordered() -> crate::schema::Schema {
+    let mut json = super::schema_json();
+    for entity_type in TYPES {
+        json["types"][entity_type]["changeOrder"] = json!(true);
+    }
+    crate::schema::Schema::from_json(&json).unwrap()
+}
+
+fn open(dir: &tempfile::TempDir) -> Database {
+    Database::open(dir.path(), OpenOptions { schema: Some(ordered()), syncs: false, ..Default::default() }).unwrap()
 }
 
 fn task(id: &str) -> serde_json::Value {
@@ -175,7 +188,7 @@ fn a_database_without_the_index_says_so_and_builds_it_as_it_opens() {
             .unwrap()
             .write(
                 |txn, d| {
-                    d.main.delete(txn, &meta_key(crate::engine::changed::CHANGE_INDEX))?;
+                    d.main.delete(txn, &meta_key("changeOrder:Task"))?;
                     let order = d
                         .main
                         .prefix_iter(txn, &crate::format::Prefix::Changed.key().to_vec())?
@@ -192,12 +205,17 @@ fn a_database_without_the_index_says_so_and_builds_it_as_it_opens() {
         assert!(!since(&db, &from(0), 100).complete, "what it would answer is missing entities");
         db.close().unwrap();
     }
-    let db =
-        Database::open(dir.path(), OpenOptions { schema: Some(super::schema()), syncs: false, ..Default::default() })
-            .unwrap();
-    let all = since(&db, &from(0), 100);
-    assert!(all.complete);
-    assert_eq!(all.ids, ["Task-1"]);
+    let db = open(&dir);
+    assert!(db.check().unwrap().is_clean(), "the open built the order again");
+    let built = db.sequence().unwrap();
+    assert!(
+        !db.changed_since(&["Task".to_owned()], &from(0), 100).unwrap().complete,
+        "it can't say what changed before"
+    );
+    write(&db, vec![task("Task-2")]).unwrap();
+    let since_built = db.changed_since(&["Task".to_owned()], &from(built), 100).unwrap();
+    assert!(since_built.complete);
+    assert_eq!(since_built.ids, ["Task-2"]);
 }
 
 #[test]
@@ -247,4 +265,38 @@ fn a_unit_knows_the_sequence_it_commits_as_and_stamps_once_whatever_it_wrote() {
     assert_eq!(committed.sequence, next);
     assert_eq!(since(&db, &from(cursor), 100).ids, ["Task-1"]);
     assert!(since(&db, &from(next), 100).ids.is_empty(), "nothing after the commit that stamped it");
+}
+
+#[test]
+fn a_type_keeps_an_order_only_as_its_schema_says_and_a_reader_of_one_that_doesnt_is_told_so() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(
+            dir.path(),
+            OpenOptions { schema: Some(super::schema()), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        write(&db, vec![task("Task-1")]).unwrap();
+        assert!(!since(&db, &from(0), 100).complete, "Task keeps no order");
+        let order = db
+            .store()
+            .unwrap()
+            .read(|txn, d| Ok(d.main.prefix_iter(txn, &crate::format::Prefix::Changed.key().to_vec())?.count()))
+            .unwrap();
+        assert_eq!(order, 0, "and pays for none");
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    let built_at = db.sequence().unwrap();
+    write(&db, vec![task("Task-2")]).unwrap();
+    assert!(!db.changed_since(&["Task".to_owned()], &from(0), 100).unwrap().complete, "built after a reader from 0");
+    let since_built = db.changed_since(&["Task".to_owned()], &from(built_at), 100).unwrap();
+    assert!(since_built.complete);
+    assert_eq!(since_built.ids, ["Task-2"]);
+    db.close().unwrap();
+
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(super::schema()), syncs: false, ..Default::default() })
+            .unwrap();
+    assert!(db.check().unwrap().is_clean(), "the order went with the schema that kept it");
 }
