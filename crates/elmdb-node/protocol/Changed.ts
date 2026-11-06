@@ -10,6 +10,11 @@ export type Changed = {
  */
 ids: Array<string>, 
 /**
+ * The sequence of the commit that last changed each of `ids`, in the same order: a reader that wrote some of them
+ * itself can tell its own commits' from another's
+ */
+sequences: number[], 
+/**
  * The entities destroyed since, which nothing else names
  */
 destroyed: Array<string>, 

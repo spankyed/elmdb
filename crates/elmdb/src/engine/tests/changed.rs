@@ -43,6 +43,22 @@ fn task(id: &str) -> serde_json::Value {
 }
 
 #[test]
+fn each_entity_read_comes_with_the_sequence_of_the_commit_that_last_changed_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let first = db.sequence().unwrap();
+    write(&db, vec![task("Task-2"), task("Task-3")]).unwrap();
+    let second = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "title": "moved" } })]).unwrap();
+    let third = db.sequence().unwrap();
+    let all = since(&db, &from(first - 1), 100);
+    assert_eq!(all.ids, ["Task-2", "Task-3", "Task-1"]);
+    assert_eq!(all.sequences, [second, second, third], "one each, in the same order");
+    assert_eq!(since(&db, &from(first - 1), 2).sequences.len(), 2, "as many as the page holds");
+}
+
+#[test]
 fn a_reader_from_the_start_reads_the_entities_a_type_held_before_it_kept_an_order() {
     let dir = tempfile::tempdir().unwrap();
     {

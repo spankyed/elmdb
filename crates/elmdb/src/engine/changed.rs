@@ -294,6 +294,10 @@ pub struct After {
 pub struct Changed {
     /// The entities that changed and are still there, in change order
     pub ids: Vec<String>,
+    /// The sequence of the commit that last changed each of `ids`, in the same order: a reader that wrote some of them
+    /// itself can tell its own commits' from another's
+    #[cfg_attr(feature = "codegen", ts(type = "number[]"))]
+    pub sequences: Vec<u64>,
     /// The entities destroyed since, which nothing else names
     pub destroyed: Vec<String>,
     /// Where to read from next
@@ -413,5 +417,6 @@ pub(crate) fn since(
             }
         }
     }
-    Ok(Changed { ids: found.into_iter().map(|(_, _, _, id)| id).collect(), destroyed, next, done, complete })
+    let sequences = found.iter().map(|(changed, ..)| *changed).collect();
+    Ok(Changed { ids: found.into_iter().map(|(_, _, _, id)| id).collect(), sequences, destroyed, next, done, complete })
 }
