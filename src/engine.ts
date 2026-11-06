@@ -6,7 +6,7 @@ import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
 import type { EarsOperationObserver } from './observation.ts';
-import { createConnection, runCommitted, type Answer, type BeforeCommit, type LoggedChanges, type SchemaChange, type UnitOptions } from './database.ts';
+import { createConnection, runCommitted, type Answer, type BeforeCommit, type ChangedEntities, type ChangedPosition, type LoggedChanges, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
@@ -151,6 +151,15 @@ export interface EarsAdmin {
   changesSince(cursor: number, limit: number): LoggedChanges;
   /** Names this engine's handle in the change log, so a reader can tell its own commits from another process's */
   origin(): string;
+  /**
+   * What of `types` changed after `from`, in the order of the commits that changed them, at most `limit`, with the
+   * entities destroyed since: read in the open unit, whose own writes are stamped only as it commits. A type answers
+   * only when the schema has it keep a change order (`EngineSchema.changeOrder`); otherwise, or when what changed can't
+   * all be known, `complete` is false
+   */
+  changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
+  /** The sequence the open unit commits as, which what it writes is stamped with; none outside a unit */
+  nextSequence(): number | undefined;
   /** The epoch another process's replacement of every row moved the database to, when this engine hasn't adopted it. Until it does its writes are refused (`DATA_REPLACED`) and its reads read what's there now */
   replacedElsewhere(): number | undefined;
   /**
@@ -375,6 +384,8 @@ export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): E
     },
     changedElsewhere: () => connection.changedElsewhere(),
     changesSince: (cursor, limit) => connection.changesSince(cursor, limit),
+    changedSince: (types, from, limit) => connection.changedSince(types, from, limit),
+    nextSequence: () => connection.nextSequence(),
     origin: () => database.origin,
     replacedElsewhere: () => connection.replacedElsewhere(),
     adoptReplacement: (epoch) => connection.adoptReplacement(epoch),

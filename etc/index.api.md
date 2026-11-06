@@ -69,6 +69,24 @@ export interface CallSite {
 }
 
 // @public
+export interface ChangedEntities {
+    complete: boolean;
+    destroyed: string[];
+    done: boolean;
+    ids: string[];
+    next: ChangedPosition;
+}
+
+// @public
+export interface ChangedPosition {
+    after?: {
+        type: string;
+        place: number;
+    };
+    sequence: number;
+}
+
+// @public
 export interface Create {
     // (undocumented)
     <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
@@ -197,6 +215,7 @@ export interface EarsAdmin {
     bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
     readonly calls: CallCounting;
     changedElsewhere(): boolean;
+    changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
     changesSince(cursor: number, limit: number): LoggedChanges;
     clear(): void;
     countEntities(): Record<string, number>;
@@ -204,6 +223,7 @@ export interface EarsAdmin {
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
+    nextSequence(): number | undefined;
     observe(observer: EarsOperationObserver): () => void;
     onFoundElsewhere(listener: () => void): () => void;
     origin(): string;
@@ -230,6 +250,7 @@ export interface EarsDatabase {
     begin(): EarsUnit;
     // (undocumented)
     bulkLoad(loads: Uint8Array): void;
+    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
     changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     close(): void;
@@ -401,11 +422,13 @@ export interface EarsSchema {
 export interface EarsUnit {
     // (undocumented)
     abort(): void;
+    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
     changesSince(cursor: number, limit: number): Uint8Array;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
     readonly isOpen: boolean;
+    nextSequence(): number;
     // (undocumented)
     read(reads: Uint8Array): Uint8Array;
     // (undocumented)
@@ -445,6 +468,7 @@ export interface Embedding {
 
 // @public
 export interface EngineSchema {
+    changeOrder?: readonly string[];
     ranks?: Readonly<Record<string, RankDeclaration>>;
     relations: Readonly<Record<string, RelationRules>>;
     // (undocumented)

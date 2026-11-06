@@ -43,6 +43,11 @@ export interface EngineSchema {
   roles: readonly string[];
   /** Each rank index, by name; none when absent */
   ranks?: Readonly<Record<string, RankDeclaration>>;
+  /**
+   * The entity types the database keeps in the order of the commits that last wrote them, which `changedSince` reads.
+   * A write to one costs about a fifth more, so only a type something reads that from is named
+   */
+  changeOrder?: readonly string[];
 }
 
 /** elmdb's schema language, which a schema names */
@@ -135,6 +140,7 @@ export function toElmdbSchema(schema: EngineSchema): object {
       fields,
       additionalFields: 'allow',
       indexes,
+      ...(schema.changeOrder?.includes(type) && { changeOrder: true }),
     });
   }
   const relations = Object.fromEntries(Object.entries(schema.relations).map(([kind, rules]) => [kind, {
