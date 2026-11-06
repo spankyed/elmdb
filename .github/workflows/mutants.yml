@@ -1,7 +1,7 @@
-name: mutants (advisory)
+name: mutants
 
-# Mutants of what a pull request changes, each crate against its own suite: survivors are reported on their lines and in
-# each job's summary, never failed on (docs/architecture/testing.md, Mutation testing). Linux splits the change's mutants
+# Mutants of what a pull request changes, each crate against its own suite: a survivor fails the job, reported on its line
+# and in the job's summary (docs/architecture/testing.md, Mutation testing). Linux splits the change's mutants
 # over four runners, leaving out code compiled only on another platform; Windows mutates only the code that compiles on
 # Windows alone, and does nothing when the change has none
 on:
