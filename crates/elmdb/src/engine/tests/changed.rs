@@ -43,6 +43,33 @@ fn task(id: &str) -> serde_json::Value {
 }
 
 #[test]
+fn a_reader_paging_from_the_start_across_types_reads_each_unstamped_entity_once() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let unordered = crate::schema::Schema::from_json(&super::schema_json()).unwrap();
+        let db =
+            Database::open(dir.path(), OpenOptions { schema: Some(unordered), syncs: false, ..Default::default() })
+                .unwrap();
+        let note = |id: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": {} });
+        write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    let mut position = from(0);
+    let mut read = Vec::new();
+    for _ in 0..10 {
+        let page = since(&db, &position, 2);
+        read.extend(page.ids);
+        position = page.next;
+        if page.done {
+            break;
+        }
+    }
+    read.sort();
+    assert_eq!(read, ["Note-1", "Note-2", "Task-1", "Task-2", "Task-3"], "each once, in pages of two");
+}
+
+#[test]
 fn each_entity_read_comes_with_the_sequence_of_the_commit_that_last_changed_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

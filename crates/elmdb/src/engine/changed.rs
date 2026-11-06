@@ -331,8 +331,9 @@ pub(crate) fn since(
         let (changed, place, inclusive) = match &from.after {
             Some(after) if after.entity_type.as_str() == entity_type => (from.sequence, after.place, false),
             Some(after) if after.entity_type.as_str() < entity_type => (from.sequence, 0, true),
-            // A reader at the start has read nothing, so it reads the entities no commit has stamped too
-            _ if from.sequence == 0 => (0, 0, true),
+            // A reader at the start has read nothing, so it reads the entities no commit has stamped too. One with a place
+            // past this type at 0 has read them
+            None if from.sequence == 0 => (0, 0, true),
             _ => (from.sequence.saturating_add(1), 0, true),
         };
         let start = keys::changed(entity_type, changed, place);
