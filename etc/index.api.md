@@ -471,7 +471,6 @@ export interface Embedding {
 
 // @public
 export interface EngineSchema {
-    changeOrder?: readonly string[];
     ranks?: Readonly<Record<string, RankDeclaration>>;
     relations: Readonly<Record<string, RelationRules>>;
     // (undocumented)
@@ -858,6 +857,7 @@ export interface RowIdentity {
 
 // @public
 export interface RowRules {
+    changeOrder?: boolean;
     embed?: EmbedDeclaration;
     fields?: Readonly<Record<string, FieldRule>>;
     indexes?: readonly string[];

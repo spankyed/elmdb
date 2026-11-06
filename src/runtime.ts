@@ -72,6 +72,12 @@ export interface RowRules {
   /** The fields its trigram index reads, strings or lists of strings: what `containing` and `matching` find */
   substrings?: readonly string[];
   /**
+   * Whether the database keeps the type's entities in the order of the commits that last wrote them, which
+   * `changedSince` reads and a projection derives from. A write to one costs about a fifth more, so only a type
+   * something reads that from keeps one
+   */
+  changeOrder?: boolean;
+  /**
    * The type of each field the shape declares, as its TypeScript type maps to one of elmdb's (`FieldRule`): what the
    * database holds every write to, from every writer. A field the shape doesn't declare is still taken
    */

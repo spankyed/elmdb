@@ -152,7 +152,7 @@ export interface EarsAdmin {
   /**
    * What of `types` changed after `from`, in the order of the commits that changed them, at most `limit`, with the
    * entities destroyed since: read in the open unit, whose own writes are stamped only as it commits. A type answers
-   * only when the schema has it keep a change order (`EngineSchema.changeOrder`); otherwise, or when what changed can't
+   * only when its row rules have it keep a change order (`RowRules.changeOrder`); otherwise, or when what changed can't
    * all be known, `complete` is false
    */
   changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
