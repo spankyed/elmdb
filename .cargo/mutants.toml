@@ -151,11 +151,13 @@ exclude_re = [
     "crates/elmdb/src/store/backup.rs:103:.*replace & with \\| in move_file",
     "crates/elmdb/src/store/sync.rs:333:.*replace > with >= in run",
     "crates/elmdb/src/store/sync.rs:349:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
+    "crates/elmdb/src/store/wake.rs:95:.*replace > with >= in Wake::notify",
+    "crates/elmdb/src/store/wake.rs:159:.*replace match guard passing\\(&error\\) with true in Wake::listen",
     "crates/elmdb-node/src/lib.rs:197:.*replace Database::hear_builder_commits -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:269:.*replace Database::changes_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:279:.*replace Database::origin -> Result<String, Code> with Ok\\(String::new\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:279:.*replace Database::origin -> Result<String, Code> with Ok\\(\"xyzzy\".into\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:288:.*replace Database::queue_owed_work -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:474:.*replace Unit::changes_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:219:.*replace Database::hear_commits_elsewhere -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:288:.*replace Database::changes_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:298:.*replace Database::origin -> Result<String, Code> with Ok\\(String::new\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:298:.*replace Database::origin -> Result<String, Code> with Ok\\(\"xyzzy\".into\\(\\)\\)",
+    "crates/elmdb-node/src/lib.rs:484:.*replace Unit::changes_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
     # END generated
 ]

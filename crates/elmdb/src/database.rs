@@ -312,6 +312,32 @@ impl Database {
         self.tracks.lock().hear_builder_commits(listener)
     }
 
+    /// Tells `listener` of commits other processes make, right after each, with the latest one's sequence. There is one
+    /// listener: a second is refused (`ALREADY_LISTENING`), and closing the database drops it. It runs on a thread of its
+    /// own, so it hands off and returns. Index work those commits left owed is queued first, since that process may have
+    /// exited with its builder part way. It files a port in the database's directory, which has to be writable
+    pub fn hear_commits_elsewhere(&self, listener: crate::store::wake::WakeListener) -> Result<()> {
+        let store = self.store()?;
+        let weak = Arc::downgrade(&store);
+        let (slot, schemas, tracks) = (Arc::clone(&self.builder), self.observing_schema(), Arc::clone(&self.tracks));
+        let read_only = self.read_only;
+        store.wake.listen(Arc::new(move |sequence| {
+            if let Some(store) = weak.upgrade().filter(|_| !read_only) {
+                let schema = Arc::clone(&schemas.read());
+                if let Ok(owed) = crate::engine::remaining_indexes(&store, &schema) {
+                    let builders = Builders {
+                        slot: Arc::clone(&slot),
+                        store,
+                        schemas: Arc::clone(&schemas),
+                        tracks: Arc::clone(&tracks),
+                    };
+                    builders.queue(owed);
+                }
+            }
+            listener(sequence);
+        }))
+    }
+
     /// Lets go of the completed read transactions kept for a burst of reads, so that the next read opens one whatever time
     /// has passed: what makes a benchmark's count not follow how long its setup took
     #[doc(hidden)]

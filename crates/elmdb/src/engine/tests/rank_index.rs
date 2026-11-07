@@ -2673,9 +2673,7 @@ fn child_exits_owing_a_rank_index() {
     std::process::exit(0);
 }
 
-/// A database a process of its own has just exited from, owing the index
-fn left_owing(dir: &tempfile::TempDir) -> Database {
-    let db = near_links(dir, 400, 5, 0);
+fn run_owing_child(dir: &tempfile::TempDir) {
     let status = std::process::Command::new(std::env::current_exe().unwrap())
         .args([
             "--ignored",
@@ -2690,7 +2688,6 @@ fn left_owing(dir: &tempfile::TempDir) -> Database {
         .status()
         .unwrap();
     assert!(status.success(), "the owing process failed");
-    db
 }
 
 fn owes(db: &Database) -> bool {
@@ -2698,11 +2695,13 @@ fn owes(db: &Database) -> bool {
 }
 
 #[test]
-fn queueing_owed_work_finishes_what_a_process_that_exited_left_owed() {
+fn being_woken_finishes_what_a_process_left_owed_without_a_commit_here() {
     let dir = tempfile::tempdir().unwrap();
-    let db = left_owing(&dir);
-    assert!(owes(&db), "the process left the index owed");
-    db.queue_owed_work().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("woken");
     db.wait_for_index_builds().unwrap();
     assert!(!owes(&db), "drained without a commit here");
 }
@@ -2710,19 +2709,27 @@ fn queueing_owed_work_finishes_what_a_process_that_exited_left_owed() {
 #[test]
 fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
     let dir = tempfile::tempdir().unwrap();
-    let db = left_owing(&dir);
-    assert!(owes(&db), "the process left the index owed");
-    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-after" })]).unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    // Its own work done first, so a builder still draining it can't take the other process's work as well
     db.wait_for_index_builds().unwrap();
-    assert!(!owes(&db), "drained after a commit here");
+    run_owing_child(&dir);
+    assert!(owes(&db), "the process left the index owed");
+    // A commit that pushes nothing of its own: a commit queues the pushes the store owes, whoever left them
+    let unit = db.begin().unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained after a commit here, with no wake heard");
 }
 
 #[test]
-fn with_nothing_owed_no_builder_starts() {
+fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
     let dir = tempfile::tempdir().unwrap();
-    let db = open_with(&dir, near_schema());
-    assert!(!owes(&db));
-    assert!(db.builder().is_none(), "nothing has needed one yet");
-    db.queue_owed_work().unwrap();
-    assert!(db.builder().is_none(), "nothing was queued");
+    let db = near_links(&dir, 400, 5, 0);
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
+    let unit = db.begin().unwrap();
+    assert_eq!(db.close().unwrap_err().code, crate::error::ErrorCode::UnitOpen);
+    drop(unit);
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("still woken");
 }

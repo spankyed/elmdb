@@ -82,38 +82,6 @@ fn an_aborted_unit_lets_the_map_grow_while_it_is_still_held() {
 }
 
 #[test]
-fn a_commit_says_when_it_found_another_process_had_committed() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = open(&dir);
-    let (_, own) = db.write(&batch(vec![]), false).unwrap();
-    assert_eq!(own.elsewhere_through, None, "a process's own commits are its own");
-    let (_, own) = db.write(&batch(vec![]), false).unwrap();
-    assert_eq!(own.elsewhere_through, None);
-
-    // What another process's commits leave: a stored sequence this handle never counted
-    let store = db.store().unwrap();
-    store
-        .write(
-            |txn, db| crate::store::put_meta(txn, db.main, crate::format::meta::SEQUENCE, &40u64.to_be_bytes()),
-            false,
-        )
-        .unwrap();
-    let (_, found) = db.write(&batch(vec![]), false).unwrap();
-    assert_eq!(found.elsewhere_through, Some(40));
-    let (_, after) = db.write(&batch(vec![]), false).unwrap();
-    assert_eq!(after.elsewhere_through, None, "said once");
-
-    store
-        .write(
-            |txn, db| crate::store::put_meta(txn, db.main, crate::format::meta::SEQUENCE, &90u64.to_be_bytes()),
-            false,
-        )
-        .unwrap();
-    let unit = db.begin().unwrap();
-    assert_eq!(unit.commit(false).unwrap().elsewhere_through, Some(90), "a unit's commit says it too");
-}
-
-#[test]
 fn the_sequence_follows_what_the_database_holds() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

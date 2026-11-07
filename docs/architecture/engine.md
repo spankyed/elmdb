@@ -81,12 +81,10 @@ Tracked reads and watch notifications belong to this process. Writes in other pr
 snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
 callbacks. Coordinate writes in one process when observers must hear every commit. `changes_since(cursor, limit)` answers what they changed, from the change log each commit writes in its own
 transaction (`engine/changelog.rs`): a reader keeps a cursor, and one further behind than the log reaches is told so
-(`truncated`) and starts again from the data. `origin` names a handle, so a reader can skip its own. The next write or unit
-commit here that finds another process has committed says so: its change set's `elsewhereThrough` is the latest such sequence, read
-under the write lock, so a builder's commits here never read as another process's. It says each once. A caller told out
-of band can compare it against the `sequence()` it read then, and calls `queueOwedWork()`, which queues the index work the
-store says is owed: that process may have exited with its builder part way, and a commit here would otherwise be what
-resumes it.
+(`truncated`) and starts again from the data. `origin` names a handle, so a reader can skip its own. `hear_commits_elsewhere(listener)` wakes a
+listener as soon as another process commits (`store/wake.rs`: loopback UDP to the ports listening handles file under
+`wake/`), having queued any index work the store says is owed. A wake carries nothing a reader depends on, since what
+changed is in the log, so one lost costs delay.
 
 ## Reads: plans
 
