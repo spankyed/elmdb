@@ -11,4 +11,9 @@ export type TypeDef = { declaredBy?: string | null,
 /**
  * The engine numbers each created row `<prefix>-<n>`
  */
-shortCode?: ShortCodeDef | null, fields?: { [key in string]: FieldDef }, additionalFields?: AdditionalFields, indexes?: { [key in string]: IndexDef }, };
+shortCode?: ShortCodeDef | null, fields?: { [key in string]: FieldDef }, additionalFields?: AdditionalFields, indexes?: { [key in string]: IndexDef }, 
+/**
+ * The store keeps the type's entities in the order of the commits that last wrote them, which `changed_since`
+ * reads; a write to the type then costs that much more
+ */
+changeOrder?: boolean, };

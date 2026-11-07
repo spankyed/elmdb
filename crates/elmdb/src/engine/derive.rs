@@ -27,6 +27,7 @@ struct Entity {
     id: String,
     seq: u64,
     trashed: bool,
+    changed: u64,
 }
 
 /// Every entity the store holds, from `p/i`
@@ -44,14 +45,8 @@ fn visit_entities(r: &impl Read, mut each: impl FnMut(Entity) -> Result<()>) -> 
         let Some(Part::String(id)) = decode_key(key)?.pop() else {
             return Err(Error::new(ErrorCode::Corrupted, "An entity's key doesn't read"));
         };
-        let record = values::decode(bytes)?;
-        let items =
-            record.as_array().ok_or_else(|| Error::new(ErrorCode::Corrupted, format!("{id}'s record doesn't read")))?;
-        each(Entity {
-            id,
-            seq: items.first().and_then(Value::as_u64).unwrap_or(0),
-            trashed: items.get(1).and_then(Value::as_bool).unwrap_or(false),
-        })
+        let record = entities::decode_record(&id, bytes)?;
+        each(Entity { id, seq: record.seq, trashed: record.trashed, changed: record.changed })
     })
 }
 
@@ -121,6 +116,9 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     for e in &all {
         let t = ids::type_of(&e.id);
         emit(keys::of_type(e.trashed, t, e.seq), values::encode(&e.id.as_str().into()))?;
+        if super::changed::kept(r.schema(), t) {
+            emit(keys::changed(t, e.changed, e.seq), values::encode(&e.id.as_str().into()))?;
+        }
         if !e.trashed {
             *live.entry(t).or_default() += 1;
         }
@@ -183,8 +181,9 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 17] = [
+const COMPARED: [Prefix; 18] = [
     Prefix::Live,
+    Prefix::Changed,
     Prefix::Trashed,
     Prefix::Count,
     Prefix::RelationCount,

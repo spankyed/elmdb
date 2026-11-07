@@ -95,10 +95,14 @@ pub enum Prefix {
     RankTotals,
     /// `l/c sequence` → what a commit changed (`engine::changelog`)
     ChangeLog,
+    /// `d/h type changed place` → id: a type's entities in the order of the commits that last wrote them (`engine::changed`)
+    Changed,
+    /// `l/d sequence type id`: an entity a commit destroyed, kept as the change log keeps its records (`engine::changed`)
+    Destroyed,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 33] = [
+    pub const ALL: [Prefix; 35] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -132,6 +136,8 @@ impl Prefix {
         Prefix::RankQueue,
         Prefix::RankTotals,
         Prefix::ChangeLog,
+        Prefix::Changed,
+        Prefix::Destroyed,
     ];
 
     /// The string the key's first part holds
@@ -170,6 +176,8 @@ impl Prefix {
             Prefix::RankQueue => "d/rq",
             Prefix::RankTotals => "d/rs",
             Prefix::ChangeLog => "l/c",
+            Prefix::Changed => "d/h",
+            Prefix::Destroyed => "l/d",
         }
     }
 
@@ -178,7 +186,7 @@ impl Prefix {
             Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
                 PrefixKind::Primary
             }
-            Prefix::Meta | Prefix::ChangeLog => PrefixKind::Meta,
+            Prefix::Meta | Prefix::ChangeLog | Prefix::Destroyed => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
     }

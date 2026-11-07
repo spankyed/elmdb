@@ -358,6 +358,8 @@ impl Database {
                 t.put(key, value)?;
             }
             store.replacing_every_row(t.txn, t.db)?;
+            // What it copied carries the other database's sequences, which mean nothing here
+            store.deposit_touched(super::changed::Touched::every(t.schema));
             for prefix in Prefix::ALL.into_iter().filter(|prefix| prefix.kind() == PrefixKind::Primary) {
                 let (low, high) = crate::format::key::prefix_range(&prefix.key().to_vec());
                 let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));

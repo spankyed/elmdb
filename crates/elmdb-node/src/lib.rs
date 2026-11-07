@@ -309,6 +309,16 @@ impl Database {
         self.inner.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
     }
 
+    /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
+    /// its `Changed`
+    #[napi]
+    pub fn changed_since(&self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
+        // mutant-skip: replace Database::changed_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` reads
+        // another process's write through it
+        self.inner.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
+    }
+
     /// Names this handle in the change log
     #[napi(getter)]
     pub fn origin(&self) -> Result<String, Code> {
@@ -503,6 +513,24 @@ impl Unit {
         // mutant-skip: replace Unit::changes_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
         // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's pending changes through it
         self.open()?.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
+    }
+
+    /// `Database.changedSince` read in the unit, before its own writes are stamped
+    #[napi]
+    pub fn changed_since(&mut self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
+        // mutant-skip: replace Unit::changed_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
+        // Only JavaScript reaches this: `test/process.test.mjs` reads in a unit through it
+        self.open()?.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
+    }
+
+    /// The sequence this unit commits as, which what it writes is stamped with
+    #[napi]
+    pub fn next_sequence(&mut self) -> Result<f64, Code> {
+        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(0.0\)
+        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(1.0\)
+        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(-1.0\)
+        // Only JavaScript reaches this: `test/process.test.mjs` holds it to the sequence the unit commits as
+        Ok(self.open()?.next_sequence().map_err(to_js)? as f64)
     }
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes

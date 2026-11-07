@@ -108,7 +108,7 @@ pub(crate) fn file(txn: &mut heed::RwTxn<'_>, db: Db, commit: &LoggedCommit) -> 
     for key in stale {
         db.main.delete(txn, &key)?;
     }
-    Ok(())
+    super::changed::trim_tombstones(txn, db, oldest)
 }
 
 /// What the log holds after `cursor`, up to `limit` commits, as of `txn`

@@ -11,13 +11,14 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | Prefix | Holds | Kind |
 |---|---|---|
 | `p/v` id field | an attribute's value | primary |
-| `p/i` id | that the entity exists: its sequence and whether it is trashed (its type is in its id) | primary |
+| `p/i` id | that the entity exists: its place, whether it is trashed, and the sequence of the commit that last wrote it (its type is in its id) | primary |
 | `p/r` relation | a relation's row: its kind, ends, info, sequence, and its weight when it isn't 1 | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
-| `m/` | the format, the kind, the schema and its hash, the last commit's sequence, how many times every row has been replaced | meta |
+| `m/` | the format, the kind, the schema and its hash, the last commit's sequence, how many times every row has been replaced, whether the change order is built, and how far tombstones are trimmed and each type's newest destroy | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
+| `d/h` type changed place | a type's entities in the order of the commits that last wrote them, for a type whose schema sets `changeOrder` | derived |
 | `d/rc` kind | a relation kind's count | derived |
 | `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |
@@ -39,6 +40,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
 | `l/c` sequence | what a commit changed: its handle's name and the types, kinds and up to 1024 entity ids it changed, or that it isn't known which; the newest 4096 commits | log |
+| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the commits the change log still holds | log |
 
 The log is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and `check()` doesn't read it.
 

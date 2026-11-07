@@ -84,6 +84,11 @@ export declare class Database {
   indexStatus(): IndexStatus[]
   /** What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes` */
   changesSince(cursor: number, limit: number): Buffer
+  /**
+   * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
+   * its `Changed`
+   */
+  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /** Names this handle in the change log */
   get origin(): string
   /** Blocks until every index waiting to be built is built or has failed */
@@ -121,6 +126,10 @@ export declare class Unit {
   write(batch: Buffer): Buffer
   /** What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes` */
   changesSince(cursor: number, limit: number): Buffer
+  /** `Database.changedSince` read in the unit, before its own writes are stamped */
+  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
+  /** The sequence this unit commits as, which what it writes is stamped with */
+  nextSequence(): number
   /** Answers reads from the unit's transaction, which sees the unit's own writes */
   read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */
