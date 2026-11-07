@@ -82,6 +82,8 @@ pub(crate) mod points {
     pub const READ_SNAPSHOT: &str = "engine::before_read_snapshot";
     /// Reading the indexes still to build fails
     pub const INDEX_REFRESH: &str = "engine::index_refresh";
+    /// The builder's work on a rank index fails before it starts, leaving it owed
+    pub const BUILD_RANK: &str = "builder::build_rank";
     /// A watch's read panics
     pub const WATCH_READ: &str = "watch::read";
     /// Creating a derivation's scratch directory fails

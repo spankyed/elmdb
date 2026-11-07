@@ -150,6 +150,11 @@ pub struct Store {
     idle: IdleReads,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
+    /// The stored epoch this handle has seen. A commit under any other is refused, since what it read has been replaced
+    epoch: AtomicU64,
+    /// The epoch the transaction about to commit moves to, when it replaces every row: taken by that commit, whatever
+    /// comes of it, so a replacement that failed can't vouch for a later one
+    replacing: AtomicU64,
     /// Tells other processes of commits here, and this one of theirs
     pub(crate) wake: wake::Wake,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
@@ -318,6 +323,10 @@ impl Store {
             let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
             held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
         };
+        let epoch = {
+            let txn = read_txn(&env)?;
+            stored_epoch(&txn, db)?
+        };
         let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);
@@ -331,6 +340,8 @@ impl Store {
             unit: UnitSlot::new(),
             idle,
             sequence: AtomicU64::new(sequence),
+            epoch: AtomicU64::new(epoch),
+            replacing: AtomicU64::new(0),
             wake,
             mirror: Arc::default(),
             #[cfg(test)]
@@ -543,9 +554,11 @@ impl Store {
                 continue;
             };
             op.record_elapsed(names::WAITED_US);
-            // Only what this write hands over reaches its commit, not what an aborted one left
+            // Only what this write hands over reaches its commit, not what an aborted one left: a replacement that failed
+            // before committing can't vouch for this write
             *self.deposited.lock() = None;
             *self.logged.lock() = None;
+            self.replacing.store(0, Ordering::Release);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -577,6 +590,18 @@ impl Store {
     /// (the `COMMIT` failpoint). The sequence is read in the transaction, which holds the environment's one write lock, so
     /// it is the last any process committed
     pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
+        let replacing = self.replacing.swap(0, Ordering::AcqRel);
+        let epoch = stored_epoch(&txn, self.db)?;
+        // mutant-skip: replace \|\| with && in Store::commit_txn
+        // A replacement's transaction stores the epoch it moves to, and a write's start clears one a failed replacement
+        // left: a replacing commit reads back its own epoch, so the second clause adds nothing a test can tell apart
+        if epoch != self.epoch.load(Ordering::Acquire) && (replacing == 0 || epoch != replacing) {
+            return Err(Error::new(
+                ErrorCode::DataReplaced,
+                "Another process replaced every row in this database since this handle read it: what it read has gone. \
+                 Open the database again, or adopt the replacement, before writing",
+            ));
+        }
         let stored = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
         let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
         let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
@@ -590,12 +615,37 @@ impl Store {
         failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
         failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
         txn.commit()?;
+        self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
         // Still this process's one writer, so commits reach the mirror in their order
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
         self.wake.notify(next);
         Ok(next)
+    }
+
+    /// Moves the stored epoch on, in the transaction replacing every row, which this handle's commit may then finish
+    pub(crate) fn replacing_every_row(&self, txn: &mut RwTxn<'_>, db: Db) -> Result<()> {
+        let next = stored_epoch(txn, db)? + 1;
+        put_meta(txn, db.main, meta::EPOCH, &next.to_be_bytes())?;
+        self.replacing.store(next, Ordering::Release);
+        Ok(())
+    }
+
+    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
+    pub(crate) fn replaced_elsewhere(&self) -> Result<Option<u64>> {
+        let stored = self.read(|txn, db| stored_epoch(txn, db))?;
+        Ok((stored != self.epoch.load(Ordering::Acquire)).then_some(stored))
+    }
+
+    /// Takes `epoch` as seen, so commits here are taken again, if it is still the stored one: a replacement since is news
+    /// the caller hasn't acted on, so it answers false and adopts nothing
+    pub(crate) fn adopt_replacement(&self, epoch: u64) -> Result<bool> {
+        if self.read(|txn, db| stored_epoch(txn, db))? != epoch {
+            return Ok(false);
+        }
+        self.epoch.store(epoch, Ordering::Release);
+        Ok(true)
     }
 
     /// What the write about to commit changed, for the change log
@@ -716,6 +766,8 @@ impl Store {
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
+                        // A replacement that failed before committing can't vouch for this unit
+                        self.replacing.store(0, Ordering::Release);
                         return Ok((txn, guard));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
@@ -901,6 +953,11 @@ pub fn meta_key(name: &str) -> Vec<u8> {
     let mut key = Prefix::Meta.key();
     key.string(name);
     key.to_vec()
+}
+
+fn stored_epoch(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db) -> Result<u64> {
+    let held = db.get(txn, &meta_key(meta::EPOCH))?;
+    Ok(held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes))
 }
 
 pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name: &str, value: &[u8]) -> Result<()> {

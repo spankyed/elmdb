@@ -229,6 +229,27 @@ impl Database {
             .map_err(to_js)
     }
 
+    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
+    #[napi]
+    pub fn replaced_elsewhere(&self) -> Result<Option<f64>, Code> {
+        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(None\)
+        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(0.0\)\)
+        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(1.0\)\)
+        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(-1.0\)\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` asks it
+        Ok(self.inner.replaced_elsewhere().map_err(to_js)?.map(|epoch| epoch as f64))
+    }
+
+    /// Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting
+    /// nothing, when another has landed since
+    #[napi]
+    pub fn adopt_replacement(&self, epoch: f64) -> Result<bool, Code> {
+        // mutant-skip: replace Database::adopt_replacement -> Result<bool, Code> with Ok\(true\)
+        // mutant-skip: replace Database::adopt_replacement -> Result<bool, Code> with Ok\(false\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` adopts through it
+        self.inner.adopt_replacement(epoch as u64).map_err(to_js)
+    }
+
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
     #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
     pub fn track_stats(&self) -> serde_json::Value {

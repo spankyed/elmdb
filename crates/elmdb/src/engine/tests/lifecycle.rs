@@ -238,6 +238,185 @@ fn the_log_stays_within_its_bound() {
     assert_eq!(held, LOG_COMMITS + 5, "what it promises, and what it has committed since it last trimmed");
 }
 
+/// Replaces every row of the database `ELMDB_RESET_DB` names, from a process of its own
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_resets_the_database() {
+    let Ok(path) = std::env::var("ELMDB_RESET_DB") else { return };
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    db.reset().unwrap();
+    db.close().unwrap();
+}
+
+fn reset_elsewhere(dir: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_resets_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_RESET_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the resetting process failed");
+}
+
+const A_TASK: fn(&str) -> serde_json::Value =
+    |id| json!({ "op": "create", "type": "Task", "id": id, "fields": { "title": "t" } });
+
+/// Replaces every row of the database `ELMDB_REPLACE_DB` names with the database `ELMDB_REPLACE_FROM` names
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_replaces_the_database() {
+    let Ok(path) = std::env::var("ELMDB_REPLACE_DB") else { return };
+    let from = std::env::var("ELMDB_REPLACE_FROM").unwrap();
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    db.replace_with(from).unwrap();
+    db.close().unwrap();
+}
+
+#[test]
+fn a_replace_with_in_another_process_refuses_commits_here_as_a_reset_does() {
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-copied")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_replaces_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_REPLACE_DB", dir.path())
+        .env("ELMDB_REPLACE_FROM", source.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the replacing process failed");
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    assert!(db.adopt_replacement(epoch).unwrap());
+    write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn adopting_a_replacement_another_has_followed_adopts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    reset_elsewhere(&dir);
+    let first = db.replaced_elsewhere().unwrap().expect("replaced");
+    reset_elsewhere(&dir);
+    assert!(!db.adopt_replacement(first).unwrap(), "the second reset is news the caller hasn't acted on");
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-1")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let second = db.replaced_elsewhere().unwrap().expect("still replaced");
+    assert!(second > first);
+    assert!(db.adopt_replacement(second).unwrap());
+    write(&db, vec![A_TASK("Task-2")]).unwrap();
+}
+
+#[test]
+fn a_reset_here_that_failed_vouches_for_no_reset_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
+    assert!(db.reset().is_err(), "the commit failed as a full disk would");
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    reset_elsewhere(&dir);
+    assert_eq!(
+        db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code,
+        ErrorCode::DataReplaced,
+        "the failed reset's epoch is the one the other process stored"
+    );
+}
+
+#[test]
+fn a_write_refused_for_a_replacement_leaves_nothing_for_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    reset_elsewhere(&dir);
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-refused")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let epoch = db.replaced_elsewhere().unwrap().unwrap();
+    assert!(db.adopt_replacement(epoch).unwrap());
+    let cursor = db.sequence().unwrap();
+    write(&db, vec![A_TASK("Task-next")]).unwrap();
+    let logged = db.changes_since(cursor, 10).unwrap();
+    assert_eq!(
+        logged.commits[0].entities.as_deref(),
+        Some(&["Task-next".to_owned()][..]),
+        "the refused write's record isn't"
+    );
+}
+
+#[test]
+fn a_reset_in_another_process_refuses_commits_here_until_it_is_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+
+    reset_elsewhere(&dir);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    let refused = db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::DataReplaced);
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-3")])).unwrap();
+    assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::DataReplaced, "a unit opened after it too");
+    assert!(
+        db.read(&serde_json::from_value(json!({"reads":[{"read":"query","plan":{"start":{"from":"types","types":["Task"]},"terminal":{"answer":"ids"}}}]})).unwrap()).is_ok(),
+        "reads carry on, over what's there now"
+    );
+
+    assert!(db.adopt_replacement(epoch).unwrap());
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-4")]).unwrap();
+}
+
+#[test]
+fn a_reset_here_goes_on_taking_commits_and_says_nothing_of_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    db.reset().unwrap();
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-2")]).unwrap();
+    db.reset().unwrap();
+    write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn a_replacement_counts_for_a_process_that_opened_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        db.reset().unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+}
+
+#[test]
+fn a_failed_reset_leaves_the_handle_refusing_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let mut unit = db.begin().unwrap();
+    assert!(db.reset().is_err(), "a unit holds the write transaction");
+    unit.abort();
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+}
+
 #[test]
 fn what_the_binding_reads_is_the_change_log_answer_in_msgpack() {
     let dir = tempfile::tempdir().unwrap();

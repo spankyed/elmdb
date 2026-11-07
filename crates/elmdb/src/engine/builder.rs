@@ -141,7 +141,10 @@ impl Core {
             if let Work::Rank { name } = &work {
                 self.await_quiet(name);
             }
-            if let Err(e) = build(&work, &|| self.stopping()) {
+            // Work over rows another process has replaced isn't owed any more: adopting that queues what is
+            if let Err(e) = build(&work, &|| self.stopping())
+                && e.code != ErrorCode::DataReplaced
+            {
                 self.lock().failures.push(IndexFailure { work: work.clone(), message: e.message });
             }
             let mut state = self.lock();
@@ -329,6 +332,7 @@ fn build_rank(
     stopping: &dyn Fn() -> bool,
     pause: &dyn Fn(),
 ) -> crate::Result<()> {
+    failure_point!(BUILD_RANK at store.path(), crate::Error::new(crate::ErrorCode::Io, "injected rank build failure"));
     let (joined, owes) = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let s = super::unit::Snapshot { txn, db, schema };

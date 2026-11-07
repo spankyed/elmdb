@@ -204,6 +204,8 @@ pub mod meta {
     pub const SCHEMA_HASH: &str = "schemaHash";
     /// The last commit's sequence, a big-endian u64: a number that only increases for as long as the database exists
     pub const SEQUENCE: &str = "sequence";
+    /// How many times every row has been replaced at once, a big-endian u64, absent for none
+    pub const EPOCH: &str = "epoch";
 }
 
 #[cfg(test)]
