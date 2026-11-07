@@ -48,6 +48,9 @@ python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BA
   by hand checks the cases you thought of; the script checks the ones you didn't, so `pre-push` runs it before the push,
   not after. Code no Rust test can ever reach, such as the binding's exports that only JavaScript calls, is excluded
   once in `.cargo/mutants.toml` rather than skipped mutant by mutant.
+- **Stacking a pull request on another?** Run `cargo xtask pre-push` and clear the branch's survivors before branching
+  the next from it. A fix made under a stack is merged up through every branch above it, and each push there reruns
+  their CI: survivors cleared where the code was written cost minutes, cleared at the end of a stack, hours.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
