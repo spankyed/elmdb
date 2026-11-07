@@ -132,7 +132,7 @@ cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -
 cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
 python3 scripts/mutants-in-diff.py main
-# One of four shares of them, or only the changed files with Windows-only code (what CI's runners split)
+# One of four shares of them, or only the change's Windows-only code (what CI's runners split)
 python3 scripts/mutants-in-diff.py main 3 --shard 1/4
 python3 scripts/mutants-in-diff.py main 3 --windows-only
 # What the exclusions leave out of a file
@@ -152,13 +152,15 @@ the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c
 cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
 (`docs/evidence/mutation-baseline.md`, The Windows reading).
 
-CI's `mutants (advisory)` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull
-request, against the base it merges into, beside the checks rather than in them: each missed mutant is annotated on its
-line and listed in its job's summary, and a job fails only when cargo-mutants does, so a survivor is read, not waited
-on. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). Windows
-mutates only the changed files holding code that compiles on Windows alone (`--windows-only`: `cfg(windows)` or
-`target_os = "windows"`), which Linux compiles to nothing and shows as missed; a change with none installs nothing
-there. A change to documentation alone mutates nothing.
+CI's `mutants` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull request,
+against the base it merges into: each missed mutant is annotated on its line and listed in its job's summary, and fails
+the job. A survivor is a test missing, or an equivalent mutant, which a `// mutant-skip:` comment names with why it is
+one; a timeout is listed and doesn't fail it, since load alone can cause one. Run the script before pushing, so the
+job finds nothing. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). A mutant of code a
+runner doesn't compile builds unchanged and passes every test, so it would show as missed whatever the tests: the script
+reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
+Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing
+there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 

@@ -342,6 +342,18 @@ pub fn rank_queued(index: &str, type_at: u32, seq: u64) -> Vec<u8> {
     })
 }
 
+/// What the commit with `sequence` changed, in commit order
+pub fn change_log(sequence: u64) -> Vec<u8> {
+    with(Prefix::ChangeLog, |w| {
+        w.number(sequence as f64);
+    })
+}
+
+/// The change log
+pub fn change_log_prefix() -> Vec<u8> {
+    with(Prefix::ChangeLog, |_| {})
+}
+
 /// A rank index's nodes waiting to be pushed
 pub fn rank_queue(index: &str) -> Vec<u8> {
     with(Prefix::RankQueue, |w| {

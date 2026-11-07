@@ -70,6 +70,10 @@ export declare class Database {
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
+  /** What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes` */
+  changesSince(cursor: number, limit: number): Buffer
+  /** Names this handle in the change log */
+  get origin(): string
   /** Queues the index work the store says is owed, for a caller told another process committed */
   queueOwedWork(): void
   /** Blocks until every index waiting to be built is built or has failed */
@@ -105,6 +109,8 @@ export declare class Unit {
    * bytes of `{ results: OpResult[] }`
    */
   write(batch: Buffer): Buffer
+  /** What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes` */
+  changesSince(cursor: number, limit: number): Buffer
   /** Answers reads from the unit's transaction, which sees the unit's own writes */
   read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */

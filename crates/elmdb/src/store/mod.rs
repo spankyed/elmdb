@@ -26,6 +26,7 @@ use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
 
 use crate::diagnostics::{Op, names};
+use crate::engine::changelog::{self, LoggedCommit};
 use crate::engine::mirror::{EdgeDelta, EdgeMirror};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
@@ -164,6 +165,10 @@ pub struct Store {
     /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
     /// write outside the engine's units, whose commit then empties the mirror
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
+    /// What the write about to commit changed, for the change log; a commit that deposits nothing logs `everything`
+    logged: PlainMutex<Option<LoggedCommit>>,
+    /// Names this handle in the change log
+    origin: String,
 }
 
 /// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
@@ -188,6 +193,14 @@ pub(crate) fn reserve_destination(target: &Path) -> Result<Registration> {
         ));
     }
     Ok(Registration(Some(target.to_owned())))
+}
+
+/// A name for a handle in the change log, which no other handle will have
+fn new_origin() -> Result<String> {
+    let mut bytes = [0u8; 8];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| Error::new(ErrorCode::Io, format!("No randomness for a handle's name: {error}")))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 impl Drop for Registration {
@@ -325,6 +338,8 @@ impl Store {
             #[cfg(test)]
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
+            logged: PlainMutex::default(),
+            origin: new_origin()?,
         })
     }
 
@@ -528,6 +543,7 @@ impl Store {
             op.record_elapsed(names::WAITED_US);
             // Only what this write hands over reaches its commit, not what an aborted one left
             *self.deposited.lock() = None;
+            *self.logged.lock() = None;
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -563,6 +579,10 @@ impl Store {
         let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
         let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
+        let mut logged = self.logged.lock().take().unwrap_or_else(LoggedCommit::everything);
+        logged.sequence = next;
+        logged.origin.clone_from(&self.origin);
+        changelog::file(&mut txn, self.db, &logged)?;
         // A test's stand-in for a full disk, armed on its thread or for this environment's path; the transaction
         // aborts as it drops
         failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
@@ -583,6 +603,16 @@ impl Store {
     /// builder's included
     pub(crate) fn take_elsewhere(&self) -> Option<u64> {
         Some(self.elsewhere.swap(0, Ordering::AcqRel)).filter(|&sequence| sequence > 0)
+    }
+
+    /// What the write about to commit changed, for the change log
+    pub(crate) fn deposit_logged(&self, logged: LoggedCommit) {
+        *self.logged.lock() = Some(logged);
+    }
+
+    /// Names this handle in the change log
+    pub(crate) fn origin(&self) -> &str {
+        &self.origin
     }
 
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror
