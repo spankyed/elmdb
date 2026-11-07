@@ -312,16 +312,16 @@ impl Database {
         self.tracks.lock().hear_builder_commits(listener)
     }
 
-    /// Tells `listener` of commits other processes make, right after each, with the latest one's sequence. There is one
-    /// listener: a second is refused (`ALREADY_LISTENING`), and closing the database drops it. It runs on a thread of its
-    /// own, so it hands off and returns. Index work those commits left owed is queued first, since that process may have
-    /// exited with its builder part way. It files a port in the database's directory, which has to be writable
+    /// Tells `listener` of commits other processes make, right after each, which `committed_elsewhere` then answers. There
+    /// is one listener: a second is refused (`ALREADY_LISTENING`), and closing the database drops it. It runs on a thread
+    /// of its own, so it hands off and returns. Index work those commits left owed is queued first, since that process may
+    /// have exited with its builder part way. It files a mailbox in the database's directory, which has to be writable
     pub fn hear_commits_elsewhere(&self, listener: crate::store::wake::WakeListener) -> Result<()> {
         let store = self.store()?;
         let weak = Arc::downgrade(&store);
         let (slot, schemas, tracks) = (Arc::clone(&self.builder), self.observing_schema(), Arc::clone(&self.tracks));
         let read_only = self.read_only;
-        store.wake.listen(Arc::new(move |sequence| {
+        store.wake.listen(Arc::new(move || {
             // Work over rows another process has replaced can't commit until the holder adopts that, which queues it
             let current =
                 |store: &Arc<crate::store::Store>| store.replaced_elsewhere().is_ok_and(|replaced| replaced.is_none());
@@ -337,7 +337,7 @@ impl Database {
                     builders.queue(owed);
                 }
             }
-            listener(sequence);
+            listener();
         }))
     }
 

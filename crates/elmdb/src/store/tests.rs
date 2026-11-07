@@ -427,8 +427,8 @@ fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
     let (told, heard) = std::sync::mpsc::channel();
-    store.wake.listen(Arc::new(move |sequence| told.send(sequence).unwrap())).unwrap();
-    assert!(store.wake.listen(Arc::new(|_| {})).is_err_and(|error| error.code == ErrorCode::AlreadyListening));
+    store.wake.listen(Arc::new(move || told.send(()).unwrap())).unwrap();
+    assert!(store.wake.listen(Arc::new(|| {})).is_err_and(|error| error.code == ErrorCode::AlreadyListening));
 
     put(&store, "a", b"1").unwrap();
     assert!(heard.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "its own commits aren't news");
@@ -441,11 +441,47 @@ fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
         .status()
         .unwrap();
     assert!(status.success(), "the child's write failed");
-    let sequence = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("told of the other process's commit");
-    assert_eq!(sequence, store.sequence());
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("told of the other process's commit");
+    assert!(store.committed_elsewhere().unwrap());
 
     store.wake.stop();
     assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "a listener that stopped files nothing");
+}
+
+/// Listens on the store `ELMDB_LISTENING_DB` names, says so with a file beside it, and waits to be killed
+#[test]
+#[ignore = "a helper a_killed_listeners_mailbox_is_removed_by_the_next_commit runs as another process"]
+fn child_listens_until_killed() {
+    let Ok(path) = std::env::var("ELMDB_LISTENING_DB") else { return };
+    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    store.wake.listen(Arc::new(|| {})).unwrap();
+    std::fs::write(Path::new(&path).join("listening"), b"").unwrap();
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+#[test]
+fn a_killed_listeners_mailbox_is_removed_by_the_next_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_listens_until_killed", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_LISTENING_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let started = std::time::Instant::now();
+    while !dir.path().join("listening").exists() {
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "the other process never listened");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 1, "its mailbox, filed");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "removed, nobody owning it");
 }
 
 #[test]
