@@ -2659,6 +2659,9 @@ fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
 #[ignore = "run by leaves_an_owed_index, as a process of its own"]
 fn child_exits_owing_a_rank_index() {
     let Ok(path) = std::env::var("ELMDB_OWING_DB") else { return };
+    // Its own builder can't take the work, however fast this machine runs it: it is owed when this process exits
+    let canonical = std::fs::canonicalize(&path).unwrap();
+    let _owing = crate::failpoints::fail_while_at(crate::failpoints::points::BUILD_RANK, &canonical);
     let db = Database::open(
         std::path::Path::new(&path),
         OpenOptions { schema: Some(near_schema()), syncs: false, ..Default::default() },
@@ -2718,6 +2721,7 @@ fn a_read_only_handle_woken_by_another_process_starts_no_build() {
         status.iter().all(|s| s.failure.is_none()),
         "no build started, so none failed for want of a write: {status:?}"
     );
+    assert!(owes(&db), "and the work is still owed, for a handle that can write");
 }
 
 #[test]
