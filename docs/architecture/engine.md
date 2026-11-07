@@ -100,6 +100,12 @@ older than the kept tombstones, of a type with a destroy since, is told the answ
 it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
 before it commits, so a reader inside it can say where it will have read to.
 
+**Checkpoints.** A reader that applies what changed since a position keeps its position with what it derived:
+`Unit::set_checkpoint(name, bytes)` writes it in the unit, so the two commit together or not at all, and
+`checkpoint(name)` reads it back, from a unit or the database. It is a reader's place, as CouchDB's local documents and
+Kafka's committed offsets are, so it is no entity, stamps no change order, and goes with the rows it describes: a
+backup keeps it, a dump leaves it out, and `reset` and `replace_with` drop it, so a reader starts again from nothing.
+
 `reset` and `replace_with` move a stored epoch on. A handle's commit under an epoch it hasn't seen is refused
 (`DATA_REPLACED`), since whatever it read before writing has gone, while its reads carry on over what's there now. The
 holder asks `replaced_elsewhere` when woken, or when a write is refused, which names the epoch; once it has acted on what's

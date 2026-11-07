@@ -40,9 +40,11 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
 | `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the last 4096 commits (`TOMBSTONE_COMMITS`) | log |
+| `l/k` name | a reader's checkpoint, the bytes it gave, written in the unit whose work it records (`Unit::set_checkpoint`) | log |
 
-A tombstone is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and `check()` doesn't
-read it.
+A tombstone or a checkpoint is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and
+`check()` doesn't read it. A backup keeps it with the rows it describes, and `reset` and `replace_with` drop it with
+them.
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` derives the same from a read snapshot into scratch files and

@@ -3,6 +3,7 @@
 
 mod catalog;
 mod changed;
+mod checkpoints;
 mod commits;
 mod compression;
 mod derived;

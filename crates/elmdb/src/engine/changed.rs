@@ -297,6 +297,10 @@ pub struct After {
 pub struct Changed {
     /// The entities that changed and are still there, in change order
     pub ids: Vec<String>,
+    /// The sequence of the commit that last changed each of `ids`, in the same order: a reader that wrote some of them
+    /// itself can tell its own commits' from another's
+    #[cfg_attr(feature = "codegen", ts(type = "number[]"))]
+    pub sequences: Vec<u64>,
     /// The entities destroyed since, which nothing else names
     pub destroyed: Vec<String>,
     /// Where to read from next
@@ -332,6 +336,9 @@ pub(crate) fn since(
             // mutant-skip: replace < with <= in since
             // A type equal to the one the reader stopped in took the arm above
             Some(after) if after.entity_type.as_str() < entity_type => (from.sequence, 0, true),
+            // A reader at the start has read nothing, so it reads the entities no commit has stamped too. One with a place
+            // past this type at 0 has read them
+            None if from.sequence == 0 => (0, 0, true),
             _ => (from.sequence.saturating_add(1), 0, true),
         };
         let start = keys::changed(entity_type, changed, place);
@@ -412,5 +419,6 @@ pub(crate) fn since(
             }
         }
     }
-    Ok(Changed { ids: found.into_iter().map(|(_, _, _, id)| id).collect(), destroyed, next, done, complete })
+    let sequences = found.iter().map(|(changed, ..)| *changed).collect();
+    Ok(Changed { ids: found.into_iter().map(|(_, _, _, id)| id).collect(), sequences, destroyed, next, done, complete })
 }

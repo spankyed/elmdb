@@ -135,7 +135,7 @@ test('an open refuses a sync or map option that is not a whole number in range, 
   Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
 });
 
-test("committedElsewhere is never a handle's own commit, and a unit reads its pending changes", () => {
+test("committedElsewhere is never a handle's own commit, a unit reads its pending changes, and a checkpoint commits with its unit", () => {
   const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
   try {
@@ -149,6 +149,13 @@ test("committedElsewhere is never a handle's own commit, and a unit reads its pe
     unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
     assert.deepEqual(Object.keys(packr.unpack(unit.pendingChanges()).entities), ['Task-2']);
     unit.abort();
+
+    const reading = db.begin();
+    reading.setCheckpoint('reader', Buffer.from('there'));
+    assert.equal(reading.checkpoint('reader').toString(), 'there');
+    assert.equal(db.checkpoint('reader'), null, 'not until it commits');
+    reading.commit();
+    assert.equal(db.checkpoint('reader').toString(), 'there');
     db.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });

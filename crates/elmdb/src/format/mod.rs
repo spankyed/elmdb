@@ -97,10 +97,12 @@ pub enum Prefix {
     Changed,
     /// `l/d sequence type id`: an entity a commit destroyed, kept for the last `TOMBSTONE_COMMITS` commits (`engine::changed`)
     Destroyed,
+    /// `l/k name` → a reader's checkpoint, written in the unit whose work it records (`Unit::set_checkpoint`)
+    Checkpoint,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 34] = [
+    pub const ALL: [Prefix; 35] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -135,6 +137,7 @@ impl Prefix {
         Prefix::RankTotals,
         Prefix::Changed,
         Prefix::Destroyed,
+        Prefix::Checkpoint,
     ];
 
     /// The string the key's first part holds
@@ -174,6 +177,7 @@ impl Prefix {
             Prefix::RankTotals => "d/rs",
             Prefix::Changed => "d/h",
             Prefix::Destroyed => "l/d",
+            Prefix::Checkpoint => "l/k",
         }
     }
 
@@ -182,7 +186,7 @@ impl Prefix {
             Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
                 PrefixKind::Primary
             }
-            Prefix::Meta | Prefix::Destroyed => PrefixKind::Meta,
+            Prefix::Meta | Prefix::Destroyed | Prefix::Checkpoint => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
     }

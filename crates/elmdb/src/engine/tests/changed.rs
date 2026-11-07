@@ -43,6 +43,73 @@ fn task(id: &str) -> serde_json::Value {
 }
 
 #[test]
+fn a_reader_paging_from_the_start_across_types_reads_each_unstamped_entity_once() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let unordered = crate::schema::Schema::from_json(&super::schema_json()).unwrap();
+        let db =
+            Database::open(dir.path(), OpenOptions { schema: Some(unordered), syncs: false, ..Default::default() })
+                .unwrap();
+        let note = |id: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": {} });
+        write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    let mut position = from(0);
+    let mut read = Vec::new();
+    for _ in 0..10 {
+        let page = since(&db, &position, 2);
+        read.extend(page.ids);
+        position = page.next;
+        if page.done {
+            break;
+        }
+    }
+    read.sort();
+    assert_eq!(read, ["Note-1", "Note-2", "Task-1", "Task-2", "Task-3"], "each once, in pages of two");
+}
+
+#[test]
+fn each_entity_read_comes_with_the_sequence_of_the_commit_that_last_changed_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let first = db.sequence().unwrap();
+    write(&db, vec![task("Task-2"), task("Task-3")]).unwrap();
+    let second = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "title": "moved" } })]).unwrap();
+    let third = db.sequence().unwrap();
+    let all = since(&db, &from(first - 1), 100);
+    assert_eq!(all.ids, ["Task-2", "Task-3", "Task-1"]);
+    assert_eq!(all.sequences, [second, second, third], "one each, in the same order");
+    assert_eq!(since(&db, &from(first - 1), 2).sequences.len(), 2, "as many as the page holds");
+}
+
+#[test]
+fn a_reader_from_the_start_reads_the_entities_a_type_held_before_it_kept_an_order() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let unordered = crate::schema::Schema::from_json(&super::schema_json()).unwrap();
+        let db =
+            Database::open(dir.path(), OpenOptions { schema: Some(unordered), syncs: false, ..Default::default() })
+                .unwrap();
+        write(&db, vec![task("Task-before-1"), task("Task-before-2")]).unwrap();
+        db.close().unwrap();
+    }
+    // Kept in order only now: what it held then no commit stamped
+    let db = open(&dir);
+    write(&db, vec![task("Task-after")]).unwrap();
+    let all = since(&db, &from(0), 100);
+    assert_eq!(all.ids, ["Task-before-1", "Task-before-2", "Task-after"], "everything, the unstamped first");
+    assert!(!all.complete, "a reader from before the order was built can't know what was destroyed");
+    assert_eq!(
+        since(&db, &from(1), 100).ids,
+        ["Task-after"],
+        "a reader past the start has read what no commit stamped"
+    );
+}
+
+#[test]
 fn a_write_moves_what_it_wrote_to_its_commit_and_a_reader_reads_only_that() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

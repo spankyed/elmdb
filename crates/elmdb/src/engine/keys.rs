@@ -375,6 +375,13 @@ pub fn destroyed_prefix() -> Vec<u8> {
     with(Prefix::Destroyed, |_| {})
 }
 
+/// The checkpoint named `name`
+pub fn checkpoint(name: &str) -> Vec<u8> {
+    with(Prefix::Checkpoint, |w| {
+        w.string(name);
+    })
+}
+
 /// A rank index's nodes waiting to be pushed
 pub fn rank_queue(index: &str) -> Vec<u8> {
     with(Prefix::RankQueue, |w| {
