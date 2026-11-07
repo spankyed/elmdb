@@ -28,6 +28,10 @@ profile = "mutants"
 
 # Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
 exclude_re = [
+    # The binding's methods, each a call into the engine converted for JavaScript: only JavaScript calls them, its suite
+    # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so none of these is ever
+    # caught here. A helper of the binding's that its Rust tests reach keeps its mutants
+    "crates/elmdb-node/src/lib.rs:.*replace (Database|Unit)::\\w+ -> Result<.*, Code> with",
     # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
     # function of the place answers the same, and only the file's size and a write's cost tell them apart
     "trigram.rs:.*replace block_of -> u64 with",
@@ -162,26 +166,5 @@ exclude_re = [
     "crates/elmdb/src/store/wake.rs:329:.*replace match guard error.raw_os_error\\(\\) == Some\\(libc::EPIPE\\) with false in mailbox::ring",
     "crates/elmdb/src/store/writers.rs:160:.*delete match arm Some\\(libc::EINTR\\) in macos::Held::hold",
     "crates/elmdb/src/store/writers.rs:178:.*replace macos::<impl Drop for Held>::drop with \\(\\)",
-    "crates/elmdb-node/src/lib.rs:197:.*replace Database::hear_builder_commits -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:219:.*replace Database::hear_commits_elsewhere -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(0.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(1.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(-1.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:250:.*replace Database::adopt_replacement -> Result<bool, Code> with Ok\\(true\\)",
-    "crates/elmdb-node/src/lib.rs:250:.*replace Database::adopt_replacement -> Result<bool, Code> with Ok\\(false\\)",
-    "crates/elmdb-node/src/lib.rs:310:.*replace Database::committed_elsewhere -> Result<bool, Code> with Ok\\(true\\)",
-    "crates/elmdb-node/src/lib.rs:310:.*replace Database::committed_elsewhere -> Result<bool, Code> with Ok\\(false\\)",
-    "crates/elmdb-node/src/lib.rs:319:.*replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:319:.*replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(Some\\(Default::default\\(\\)\\)\\)",
-    "crates/elmdb-node/src/lib.rs:329:.*replace Database::changed_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:515:.*replace Unit::set_checkpoint -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:524:.*replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:524:.*replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(Some\\(Default::default\\(\\)\\)\\)",
-    "crates/elmdb-node/src/lib.rs:532:.*replace Unit::pending_changes -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:540:.*replace Unit::changed_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(0.0\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(1.0\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(-1.0\\)",
     # END generated
 ]

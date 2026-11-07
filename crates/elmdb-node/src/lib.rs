@@ -191,9 +191,6 @@ impl Database {
         &self,
         listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
     ) -> Result<(), Code> {
-        // mutant-skip: replace Database::hear_builder_commits -> Result<\(\), Code> with Ok\(\(\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/tracked.test.mjs` never hears a
-        // commit without it
         let tell = listener
             .build_threadsafe_function()
             .callee_handled::<false>()
@@ -214,8 +211,6 @@ impl Database {
     /// second being refused. It keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: () => void")]
     pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, (), ()>) -> Result<(), Code> {
-        // mutant-skip: replace Database::hear_commits_elsewhere -> Result<\(\), Code> with Ok\(\(\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` hears a commit through it
         let tell = listener
             .build_threadsafe_function()
             .callee_handled::<false>()
@@ -232,11 +227,6 @@ impl Database {
     /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
     #[napi]
     pub fn replaced_elsewhere(&self) -> Result<Option<f64>, Code> {
-        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(None\)
-        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(0.0\)\)
-        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(1.0\)\)
-        // mutant-skip: replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\(Some\(-1.0\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` asks it
         Ok(self.inner.replaced_elsewhere().map_err(to_js)?.map(|epoch| epoch as f64))
     }
 
@@ -244,9 +234,6 @@ impl Database {
     /// nothing, when another has landed since
     #[napi]
     pub fn adopt_replacement(&self, epoch: f64) -> Result<bool, Code> {
-        // mutant-skip: replace Database::adopt_replacement -> Result<bool, Code> with Ok\(true\)
-        // mutant-skip: replace Database::adopt_replacement -> Result<bool, Code> with Ok\(false\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` adopts through it
         self.inner.adopt_replacement(epoch as u64).map_err(to_js)
     }
 
@@ -304,18 +291,12 @@ impl Database {
     /// Whether another handle has committed since this one last asked, or since it opened; never for this handle's own
     #[napi]
     pub fn committed_elsewhere(&self) -> Result<bool, Code> {
-        // mutant-skip: replace Database::committed_elsewhere -> Result<bool, Code> with Ok\(true\)
-        // mutant-skip: replace Database::committed_elsewhere -> Result<bool, Code> with Ok\(false\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` asks it
         self.inner.committed_elsewhere().map_err(to_js)
     }
 
     /// The checkpoint named `name`, as the latest commit left it
     #[napi]
     pub fn checkpoint(&self, name: String) -> Result<Option<Buffer>, Code> {
-        // mutant-skip: replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\(None\)
-        // mutant-skip: replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\(Some\(Default::default\(\)\)\)
-        // Only JavaScript reaches this: `test/database.test.mjs` reads a committed checkpoint through it
         Ok(self.inner.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
     }
 
@@ -323,9 +304,6 @@ impl Database {
     /// its `Changed`
     #[napi]
     pub fn changed_since(&self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
-        // mutant-skip: replace Database::changed_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` reads
-        // another process's write through it
         self.inner.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
     }
 
@@ -510,43 +488,30 @@ impl Unit {
     /// Records `value` as the checkpoint `name`, committing with this unit or not at all
     #[napi]
     pub fn set_checkpoint(&mut self, name: String, value: Buffer) -> Result<(), Code> {
-        // mutant-skip: replace Unit::set_checkpoint -> Result<\(\), Code> with Ok\(\(\)\)
-        // Only JavaScript reaches this: `test/database.test.mjs` sets a checkpoint through it
         self.open()?.set_checkpoint(&name, &value).map_err(to_js)
     }
 
     /// The checkpoint named `name`, as this unit sees it
     #[napi]
     pub fn checkpoint(&mut self, name: String) -> Result<Option<Buffer>, Code> {
-        // mutant-skip: replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\(None\)
-        // mutant-skip: replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\(Some\(Default::default\(\)\)\)
-        // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's checkpoint through it
         Ok(self.open()?.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
     }
 
     /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
     #[napi]
     pub fn pending_changes(&mut self) -> Result<Buffer, Code> {
-        // mutant-skip: replace Unit::pending_changes -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
-        // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's pending changes through it
         self.open()?.pending_changes_bytes().map(Buffer::from).map_err(to_js)
     }
 
     /// `Database.changedSince` read in the unit, before its own writes are stamped
     #[napi]
     pub fn changed_since(&mut self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
-        // mutant-skip: replace Unit::changed_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
-        // Only JavaScript reaches this: `test/process.test.mjs` reads in a unit through it
         self.open()?.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
     }
 
     /// The sequence this unit commits as, which what it writes is stamped with
     #[napi]
     pub fn next_sequence(&mut self) -> Result<f64, Code> {
-        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(0.0\)
-        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(1.0\)
-        // mutant-skip: replace Unit::next_sequence -> Result<f64, Code> with Ok\(-1.0\)
-        // Only JavaScript reaches this: `test/process.test.mjs` holds it to the sequence the unit commits as
         Ok(self.open()?.next_sequence().map_err(to_js)? as f64)
     }
 

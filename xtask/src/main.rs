@@ -18,12 +18,15 @@
 //!   reports and decides nothing (`docs/architecture/testing.md`, Comparing two revisions).
 //! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
 //!   testing.md`, The build directory).
+//! - `pre-push`: every check CI runs on a change, the change's mutants included, cheapest first, stopping at the first
+//!   that fails: what to run before a push.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 mod compare;
 mod generate;
+mod pre_push;
 
 fn main() -> ExitCode {
     let task = std::env::args().nth(1);
@@ -38,8 +41,23 @@ fn main() -> ExitCode {
         Some("check-sync") => check_sync(&workspace_root()),
         Some("mutant-exclusions") => mutant_exclusions(&workspace_root()),
         Some("check-mutant-exclusions") => check_mutant_exclusions(&workspace_root()),
+        Some("pre-push") => {
+            let root = workspace_root();
+            pre_push::pre_push(
+                &root,
+                &std::env::args().skip(2).collect::<Vec<_>>(),
+                &[
+                    ("generated protocol", &check_generated),
+                    ("one LMDB", &|| check_one_lmdb(&root)),
+                    ("diagnostics off by default", &|| check_diagnostics_off(&root)),
+                    ("serial Leiden", &|| check_leiden_serial(&root)),
+                    ("crate::sync", &|| check_sync(&root)),
+                    ("mutant exclusions", &|| check_mutant_exclusions(&root)),
+                ],
+            )
+        }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
                 .to_owned(),
         ),
     };
