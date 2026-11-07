@@ -704,10 +704,11 @@ impl Database {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
         let held = self.schema_guard();
         let store = self.store()?;
-        let (txn, gate) = store.begin()?;
+        let (txn, gate, writer) = store.begin()?;
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
+            writer.release();
             store.end_unit();
             return Err(error);
         }
@@ -724,6 +725,7 @@ impl Database {
             schemas: self.observing_schema(),
             poisoned: None,
             gate: Some(gate),
+            writer: Some(writer),
             schema,
             store,
             builders: self.builders()?,
@@ -742,6 +744,8 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
+    /// The writer's hold on the write transaction, let go once the transaction has ended (`store/writers.rs`)
+    writer: Option<crate::store::WriterLock>,
     schema: Arc<EngineSchema>,
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
@@ -894,6 +898,7 @@ impl Unit {
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
+        self.writer = None;
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
@@ -915,6 +920,7 @@ impl Unit {
     pub fn abort(&mut self) {
         if self.txn.take().is_some() {
             self.gate = None;
+            self.writer = None;
             self.store.end_unit();
         }
     }

@@ -14,6 +14,8 @@ pub(crate) use backup::publish_new;
 pub mod sync;
 mod unit_slot;
 pub(crate) mod wake;
+mod writers;
+pub(crate) use writers::WriterLock;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -157,6 +159,8 @@ pub struct Store {
     replacing: AtomicU64,
     /// Tells other processes of commits here, and this one of theirs
     pub(crate) wake: wake::Wake,
+    /// What a writer takes before LMDB's write lock, so one a dead writer left held is let go
+    writers: writers::Writers,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
@@ -312,7 +316,8 @@ impl Store {
         if options.read_only {
             require_registered_reader(&env, &canonical)?;
         }
-        let db = Self::open_db(&env, &canonical, options.read_only)?;
+        let writers = writers::Writers::open(&canonical, options.read_only)?;
+        let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
@@ -345,6 +350,7 @@ impl Store {
             epoch: AtomicU64::new(epoch),
             replacing: AtomicU64::new(0),
             wake,
+            writers,
             mirror: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
@@ -361,7 +367,7 @@ impl Store {
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
-    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool) -> Result<Db> {
+    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool, writers: &writers::Writers) -> Result<Db> {
         let rtxn = read_txn(env)?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -386,7 +392,7 @@ impl Store {
         };
         if let Some(db) = db {
             check_stamp(env, db, path)?;
-            return Self::with_graphs(env, db, read_only);
+            return Self::with_graphs(env, db, read_only, writers);
         }
         if read_only || foreign {
             return Err(Error::new(
@@ -399,6 +405,7 @@ impl Store {
             ));
         }
         // A new environment: its database and stamp in one unit, synced, before anything else is written
+        let writer = writers.hold()?;
         let wtxn = env.write_txn()?;
         let db = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
@@ -413,13 +420,20 @@ impl Store {
                 Error::new(e.code, format!("Couldn't record the storage format of {}: {}", path.display(), e.message))
             })?
             .unwrap_commit();
+        // Let go before the graphs' transaction, which takes it again
+        writer.release();
         env.force_sync()?;
-        Self::with_graphs(env, db, read_only)
+        Self::with_graphs(env, db, read_only, writers)
     }
 
     /// The databases around `main`: hannoy's graph databases, created in a writable environment that lacks them, and
     /// opened, when there, in a read-only one
-    fn with_graphs(env: &Env<WithoutTls>, main: heed::Database<'static, Bytes, Bytes>, read_only: bool) -> Result<Db> {
+    fn with_graphs(
+        env: &Env<WithoutTls>,
+        main: heed::Database<'static, Bytes, Bytes>,
+        read_only: bool,
+        writers: &writers::Writers,
+    ) -> Result<Db> {
         let rtxn = read_txn(env)?;
         let (cosine, euclidean) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -431,6 +445,7 @@ impl Store {
         if read_only || (cosine.is_some() && euclidean.is_some()) {
             return Ok(Db { main, cosine, euclidean });
         }
+        let _writer = writers.hold()?;
         let wtxn = env.write_txn()?;
         let (cosine, euclidean) = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
@@ -546,8 +561,9 @@ impl Store {
             // this caller waiting on the unit's writer while it holds a schema guard
             let claimed = self.unit.claim_writer(|| {
                 let guard = self.gate();
+                let writer = self.writers.hold()?;
                 match self.env.write_txn() {
-                    Ok(txn) => Ok(Some((txn, guard))),
+                    Ok(txn) => Ok(Some((txn, (guard, writer)))),
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => Ok(None),
                     Err(e) => Err(Error::from(e)),
                 }
@@ -753,6 +769,7 @@ impl Store {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
         }
         let _guard = self.gate();
+        let _writer = self.writers.hold()?;
         self.drop_idle();
         let mut txn = self.env.write_txn()?;
         let key = meta_key(meta::SEQUENCE);
@@ -769,14 +786,17 @@ impl Store {
 
     /// The environment's write transaction for a unit held open across calls, with the gate held for it. Refuses a
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
-    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
+    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         let op = Op::begin();
         let result = self.begin_reported(&op);
         op.ended(result, "begun")
     }
 
     /// `begin`'s work, recording on `op` what it waited for and retried
-    fn begin_reported(&self, op: &Op) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
+    fn begin_reported(
+        &self,
+        op: &Op,
+    ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
         self.unit.reserve()?;
         let begun = (|| {
@@ -787,12 +807,13 @@ impl Store {
             }
             loop {
                 let guard = self.gate.read_arc();
+                let writer = self.writers.hold()?;
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
                         // A replacement that failed before committing can't vouch for this unit
                         self.replacing.store(0, Ordering::Release);
-                        return Ok((txn, guard));
+                        return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
                     // transaction's hold on it goes first
