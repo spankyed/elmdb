@@ -14,6 +14,10 @@ exclude_globs = [
     "crates/elmdb/src/sync/shuttle_primitives.rs",
     "crates/elmdb/src/engine/watch/model.rs",
     "crates/elmdb/src/engine/builder/model.rs",
+    # The binding's exports and the conversions they make for JavaScript: only JavaScript reaches them, its suite
+    # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
+    # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
+    "crates/elmdb-node/src/lib.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
@@ -162,26 +166,5 @@ exclude_re = [
     "crates/elmdb/src/store/wake.rs:329:.*replace match guard error.raw_os_error\\(\\) == Some\\(libc::EPIPE\\) with false in mailbox::ring",
     "crates/elmdb/src/store/writers.rs:160:.*delete match arm Some\\(libc::EINTR\\) in macos::Held::hold",
     "crates/elmdb/src/store/writers.rs:178:.*replace macos::<impl Drop for Held>::drop with \\(\\)",
-    "crates/elmdb-node/src/lib.rs:197:.*replace Database::hear_builder_commits -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:219:.*replace Database::hear_commits_elsewhere -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(0.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(1.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:240:.*replace Database::replaced_elsewhere -> Result<Option<f64>, Code> with Ok\\(Some\\(-1.0\\)\\)",
-    "crates/elmdb-node/src/lib.rs:250:.*replace Database::adopt_replacement -> Result<bool, Code> with Ok\\(true\\)",
-    "crates/elmdb-node/src/lib.rs:250:.*replace Database::adopt_replacement -> Result<bool, Code> with Ok\\(false\\)",
-    "crates/elmdb-node/src/lib.rs:310:.*replace Database::committed_elsewhere -> Result<bool, Code> with Ok\\(true\\)",
-    "crates/elmdb-node/src/lib.rs:310:.*replace Database::committed_elsewhere -> Result<bool, Code> with Ok\\(false\\)",
-    "crates/elmdb-node/src/lib.rs:319:.*replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:319:.*replace Database::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(Some\\(Default::default\\(\\)\\)\\)",
-    "crates/elmdb-node/src/lib.rs:329:.*replace Database::changed_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:515:.*replace Unit::set_checkpoint -> Result<\\(\\), Code> with Ok\\(\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:524:.*replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(None\\)",
-    "crates/elmdb-node/src/lib.rs:524:.*replace Unit::checkpoint -> Result<Option<Buffer>, Code> with Ok\\(Some\\(Default::default\\(\\)\\)\\)",
-    "crates/elmdb-node/src/lib.rs:532:.*replace Unit::pending_changes -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:540:.*replace Unit::changed_since -> Result<Buffer, Code> with Ok\\(Default::default\\(\\)\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(0.0\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(1.0\\)",
-    "crates/elmdb-node/src/lib.rs:550:.*replace Unit::next_sequence -> Result<f64, Code> with Ok\\(-1.0\\)",
     # END generated
 ]

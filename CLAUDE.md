@@ -15,7 +15,16 @@ read `docs/architecture/design.md` before changing anything, and the document th
 
 ## Checks
 
-Run what your change touches, and all of them before a commit that lands an engine change:
+Before a push, run every check CI fails a change on that this machine can run, in one command that stops at the first
+failure. It checks what is committed, and refuses a tree with uncommitted changes:
+
+```bash
+cargo xtask pre-push              # cheapest first; --base REF when the branch merges into another than origin/main
+```
+
+What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings.
+
+While working, run what your change touches:
 
 ```bash
 cargo fmt --all --check
@@ -27,6 +36,7 @@ cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
 cargo xtask check-mutant-exclusions  # every exclude_re in .cargo/mutants.toml still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
+cargo xtask check-diagnostics-off && cargo xtask check-leiden-serial  # what the dependency tree may hold
 python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BASE what it merges into; fails on a survivor
 ```
 
@@ -35,7 +45,9 @@ python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BA
 - **A mutant survived?** Kill it with a test that fails on it, or, when no input tells it from the code, name it in a
   `// mutant-skip:` with why. A mutant in code this machine doesn't compile survives whatever the tests: macOS-only code
   is read on a Mac, Linux-only and Windows-only code by CI, which mutates only what each runner compiles. Breaking a line
-  by hand checks the cases you thought of; the script checks the ones you didn't, so it runs before the push, not after.
+  by hand checks the cases you thought of; the script checks the ones you didn't, so `pre-push` runs it before the push,
+  not after. Code no Rust test can ever reach, such as the binding's exports that only JavaScript calls, is excluded
+  once in `.cargo/mutants.toml` rather than skipped mutant by mutant.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
