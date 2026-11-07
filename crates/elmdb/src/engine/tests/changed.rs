@@ -515,3 +515,25 @@ fn what_the_binding_reads_is_what_changed_in_msgpack_from_the_position_it_gave()
     let decoded: Changed = rmp_serde::from_slice(&unit.changed_since_bytes(&types(), &position, 10).unwrap()).unwrap();
     assert_eq!(decoded, read);
 }
+
+#[test]
+fn a_schema_change_leaves_an_order_built_from_when_it_was_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let before = db.sequence().unwrap();
+    write(&db, vec![task("Task-2")]).unwrap();
+    db.close().unwrap();
+    // Reopened under a schema changed elsewhere, which settles every type's order again
+    let mut json = super::schema_json();
+    for entity_type in TYPES {
+        json["types"][entity_type]["changeOrder"] = json!(true);
+    }
+    json["types"]["Kept"] = json!({ "fields": {} });
+    let changed = crate::schema::Schema::from_json(&json).unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(changed), syncs: false, ..Default::default() }).unwrap();
+    let read = since(&db, &from(before), 10);
+    assert!(read.complete, "the order reaches back as far as it did before the schema changed");
+    assert_eq!(read.ids, ["Task-2"]);
+}

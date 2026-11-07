@@ -331,6 +331,7 @@ fn build_rank(
     stopping: &dyn Fn() -> bool,
     pause: &dyn Fn(),
 ) -> crate::Result<()> {
+    failure_point!(BUILD_RANK at store.path(), crate::Error::new(crate::ErrorCode::Io, "injected rank build failure"));
     let (joined, owes) = store.read(|txn, db| {
         schema.validate(txn, db)?;
         let s = super::unit::Snapshot { txn, db, schema };
