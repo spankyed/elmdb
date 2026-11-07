@@ -342,13 +342,6 @@ pub fn rank_queued(index: &str, type_at: u32, seq: u64) -> Vec<u8> {
     })
 }
 
-/// What the commit with `sequence` changed, in commit order
-pub fn change_log(sequence: u64) -> Vec<u8> {
-    with(Prefix::ChangeLog, |w| {
-        w.number(sequence as f64);
-    })
-}
-
 /// An entity's place in its type's change order
 pub fn changed(entity_type: &str, changed: u64, place: u64) -> Vec<u8> {
     with(Prefix::Changed, |w| {
@@ -380,11 +373,6 @@ pub fn destroyed_through(sequence: u64) -> Vec<u8> {
 /// Every tombstone
 pub fn destroyed_prefix() -> Vec<u8> {
     with(Prefix::Destroyed, |_| {})
-}
-
-/// The change log
-pub fn change_log_prefix() -> Vec<u8> {
-    with(Prefix::ChangeLog, |_| {})
 }
 
 /// A rank index's nodes waiting to be pushed

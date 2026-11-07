@@ -29,7 +29,6 @@ use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
 
 use crate::diagnostics::{Op, names};
-use crate::engine::changelog::{self, LoggedCommit};
 use crate::engine::mirror::{EdgeDelta, EdgeMirror};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
@@ -175,12 +174,19 @@ pub struct Store {
     /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
     /// write outside the engine's units, whose commit then empties the mirror
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
-    /// What the write about to commit changed, for the change log; a commit that deposits nothing logs `everything`
-    logged: PlainMutex<Option<LoggedCommit>>,
     /// The entities the write about to commit wrote, which its commit stamps with its sequence
     touched: PlainMutex<Option<crate::engine::changed::Touched>>,
-    /// Names this handle in the change log
-    origin: String,
+    /// How far this handle has accounted for every commit, and whether one since it last answered was another's
+    accounted: PlainMutex<Accounted>,
+}
+
+/// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
+/// `committed_elsewhere` last answered. Every commit raises the sequence by one and every commit here passes through
+/// `commit_txn`, so a sequence between `through` and the next commit here is another handle's
+#[derive(Default)]
+struct Accounted {
+    through: u64,
+    elsewhere: bool,
 }
 
 /// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
@@ -205,14 +211,6 @@ pub(crate) fn reserve_destination(target: &Path) -> Result<Registration> {
         ));
     }
     Ok(Registration(Some(target.to_owned())))
-}
-
-/// A name for a handle in the change log, which no other handle will have
-fn new_origin() -> Result<String> {
-    let mut bytes = [0u8; 8];
-    getrandom::fill(&mut bytes)
-        .map_err(|error| Error::new(ErrorCode::Io, format!("No randomness for a handle's name: {error}")))?;
-    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 impl Drop for Registration {
@@ -337,6 +335,8 @@ impl Store {
         let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);
+        let accounted = PlainMutex::<Accounted>::default();
+        accounted.lock().through = sequence;
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
@@ -359,9 +359,8 @@ impl Store {
             #[cfg(test)]
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
-            logged: PlainMutex::default(),
             touched: PlainMutex::default(),
-            origin: new_origin()?,
+            accounted,
         })
     }
 
@@ -576,7 +575,6 @@ impl Store {
             // Only what this write hands over reaches its commit, not what an aborted one left: a replacement that failed
             // before committing can't vouch for this write
             *self.deposited.lock() = None;
-            *self.logged.lock() = None;
             *self.touched.lock() = None;
             self.replacing.store(0, Ordering::Release);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
@@ -625,25 +623,50 @@ impl Store {
         let next = self.next_sequence(&txn)?;
         let last = next - 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
-        let mut logged = self.logged.lock().take().unwrap_or_else(LoggedCommit::everything);
-        logged.sequence = next;
-        logged.origin.clone_from(&self.origin);
         if let Some(touched) = self.touched.lock().take() {
             crate::engine::changed::stamp(&mut txn, self.db, &touched, next)?;
         }
-        changelog::file(&mut txn, self.db, &logged)?;
+        crate::engine::changed::trim_tombstones(&mut txn, self.db, next)?;
         // A test's stand-in for a full disk, armed on its thread or for this environment's path; the transaction
         // aborts as it drops
         failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
         failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
+        // Held from before the commit is visible until it is accounted for, so an answer never sees it half done
+        let mut accounted = self.accounted.lock();
+        let skipped = last > accounted.through;
         txn.commit()?;
+        accounted.elsewhere |= skipped;
+        accounted.through = next;
+        drop(accounted);
         self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
         // Still this process's one writer, so commits reach the mirror in their order
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
+        // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died
+        // first: this handle hears it now as if it had arrived
+        if skipped {
+            self.wake.wake_self(last);
+        }
         self.wake.notify(next);
         Ok(next)
+    }
+
+    /// Whether another handle has committed since this one last asked, or since it opened. A replacement of every row
+    /// that took the sequence back counts as one
+    pub(crate) fn committed_elsewhere(&self) -> Result<bool> {
+        let mut accounted = self.accounted.lock();
+        // A transaction of its own rather than an idle read kept for a burst, which may be from before the latest commit
+        let now = {
+            let txn = read_txn(&self.env)?;
+            let held = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
+            held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
+        };
+        if now != accounted.through {
+            accounted.elsewhere = true;
+            accounted.through = now;
+        }
+        Ok(std::mem::take(&mut accounted.elsewhere))
     }
 
     /// The sequence the write transaction `txn` commits as. It holds the environment's one write lock, so the stored
@@ -686,16 +709,6 @@ impl Store {
             Some(held) => held.merge(touched),
             None => *slot = Some(touched),
         }
-    }
-
-    /// What the write about to commit changed, for the change log
-    pub(crate) fn deposit_logged(&self, logged: LoggedCommit) {
-        *self.logged.lock() = Some(logged);
-    }
-
-    /// Names this handle in the change log
-    pub(crate) fn origin(&self) -> &str {
-        &self.origin
     }
 
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror

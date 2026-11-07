@@ -301,12 +301,13 @@ impl Database {
         Ok(serde_json::to_value(status).expect("a status serializes"))
     }
 
-    /// What the change log holds after `cursor`, up to `limit` commits: msgpack bytes of its `Changes`
+    /// Whether another handle has committed since this one last asked, or since it opened; never for this handle's own
     #[napi]
-    pub fn changes_since(&self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
-        // mutant-skip: replace Database::changes_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
-        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/database.test.mjs` reads a commit through it
-        self.inner.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
+    pub fn committed_elsewhere(&self) -> Result<bool, Code> {
+        // mutant-skip: replace Database::committed_elsewhere -> Result<bool, Code> with Ok\(true\)
+        // mutant-skip: replace Database::committed_elsewhere -> Result<bool, Code> with Ok\(false\)
+        // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` asks it
+        self.inner.committed_elsewhere().map_err(to_js)
     }
 
     /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
@@ -317,16 +318,6 @@ impl Database {
         // Only a JavaScript caller reaches this, and cargo-mutants runs no JavaScript: `test/process.test.mjs` reads
         // another process's write through it
         self.inner.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
-    }
-
-    /// Names this handle in the change log
-    #[napi(getter)]
-    pub fn origin(&self) -> Result<String, Code> {
-        // mutant-skip: replace Database::origin -> Result<String, Code> with Ok\(String::new\(\)\)
-        // Only JavaScript reaches this: `test/database.test.mjs` holds it to the name a commit is logged under
-        // mutant-skip: replace Database::origin -> Result<String, Code> with Ok\("xyzzy".into\(\)\)
-        // The same
-        self.inner.origin().map_err(to_js)
     }
 
     /// Blocks until every index waiting to be built is built or has failed
@@ -507,12 +498,12 @@ impl Unit {
         self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
     }
 
-    /// What the change log holds after `cursor`, with the unit's own changes so far: msgpack bytes of its `Changes`
+    /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
     #[napi]
-    pub fn changes_since(&mut self, cursor: f64, limit: u32) -> Result<Buffer, Code> {
-        // mutant-skip: replace Unit::changes_since -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
+    pub fn pending_changes(&mut self) -> Result<Buffer, Code> {
+        // mutant-skip: replace Unit::pending_changes -> Result<Buffer, Code> with Ok\(Default::default\(\)\)
         // Only JavaScript reaches this: `test/database.test.mjs` reads a unit's pending changes through it
-        self.open()?.changes_since_bytes(cursor as u64, limit as usize).map(Buffer::from).map_err(to_js)
+        self.open()?.pending_changes_bytes().map(Buffer::from).map_err(to_js)
     }
 
     /// `Database.changedSince` read in the unit, before its own writes are stamped

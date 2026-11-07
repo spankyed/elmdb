@@ -11,7 +11,6 @@ mod apply;
 pub mod batch;
 mod builder;
 pub mod changed;
-pub mod changelog;
 pub mod changes;
 pub mod derive;
 mod entities;
@@ -88,7 +87,6 @@ pub(crate) fn drain_commits(
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now: now_ms() };
                 let done = chunk(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
-                store.deposit_logged(changelog::LoggedCommit::derived());
                 Ok((done, state.written.take()))
             },
             false,
@@ -372,8 +370,6 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
                     let mut state = UnitState::default();
                     let unbuilt = settle_indexes_in(&mut Txn { txn, db, state: &mut state, schema, now: 0.0 })?;
                     store.deposit(std::mem::take(&mut state.edges));
-                    // Markers for indexes, which no row is: another process reading the log has nothing to read again
-                    store.deposit_logged(changelog::LoggedCommit::derived());
                     Ok(unbuilt)
                 },
                 true,
@@ -516,14 +512,10 @@ impl Database {
         finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
-    /// What the change log holds after `cursor`, up to `limit` commits, from one snapshot
-    pub fn changes_since(&self, cursor: u64, limit: usize) -> Result<changelog::Changes> {
-        self.store()?.read(|txn, db| changelog::since(txn, db, cursor, limit))
-    }
-
-    /// `changes_since` as msgpack bytes, as the binding takes it
-    pub fn changes_since_bytes(&self, cursor: u64, limit: usize) -> Result<Vec<u8>> {
-        Ok(rmp_serde::to_vec_named(&self.changes_since(cursor, limit)?).expect("an answer serializes"))
+    /// Whether another handle has committed since this one last asked, or since it opened: like SQLite's `data_version`,
+    /// it moves for another's commits and never for this handle's own, its index builder's included
+    pub fn committed_elsewhere(&self) -> Result<bool> {
+        self.store()?.committed_elsewhere()
     }
 
     /// The entities of `types` that changed after `from`, in the order of the commits that changed them, at most
@@ -537,11 +529,6 @@ impl Database {
     pub fn changed_since_bytes(&self, types: &[String], from: &[u8], limit: usize) -> Result<Vec<u8>> {
         let from = position(from)?;
         Ok(rmp_serde::to_vec_named(&self.changed_since(types, &from, limit)?).expect("an answer serializes"))
-    }
-
-    /// Names this handle in the change log
-    pub fn origin(&self) -> Result<String> {
-        Ok(self.store()?.origin().to_owned())
     }
 
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
@@ -673,7 +660,6 @@ impl Database {
                 let waiting = ranks::push_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
                 let changes = ChangeSet::of(&state.events);
-                store.deposit_logged(changelog::LoggedCommit::of(&changes));
                 store.deposit_touched(changed::Touched::of(&state.events, &schema));
                 Ok((results, changes, state.written.take(), waiting))
             },
@@ -756,22 +742,19 @@ pub struct Unit {
 }
 
 impl Unit {
-    /// What the change log holds after `cursor`, as this unit's transaction sees it, with the unit's own changes so far:
-    /// they aren't in the log until it commits, and something running inside the unit may need to act on them
-    pub fn changes_since(&mut self, cursor: u64, limit: usize) -> Result<changelog::Changes> {
+    /// What this unit has changed so far, which something running inside it may need to act on before it commits
+    pub fn pending_changes(&mut self) -> Result<ChangeSet> {
         let view = self.view(0.0)?;
-        let mut changes = changelog::since(view.txn, view.db, cursor, limit)?;
-        changes.pending = Some(ChangeSet::of(&view.state.events));
-        Ok(changes)
+        Ok(ChangeSet::of(&view.state.events))
     }
 
-    /// `changes_since` as msgpack bytes, as the binding takes it
-    pub fn changes_since_bytes(&mut self, cursor: u64, limit: usize) -> Result<Vec<u8>> {
-        Ok(rmp_serde::to_vec_named(&self.changes_since(cursor, limit)?).expect("an answer serializes"))
+    /// `pending_changes` as msgpack bytes, as the binding takes it
+    pub fn pending_changes_bytes(&mut self) -> Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec_named(&self.pending_changes()?).expect("a change set serializes"))
     }
 
     /// `Database::changed_since` read in this unit, before its own writes are stamped: what it has written so far is in
-    /// `changes_since`' pending changes, and takes `next_sequence` as it commits
+    /// `pending_changes`, and takes `next_sequence` as it commits
     pub fn changed_since(
         &mut self,
         types: &[String],
@@ -894,7 +877,6 @@ impl Unit {
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
         self.store.deposit(std::mem::take(&mut self.state.edges));
-        self.store.deposit_logged(changelog::LoggedCommit::of(&changes));
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;

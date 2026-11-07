@@ -2698,6 +2698,14 @@ fn owes(db: &Database) -> bool {
 }
 
 #[test]
+fn the_index_builders_commits_are_this_handles_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.wait_for_index_builds().unwrap();
+    assert!(!db.committed_elsewhere().unwrap(), "the builder drained in commits of its own");
+}
+
+#[test]
 fn a_read_only_handle_woken_by_another_process_starts_no_build() {
     let dir = tempfile::tempdir().unwrap();
     near_links(&dir, 400, 5, 0).close().unwrap();

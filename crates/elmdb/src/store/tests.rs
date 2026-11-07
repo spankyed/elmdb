@@ -216,7 +216,7 @@ fn grows_the_map_when_a_unit_fills_it() {
     store.close().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
     let count = store.read(|txn, db| Ok(db.len(txn)?)).unwrap();
-    assert_eq!(count, 32 + 4, "the unit's 32 entries, the stamp's two, the commit's sequence and its log record");
+    assert_eq!(count, 32 + 3, "the unit's 32 entries, the stamp's two, and the commit's sequence");
 }
 
 #[test]

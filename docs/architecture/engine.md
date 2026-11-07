@@ -79,12 +79,14 @@ releasing that guard for callbacks. Post-commit watch queries fetch the current 
 
 Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
 snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
-callbacks. Coordinate writes in one process when observers must hear every commit. `changes_since(cursor, limit)` answers which types and relation kinds they changed, and which process made each, from the change log each commit writes in its own
-transaction (`engine/changelog.rs`): a reader keeps a cursor, and one further behind than the log reaches is told so
-(`truncated`) and starts again from the data. `origin` names a handle, so a reader can skip its own. `hear_commits_elsewhere(listener)` wakes a
-listener as soon as another process commits (`store/wake.rs`: loopback UDP to the ports listening handles file under
-`wake/`), having queued any index work the store says is owed. A wake carries nothing a reader depends on, since what
-changed is in the log, so one lost costs delay.
+callbacks. Coordinate writes in one process when observers must hear every commit. `committed_elsewhere()` answers
+whether another handle has committed since this one last asked, as SQLite's `data_version` does, with no log: every
+commit raises the sequence by one and every commit a handle makes, its index builder's included, passes through its
+`Store::commit_txn`, so a handle that keeps the sequence it has accounted for knows any commit past it is another's.
+`hear_commits_elsewhere(listener)` wakes a listener as soon as another process commits (`store/wake.rs`: loopback UDP
+to the ports listening handles file under `wake/`), having queued any index work the store says is owed. A wake
+carries nothing a reader depends on, so one lost costs delay, and a commit here that finds a commit it hadn't
+accounted for wakes its own listener as the lost wake would have.
 
 **Changed since.** Every entity keeps the sequence of the commit that last wrote it, a field, its trash state or a
 relation at either end, and for a type whose schema sets `changeOrder`, `d/h` keeps its entities in that order
@@ -92,7 +94,7 @@ relation at either end, and for a type whose schema sets `changeOrder`, `d/h` ke
 asking. A commit to a type that keeps one costs about a fifth more (`examples/write-cost.rs`, 2026-11-06, load 6 to 9),
 so only a type something reads it from sets it; a type that keeps none pays nothing. `changed_since(types,
 from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
-entities (`Position.after`), with the entities destroyed since from tombstones the change log's bound keeps. A reader
+entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits. A reader
 older than the kept tombstones, of a type with a destroy since, is told the answer is incomplete. A commit stamps what
 it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
 before it commits, so a reader inside it can say where it will have read to.

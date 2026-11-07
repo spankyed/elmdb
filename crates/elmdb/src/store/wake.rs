@@ -1,6 +1,7 @@
 //! Waking other processes that hold this database open: a commit here tells each of them its sequence, so one holding
-//! tracked reads learns right away that another process committed. What changed is in the change log, so a wake carries
-//! nothing a reader depends on: one lost costs delay, and a stray packet costs a read of the log.
+//! tracked reads learns right away that another process committed. Whether one did is the store's to answer
+//! (`committed_elsewhere`), so a wake carries nothing a reader depends on: one lost costs delay, and a stray packet costs
+//! an ask.
 //!
 //! A handle that wants waking binds a loopback UDP port and files it as `wake/<pid>-<port>` in the database's directory,
 //! holding a lock on that file for as long as it listens, and every other handle's commits send to what's filed there. A
@@ -108,6 +109,14 @@ impl Wake {
         }
     }
 
+    /// Tells this handle's own listener, as a wake from another process would: on its thread, so whoever calls this holds
+    /// nothing the listener may need
+    pub(crate) fn wake_self(&self, sequence: u64) {
+        if let Some(listening) = self.listening.lock().as_ref() {
+            let _ = listening.waker.send_to(&sequence.to_be_bytes(), (Ipv4Addr::LOCALHOST, listening.port));
+        }
+    }
+
     /// The ports filed, without this handle's, removing those of processes that have gone
     fn read_peers(&self, own_port: Option<u16>) -> Vec<SocketAddr> {
         let Ok(entries) = std::fs::read_dir(&self.directory) else { return Vec::new() };
@@ -157,7 +166,7 @@ impl Wake {
                     // mutant-skip: replace match guard passing\(&error\) with true in Wake::listen
                     // Any other failure is of a socket this thread holds for as long as it runs, which nothing here breaks
                     Err(error) if passing(&error) => continue,
-                    // Nothing wakes this again, and what was missed is in the log for whoever reads it next
+                    // Nothing wakes this again, and whoever asks next learns what was missed
                     Err(_) => return,
                 }
                 if stop.load(Ordering::Acquire) {
