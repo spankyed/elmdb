@@ -31,7 +31,7 @@ pub enum PrefixKind {
 pub enum Prefix {
     /// `p/v id field` → an attribute's value
     Value,
-    /// `p/i id` → an entity's type, sequence and trash state
+    /// `p/i id` → that an entity exists: its sequence and trash state (its type is in its id)
     Entity,
     /// `p/r relation` → a relation's row
     Relation,

@@ -1,0 +1,16 @@
+# Fails, which mails whoever maintains this, when upstream LMDB has commits nobody here has read (scripts/lmdb-upstream.py)
+name: lmdb upstream
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+jobs:
+  unread:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - run: python3 scripts/lmdb-upstream.py
+        env:
+          GH_TOKEN: ${{ github.token }}
