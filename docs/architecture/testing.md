@@ -155,8 +155,8 @@ cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine
 CI's `mutants` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull request,
 against the base it merges into: each missed mutant is annotated on its line and listed in its job's summary, and fails
 the job. A survivor is a test missing, or an equivalent mutant, which a `// mutant-skip:` comment names with why it is
-one; a timeout is listed and doesn't fail it, since load alone can cause one. `cargo xtask pre-push` runs it with every other check before a push, so the
-job finds nothing. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). A mutant of code a
+one; a timeout is listed and doesn't fail it, since load alone can cause one. `cargo xtask pre-push` runs it with the
+other checks before a push, so the job finds nothing. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). A mutant of code a
 runner doesn't compile builds unchanged and passes every test, so it would show as missed whatever the tests: the script
 reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
 Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing

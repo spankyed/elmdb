@@ -15,11 +15,14 @@ read `docs/architecture/design.md` before changing anything, and the document th
 
 ## Checks
 
-Before a push, run all of them, committed, in one command that stops at the first failure:
+Before a push, run every check CI fails a change on that this machine can run, in one command that stops at the first
+failure. It checks what is committed, and refuses a tree with uncommitted changes:
 
 ```bash
-cargo xtask pre-push              # every check below, cheapest first; --base REF when the branch merges into another
+cargo xtask pre-push              # cheapest first; --base REF when the branch merges into another than origin/main
 ```
+
+What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings.
 
 While working, run what your change touches:
 
