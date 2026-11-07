@@ -22,9 +22,6 @@ pub const LOG_COMMITS: u64 = 4096;
 /// How often a commit also drops what has fallen out of the log's reach, which the log may run over by this many until then
 pub const LOG_TRIM_EVERY: u64 = 64;
 
-/// How many entities a record names before it says only their types, so one large commit can't make a large record
-pub const LOG_ENTITIES: usize = 1024;
-
 /// What one commit changed, as the log holds it
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
@@ -41,11 +38,6 @@ pub struct LoggedCommit {
     pub types: BTreeSet<String>,
     /// The relation kinds whose edges changed
     pub kinds: BTreeSet<String>,
-    /// The entities it changed, for a reader to read as they are now, which a record of what happened to each couldn't
-    /// improve on and could only contradict; absent when there were more than `LOG_ENTITIES`
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "codegen", ts(optional))]
-    pub entities: Option<Vec<String>>,
 }
 
 impl LoggedCommit {
@@ -62,12 +54,7 @@ impl LoggedCommit {
     }
 
     pub(crate) fn of(changes: &ChangeSet) -> Self {
-        Self {
-            types: changes.types.clone(),
-            kinds: changes.kinds.clone(),
-            entities: (changes.entities.len() <= LOG_ENTITIES).then(|| changes.entities.keys().cloned().collect()),
-            ..Self::default()
-        }
+        Self { types: changes.types.clone(), kinds: changes.kinds.clone(), ..Self::default() }
     }
 }
 

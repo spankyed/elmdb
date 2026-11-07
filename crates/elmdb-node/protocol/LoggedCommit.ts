@@ -23,9 +23,4 @@ types: Array<string>,
 /**
  * The relation kinds whose edges changed
  */
-kinds: Array<string>, 
-/**
- * The entities it changed, for a reader to read as they are now, which a record of what happened to each couldn't
- * improve on and could only contradict; absent when there were more than `LOG_ENTITIES`
- */
-entities?: Array<string>, };
+kinds: Array<string>, };

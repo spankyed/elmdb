@@ -79,7 +79,7 @@ releasing that guard for callbacks. Post-commit watch queries fetch the current 
 
 Tracked reads and watch notifications belong to this process. Writes in other processes are visible in subsequent
 snapshots and `sequence()` reads the persisted commit counter, but those writes do not dispatch this handle's watch
-callbacks. Coordinate writes in one process when observers must hear every commit. `changes_since(cursor, limit)` answers what they changed, from the change log each commit writes in its own
+callbacks. Coordinate writes in one process when observers must hear every commit. `changes_since(cursor, limit)` answers which types and relation kinds they changed, and which process made each, from the change log each commit writes in its own
 transaction (`engine/changelog.rs`): a reader keeps a cursor, and one further behind than the log reaches is told so
 (`truncated`) and starts again from the data. `origin` names a handle, so a reader can skip its own. `hear_commits_elsewhere(listener)` wakes a
 listener as soon as another process commits (`store/wake.rs`: loopback UDP to the ports listening handles file under

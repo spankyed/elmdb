@@ -146,7 +146,7 @@ test('changesSince reads a commit through the binding, under the name of the han
     db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
     const changes = packr.unpack(db.changesSince(cursor, 10));
     assert.equal(changes.truncated, false);
-    assert.deepEqual(changes.commits[0].entities, ['Task-1']);
+    assert.deepEqual(changes.commits[0].types, ['Task']);
     assert.equal(changes.commits[0].origin, db.origin);
     assert.match(db.origin, /^[0-9a-f]{16}$/);
 
