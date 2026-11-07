@@ -14,6 +14,10 @@ exclude_globs = [
     "crates/elmdb/src/sync/shuttle_primitives.rs",
     "crates/elmdb/src/engine/watch/model.rs",
     "crates/elmdb/src/engine/builder/model.rs",
+    # The binding's exports and the conversions they make for JavaScript: only JavaScript reaches them, its suite
+    # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
+    # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
+    "crates/elmdb-node/src/lib.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
@@ -28,10 +32,6 @@ profile = "mutants"
 
 # Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
 exclude_re = [
-    # The binding's methods, each a call into the engine converted for JavaScript: only JavaScript calls them, its suite
-    # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so none of these is ever
-    # caught here. A helper of the binding's that its Rust tests reach keeps its mutants
-    "crates/elmdb-node/src/lib.rs:.*replace (Database|Unit)::\\w+ -> Result<.*, Code> with",
     # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
     # function of the place answers the same, and only the file's size and a write's cost tell them apart
     "trigram.rs:.*replace block_of -> u64 with",

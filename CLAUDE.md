@@ -46,8 +46,8 @@ python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BA
   `// mutant-skip:` with why. A mutant in code this machine doesn't compile survives whatever the tests: macOS-only code
   is read on a Mac, Linux-only and Windows-only code by CI, which mutates only what each runner compiles. Breaking a line
   by hand checks the cases you thought of; the script checks the ones you didn't, so `pre-push` runs it before the push,
-  not after. A kind of mutant no test here can ever catch, such as the binding's methods that only JavaScript calls,
-  is excluded once by pattern in `.cargo/mutants.toml` rather than skipped one by one.
+  not after. Code no Rust test can ever reach, such as the binding's exports that only JavaScript calls, is excluded
+  once in `.cargo/mutants.toml` rather than skipped mutant by mutant.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
 - CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
