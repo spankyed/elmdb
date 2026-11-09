@@ -7,10 +7,22 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = path.resolve(import.meta.dirname, '..', 'src');
 
-const files = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+const _files = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
   const full = path.join(dir, entry.name);
-  return entry.isDirectory() ? files(full) : entry.name.endsWith('.ts') ? [full] : [];
+  return entry.isDirectory() ? _files(full) : entry.name.endsWith('.ts') ? [full] : [];
 });
+
+/**
+ * The walk, refusing an empty answer: the check below asserts that a *derived* set is empty, which passes for
+ * free when the population it filtered was empty. `population()` (`@apackdev/sdk/testing`) is this guard
+ * everywhere else; this package is a layer below the SDK and cannot import it, so the refusal is written here.
+ * Only the top-level call is held — the recursion goes through `_files`, where an empty directory is ordinary.
+ */
+const files = (dir: string): string[] => {
+  const found = _files(dir);
+  if (found.length === 0) throw new Error(`${dir}: no .ts file — anything asserted over it would pass for the wrong reason`);
+  return found;
+};
 
 const STATE_CONSTRUCTORS = new Set(['Map', 'Set', 'WeakMap', 'WeakSet', 'Array']);
 
