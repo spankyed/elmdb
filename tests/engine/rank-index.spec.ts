@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import { settles } from '../_support/waiting.ts';
 import { engine, NAMES, type Id } from './helpers.ts';
 import { freshEngine } from './engine-under-test.ts';
 import type { EarsDatabase, EngineSchema } from '../../src/index.ts';
@@ -134,7 +135,7 @@ describe('a rank index building', () => {
       error: (error) => errors.push(error),
     });
     // The first read runs after this call returns, so it must get to run before the wait blocks the thread
-    await vi.waitFor(() => expect(answers.length + errors.length).toBeGreaterThan(0));
+    await settles(() => expect(answers.length + errors.length).toBeGreaterThan(0));
     e.admin.waitForIndexBuilds();
     await e.admin.watchesSettled();
     watching.stop();
@@ -157,9 +158,9 @@ describe('a watch over a rank index', () => {
       next: (answer) => seen.push(answer),
       error: (error) => seen.push((error as { code?: string }).code),
     });
-    await vi.waitFor(() => expect(seen).toEqual(['INDEX_BUILDING']), { timeout: 30_000, interval: 10 });
+    await settles(() => expect(seen).toEqual(['INDEX_BUILDING']), { interval: 10 });
     holding.abort();
-    await vi.waitFor(() => expect(seen.at(-1)).toEqual([tasks[0]]), { timeout: 30_000, interval: 50 });
+    await settles(() => expect(seen.at(-1)).toEqual([tasks[0]]));
     watching.stop();
   });
 });
