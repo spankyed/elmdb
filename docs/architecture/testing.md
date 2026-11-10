@@ -135,6 +135,10 @@ python3 scripts/mutants-in-diff.py main
 # One of four shares of them, or only the change's Windows-only code (what CI's runners split)
 python3 scripts/mutants-in-diff.py main 3 --shard 1/4
 python3 scripts/mutants-in-diff.py main 3 --windows-only
+# The same again after a run that was stopped: only the mutants no run of this change has caught yet
+python3 scripts/mutants-in-diff.py main 3 --resume
+# One of CI's four shares alone, on a branch, while the others run or after its runner was lost
+gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
 diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
@@ -155,7 +159,10 @@ cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine
 CI's `mutants` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull request,
 against the base it merges into: each missed mutant is annotated on its line and listed in its job's summary, and fails
 the job. A survivor is a test missing, or an equivalent mutant, which a `// mutant-skip:` comment names with why it is
-one; a timeout is listed and doesn't fail it, since load alone can cause one. `cargo xtask pre-push` runs it with the
+one; a timeout is listed and doesn't fail it, since load alone can cause one. A mutant that failed to build for want
+of a file, and not for what it changed, fails the run as untested: cargo-mutants lists it as unviable beside those whose
+replacement doesn't compile, and it means the copy of the tree it was built in was damaged, as a temporary directory
+cleaned under a long run leaves it. `cargo xtask pre-push` runs it with the
 other checks before a push, so the job finds nothing. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). A mutant of code a
 runner doesn't compile builds unchanged and passes every test, so it would show as missed whatever the tests: the script
 reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
