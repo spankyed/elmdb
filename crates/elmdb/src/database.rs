@@ -356,7 +356,16 @@ impl Database {
                 "A watch listener is running on this thread: close the database after the listener returns",
             ));
         }
-        self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+        // A build in progress stops between chunks, for the next open to finish
+        let stop_builder = || {
+            if let Some(mut builder) = self.builder().take() {
+                if at_exit {
+                    builder.abandon();
+                } else {
+                    builder.stop();
+                }
+            }
+        };
         let taken = {
             // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
             // released before the wait, which an operation finishing may need it for
@@ -367,24 +376,23 @@ impl Database {
                 Some(store) if store.unit_is_open() => return Ok(false),
                 Some(_) => {}
             }
-            // A build in progress stops between chunks, for the next open to finish
-            if let Some(mut builder) = self.builder().take() {
-                if at_exit {
-                    builder.abandon();
-                } else {
-                    builder.stop();
-                }
-            }
+            stop_builder();
             slot.take()
         };
         let Some(mut store) = taken else { return Ok(true) };
+        run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
         // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
         let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
-                Ok(store) if at_exit => return store.close_at_exit(wait.unwrap_or_default()).map(|()| true),
-                Ok(store) => return store.close().map(|()| true),
+                Ok(store) => {
+                    // Dropped by the close that closes: one refused for an open unit, or given up on below, leaves the
+                    // database open, and its listener is still to hear the builder's commits
+                    self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+                    let closed = if at_exit { store.close_at_exit(wait.unwrap_or_default()) } else { store.close() };
+                    return closed.map(|()| true);
+                }
                 Err(shared) => {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                         let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
@@ -392,6 +400,10 @@ impl Database {
                         return synced.map(|()| false);
                     }
                     store = shared;
+                    // An operation that took the store before the close, a commit or another process's wake, may queue
+                    // index work after it, which starts a builder that holds the store for as long as it runs: stopped
+                    // as the first was, or the wait for the store would never end
+                    stop_builder();
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }

@@ -74,6 +74,8 @@ pub(crate) mod points {
     pub const SCHEMA_RECOVERY: &str = "database::before_schema_recovery";
     /// Runs before a schema is written
     pub const SCHEMA_WRITE: &str = "database::before_schema_write";
+    /// Runs once a close has stopped the builder and taken the store, before it waits for the store's other holders
+    pub const CLOSE_TAKEN: &str = "database::close_taken";
     /// Runs before a load publishes its staged database
     pub const LOAD_PUBLISH: &str = "dump::before_load_publish";
     /// A load's sync fails after its database is published
