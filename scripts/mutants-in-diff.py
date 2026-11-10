@@ -54,6 +54,13 @@ diff = out / "branch.diff"
 change = subprocess.check_output(["git", "diff", f"{args.base}...HEAD"])
 # What an earlier run caught holds only for the diff it was caught in
 same_change = diff.exists() and diff.read_bytes() == change
+if not same_change:
+    # Forgotten before the diff is written: a run of the new diff that is stopped before it has kept anything would
+    # otherwise find the diff its own on a resume, and the last diff's catches beside it
+    for kept in out.glob("*/caught.txt"):
+        kept.unlink()
+    for results in out.glob("*/mutants.out"):
+        shutil.rmtree(results, ignore_errors=True)
 diff.write_bytes(change)
 changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}...HEAD"], text=True).split()
 

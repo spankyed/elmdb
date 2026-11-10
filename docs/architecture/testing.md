@@ -452,15 +452,18 @@ a word every note holds and one a twelfth hold; a misspelled word; the ten lowes
 of it, and a page near the end of creation order; a check, a rebuild and a compaction. For elmdb it also reads how
 many entities the plan visited (`explain`), which is a count and so the same on any machine.
 
-The two engines answer every read alike before one is timed, or the run fails. A plan has no range step, so elmdb's
+Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
+best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking
+orders alike; the other searches' matches tie, and are compared as counts. A plan has no range step, so elmdb's
 last 500 is what a caller does without one: the field of every note read and filtered. A Node whose SQLite is built
-without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`. The databases are made under
+without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`; `--require-text` fails the run there instead. The databases are made under
 `--dir`, the system's temporary directory unless given, and removed; a million notes need about 4 GB there.
 
 Without `--json` it prints a reading a line as `name=value`, which `cargo xtask compare` reads. The times are readings
 of one machine under its load, which the report records before and after: compare two reports from one host, and take
 a reading for a release on a quiet one. CI and `cargo xtask pre-push` run it at 2,000 notes, which shows that it runs
-and that the engines agree, and is no reading. The readings: `../evidence/million-notes.md`.
+and that the engines agree, and is no reading; CI's Node 24 job runs it with `--require-text`, since its Node 23
+job compares no search. The readings: `../evidence/million-notes.md`.
 
 ## Read allocation and codec reports
 
