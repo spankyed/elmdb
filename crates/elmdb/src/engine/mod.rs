@@ -460,7 +460,8 @@ impl Database {
     /// Renames a type, rewriting its entities' ids, the relations and declared `ref` fields naming them, and its
     /// sequences
     pub fn rename_type(&self, from: &str, to: &str) -> Result<()> {
-        self.admin_unit(|t| admin::rename_type(t, from, to))
+        let store = self.store()?;
+        self.admin_unit(|t| admin::rename_type(t, from, to, store.next_sequence(t.txn)?))
     }
 
     pub(crate) fn admin_load(&self, loads: &[maintenance::Load]) -> Result<()> {

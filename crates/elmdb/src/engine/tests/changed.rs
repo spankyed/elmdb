@@ -583,3 +583,64 @@ fn a_relation_moved_to_other_ends_moves_the_ends_it_left_and_its_change_names_th
     assert_eq!(change.moved_from, None);
     assert!(db.check().unwrap().is_clean());
 }
+
+#[test]
+fn a_reader_from_before_every_row_was_replaced_is_told_to_start_again() {
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let other = open(&source);
+        write(&other, vec![task("Task-other")]).unwrap();
+        other.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
+
+    // A reset destroys what the reader read and keeps no tombstone of it
+    let before = db.sequence().unwrap();
+    db.reset().unwrap();
+    let reset = db.sequence().unwrap();
+    let read = since(&db, &from(before), 100);
+    assert!(read.ids.is_empty() && read.destroyed.is_empty());
+    assert!(!read.complete, "what the reset removed is named nowhere");
+    assert!(since(&db, &from(reset), 100).complete, "a reader from the reset on has missed nothing");
+
+    // A replacement stamps what it brought, and says as little of what it took away
+    write(&db, vec![task("Task-3")]).unwrap();
+    let before = db.sequence().unwrap();
+    db.replace_with(source.path()).unwrap();
+    let replaced = db.sequence().unwrap();
+    let read = since(&db, &from(before), 100);
+    assert_eq!(read.ids, ["Task-other"]);
+    assert!(!read.complete, "Task-3 went without a tombstone");
+    assert!(since(&db, &from(replaced), 100).complete);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_reader_from_before_a_type_was_renamed_is_told_to_start_again() {
+    let mut json = super::schema_json();
+    json["types"]["Memo"] = json["types"]["Note"].clone();
+    for entity_type in ["Note", "Memo", "Task"] {
+        json["types"][entity_type]["changeOrder"] = json!(true);
+    }
+    let schema = crate::schema::Schema::from_json(&json).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1")]).unwrap();
+    let before = db.sequence().unwrap();
+    db.rename_type("Note", "Memo").unwrap();
+    let renamed = db.sequence().unwrap();
+    let of = |types: &[&str], sequence: u64| {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_owned()).collect();
+        db.changed_since(&types, &from(sequence), 100).unwrap()
+    };
+    // The ids a reader held are gone and the ones in their place carry the stamps the old ones had
+    assert!(!of(&["Note"], before).complete, "Note-1 and Note-2 went without a tombstone");
+    assert!(!of(&["Memo"], before).complete, "Memo-1 and Memo-2 came without a stamp");
+    assert!(of(&["Task"], before).complete, "a type the rename left alone reads on");
+    assert!(of(&["Note", "Memo"], renamed).complete, "a reader from the rename on has missed nothing");
+    let all = of(&["Memo"], 0);
+    assert_eq!(all.ids, ["Memo-1", "Memo-2"]);
+    assert!(db.check().unwrap().is_clean());
+}

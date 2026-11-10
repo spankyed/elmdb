@@ -260,6 +260,25 @@ pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::
     Ok(())
 }
 
+/// Says that the types keeping a change order, `only` these when given, have theirs from `sequence` on: the commit that
+/// replaced their entities whole, as a reset, a replacement and a type's rename do. What such a commit took away left
+/// no tombstone and what it brought carries no stamp of its own, so a reader from before it can't be told what changed,
+/// and `since` answers it as it does one from before the order was built
+pub(crate) fn replaced(
+    txn: &mut heed::RwTxn<'_>,
+    db: Db,
+    schema: &crate::schema::Schema,
+    only: Option<&[&str]>,
+    sequence: u64,
+) -> Result<()> {
+    for (entity_type, def) in &schema.types {
+        if def.change_order && only.is_none_or(|types| types.contains(&entity_type.as_str())) {
+            db.main.put(txn, &built_meta(entity_type), &sequence.to_be_bytes())?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether some type keeping a change order hasn't built it, or one no longer kept still has one: what `settle` does
 pub(crate) fn needs_settling(
     txn: &heed::RoTxn<'_, heed::AnyTls>,

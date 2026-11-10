@@ -147,8 +147,10 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 
 /// Renames a type: every entity's id from `<from>-…` to `<to>-…`, and with it the relations' ends, the declared `ref`
 /// fields that named it, and the type's sequences. A string field holding an id that isn't a declared `ref` isn't
-/// rewritten. Derived data is rebuilt from what this leaves
-pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
+/// rewritten. Derived data is rebuilt from what this leaves. `sequence` is the commit's: a reader of what changed in
+/// either type from before it is told to start again, the ids it read having gone and the ones in their place carrying
+/// the stamps those had
+pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
         .into_iter()
@@ -252,5 +254,6 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
             }
         }
     }
+    super::changed::replaced(t.txn, t.db, t.schema, Some(&[from, to]), sequence)?;
     derive::rebuild(t, None)
 }

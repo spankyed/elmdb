@@ -311,7 +311,7 @@ impl Database {
                 }
                 store.replacing_every_row(t.txn, t.db)?;
                 super::settle_indexes_in(t)?;
-                Ok(())
+                super::changed::replaced(t.txn, t.db, t.schema, None, store.next_sequence(t.txn)?)
             },
             true,
         )
@@ -393,7 +393,7 @@ impl Database {
             }
             derive::rebuild(t, None)?;
             super::settle_indexes_in(t)?;
-            Ok(())
+            super::changed::replaced(t.txn, t.db, t.schema, None, store.next_sequence(t.txn)?)
         });
         drop(rtxn);
         env.prepare_for_closing().wait();
