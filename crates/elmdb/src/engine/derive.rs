@@ -67,8 +67,8 @@ fn index_entries_into(
     Ok(())
 }
 
-/// What an index that accounts for every entity of its type holds besides its entries: each of these entities it
-/// files among those without a value, or among those whose value it doesn't order (`entities::other_of`)
+/// What an index that accounts for its entities holds besides its entries: each of these entities it files among
+/// those without a value in its last field, or among those holding a value it doesn't order (`entities::other_of`)
 fn index_others_into(
     r: &impl Read,
     entity_type: &str,
@@ -80,9 +80,10 @@ fn index_others_into(
         return Ok(());
     }
     for e in of {
-        let value = entities::get(r, &e.id, &index.fields[0])?;
-        if let Some(prefix) = entities::other_of(value.as_ref()) {
-            emit(entities::other_key(prefix, entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
+        let fields: Vec<Option<Value>> =
+            index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
+        if let Some(other) = entities::other_of(&fields) {
+            emit(other.key(entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
     Ok(())
@@ -658,9 +659,9 @@ pub fn build_chunk(
             t.put(&key, &values::encode(&id.as_str().into()))?;
         }
         if index.accounts()
-            && let Some(prefix) = entities::other_of(fields[0].as_ref())
+            && let Some(other) = entities::other_of(&fields)
         {
-            t.put(&entities::other_key(prefix, entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
+            t.put(&other.key(entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
         }
         last = *seq;
     }

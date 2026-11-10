@@ -8,9 +8,9 @@
 //! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
 //!   goes, as a property key is in a graph database, and pruned only by `rebuild`
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
-//! - `d/xw type index seq` → id, `d/xu type index seq` → id: the entities a value index on one field files no one value
-//!   of, those without a value and those whose value it doesn't order, so that the index accounts for every entity of
-//!   its type (`ValueIndex::accounts`)
+//! - `d/xw type index leading… seq` → id, `d/xu type index seq` → id: the entities a value index files besides its
+//!   entries, those without a value in its last field and those holding a value it doesn't order, so that the index
+//!   accounts for every entity an equality on its other fields can name (`ValueIndex::accounts`)
 //!
 //! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
 //! among them.
@@ -268,10 +268,13 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     }
     if let Some(record) = record(t, id)? {
         let entity_type = ids::type_of(id).to_owned();
-        // A field it never held left it among those without a value, which no field's removal above reached
+        // A field it never held left it among those an index on that field alone holds without a value, which no
+        // field's removal above reached
         for index in value_indexes(t.schema(), &entity_type).iter().filter(|index| index.accounts()) {
-            if !held.iter().any(|(field, _)| *field == index.fields[0]) {
-                t.del(&other_key(Prefix::IndexWithout, &entity_type, &index.name, record.seq))?;
+            if let [only] = index.fields.as_slice()
+                && !held.iter().any(|(field, _)| field == only)
+            {
+                t.del(&Other::Without(Vec::new()).key(&entity_type, &index.name, record.seq))?;
             }
         }
         t.del(&keys::of_type(record.trashed, &entity_type, record.seq))?;
@@ -294,43 +297,74 @@ pub struct ValueIndex {
 }
 
 impl ValueIndex {
-    /// Whether the index accounts for every entity of its type, as a declared index on one field does: an entity is in
-    /// its entries under the boolean, the number or the string its field holds, or among those without a value, or
-    /// among those whose value it doesn't order (`other_of`). A plan reads the type in the field's order from such an
-    /// index, which leaves no entity out. The short code's and the roles' indexes hold only what their lookups read
+    /// Whether the index accounts for every entity an equality on each of its fields but the last can name, as a
+    /// declared index does: such an entity is in its entries, under what those fields hold and then the boolean, the
+    /// number or the string its last field holds, or among those without a value there, or among those holding a
+    /// value it doesn't order (`other_of`). A plan reads those entities in the last field's order from such an index,
+    /// which leaves none out; for an index on one field they are every entity of its type. The short code's and the
+    /// roles' indexes hold only what their lookups read
     pub fn accounts(&self) -> bool {
-        matches!(self.fields.as_slice(), [only] if only != field::SHORT_CODE && only != field::ROLE)
+        !self.fields.iter().any(|name| name == field::SHORT_CODE || name == field::ROLE)
     }
 }
 
-/// Where an index that accounts for every entity files one whose field holds `value`, besides its entries: among those
-/// without a value when it is missing or null, among those it doesn't order when it is a list or a value it can't
-/// hold (a map, bytes, a timestamp, a string past `MAX_INDEXED_STRING`), and nowhere when it is a boolean, a number or
-/// a string it holds, which its entry orders
-pub fn other_of(value: Option<&Value>) -> Option<Prefix> {
-    match value {
-        None | Some(Value::Nil) => Some(Prefix::IndexWithout),
+/// Where an index that accounts for its entities files one besides its entries
+#[derive(Debug, Clone, PartialEq)]
+pub enum Other {
+    /// Among those without a value in the index's last field, under the parts its fields before that one hold
+    Without(Vec<Part>),
+    /// Among those holding, in one of the index's fields, a value it doesn't order
+    Unordered,
+}
+
+impl Other {
+    /// The key the entity at `seq` is filed under
+    pub fn key(&self, entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
+        let under = match self {
+            Other::Without(leading) => keys::index_others(Prefix::IndexWithout, entity_type, index, leading),
+            Other::Unordered => keys::index_others(Prefix::IndexUnordered, entity_type, index, &[]),
+        };
+        keys::place_under(&under, seq)
+    }
+}
+
+/// Where an index that accounts for its entities files one, besides its entries, given what each of the index's
+/// fields holds: among those it doesn't order when a field holds a list or a value it can't hold (a map, bytes, a
+/// timestamp, a string past `MAX_INDEXED_STRING`); among those without a value when the last field is missing or
+/// null and each field before it holds a scalar, which an equality can ask for; and nowhere when the last field
+/// holds a boolean, a number or a string the index holds, which its entry orders, or when a field before it is
+/// missing or null, which no equality names
+pub fn other_of(fields: &[Option<Value>]) -> Option<Other> {
+    let (last, before) = fields.split_last()?;
+    let mut leading = Vec::with_capacity(before.len());
+    let mut named = true;
+    for value in before {
+        match value {
+            None | Some(Value::Nil) => named = false,
+            Some(held) => match values::index_part(held) {
+                Some(part) => leading.push(part),
+                None => return Some(Other::Unordered),
+            },
+        }
+    }
+    match last {
+        None | Some(Value::Nil) => named.then_some(Other::Without(leading)),
         // A list is no scalar an index holds, though its elements are entries
-        Some(held) => match values::index_part(held) {
-            Some(_) => None,
-            None => Some(Prefix::IndexUnordered),
-        },
+        Some(held) => values::index_part(held).is_none().then_some(Other::Unordered),
     }
 }
 
-/// The key an index that accounts for every entity files the entity at `seq` under, among those `prefix` holds
-pub fn other_key(prefix: Prefix, entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
-    keys::place_under(&keys::index_others(prefix, entity_type, index), seq)
-}
-
-/// Files an entity just made, at `seq`, among those without a value in each index of its type that accounts for every
-/// entity and whose field it was given no value of, `valued` saying which it was. The writes of its fields found it
-/// filed nowhere, so one that gave it no value, or null, left this to do
+/// Files an entity just made, at `seq`, among those without a value in each index on one field that accounts for its
+/// type's entities and whose field it was given no value of, `valued` saying which it was. The writes of its fields
+/// found it filed nowhere, so one that gave it no value, or null, left this to do. An index on several fields files
+/// it as its fields before the last are written, and nowhere until then
 pub fn file_without(t: &mut Txn<'_, '_>, id: &str, seq: u64, valued: impl Fn(&str) -> bool) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     for index in value_indexes(t.schema(), &entity_type).iter().filter(|index| index.accounts()) {
-        if !valued(&index.fields[0]) {
-            t.put(&other_key(Prefix::IndexWithout, &entity_type, &index.name, seq), &values::encode(&id.into()))?;
+        if let [only] = index.fields.as_slice()
+            && !valued(only)
+        {
+            t.put(&Other::Without(Vec::new()).key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
         }
     }
     Ok(())
@@ -535,19 +569,20 @@ fn reindex(
             t.put(&key, &values::encode(&id.into()))?;
         }
         if index.accounts() {
-            let was = other_of(before);
-            let now = if going { None } else { other_of(after) };
+            let was = other_of(&values_before);
+            let now = if going { None } else { other_of(&values_after) };
             if was != now {
-                if let Some(prefix) = was {
-                    // An entity just made is filed nowhere until its fields are written (`file_without`), so its
-                    // first values find nothing to remove
-                    let key = other_key(prefix, &entity_type, &index.name, seq);
+                if let Some(was) = was {
+                    // An entity just made is filed nowhere until its fields are written (`file_without`), and one
+                    // being destroyed is taken out as the first of an index's fields goes, so there may be nothing
+                    // to remove
+                    let key = was.key(&entity_type, &index.name, seq);
                     if t.contains(&key)? {
                         t.del(&key)?;
                     }
                 }
-                if let Some(prefix) = now {
-                    t.put(&other_key(prefix, &entity_type, &index.name, seq), &values::encode(&id.into()))?;
+                if let Some(now) = now {
+                    t.put(&now.key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
                 }
             }
         }

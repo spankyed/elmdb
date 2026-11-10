@@ -198,9 +198,12 @@ when the type has more than one.
 "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"], "unique": false }
 ```
 
-- `fields`: one, or several for a compound index, which enforces `unique` over the fields together; a plan's lookups
-  read single-field indexes only (`engine.md`, Reads: plans). A field of any type but `bytes`, `object` or a list of those or of lists: of
-  an `any` field the index holds the scalar values, and a lookup for another walks the type's rows.
+- `fields`: one, or several for a compound index, which enforces `unique` over the fields together. The order of
+  several is what a plan reads: equalities on every field but the last, then the last field's order or a range of
+  it, so `["status", "n"]` reads the open tasks in `n`'s order and `["n", "status"]` does not (`engine.md`, Reads:
+  plans). An equality alone reads an index on its one field. A field of any type but `bytes`, `object` or a list of
+  those or of lists: of an `any` field the index holds the scalar values, and a lookup for another walks the type's
+  rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`), from the moment it is
   declared: a value the index can't hold (below), or one of rows its build hasn't reached yet, is found by walking the
   type's rows.
@@ -211,7 +214,9 @@ when the type has more than one.
   string past 256 bytes). That is what lets a plan read the type in the field's order, or a range of it, from the
   index alone and leave no entity out. Numbers and booleans are read in order; strings are held, and sorted by the
   schema's collation when a plan orders by them. A number field that every entity holds costs nothing more for it; an
-  optional one costs a key for each entity without it.
+  optional one costs a key for each entity without it. An index on several fields accounts the same way for the
+  entities an equality on each field but the last can name: those whose fields before the last each hold a value,
+  filed without a value under what those fields hold when the last is missing or null.
 - Every type has a unique value index on `shortCode` and one on `role`, without declaring them.
 
 **Text**: ranked full-text search (`search.md`).

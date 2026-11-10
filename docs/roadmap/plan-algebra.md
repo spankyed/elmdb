@@ -17,9 +17,14 @@ order, a `range` of numbers reads the entries between its bounds, and an `after`
 cursor: each index on one field accounts for every entity of its type, so an order read from it leaves none out
 (`../architecture/engine.md`, Reads: plans).
 
+An order or a range under equalities is read from an index on the equalities' fields and then its own, and with no
+such index an `orderBy` before a `limit` walks its order and tests the filters while that costs less than sorting
+what they keep, which it learns by counting the entries the filters would read as it goes.
+
 What the planner still does not do: choose which of two indexed filters drives (the first wins, whichever is smaller),
-intersect two indexes rather than check one per match, run a search inside a filter's set when the filter comes
-first, or read an order from an index after a filter of another field, which a compound index would answer.
+intersect two indexes rather than check one per match, or run a search inside a filter's set when the filter comes
+first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
+the test is a lookup in a set.
 
 ## The measurements
 

@@ -5,6 +5,7 @@ mod catalog;
 mod changed;
 mod checkpoints;
 mod commits;
+mod compound;
 mod compression;
 mod derived;
 mod field_writes;

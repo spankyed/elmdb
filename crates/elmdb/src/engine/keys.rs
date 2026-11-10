@@ -130,20 +130,28 @@ pub fn index_past(entity_type: &str, index: &str, parts: &[crate::format::key::P
     key
 }
 
-/// The least key an entry of an index for a string can have, which is above its every entry for null, a boolean or a
-/// number
-pub fn index_strings(entity_type: &str, index: &str) -> Vec<u8> {
+/// The least key an entry of an index for a string can have under these leading parts, which is above every entry
+/// under them for null, a boolean or a number
+pub fn index_strings(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
     with(Prefix::Index, |w| {
-        w.string(entity_type).string(index).string_prefix("");
+        w.string(entity_type).string(index);
+        for part in parts {
+            w.part(part);
+        }
+        w.string_prefix("");
     })
 }
 
-/// The entities of a type that a value index on one field files no one value of, in place order: those without a
-/// value (`Prefix::IndexWithout`), or those whose value it doesn't order (`Prefix::IndexUnordered`). An entity's key is
-/// this and its place (`place_under`)
-pub fn index_others(prefix: Prefix, entity_type: &str, index: &str) -> Vec<u8> {
+/// The entities of a type that a value index files besides its entries, in place order: those without a value in its
+/// last field (`Prefix::IndexWithout`), under the parts its fields before that one hold, or those holding a value it
+/// doesn't order (`Prefix::IndexUnordered`), which no parts lead. An entity's key is this and its place
+/// (`place_under`)
+pub fn index_others(prefix: Prefix, entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Vec<u8> {
     with(prefix, |w| {
         w.string(entity_type).string(index);
+        for part in leading {
+            w.part(part);
+        }
     })
 }
 
@@ -152,8 +160,8 @@ pub fn index_others(prefix: Prefix, entity_type: &str, index: &str) -> Vec<u8> {
 pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
     [
         index_range(entity_type, index, &[]),
-        index_others(Prefix::IndexWithout, entity_type, index),
-        index_others(Prefix::IndexUnordered, entity_type, index),
+        index_others(Prefix::IndexWithout, entity_type, index, &[]),
+        index_others(Prefix::IndexUnordered, entity_type, index, &[]),
     ]
 }
 
