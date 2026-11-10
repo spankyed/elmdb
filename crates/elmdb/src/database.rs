@@ -411,7 +411,15 @@ impl Database {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                         let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
-                        return synced.map(|()| false);
+                        synced?;
+                        // The database stays open with its builder stopped: what is left to build is queued again,
+                        // as an open queues it, or a read of an unbuilt index would be told to wait for no one
+                        if !at_exit && let Some(builders) = self.builders()? {
+                            let store = self.store()?;
+                            let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read())?;
+                            builders.queue(owed);
+                        }
+                        return Ok(false);
                     }
                     store = shared;
                     // An operation that took the store before the close, a commit or another process's wake, may queue
