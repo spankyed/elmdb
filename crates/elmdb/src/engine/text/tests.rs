@@ -937,6 +937,13 @@ fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_a
     assert_eq!(kept.len(), 399);
     let ids_kept: Vec<String> = kept.iter().map(|i| id(*i)).collect();
     assert_eq!(holding("common"), ids_kept);
+    // More matches than the trash is asked for one by one: it is read whole, and what it holds is left out
+    let trashed = [id(kept[5]), id(kept[300])];
+    write(&db, trashed.iter().map(|id| json!({ "op": "trash", "id": id })).collect());
+    let live: Vec<String> = ids_kept.iter().filter(|held| !trashed.contains(held)).cloned().collect();
+    assert_eq!(holding("common"), live);
+    write(&db, trashed.iter().map(|id| json!({ "op": "restore", "id": id })).collect());
+    assert_eq!(holding("common"), ids_kept);
     // A rebuild of the index, and of everything, derives the keys the writes left
     db.rebuild(Some(("Message", "text"))).unwrap();
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());

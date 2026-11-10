@@ -671,6 +671,14 @@ impl<'a> Walk<'a> {
     /// The counts of the entity at `place`, when the term holds it. Each place asked for is after the last
     #[inline]
     pub fn to(&mut self, place: u64) -> Option<&'a [u8]> {
+        // A run starting at the place or before it is where the place is if the term holds it: the last such run is
+        // found among those not yet read, and the runs before it are passed unread
+        let ahead = self.postings.runs[self.run..].partition_point(|(start, _)| *start <= place);
+        if ahead > 0 {
+            self.run += ahead;
+            self.entries = self.postings.run_at(self.run - 1);
+            self.next = None;
+        }
         loop {
             if let Some((at, counts)) = self.next
                 && at >= place

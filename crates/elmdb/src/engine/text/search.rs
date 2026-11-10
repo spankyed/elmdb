@@ -460,8 +460,36 @@ pub struct Matches<'a> {
     pub found: RoaringTreemap,
 }
 
-/// The entities of a type the query matches in one of its text indexes: within `among` when given, and none of
-/// `without`
+/// How many places are few enough to ask the trash for one by one, where reading the whole of it costs more
+const PROBED: u64 = 256;
+
+/// `places` of a type, less those in its trash
+fn untrashed(r: &impl Read, entity_type: &str, mut places: RoaringTreemap) -> Result<RoaringTreemap> {
+    // mutant-skip: replace <= with > in untrashed
+    // Either way leaves the places out of the trash: asking for each, or reading the trash, is what it costs
+    if places.len() <= PROBED {
+        let mut trashed = Vec::new();
+        for seq in &places {
+            if r.get(&keys::of_type(true, entity_type, seq))?.is_some() {
+                trashed.push(seq);
+            }
+        }
+        for seq in trashed {
+            places.remove(seq);
+        }
+    } else {
+        r.visit(&keys::type_range(true, entity_type), |key, _| {
+            if let Some(place) = keys::place_of(key) {
+                places.remove(place);
+            }
+            true
+        })?;
+    }
+    Ok(places)
+}
+
+/// The entities of a type the query matches in one of its text indexes: within `among` when given, and with `live`
+/// none of the type's trash
 pub fn matches<'a>(
     r: &impl Read,
     entity_type: &'a str,
@@ -469,7 +497,7 @@ pub fn matches<'a>(
     query: &[RawClause],
     options: &'a SearchOptions,
     among: Option<&RoaringTreemap>,
-    without: Option<&RoaringTreemap>,
+    live: bool,
 ) -> Result<Matches<'a>> {
     let name = index.name.as_str();
     let clauses = clauses(index, query, options);
@@ -504,6 +532,10 @@ pub fn matches<'a>(
         // One word is at consecutive places wherever it is, and candidates are already those holding it in the
         // clause's fields: holds answers true for each
         if words.len() > 1 {
+            // A phrase is checked in each candidate's document, so the trash is left out before, not after
+            if live {
+                candidates = untrashed(r, entity_type, candidates)?;
+            }
             let mut kept = RoaringTreemap::new();
             for seq in &candidates {
                 if holds(r, entity_type, name, clause, &words, seq)? {
@@ -533,8 +565,8 @@ pub fn matches<'a>(
         });
     }
     let mut found = found.unwrap_or_default() - excluded;
-    if let Some(without) = without {
-        found -= without;
+    if live {
+        found = untrashed(r, entity_type, found)?;
     }
     let allowed: Vec<u32> = match &options.fields {
         Some(names) => {
@@ -652,6 +684,10 @@ impl Matches<'_> {
             }
             let in_clause = clause.fields.as_deref().unwrap_or(&self.allowed);
             for (term, (_, postings)) in m.words.iter().flatten() {
+                // Of a word's many forms a match holds one or two: the set says which without reading a run
+                if !postings.places.contains(seq) {
+                    continue;
+                }
                 let Some(counts) = postings.at(seq) else { continue };
                 postings::counted(counts, self.index.fields.len(), |field, _| {
                     if in_clause.contains(&field) {
@@ -676,7 +712,7 @@ pub fn search(
     among: Option<&RoaringTreemap>,
     now: f64,
 ) -> Result<Vec<Hit>> {
-    let matches = matches(r, entity_type, index, query, options, among, None)?;
+    let matches = matches(r, entity_type, index, query, options, among, false)?;
     let mut scored = Vec::new();
     matches.scored(r, now, |seq, score| scored.push((seq, score)))?;
     let mut hits = Vec::with_capacity(scored.len());
