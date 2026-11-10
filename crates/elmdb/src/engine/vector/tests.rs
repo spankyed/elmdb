@@ -923,3 +923,54 @@ fn a_graph_grown_an_embedding_a_commit_keeps_few_entry_points() {
     let near = ids(&db, docs(), json!([{ "step": "near", "vector": direction("text 57"), "k": 3 }]));
     assert_eq!(near, json!(["Doc-057", "Doc-056", "Doc-058"]));
 }
+
+#[test]
+fn a_chunk_that_moved_among_its_entity_s_chunks_keeps_its_embedding() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let body =
+        |paragraphs: &[&str]| json!({ "op": "set", "id": "Doc-1", "fields": { "body": paragraphs.join("\n\n") } });
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1" }), body(&["a cat", "a car", "waves"])])
+        .unwrap();
+    embed_pending(&db, topic);
+    assert_eq!(pending(&db)["count"], 0);
+    let waiting = |db: &Database| -> Vec<(u64, String)> {
+        let chunks = pending(db)["chunks"].as_array().unwrap().clone();
+        chunks.iter().map(|c| (c["chunk"].as_u64().unwrap(), c["text"].as_str().unwrap().to_owned())).collect()
+    };
+    let nearest =
+        |db: &Database, vector: [f32; DIMS]| ids(db, docs(), json!([{ "step": "near", "vector": vector, "k": 1 }]));
+
+    // A paragraph put before the others moves each to the place after its own: the new one alone waits for a vector
+    write(&db, vec![body(&["an opening", "a cat", "a car", "waves"])]).unwrap();
+    assert_eq!(waiting(&db), [(0, "an opening".to_owned())]);
+    assert_eq!(nearest(&db, [1.0, 0.0, 0.0]), json!(["Doc-1"]), "found by the vector of a chunk that moved");
+    assert!(db.check().unwrap().is_clean());
+
+    // One taken out and the rest in another order: each is where it is now, with the vector it had
+    write(&db, vec![body(&["a car", "waves", "a cat"])]).unwrap();
+    assert_eq!(waiting(&db), []);
+    assert_eq!(nearest(&db, [0.0, 0.0, 1.0]), json!(["Doc-1"]));
+    assert!(db.check().unwrap().is_clean());
+
+    // Text written anew has no vector, wherever it is
+    write(&db, vec![body(&["a car", "waves again", "a cat"])]).unwrap();
+    assert_eq!(waiting(&db), [(1, "waves again".to_owned())]);
+    // A vector another model made, or one of another size, embeds nothing where it is and moves nowhere: its chunk
+    // waits at its new place as it did at its old
+    for (model, vector) in [("m0", vec![1.0, 0.0, 0.0]), ("m1", vec![1.0, 0.0])] {
+        write(&db, vec![body(&["a cat", "a car"])]).unwrap();
+        db.bulk_load(&[crate::engine::maintenance::Load::Embedding {
+            id: "Doc-1".into(),
+            index: "meaning".into(),
+            chunk: 0,
+            model: model.into(),
+            hash: super::hash_of("a cat"),
+            vector,
+        }])
+        .unwrap();
+        write(&db, vec![body(&["an opening", "a cat", "a car"])]).unwrap();
+        assert_eq!(waiting(&db), [(0, "an opening".to_owned()), (1, "a cat".to_owned())], "{model}");
+        assert!(db.check().unwrap().is_clean(), "{model}");
+    }
+}

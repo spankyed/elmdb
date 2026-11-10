@@ -308,17 +308,36 @@ pub fn remove(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Moves what an index holds of the entity from its stored chunks to `now`
+/// Whether a stored embedding is one the index reads for a chunk of this hash: of its text, by the index's model, of
+/// the index's size
+fn embeds(index: &VectorIndex, stored: &[u8], hash: &str) -> Result<bool> {
+    let stored = decode_vector(stored)?;
+    Ok(stored.hash == hash && stored.model == index.model && stored.vector.len() == index.dims)
+}
+
+/// Moves what an index holds of the entity from its stored chunks to `now`. A chunk is kept by its place and its text;
+/// one whose text is at another place now, as every chunk after an inserted or a removed one is, takes its embedding
+/// there with it, an embedding being of a text wherever the text lies, and making one again the caller's cost
 fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &VectorIndex, id: &str, now: &[String]) -> Result<()> {
     let name = index.name.as_str();
     let before = stored_chunks(t, entity_type, name, id)?;
+    // The embeddings of the chunks leaving their places, by the hash of the text each embeds
+    let mut leaving: HashMap<String, Vec<u8>> = HashMap::new();
     for (n, (hash, _)) in &before {
         let kept = now.get(*n as usize).is_some_and(|text| hash_of(text) == *hash);
         if !kept {
+            let embedding = keys::vector(entity_type, name, id, *n);
+            // An entity leaving the index whole has no chunk for an embedding to follow
+            if !now.is_empty()
+                && let Some(stored) = t.get(&embedding)?
+                && embeds(index, &stored, hash)?
+            {
+                leaving.insert(hash.clone(), stored);
+            }
             remove_item(t, entity_type, name, id, *n)?;
             t.del(&keys::vector_chunk_key(Prefix::VectorChunk, entity_type, name, id, *n))?;
             t.del(&keys::vector_chunk_key(Prefix::VectorPending, entity_type, name, id, *n))?;
-            t.del(&keys::vector(entity_type, name, id, *n))?;
+            t.del(&embedding)?;
         }
     }
     for (n, text) in now.iter().enumerate() {
@@ -328,12 +347,14 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &VectorIndex, id: &str, n
             continue;
         }
         t.put(&keys::vector_chunk_key(Prefix::VectorChunk, entity_type, name, id, n), &encode_chunk(&hash, text))?;
-        let embedded = match t.get(&keys::vector(entity_type, name, id, n))? {
-            Some(stored) => {
-                let stored = decode_vector(&stored)?;
-                stored.hash == hash && stored.model == index.model && stored.vector.len() == index.dims
+        let embedding = keys::vector(entity_type, name, id, n);
+        let embedded = match (t.get(&embedding)?, leaving.get(&hash)) {
+            (Some(stored), _) => embeds(index, &stored, &hash)?,
+            (None, Some(moved)) => {
+                t.put(&embedding, moved)?;
+                true
             }
-            None => false,
+            (None, None) => false,
         };
         if embedded {
             add_item(t, entity_type, name, id, n)?;

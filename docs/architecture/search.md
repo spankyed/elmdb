@@ -133,7 +133,9 @@ snapshot as a search when it needs to say that search is incomplete.
   chunk both ways (`d/qi`, `d/qm`), a unit's graph changes (`d/qj`) and each index's graph number (`d/qn`). The graphs
   are hannoy's, in LMDB databases of their own (`elmdb.graphs.cosine`, `elmdb.graphs.euclidean`).
 - **Writes** refile a changed entity's chunks in the same unit: a chunk whose text changed loses its embedding and its
-  graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
+  graph item and is pending. A chunk whose text only moved among its entity's chunks, as every one after an
+  inserted or a removed paragraph does, takes its embedding to its new place: an embedding is of a text wherever the
+  text lies, and making one again is the caller's cost. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
 - **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
   everything else; each build is seeded by the changes it makes, so one history builds one graph and builds that
   change other items draw their levels otherwise (seeded alike, a graph grown an embedding a commit holds every item
