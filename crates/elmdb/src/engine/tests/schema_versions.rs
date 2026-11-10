@@ -358,3 +358,35 @@ fn a_schema_stored_before_its_canonical_form_grew_a_field_still_opens_and_reads(
     let db = Database::open(dir.path(), options(Some(with_kind), false)).unwrap();
     db.read(&reads()).unwrap();
 }
+
+#[test]
+fn a_unit_begun_while_a_schema_change_waits_for_the_builder_refuses_the_change() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let options = OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() };
+    let db = std::sync::Arc::new(Database::open(dir.path(), options).unwrap());
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    // A builder for the change to wait for, which it does with the schema's lock let go
+    let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
+    db.builders().unwrap().expect("a writable database starts builders").queue(vec![lookup]);
+    db.wait_for_index_builds().unwrap();
+    let unit = Rc::new(RefCell::new(None));
+    let (beginning, held) = (std::sync::Arc::clone(&db), Rc::clone(&unit));
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED, move || {
+        *held.borrow_mut() = Some(beginning.begin().unwrap());
+    });
+    let error = db.set_schema(schema("b")).unwrap_err();
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED));
+    assert_eq!(error.code, ErrorCode::UnitOpen, "{error}");
+    assert_eq!(db.schema().unwrap(), schema("a"), "the schema stands as it was");
+    let answer: serde_json::Value = rmp_serde::from_slice(&db.read(&query()).unwrap()).unwrap();
+    assert_eq!(answer[0]["ids"], json!(["Task-0"]));
+
+    // The unit ended, the change is made, and its index built
+    unit.borrow_mut().take();
+    db.set_schema(schema("b")).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(db.schema().unwrap(), schema("b"));
+    assert!(db.check().unwrap().is_clean());
+}

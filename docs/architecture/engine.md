@@ -356,7 +356,10 @@ in either order. `db.sequence` is the last commit's.
 - `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
-  after the commit, outside its transaction, on the thread that committed. An unwinding listener panic removes that
+  after the commit, outside its transaction, on the thread that committed, which for a commit of the index builder's
+  is the builder's own. A schema change and a close wait for that thread to end, and wait holding nothing its
+  delivery takes, the schema's lock least of all: a watch's read, and whatever its listener calls of the database,
+  goes on while they wait, and the listener's calls after a close are answered `CLOSED`. An unwinding listener panic removes that
   watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
   its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
   A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does

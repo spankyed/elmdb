@@ -235,10 +235,17 @@ impl Builder {
         self.core.lock().failures.clone()
     }
 
-    /// Stops the thread, leaving an index part built for the next open to finish
-    pub fn stop(&mut self) {
+    /// Tells the thread to stop once the piece of work it is on ends, without waiting for it as `stop` does
+    pub fn tell_to_stop(&self) {
         self.core.stop();
         self.store.wake_unit_waiters();
+    }
+
+    /// Stops the thread, leaving an index part built for the next open to finish. Its caller holds nothing the thread
+    /// may wait for: a chunk's commit delivers to the watches it wrote into, and a watch's read, and whatever its
+    /// listener calls of the database, takes the schema's lock
+    pub fn stop(&mut self) {
+        self.tell_to_stop();
         if let Some(thread) = self.thread.take() {
             thread.join().expect("the index thread doesn't panic");
         }
@@ -246,8 +253,7 @@ impl Builder {
 
     /// Stops the thread without waiting for it, in a process that is exiting, whose other threads may be gone already
     pub fn abandon(&mut self) {
-        self.core.stop();
-        self.store.wake_unit_waiters();
+        self.tell_to_stop();
         // Dropping the handle detaches the thread
         self.thread.take();
     }
