@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -160,13 +161,16 @@ for name, path, features in crates:
         continue
     # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
     with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
+    # A change that holds no mutant of the crate has cargo-mutants write no results, and those an earlier run left
+    # would be read as this one's
+    results = out / name / "mutants.out"
+    shutil.rmtree(results, ignore_errors=True)
     run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), "--in-diff", str(diff),
                           *(arg for file in files for arg in ("--file", file)), *sharding, *platform_args, "--test-package", name,
                           *with_features, *SUITE_ARGS.get(name, [])],
                          env=env)
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
-    results = out / name / "mutants.out"
     for found, file in ((missed, "missed.txt"), (timeouts, "timeout.txt")):
         if (results / file).exists():
             found += (results / file).read_text().splitlines()
