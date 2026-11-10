@@ -364,6 +364,14 @@ impl Database {
                 "A watch listener is running on this thread: close the database after the listener returns",
             ));
         }
+        // As is the builder's own thread, where a listener of its commits runs: a close waits for the store the
+        // thread holds, which it lets go only once that listener has returned
+        if self.builder().as_ref().is_some_and(crate::engine::Builder::on_its_thread) {
+            return Err(Error::new(
+                ErrorCode::CallbackActive,
+                "A listener of the builder's commits is running on this thread: close the database after it returns",
+            ));
+        }
         // A build in progress stops between chunks, for the next open to finish. A builder is waited for with nothing
         // held that its thread may wait for: it may be delivering a commit of its own to a watch, whose read and whose
         // listener's calls of the database take the schema's lock, the store's slot and the builder's

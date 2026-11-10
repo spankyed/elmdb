@@ -829,3 +829,92 @@ fn a_close_ends_while_the_builder_s_delivery_owes_its_watch_another_read() {
 fn a_close_ends_while_a_listener_on_the_builder_s_thread_calls_the_database() {
     ends_beside_a_builder_s_delivery("close", Needs::TheDatabase);
 }
+
+/// A database with a rank index over sixty tasks, built; `schema(tolerance)` is its schema with that tolerance, and
+/// `top` a read of the index's best, which a drain's commit writes into
+fn ranked_tasks() -> (tempfile::TempDir, Arc<Database>, impl Fn(f64) -> crate::schema::Schema, Json) {
+    let schema = |tolerance: f64| {
+        let mut json = super::schema_json();
+        json["ranks"] = json!({ "taskRank": {
+            "types": ["Task"], "relations": ["refs"], "direction": "out", "weights": false, "tolerance": tolerance
+        } });
+        crate::schema::Schema::from_json(&json).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let options = crate::OpenOptions { schema: Some(schema(1e-9)), syncs: false, ..Default::default() };
+    let db = Arc::new(Database::open(dir.path(), options).unwrap());
+    write(&db, (0..60).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+        .unwrap();
+    db.wait_for_index_builds().unwrap();
+    let top = json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Task"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }],
+        "terminal": { "answer": "hits" } } });
+    (dir, db, schema, top)
+}
+
+/// Links every task to the first, which leaves the rank index a drain to commit
+fn link_all(db: &Database) {
+    let links =
+        (1..60).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }));
+    write(db, links.collect()).unwrap();
+}
+
+/// A schema change stops the builder and waits for its thread to end. Made by a watch's listener on that thread,
+/// which a drain's commit delivered to, it has no one to wait for: the thread ends once the listener returns
+#[test]
+fn a_listener_on_the_builder_s_thread_changes_the_schema() {
+    use std::time::Duration;
+    let (_dir, db, schema, top) = ranked_tasks();
+    let (tell, told) = std::sync::mpsc::channel();
+    let mut tell = Some(tell);
+    let weak = Arc::downgrade(&db);
+    let changed = schema(1e-8);
+    db.watch(
+        reads(vec![top], None),
+        Box::new(move |_| {
+            if std::thread::current().name() != Some("elmdb-index") {
+                return;
+            }
+            let Some(tell) = tell.take() else { return };
+            let db = weak.upgrade().unwrap();
+            tell.send(db.set_schema(changed.clone()).map(|changes| changes.len())).unwrap();
+        }),
+    )
+    .unwrap();
+    link_all(&db);
+    let outcome = told
+        .recv_timeout(Duration::from_secs(4))
+        .expect("the change waits for the thread it is made on, or that thread ended without making it");
+    assert_eq!(outcome.unwrap(), 1, "the tolerance changed");
+    // The schema is the one given, and the builder started for it builds what the stopped one left
+    assert_eq!(db.schema().unwrap().ranks["taskRank"].tolerance, 1e-8);
+    db.wait_for_index_builds().unwrap();
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+    db.close().unwrap();
+}
+
+/// A close waits for the store, which the builder's thread holds until it ends: asked for on that thread, by the
+/// listener of the builder's commits, it is refused as one made by a watch's listener is
+#[test]
+fn a_close_on_the_builder_s_thread_is_refused() {
+    use std::time::Duration;
+    let (_dir, db, _, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    let (tell, told) = std::sync::mpsc::channel();
+    let tell = Mutex::new(Some(tell));
+    let weak = Arc::downgrade(&db);
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        let Some(tell) = tell.lock().unwrap().take() else { return };
+        let db = weak.upgrade().unwrap();
+        tell.send(db.close_within(Some(Duration::from_millis(50))).map_err(|refused| refused.code)).unwrap();
+    })))
+    .unwrap();
+    link_all(&db);
+    let outcome = told.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    assert_eq!(outcome, Err(crate::ErrorCode::CallbackActive));
+    // And on any other thread it closes
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}

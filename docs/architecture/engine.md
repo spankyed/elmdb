@@ -373,6 +373,10 @@ in either order. `db.sequence` is the last commit's.
   listener needs.
   This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
+  So does closing it from the listener of the builder's commits, which runs on the builder's thread: a close waits
+  for the store that thread holds. A schema change made by a listener on that thread, a watch's that a builder's
+  commit delivered to, stops the builder without waiting for it, there being no other thread to wait: the builder
+  ends once the listener returns, and the one started for the new schema builds what it left.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a
