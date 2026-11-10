@@ -2068,9 +2068,8 @@ impl<R: Read> Query<'_, R> {
     /// The first `take` ids of the set after the first `upto` steps in `name`'s order, found by walking the order and
     /// testing each entity against those steps, where a sort reads every entity they keep; or none when the walk
     /// isn't tried or is given up, and the set is sorted. It is tried when the steps are filters a type start begins
-    /// with, which keep the same set whichever side of the order they stand (all of those but `withRole`, whose
-    /// holders its index reads), an index reads the type in `name`'s order, and reading the filters reads
-    /// `WALK_BEFORE_ASKING` entities or more. It is given up once reading the
+    /// with, which keep the same set whichever side of the order they stand, an index reads the type in `name`'s
+    /// order, and reading the filters reads `WALK_BEFORE_ASKING` entities or more. It is given up once reading the
     /// filters would cost less than the walk has: asked each time the walk has read twice what it had, from
     /// `WALK_BEFORE_ASKING` on, it stops when the filters would read fewer than `WALK_FOR_EACH_READ` times that. So
     /// the two together cost a small multiple of the cheaper, whatever the entities hold. A page's walk begins past
@@ -2092,6 +2091,7 @@ impl<R: Read> Query<'_, R> {
                     | Step::Where { .. }
                     | Step::Has { .. }
                     | Step::Lacks { .. }
+                    | Step::WithRole { .. }
             )
         };
         if filters.is_empty() || !filters.iter().all(swaps) {
@@ -2099,6 +2099,8 @@ impl<R: Read> Query<'_, R> {
         }
         let Some(entity_type) = self.ordered_type() else { return Ok(None) };
         let Some(ordered) = self.ordered_under(entity_type, &[], None, name)? else { return Ok(None) };
+        // A role the schema doesn't declare is refused as its filter refuses it, which the walk never runs
+        self.roles_declared(upto)?;
         if self.filters_read_fewer(entity_type, WALK_BEFORE_ASKING)? {
             return Ok(None);
         }
@@ -2135,6 +2137,7 @@ impl<R: Read> Query<'_, R> {
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
         let read_from = match self.driver().map(|at| &self.plan.steps[at]) {
             Some(Step::Where { field, value }) => indexable(field, value).map(|part| (field.as_str(), part)),
+            Some(Step::WithRole { role }) => Some((field::ROLE, Part::String(role.clone()))),
             _ => None,
         };
         let entries = read_from.and_then(|(name, part)| {

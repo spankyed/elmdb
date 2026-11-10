@@ -17,7 +17,7 @@ use crate::{Database, OpenOptions};
 fn schema_json() -> Json {
     json!({
         "$schema": crate::schema::SCHEMA_LANGUAGE,
-        "roles": { "star": {} },
+        "roles": { "star": {}, "lead": {} },
         "types": {
             "Task": {
                 "fields": {
@@ -617,11 +617,25 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
         [json!(3), json!(3), json!(3), json!(3)]
     );
 
-    // A role's holders are read from its index and sorted, however many: the order isn't walked for them
+    // A role's holders are a filter like any: two hundred hold this one, the first by the number, so its least is
+    // the first the walk reads, and its greatest is past where the walk asks and gives up, two hundred being fewer
+    // than twice what it has read
     let stars = (0..200).map(|at| json!({ "op": "grant", "id": id(at), "role": "star" }));
     write(&db, stars.collect());
-    let star = plan("live", json!([{ "step": "withRole", "role": "star" }, order("k", true), limit(1)]));
-    assert_eq!(visited(&db, star), (vec![id(199)], 200));
+    let with_role = |role: &str, descending: bool| {
+        visited(&db, plan("live", json!([{ "step": "withRole", "role": role }, order("k", descending), limit(1)])))
+    };
+    assert_eq!(with_role("star", false), (vec![id(0)], 1));
+    assert_eq!(with_role("star", true), (vec![id(199)], 128 + 200));
+    // Three hold this one: so few are read from the role's index and sorted
+    write(&db, [10, 300, 599].iter().map(|at| json!({ "op": "grant", "id": id(*at), "role": "lead" })).collect());
+    assert_eq!(with_role("lead", true), (vec![id(599)], 3));
+    // A role the schema no longer declares is refused though tasks still hold it, as its filter refuses it
+    let mut fewer = schema_json();
+    fewer["roles"].as_object_mut().unwrap().remove("star");
+    db.set_schema(Schema::from_json(&fewer).unwrap()).unwrap();
+    let dropped = plan("live", json!([{ "step": "withRole", "role": "star" }, order("k", false), limit(1)]));
+    assert_eq!(read(&db, json!({ "read": "query", "plan": dropped })).unwrap_err().code, ErrorCode::UnknownRole);
 }
 
 #[test]

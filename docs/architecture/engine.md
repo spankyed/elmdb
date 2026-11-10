@@ -239,8 +239,7 @@ an answer:
   index doesn't order, and while its entries under those values hold no string; otherwise the equalities are
   filtered and their matches sorted.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,
-  after the filters a type start begins with (but `withRole`, whose holders its index reads), has two ways to its
-  first entities: read the filters and sort what
+  after the filters a type start begins with, has two ways to its first entities: read the filters and sort what
   they keep, or walk the order from an index on its field alone and test each entity against the filters, which
   answer the same. Which costs less is the entities', not the plan's: filters that keep half the type are met within
   a few entities of the walk, and filters that keep a thousandth cost the sort a thousandth of the type. So the walk
