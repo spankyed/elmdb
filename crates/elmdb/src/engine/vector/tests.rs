@@ -477,6 +477,33 @@ fn single_vector_rebuild_spills_identifiers_and_preserves_embeddings_and_neighbo
 }
 
 #[test]
+fn a_rebuild_of_one_vector_index_drops_what_the_index_held_before_it_files_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    embed_pending(&db, topic);
+    // What no write leaves, and filing an entity whose chunks stand as they were doesn't look at: a chunk embedded, in
+    // the graph, and marked pending
+    let marker =
+        crate::engine::keys::vector_chunk_key(crate::format::Prefix::VectorPending, "Doc", "meaning", "Doc-cats", 0);
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.put(txn, &marker, &crate::engine::values::encode(&rmpv::Value::Nil))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    assert!(!db.check().unwrap().is_clean());
+    db.rebuild(Some(("Doc", "meaning"))).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(pending(&db)["count"], 0);
+    assert_eq!(ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }])), json!(["Doc-cats"]));
+}
+
+#[test]
 fn vector_flush_drains_multiple_journal_batches_and_index_groups() {
     use crate::engine::unit::Read;
     let dir = tempfile::tempdir().unwrap();
@@ -861,4 +888,38 @@ fn a_near_read_asks_the_graph_again_only_while_it_lacks_k_and_the_graph_holds_mo
     // k of three is answered by the first ask; k of ten does no more work
     let (_, asked_once) = visited(scope(), 3);
     assert_eq!(visited(scope(), 10), (3, asked_once));
+}
+
+#[test]
+fn a_graph_grown_an_embedding_a_commit_keeps_few_entry_points() {
+    use crate::engine::unit::Read as _;
+    const DOCS: usize = 200;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // A direction per document, around a circle, each document embedded in a commit of its own
+    let direction = |text: &str| {
+        let turn = text.trim_start_matches("text ").parse::<f32>().unwrap() * 0.03;
+        [turn.cos(), turn.sin(), 0.25]
+    };
+    for i in 0..DOCS {
+        let doc = json!({ "op": "create", "type": "Doc", "id": format!("Doc-{i:03}"), "fields": { "body": format!("text {i}") } });
+        write(&db, vec![doc]).unwrap();
+        embed_pending(&db, direction);
+    }
+    let (entry_points, items) = db
+        .snapshot(|s| {
+            let (number, _) = super::graph_of(s, "Doc", "meaning")?.expect("the index has a graph");
+            let (txn, d) = s.raw();
+            let graphs = d.cosine.expect("a writable store has the cosine graphs");
+            let reader = hannoy::Reader::open(txn, number, graphs).map_err(super::graph_error)?;
+            Ok((reader.n_entrypoints(), reader.n_items()))
+        })
+        .unwrap();
+    assert_eq!(items, DOCS as u64);
+    // A graph is entered at the items of its top level, and a level holds a sixteenth of the one below. Were each
+    // build to draw the levels the build before it drew, every item would land on one level and be an entry point,
+    // which each insert and each search then measures the query against
+    assert!(entry_points <= DOCS / 4, "{entry_points} of {items} items are entry points");
+    let near = ids(&db, docs(), json!([{ "step": "near", "vector": direction("text 57"), "k": 3 }]));
+    assert_eq!(near, json!(["Doc-057", "Doc-056", "Doc-058"]));
 }

@@ -135,7 +135,10 @@ snapshot as a search when it needs to say that search is incomplete.
 - **Writes** refile a changed entity's chunks in the same unit: a chunk whose text changed loses its embedding and its
   graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
 - **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
-  everything else; `check()` and `rebuild()` treat them as derived from the stored embeddings.
+  everything else; each build is seeded by the changes it makes, so one history builds one graph and builds that
+  change other items draw their levels otherwise (seeded alike, a graph grown an embedding a commit holds every item
+  on one level, each an entry point every insert and search measures against);
+  `check()` and `rebuild()` treat them as derived from the stored embeddings.
   Reads within a unit omit journaled items from the committed graph results and merge the current primary
   embeddings for those items, using the graph's distance metric. New embeddings are visible even before the
   first graph is built. Savepoint rollback restores this read view with the journal and primary data; a read

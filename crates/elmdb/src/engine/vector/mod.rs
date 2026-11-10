@@ -429,14 +429,21 @@ pub fn restore(
     Ok(())
 }
 
-/// The graph changes the unit's writes journaled, made in the graphs as it commits, each graph then built once
+/// The graph changes the unit's writes journaled, made in the graphs as it commits, each graph then built once.
+///
+/// A build is seeded by the changes it makes, so one history builds one graph and builds that change other items draw
+/// otherwise. hannoy gives a build's items the levels its generator draws first, and enters a graph at every item of
+/// its top level: builds seeded alike would put each one's items on the levels the last one's took, and a graph grown
+/// an embedding a commit would hold every item on one level, each an entry point that every insert and every search
+/// measures against
 pub fn flush(t: &mut Txn<'_, '_>) -> Result<()> {
+    use std::hash::Hasher as _;
     let prefix = Prefix::VectorJournal.key().to_vec();
     let mut current: Option<(String, String)> = None;
-    let mut graph: Option<(VectorIndex, u16)> = None;
-    let finish = |t: &mut Txn<'_, '_>, graph: Option<&(VectorIndex, u16)>| -> Result<()> {
-        if let Some((def, number)) = graph {
-            apply(t, def, *number, &[], &[], false)?;
+    let mut graph: Option<(VectorIndex, u16, rustc_hash::FxHasher)> = None;
+    let finish = |t: &mut Txn<'_, '_>, graph: Option<&(VectorIndex, u16, rustc_hash::FxHasher)>| -> Result<()> {
+        if let Some((def, number, seed)) = graph {
+            apply(t, def, *number, &[], &[], false, seed.finish())?;
         }
         Ok(())
     };
@@ -459,15 +466,17 @@ pub fn flush(t: &mut Txn<'_, '_>) -> Result<()> {
             if current.as_ref() != Some(&pair) {
                 finish(t, graph.as_ref())?;
                 graph = match vector_indexes(t.schema, &pair.0).into_iter().find(|i| i.name == pair.1) {
-                    Some(def) => graph_of(t, &pair.0, &pair.1)?.map(|(number, _)| (def, number)),
+                    Some(def) => graph_of(t, &pair.0, &pair.1)?.map(|(number, _)| (def, number, Default::default())),
                     None => None,
                 };
                 current = Some(pair.clone());
             }
             t.del(&key)?;
-            let Some((def, number)) = &graph else { continue };
+            let Some((def, number, seed)) = &mut graph else { continue };
             let item = item as u32;
             let added = values::decode(&value)?.as_bool().unwrap_or(false);
+            seed.write_u32(item);
+            seed.write_u8(u8::from(added));
             let vector = if added {
                 match t.get(&keys::vector_item_key(Prefix::VectorItem, &pair.0, &pair.1, item))? {
                     Some(chunk) => {
@@ -507,7 +516,7 @@ pub fn flush(t: &mut Txn<'_, '_>) -> Result<()> {
     Ok(())
 }
 
-/// Removes and adds items in a graph and builds it, or with `clear`, empties it first
+/// Removes and adds items in a graph and builds it from `seed`, or with `clear`, empties it first
 fn apply(
     t: &mut Txn<'_, '_>,
     def: &VectorIndex,
@@ -515,6 +524,7 @@ fn apply(
     removes: &[u32],
     adds: &[(u32, Vec<f32>)],
     clear: bool,
+    seed: u64,
 ) -> Result<()> {
     macro_rules! write {
         ($db:expr) => {{
@@ -534,7 +544,7 @@ fn apply(
             for (item, vector) in adds {
                 writer.add_item(t.txn, *item, vector).map_err(graph_error)?;
             }
-            let mut rng = StdRng::seed_from_u64(u64::from(number));
+            let mut rng = StdRng::seed_from_u64(seed);
             writer.builder(&mut rng).build::<16, 32>(t.txn).map_err(graph_error)?;
         }};
     }
@@ -924,7 +934,8 @@ pub fn clear(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<()> 
     if let (Some(def), Some((number, _))) =
         (vector_indexes(t.schema, entity_type).into_iter().find(|i| i.name == index), graph_of(t, entity_type, index)?)
     {
-        apply(t, &def, number, &[], &[], true)?;
+        // An emptied graph has no item to draw a level for, so its build takes any seed
+        apply(t, &def, number, &[], &[], true, 0)?;
     }
     for prefix in
         [Prefix::VectorChunk, Prefix::VectorPending, Prefix::VectorItem, Prefix::VectorItemOf, Prefix::VectorJournal]
