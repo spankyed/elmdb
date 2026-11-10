@@ -91,9 +91,10 @@ pub enum ErrorCode {
     UnknownIndex,
     /// A second listener for a database's builder commits
     AlreadyListening,
-    /// A `ranked` read asked to be refused while its index builds
+    /// A read of an index still being built that nothing answers in its place: a text index's `search`, `hybrid` or
+    /// `suggest`, whose terms and statistics are the answer, and a `ranked` read that asked to be refused rather than
+    /// computed
     IndexBuilding,
-    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to

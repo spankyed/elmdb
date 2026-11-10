@@ -560,6 +560,46 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
 }
 
 #[test]
+fn a_read_of_a_text_index_still_being_built_is_refused_and_answered_once_it_is_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    // As a build leaves it part way: its entries there, its marker not yet
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Message", "text"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let query = |start: Json| {
+        json!({ "read": "query", "plan": {
+            "start": start, "steps": [{ "step": "search", "query": "lmdb" }], "terminal": { "answer": "ids" }
+        } })
+    };
+    let from_the_type = read(&db, query(json!({ "from": "types", "types": ["Message"] }))).unwrap_err();
+    assert_eq!(from_the_type.code, ErrorCode::IndexBuilding, "{from_the_type}");
+    assert!(from_the_type.message.contains("Message") && from_the_type.message.contains("text"), "{from_the_type}");
+    let among_a_set = read(&db, query(json!({ "from": "ids", "ids": ["Message-1", "Message-3"] }))).unwrap_err();
+    assert_eq!(among_a_set.code, ErrorCode::IndexBuilding, "{among_a_set}");
+    let suggested = read(&db, json!({ "read": "suggest", "type": "Message", "term": "lm" })).unwrap_err();
+    assert_eq!(suggested.code, ErrorCode::IndexBuilding, "{suggested}");
+    // A set holding nothing of the type reads no index of it
+    let elsewhere = read(&db, query(json!({ "from": "ids", "ids": [] }))).unwrap();
+    assert_eq!(elsewhere["ids"], json!([]));
+
+    db.rebuild(Some(("Message", "text"))).unwrap();
+    assert_eq!(search(&db, "Message", "lmdb", json!({})), json!(["Message-3", "Message-1"]));
+    assert_eq!(
+        read(&db, json!({ "read": "suggest", "type": "Message", "term": "lm" })).unwrap()["completions"],
+        json!(["lmdb"])
+    );
+}
+
+#[test]
 fn a_highlight_names_its_element_by_its_place_in_the_list() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

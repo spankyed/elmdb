@@ -925,6 +925,32 @@ fn a_graph_grown_an_embedding_a_commit_keeps_few_entry_points() {
 }
 
 #[test]
+fn a_hybrid_search_over_a_text_index_still_being_built_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    embed_pending(&db, topic);
+    let hybrid = json!([{ "step": "hybrid", "query": "cats", "vector": [1.0, 0.0, 0.0], "k": 1 }]);
+    assert_eq!(ids(&db, docs(), hybrid.clone()), json!(["Doc-cats"]));
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Doc", "text"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let plan =
+        json!({ "read": "query", "plan": { "start": docs(), "steps": hybrid, "terminal": { "answer": "ids" } } });
+    let error = read(&db, plan).unwrap_err();
+    assert_eq!(error.code, ErrorCode::IndexBuilding, "{error}");
+    // The vector index is its own: a search by nearness reads no text index
+    assert_eq!(ids(&db, docs(), json!([{ "step": "near", "vector": [1.0, 0.0, 0.0], "k": 1 }])), json!(["Doc-cats"]));
+}
+
+#[test]
 fn a_chunk_that_moved_among_its_entity_s_chunks_keeps_its_embedding() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

@@ -81,7 +81,8 @@ snapshot as a search when it needs to say that search is incomplete.
   terms and words as written — (`d/fd`), the index's statistics (`d/fs`: documents, each field's total length), and,
   in a stemming index, each word as written and the entities holding it (`d/fw`). Every write that changes an indexed
   field refiles the entity from its stored document, in the same unit; an index declared over existing data is built
-  in the background as a value index is, and `check()` and `rebuild()` cover it.
+  in the background as a value index is, a read of it refused until it is (`INDEX_BUILDING`), and `check()` and
+  `rebuild()` cover it.
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
 - **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves

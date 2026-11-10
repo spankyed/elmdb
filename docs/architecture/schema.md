@@ -278,9 +278,9 @@ stored one.
 
 | Change | What happens |
 |---|---|
-| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built |
+| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built, and a text index, which has no rows to walk in its place, refuses its reads until then (`INDEX_BUILDING`) |
 | A required field added to a type with rows, or a type or relation kind declared again over the data its removal kept | enforced, as a tightened rule is: `check()` reports the rows that break it |
-| An index's definition changed | rebuilt in the background under its name |
+| An index's definition changed | rebuilt in the background under its name; a text index is searched again once it is built, and refused (`INDEX_BUILDING`) until then |
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
 | A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
