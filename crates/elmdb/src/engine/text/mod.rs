@@ -198,7 +198,7 @@ fn field_values(r: &impl Read, index: &TextIndex, id: &str) -> Result<Vec<Option
 }
 
 fn corrupt(what: &str) -> Error {
-    Error::new(ErrorCode::Corrupted, format!("A text index's {what} doesn't read"))
+    Error::new(ErrorCode::Corrupted, format!("A text index's {what} doesn't read: rebuild() derives it again"))
 }
 
 // The stored forms, written and read only here, so `derive` writes exactly what the writes do
@@ -403,6 +403,10 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, seq: u64, now
     }
     let nothing = StoredDocument::default();
     let held = before.as_ref().unwrap_or(&nothing);
+    // A field the index doesn't have is no place a count is kept for
+    if held.terms.iter().flat_map(|(_, places)| places).any(|(field, _)| *field as usize >= fields) {
+        return Err(corrupt("document"));
+    }
     for (term, _) in held.terms.iter().filter(|(term, _)| !now.terms.contains_key(term)) {
         postings::remove(t, &postings::Term::new(entity_type, name, fields, term), seq)?;
     }

@@ -505,6 +505,10 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             for prefix in COMPARED {
                 t.clear_prefix(&prefix.key().to_vec())?;
             }
+            // What an earlier layout left under a tag nothing reads now
+            for retired in Prefix::retired() {
+                t.clear_prefix(&retired)?;
+            }
             // Every declared index of every type with entities is built by a full rebuild, but a value index a build
             // couldn't finish, which keeps the entries that fit unmarked, as writes keep an unbuilt index's
             let all = entities_of(t)?;

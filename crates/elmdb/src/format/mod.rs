@@ -208,6 +208,19 @@ impl Prefix {
         }
     }
 
+    /// The derived tags an earlier layout wrote under and none writes under now: `d/fp`, a term's positions in an
+    /// entity. No prefix takes one again, and a rebuild of everything clears what a database written then still holds
+    pub const RETIRED: [&'static str; 1] = ["d/fp"];
+
+    /// The start of every key under a retired tag
+    pub fn retired() -> impl Iterator<Item = Vec<u8>> {
+        Self::RETIRED.into_iter().map(|tag| {
+            let mut w = key::KeyWriter::new();
+            w.string(tag);
+            w.to_vec()
+        })
+    }
+
     /// The prefix a tag names, if any
     pub fn from_tag(tag: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.tag() == tag)
@@ -239,10 +252,12 @@ mod tests {
 
     #[test]
     fn tags_are_distinct_and_name_their_kind() {
-        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).collect();
+        // A retired tag is no prefix's, or what a database kept under it would be read as that prefix's
+        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).chain(Prefix::RETIRED).collect();
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), Prefix::ALL.len());
+        assert_eq!(tags.len(), Prefix::ALL.len() + Prefix::RETIRED.len());
+        assert!(Prefix::RETIRED.iter().all(|tag| tag.starts_with("d/")), "only derived data is left to a rebuild");
         for p in Prefix::ALL {
             assert_eq!(Prefix::from_tag(p.tag()), Some(p));
             let expected = match p.tag().split('/').next() {

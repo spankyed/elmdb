@@ -1237,19 +1237,11 @@ impl<R: Read> Query<'_, R> {
                 }
                 None => None,
             };
-            let (within, without) = match &ids {
-                Some(ids) => (Some(ids.keys().copied().collect::<RoaringTreemap>()), None),
+            let (within, live) = match &ids {
+                Some(ids) => (Some(ids.keys().copied().collect::<RoaringTreemap>()), false),
                 None => self.searched_places(entity_type)?,
             };
-            let matches = text::search::matches(
-                self.r,
-                entity_type,
-                text_index,
-                &raw,
-                options,
-                within.as_ref(),
-                without.as_ref(),
-            )?;
+            let matches = text::search::matches(self.r, entity_type, text_index, &raw, options, within.as_ref(), live)?;
             matches.scored(self.r, now, |seq, score| {
                 // A tie is broken by the set's own order, or by the types' and then by creation's
                 let first = match (&order, &ids) {
@@ -1288,18 +1280,22 @@ impl<R: Read> Query<'_, R> {
         Ok(true)
     }
 
-    /// The places of a type a search from it reads, as those to search among and those to leave out: all but the trash
-    /// for a live plan, the trash for a plan of it, and every place for one of both
-    fn searched_places(&self, entity_type: &str) -> Result<(Option<RoaringTreemap>, Option<RoaringTreemap>)> {
-        if self.plan.scope == Scope::WithTrashed {
-            return Ok((None, None));
+    /// The places of a type a search from it reads, as those to search among and whether its trash is left out: all
+    /// but the trash for a live plan, which the search leaves out of what it matched; the trash for a plan of it; and
+    /// every place for one of both
+    fn searched_places(&self, entity_type: &str) -> Result<(Option<RoaringTreemap>, bool)> {
+        match self.plan.scope {
+            Scope::Live => Ok((None, true)),
+            Scope::WithTrashed => Ok((None, false)),
+            Scope::Trashed => {
+                let mut trashed = RoaringTreemap::new();
+                self.r.visit(&keys::type_range(true, entity_type), |key, _| {
+                    trashed.extend(keys::place_of(key));
+                    true
+                })?;
+                Ok((Some(trashed), false))
+            }
         }
-        let mut trashed = RoaringTreemap::new();
-        self.r.visit(&keys::type_range(true, entity_type), |key, _| {
-            trashed.extend(keys::place_of(key));
-            true
-        })?;
-        Ok(if self.plan.scope == Scope::Trashed { (Some(trashed), None) } else { (None, Some(trashed)) })
     }
 
     /// The entity of a type at a place, read from the type's entities the plan's scope holds
@@ -1324,16 +1320,9 @@ impl<R: Read> Query<'_, R> {
         let mut n = 0;
         for entity_type in types {
             let text_index = text::resolve_built(self.r, entity_type, index, "search")?;
-            let (within, without) = self.searched_places(entity_type)?;
-            let matches = text::search::matches(
-                self.r,
-                entity_type,
-                &text_index,
-                &raw,
-                options,
-                within.as_ref(),
-                without.as_ref(),
-            )?;
+            let (within, live) = self.searched_places(entity_type)?;
+            let matches =
+                text::search::matches(self.r, entity_type, &text_index, &raw, options, within.as_ref(), live)?;
             n += matches.found.len();
         }
         Ok(n)
@@ -1858,9 +1847,9 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// How many entities of the start's types a `range` straight after it keeps, in the plan's scope, counted in their
-    /// indexes: the entries between its number bounds, each an entity's own, told from the trash by its place, so no
-    /// entity is read. None when the bounds are strings, or a type has no index that accounts for every entity by the
-    /// field, and the entities have to be walked
+    /// indexes: the places of the entries between its number bounds, each an entity's own, less the trash's as a
+    /// search leaves them out of its matches, so no entity is read. None when the bounds are strings, or a type has
+    /// no index that accounts for every entity by the field, and the entities have to be walked
     fn ranged(&self, types: &[String], name: &str, bounds: &Bounds) -> Result<Option<u64>> {
         let Bounds::Numbers(limits) = bounds else { return Ok(None) };
         let mut indexes = Vec::with_capacity(types.len());
@@ -1870,16 +1859,21 @@ impl<R: Read> Query<'_, R> {
         }
         let mut n = 0;
         for (t, index) in indexes {
-            let (among, without) = self.searched_places(t)?;
+            let (among, live) = self.searched_places(t)?;
             let (from, to) = limits.keys(t, &index);
+            let mut places = RoaringTreemap::new();
             self.r.visit_within(&from, &to, |key, _| {
                 self.count_visit();
-                let place = keys::place_of(key).unwrap_or_default();
-                let reached = among.as_ref().is_none_or(|among| among.contains(place))
-                    && !without.as_ref().is_some_and(|without| without.contains(place));
-                n += u64::from(reached);
+                places.extend(keys::place_of(key));
                 true
             })?;
+            if let Some(among) = among {
+                places &= among;
+            }
+            if live {
+                places = text::search::untrashed(self.r, t, places)?;
+            }
+            n += places.len();
         }
         Ok(Some(n))
     }

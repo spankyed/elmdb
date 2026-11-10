@@ -78,7 +78,9 @@ snapshot as a search when it needs to say that search is incomplete.
 
 - **Keys** (`format.md`, Keys): per type and index, a term's places (`d/ft`: the entities holding it, each with the
   term's count in each field), each entity's document — its terms, each with its positions in each field, and its
-  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key), the
+  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key: every
+  place's lengths, or a bit a place and the lengths of those holding any, whichever is fewer bytes, since a type's
+  entities may be few of the store's places), the
   index's statistics (`d/fs`: documents, each field's total length), and, in a stemming index, each word as written
   and how many entities hold it (`d/fw`). Every write that changes an indexed field refiles the entity from its stored
   document, in the same unit: a term the entity holds as often in each field as it did is left as filed. An index
@@ -113,7 +115,9 @@ snapshot as a search when it needs to say that search is incomplete.
   keeps its best matches as they are scored and reads that many entities, and a `count` straight after it counts the
   matches as the index holds them, scoring and reading none. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
-  `counts` is a facet; `after` pages by the last id of the page before.
+  `counts` is a facet; `after` pages by the last id of the page before. A hit is of an entity the search handed on:
+  a match a `limit` left out, reached again by a step after it, is answered with no score and no terms, as an entity
+  the search never matched is.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).

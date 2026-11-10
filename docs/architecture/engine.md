@@ -232,8 +232,8 @@ an answer:
 - **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
-  reads those entries in order instead, as above, and a `count` of it counts them by their places, the trash's told
-  from the rest by its own, and reads no entity. A range of strings, one after another step, and one over a type
+  reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's as a
+  search leaves them out, and reads no entity. A range of strings, one after another step, and one over a type
   without such an index filter what reaches them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own

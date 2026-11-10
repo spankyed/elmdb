@@ -19,16 +19,19 @@ const { Database } = require('../index.js');
 const { DatabaseSync } = require('node:sqlite');
 const packr = new Packr({ useRecords: false, mapsAsObjects: true });
 
-const USAGE = 'usage: against-sqlite.mjs [--json] [--notes N] [--dir PATH]';
+const USAGE = 'usage: against-sqlite.mjs [--json] [--notes N] [--dir PATH] [--require-text]';
 const args = process.argv.slice(2);
 let json = false;
 let NOTES = 1_000_000;
 let parent = tmpdir();
+// Refuses a SQLite built without FTS5, which answers no search for elmdb's to be held to
+let requireText = false;
 while (args.length) {
   const arg = args.shift();
   if (arg === '--json') json = true;
   else if (arg === '--notes') NOTES = Number(args.shift());
   else if (arg === '--dir') parent = args.shift();
+  else if (arg === '--require-text') requireText = true;
   else assert.fail(USAGE);
 }
 // A range's last 500 and a first checkpoint of a twentieth need this many
@@ -52,6 +55,17 @@ const note = (i) => ({
 // cursor of a page near that order's end
 const numbered = Uint32Array.from({ length: NOTES }, (_, i) => i).sort((a, b) => numberOf(a) - numberOf(b) || a - b);
 const NEAR_END_BY_NUMBER = id(numbered[NOTES - 200]);
+
+// Ten more notes, of ten words each, holding a word no other does from once to ten times: equally long, so either
+// engine's ranking puts the one holding it most first, whatever its formula's constants. Their numbers are past every
+// other note's, so they are the ten highest
+const RANKED = Array.from({ length: 10 }, (_, k) => ({
+  id: `Note-r${k}`,
+  title: [...Array(k + 1).fill('quokka'), ...Array(9 - k).fill('wombat')].join(' '),
+  n: NOTES + k,
+  status: 'open',
+}));
+const RANKED_BEST = RANKED.map((one) => one.id).reverse();
 
 const ms = (from) => Number(process.hrtime.bigint() - from) / 1e6;
 const median = (samples) => [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
@@ -79,7 +93,8 @@ const root = mkdtempSync(join(parent, 'elmdb-against-sqlite-'));
 // The plans of the ordered reads, the range and the pages
 const LOWEST = [{ step: 'orderBy', field: 'n' }, { step: 'limit', n: 10 }];
 const HIGHEST = [{ step: 'orderBy', field: 'n', descending: true }, { step: 'limit', n: 10 }];
-const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least }];
+// The notes' own numbers from `least` on: below the ranked notes', which are past them
+const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: NOTES }];
 const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 const pageByNumberAfter = (cursor) => [{ step: 'orderBy', field: 'n' }, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 
@@ -164,7 +179,9 @@ function sqlite() {
       CREATE TRIGGER notes_ai AFTER INSERT ON notes BEGIN
         INSERT INTO notes_fts(rowid, title) VALUES (new.rowid, new.title);
       END;`);
-  } catch {
+  } catch (error) {
+    // Only a SQLite without the module: anything else wrong with the statements is a failure of this script
+    if (!/fts5/i.test(String(error?.message))) throw error;
     text = false;
   }
   const insert = db.prepare('INSERT INTO notes(id, title, n, status) VALUES (?, ?, ?, ?)');
@@ -173,7 +190,7 @@ function sqlite() {
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
   const lowest = db.prepare('SELECT n FROM notes ORDER BY n LIMIT 10');
   const highest = db.prepare('SELECT n FROM notes ORDER BY n DESC LIMIT 10');
-  const atLeast = db.prepare('SELECT count(*) AS n FROM notes WHERE n >= ?');
+  const atLeast = db.prepare('SELECT count(*) AS n FROM notes WHERE n >= ? AND n < ?');
   const pageAfter = db.prepare('SELECT id FROM notes WHERE rowid > (SELECT rowid FROM notes WHERE id = ?) ORDER BY rowid LIMIT 50');
   const pageByNumberAfter = db.prepare(
     'SELECT id FROM notes WHERE (n, rowid) > (SELECT n, rowid FROM notes WHERE id = ?) ORDER BY n, rowid LIMIT 50',
@@ -192,7 +209,7 @@ function sqlite() {
     count: (text) => count.get(text).n,
     lowest: () => lowest.all().map((row) => row.n),
     highest: () => highest.all().map((row) => row.n),
-    atLeast: (least) => atLeast.get(least).n,
+    atLeast: (least) => atLeast.get(least, NOTES).n,
     pageAfter: (cursor) => pageAfter.all(cursor).map((row) => row.id),
     pageByNumberAfter: (cursor) => pageByNumberAfter.all(cursor).map((row) => row.id),
     check: () => assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok', 'sqlite: integrity_check'),
@@ -256,6 +273,8 @@ function measure(name, engine) {
   let load = loadTo(Math.floor(NOTES / 20));
   commits();
   load += loadTo(NOTES);
+  engine.load(RANKED);
+  extra += RANKED.length;
   engine.settle();
   out.loadSeconds = round(load / 1000, 2);
   progress(`${name}: ${NOTES} notes loaded in ${out.loadSeconds} s`);
@@ -270,7 +289,7 @@ function measure(name, engine) {
   };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
-    Object.assign(answers, { everyCount: engine.count('the'), twelfthCount: engine.count('alpha'), twelfthBest: engine.best('alpha').length });
+    Object.assign(answers, { everyCount: engine.count('the'), twelfthCount: engine.count('alpha'), twelfthBest: engine.best('alpha').length, ranked: engine.best('quokka') });
     out.searches = {
       everyBestTenMs: timed(5, () => engine.best('the')).ms,
       everyCountMs: timed(5, () => engine.count('the')).ms,
@@ -307,7 +326,7 @@ function measure(name, engine) {
 const git = (...words) => execFileSync('git', words, { cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8' }).trim();
 const report = {
   benchmark: 'against-sqlite',
-  fixtureVersion: 1,
+  fixtureVersion: 2,
   notes: NOTES,
   source: { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=normal')) },
   host: {
@@ -319,12 +338,16 @@ try {
   const lite = sqlite();
   report.host.sqlite = lite.version;
   report.host.sqliteText = lite.text;
+  assert.ok(lite.text || !requireText, 'this Node\'s SQLite has no FTS5, and --require-text was given');
   const ours = measure('elmdb', elmdb());
   const theirs = measure('sqlite', lite);
   // The misspelled word is left out: SQLite finds nothing for it, which is its answer and not a difference in the notes
   for (const [read, answer] of Object.entries(theirs.answers)) {
     assert.deepEqual(ours.answers[read], answer, `elmdb and SQLite answered ${read} differently`);
   }
+  // elmdb's own searches, held to what the notes say whether or not SQLite answered any
+  assert.deepEqual(ours.answers.ranked, RANKED_BEST, 'elmdb ranked the notes holding a word most often out of order');
+  assert.equal(ours.out.searches.misspelledFound, 10, 'elmdb found fewer than ten notes for a word one letter off');
   report.elmdb = ours.out;
   report.sqlite = theirs.out;
   report.host.loadAfter = round(loadavg()[0], 1);
