@@ -53,18 +53,23 @@ impl<B: AsRef<[u8]>> Lengths<B> {
     #[inline]
     pub fn at(&self, place: u64, field: usize) -> u32 {
         let from = (slot_of(place) * self.fields + field) * self.width;
-        match self.lengths().get(from..from + self.width) {
-            Some(&[length]) => u32::from(length),
-            Some(&[low, high]) => u32::from(u16::from_le_bytes([low, high])),
-            Some(&[a, b, c, d]) => u32::from_le_bytes([a, b, c, d]),
-            _ => 0,
-        }
+        self.lengths().get(from..from + self.width).map_or(0, length)
     }
 
     /// Every length the block holds, place by place, each place's in field order
     fn all(&self) -> Vec<u32> {
-        let places = self.lengths().len() / (self.width * self.fields);
-        (0..places as u64).flat_map(|place| (0..self.fields).map(move |field| self.at(place, field))).collect()
+        self.lengths().chunks(self.width).map(length).collect()
+    }
+}
+
+/// A length as a block holds it, in the one, two or four bytes of the block's width
+#[inline]
+fn length(held: &[u8]) -> u32 {
+    match *held {
+        [length] => u32::from(length),
+        [low, high] => u32::from(u16::from_le_bytes([low, high])),
+        [a, b, c, d] => u32::from_le_bytes([a, b, c, d]),
+        _ => 0,
     }
 }
 

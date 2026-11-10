@@ -32,12 +32,15 @@ fn corrupt() -> Error {
     Error::new(ErrorCode::Corrupted, "A text index's places don't read")
 }
 
-fn put_varint(out: &mut Vec<u8>, mut n: u64) {
-    while n >= 0x80 {
-        out.push(n as u8 | 0x80);
-        n >>= 7;
+fn put_varint(out: &mut Vec<u8>, n: u64) {
+    // Seven bits a byte, the lowest first, so ten bytes at most: the last is what is left of a u64 past 63 bits
+    for shift in (0..64).step_by(7) {
+        let rest = n >> shift;
+        if rest < 0x80 {
+            return out.push(rest as u8);
+        }
+        out.push(rest as u8 | 0x80);
     }
-    out.push(n as u8);
 }
 
 /// The varint `bytes` starts with, and `bytes` moved past it
@@ -125,14 +128,16 @@ pub fn weighted(counts: &[u8], weights: &[f64]) -> Result<f64> {
 /// An entry as a block is read: its place, and its counts as stored
 type Entry<'a> = (u64, &'a [u8]);
 
+/// Each entry `bytes` holds as it reads, the first's place counted from `start`. An entry is a byte at least, so
+/// there are no more of them than bytes, and the reading ends there whatever the bytes hold
+fn each_entry(bytes: &[u8], start: u64, fields: usize) -> impl Iterator<Item = Result<Entry<'_>>> {
+    let mut entries = Entries { place: start, rest: bytes, fields };
+    (0..bytes.len()).map_while(move |_| (!entries.rest.is_empty()).then(|| entries.read()))
+}
+
 /// The entries `bytes` holds, the first's place counted from `start`
 fn entries(bytes: &[u8], start: u64, fields: usize) -> Result<Vec<Entry<'_>>> {
-    let mut out = Vec::new();
-    let mut entries = Entries { place: start, rest: bytes, fields };
-    while !entries.rest.is_empty() {
-        out.push(entries.read()?);
-    }
-    Ok(out)
+    each_entry(bytes, start, fields).collect()
 }
 
 fn write_entries<C: AsRef<[u8]>>(out: &mut Vec<u8>, start: u64, list: &[(u64, C)]) {
@@ -215,7 +220,11 @@ fn blocks<C>(list: &[(u64, C)], capacity: usize) -> Vec<Laid<'_, C>> {
     let mut out = Vec::new();
     let mut rest = list;
     let mut last = None;
-    while !rest.is_empty() {
+    // A block holds an entry at least, so there are no more of them than entries
+    for _ in 0..list.len() {
+        if rest.is_empty() {
+            break;
+        }
         let (start, level, take) = first_block(rest, last, capacity);
         let (held, after) = rest.split_at(take);
         last = held.last().map(|(place, _)| *place);
@@ -547,9 +556,8 @@ impl Reading {
                 self.part(start)?.insert_range(from..=from + (size - 1) as u32);
             }
             None => {
-                let mut entries = Entries { place: start, rest: stored, fields: self.fields };
-                while !entries.rest.is_empty() {
-                    let (place, _) = entries.read()?;
+                for entry in each_entry(stored, start, self.fields) {
+                    let (place, _) = entry?;
                     self.part(place)?.try_push(place as u32).map_err(|_| corrupt())?;
                 }
             }
@@ -588,9 +596,10 @@ impl Postings {
         Walk { postings: self, run: 0, entries: Entries { place: 0, rest: &[], fields: self.fields }, next: None }
     }
 
-    /// Every entity holding the term, with its counts, in place order
+    /// Every entity holding the term, with its counts, in place order. An entry is a byte at least, so there are no
+    /// more of them than bytes, and they end there whatever a run reads as
     pub fn entries(&self) -> impl Iterator<Item = (u64, &[u8])> {
-        (0..self.runs.len()).flat_map(|at| self.run_at(at))
+        (0..self.runs.len()).flat_map(|at| self.run_at(at)).take(self.bytes.len())
     }
 }
 
