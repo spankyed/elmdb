@@ -1,33 +1,35 @@
 # The text index at scale
 
-Status: designed again on 2026-11-10 from readings at a million notes (`../evidence/million-notes.md`); nothing of the
-design below is built. Fuzzy terms by seeking is built (2026-10-27). Posting lists in blocks of a fixed range of places
-were built and measured at 50,000 messages, changed no write's time there and were not kept
-(`../evidence/next-phase-6.md`); at a million notes the rewrite of whole lists is most of a commit, which this design
-answers. It is ordered by the road to 1.0 (`../roadmap.md`), and is built before the format is frozen.
+Status: designed again on 2026-11-10 from readings at a million notes (`../evidence/million-notes.md`). Of the design
+below, a term's places in blocks with their counts, lengths by place and ranking from the two are built (3, 4 and 6;
+`../architecture/search.md`, Text search as built), and read against their gate under Order. The journal (1, 2, 5 and
+7) and what is beyond text are not built. Fuzzy terms by seeking is built (2026-10-27). Posting lists in blocks of a
+fixed range of places were built and measured at 50,000 messages, changed no write's time there and were not kept
+(`../evidence/next-phase-6.md`); at a million notes the rewrite of whole lists was most of a commit. The design is
+ordered by the road to 1.0 (`../roadmap.md`), and is built before the format is frozen.
 
 ## Where it starts
 
-A text index (`../architecture/search.md`; the layout in `crates/elmdb/src/engine/text/mod.rs`) keeps one roaring
-bitmap per term, positions per term and entity, a document record per entity and the index's statistics, all written
-by the unit that changes them. At a million notes, four costs have grown with the notes and not with the change:
+A text index kept one roaring bitmap per term, positions per term and entity, a document record per entity and the
+index's statistics, all written by the unit that changed them. At a million notes, four costs had grown with the notes
+and not with the change:
 
-- **Writes.** A create holding thirty terms that exist, fifteen of them widely held, commits in 1.3 ms, where a create
-  in a type with no text index commits in 0.06 ms. Each widely held term's list is read, decoded, extended, encoded and
-  written again, 75 µs a term, and the commit writes about 211 pages.
+- **Writes.** A create holding thirty terms that exist, fifteen of them widely held, committed in 1.3 ms, where a
+  create in a type with no text index committed in 0.06 ms. Each widely held term's list was read, decoded, extended,
+  encoded and written again, 75 µs a term, and the commit wrote about 211 pages.
 - **Tokenizing** is done by the commit: 10.5 µs for a message of thirty words and 138 µs for a reply of 2.6 KB. A reply
   streamed in 181 writes (`../evidence/next-phase-10.md`) is tokenized 181 times.
-- **Ranking.** The best ten for a word every note holds take 3.6 s, and its count as long. Every match is scored, and
-  scoring one reads three keys: its document record, the term's positions in it, and its entity's record.
-- **Bytes.** Positions are a key per term and entity, 178 MB of keys for 27 MB of values, and the pages of the file are
-  half full.
+- **Ranking.** The best ten for a word every note holds took 3.6 s, and its count as long. Every match was scored,
+  and scoring one read three keys: its document record, the term's positions in it, and its entity's record.
+- **Bytes.** Positions were a key per term and entity, 178 MB of keys for 27 MB of values, and the pages of the file
+  are half full.
 
 ## The design
 
 What stays: a search answers from the data of its own transaction. A unit that writes a note and then searches finds
 it, and so does every read after the commit, with the score it would have had were the index written by the commit.
-What changes is when the index's keys are written, which today is in the unit (`../architecture/design.md`,
-Principles) and becomes after it, as a rank index's already are.
+What changes with the journal is when the index's keys are written, which is in the unit
+(`../architecture/design.md`, Principles) and becomes after it, as a rank index's already are.
 
 1. **A commit notes the place.** A write that changes an entity's text in an index adds its place to the index's
    journal, `d/fj type index`, and writes nothing else of the index: no term is read and no text is tokenized. A vector
@@ -37,22 +39,27 @@ Principles) and becomes after it, as a rank index's already are.
    calls it itself for its own places when they are many, and when the journal is full, so the journal has a bound
    and a search's work beside the index has one too. A unit of a thousand messages gains nothing from filing in term
    order, so there is no merge and no order to keep.
-3. **A term's places are held in blocks, each place with the term's count in each field.** `d/ft type index term`
-   holds how many entities hold the term and the block still open; a block that reaches about 2 KB is sealed under
-   `d/ft type index term place`, the first place in it. Adding a place rewrites one block, whatever the term holds. An
-   entry is the place's distance from the one before it and the count for each field holding the term, which is what
-   BM25F reads (`crates/elmdb/src/engine/text/search.rs`). A stemming index's words as written (`d/fw`) are held the
-   same way.
-4. **Lengths are held by place**, `d/fl type index field block`, a block of 1,024 places. Positions move into the
-   document record (`d/fd`), which a phrase's candidates read and no other match does, and `d/fp` goes.
+3. **A term's places are held in blocks, each place with the term's count in each field** (built:
+   `crates/elmdb/src/engine/text/postings.rs`). `d/ft type index term` holds them while no more than 256 entities hold
+   the term, and past that they are in blocks, `d/fb type index term start`. A block is the largest range of a power
+   of two places, starting at a multiple of its size, that holds no more than 256, so a term's keys follow from the
+   entities holding it alone: derived data is held to that by `check()`, which a block sealed as it filled, laid out
+   by the order of the writes, would not meet. Adding a place rewrites one block, whatever the term holds. An entry is
+   the place's distance from the one before it and the count for each field holding the term, which is what BM25F
+   reads. A stemming index's word as written (`d/fw`) holds how many entities hold it, which is all a read asks of it.
+4. **Lengths are held by place** (built: `text/lengths.rs`), `d/fl type index block`, each field's in a block of 512
+   places. Positions are in the document record (`d/fd`), which a phrase's candidates read and no other match does,
+   and `d/fp` is gone.
 5. **A search reads the journal first.** The places in it are taken out of every term's places and matched against
    their entities' text as it is, tokenized then, and the statistics are corrected by the same difference. The answer,
    each score included, is then the same whether or not a place has been filed, which is what the model harness holds
    a search to.
-6. **Ranking reads counts and lengths.** Scoring a match reads no key of its own. Hits are handed to the plan best
-   first, and a hit's document record, for its id and the terms and fields it matched, is read when the plan visits
-   it. The type's trashed places (`d/t`) are taken out as a set before ranking, where a plan reads each hit's entity
-   record today. A count scores nothing.
+6. **Ranking reads counts and lengths** (built: `text/search.rs`, and the `search` step in `engine/reads.rs`).
+   Scoring a match reads no key of its own. Matches are handed to the plan best first, and an entity's id is read
+   from its type's places as it is handed on, its terms and fields only for a plan that answers hits; a `limit`
+   straight after the search keeps its best matches as they are scored. The type's trashed places (`d/t`) are taken
+   out as a set before ranking, where a plan read each hit's entity record. A count straight after a search scores
+   nothing.
 7. **A tracked search reads the journal's key**, so it hears every commit that changes text in its index, as one with
    a match hears it today through the statistics' key. A commit that files changes no answer and names no tracked
    read.
@@ -83,6 +90,19 @@ of thirty terms of which fifteen are widely held (`../evidence/million-notes.md`
 
 The best ten for a term every document holds, read from the blocks and the lengths: 2.8 ms, 3 ns a match.
 
+In the engine, with what is built (`../evidence/million-notes.md`, With a term's places in blocks), a million notes:
+
+| | Before | With blocks, lengths and ranking |
+|---|---:|---:|
+| Loading the notes | 132.5 s | 56.6 s |
+| A create of thirty terms, fifteen widely held | 1.54 ms | 0.43 ms |
+| The best ten for a word every note holds | 3,630 ms, every note read | 20.6 ms, ten read |
+| Its count | 3,642 ms | 0.35 ms |
+| The best ten for a word a twelfth hold | 311 ms | 4.5 ms |
+| A misspelled word, ten found | 630 ms | 18.1 ms |
+| A rebuild | 85.3 s | 36.4 s |
+| The file of a database of the text index alone | 1,330 MB | 644 MB |
+
 ## What was weighed
 
 - *Blocks of a fixed range of places*, a roaring bitmap each (`term | seq >> 16`), as a trigram index has: they bound a
@@ -101,21 +121,31 @@ The best ten for a term every document holds, read from the blocks and the lengt
 
 Each is read from the benchmark against SQLite (`../architecture/testing.md`), at a million notes.
 
-1. **Blocks, lengths and ranking** (3, 4 and 6 above). The best ten for a word every note holds visit about ten
-   entities and take under 10 ms; a count scores nothing; the index's bytes fall by half.
+1. **Blocks, lengths and ranking** (3, 4 and 6 above), built. The best ten for a word every note holds visit about
+   ten entities and take under 10 ms; a count scores nothing; the index's bytes fall by half. Read on 2026-11-10: ten
+   entities visited, and 20.6 ms, which misses the 10 ms. That was set from the layouts' reading, a loop over
+   one term's entries at 3 ns a match; the engine's loop joins any clauses, each word's terms read beside the set of
+   matches, and costs about 20 ns a match. A count takes 0.35 ms, and the index's keys and values are 131 MB
+   where they were 336 MB.
 2. **The journal, for text and trigram indexes** (1, 2, 5 and 7). A create's commit costs at a million notes what it
    does at 50,000, and the same for a long text as for a short one; the model harness shows a search's answer the same
    before a place is filed and after.
 3. **Vectors on the journal.** Change 6's own gate.
 4. **A database for each family that only appends.** Their leaves are nine tenths full.
 
-Block-max scores, which skip a block that can't reach the best ten, wait for a reading that calls for them: a block's
-header keeps room for its greatest score.
+Block-max scores, which skip a block that can't reach the best ten, wait for a reading that calls for them. They are
+what would make a common word's search cost less than its matches; a block's greatest score would be a change to
+what a block holds, which a rebuild makes.
 
 ## Open questions
 
-- **A block's size against a page's.** The readings are on 16 KB pages. On 4 KB pages a 2 KB value is past what a page
-  holds beside another and goes to a page of its own, so the size is read on Linux before it is chosen.
+- **A block's size against a page's.** A block holds 256 entries, a kilobyte at most at two to four bytes an entry,
+  which a 4 KB page holds beside others; the readings are on 16 KB pages, and none is on 4 KB.
+- **The scoring loop.** It costs about 20 ns a match where one term's entries can be scored at 3: reading a term's
+  entries, weighing their counts and walking the set of matches are each a share of it
+  (`../evidence/million-notes.md`). A search of one word could be scored from its term's entries alone.
+- **Reading a term's places.** A term a twelfth of a million notes hold takes 1.9 ms to read into a set, 23 ns an
+  entity, which its count and every search of it pay.
 - **The journal's bound.** What a search reads beside the index is the journaled text, 55 µs a KB to tokenize, so the
   bound is on the text that waits and not on the places.
 - **`recency`** reads a field of every match (`search.rs`). It needs the field held by place as a length is, which the

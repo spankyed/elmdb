@@ -31,7 +31,8 @@ waiting on a trigger below, which add to them and reorder nothing.
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the
-format is frozen; change 6 is built with it, since a vector index's journal outliving its commit is the same design.
+format is frozen: its first step, a term's places in blocks and ranking read from them, is built. Change 6 is built
+with its journal, since a vector index's journal outliving its commit is the same design.
 
 ## Built
 
