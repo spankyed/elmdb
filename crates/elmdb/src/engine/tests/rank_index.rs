@@ -2763,3 +2763,27 @@ fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
     run_owing_child(&dir);
     heard.recv_timeout(std::time::Duration::from_secs(10)).expect("still woken");
 }
+
+#[test]
+fn a_loaded_weight_that_is_no_number_is_refused_before_the_index_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "rates", "target": "Task-1", "weight": 2.0 })])
+        .unwrap();
+    assert_within_bound(&db, "out", true);
+    // A second arc out of a node that holds one, its weight NaN: the index would have added it to that node's
+    // out-weight and filed the node under a score that is no number
+    let error = db
+        .bulk_load(&[crate::engine::maintenance::Load::Relation {
+            id: "Relation-nan".into(),
+            kind: "rates".into(),
+            source: "Task-0".into(),
+            target: "Task-2".into(),
+            info: None,
+            weight: Some(f64::NAN),
+        }])
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
+    assert_within_bound(&db, "out", true);
+}

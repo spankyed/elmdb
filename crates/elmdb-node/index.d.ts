@@ -106,7 +106,10 @@ export declare class Database {
   reset(): void
   /** What the database holds: entities per type and field, relations per kind, entries per index, its sizes */
   stats(): Stats
-  /** Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does */
+  /**
+   * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
+   * value outside the value spec is refused all the same
+   */
   bulkLoad(loads: Buffer): void
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or

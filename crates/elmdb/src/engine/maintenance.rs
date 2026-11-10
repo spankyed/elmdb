@@ -89,12 +89,30 @@ pub struct FieldStats {
     pub bytes: u64,
 }
 
+/// Refuses a loaded value outside the value spec (`VALUE_INVALID`), saying what holds it
+fn in_spec(value: &Value, holder: impl FnOnce() -> String) -> Result<()> {
+    values::check_spec(value).map_err(|e| Error::new(e.code, format!("A load of {}: {}", holder(), e.message)))
+}
+
+/// Refuses a loaded number that isn't finite (`VALUE_INVALID`), saying what holds it: the value spec holds none
+fn finite(is: bool, holder: impl FnOnce() -> String) -> Result<()> {
+    if is {
+        return Ok(());
+    }
+    Err(Error::new(ErrorCode::ValueInvalid, format!("A load of {}: it holds a number that isn't finite", holder())))
+}
+
 /// Applies loads in one unit without a write's checks: no schema, no refusals, the ids and fields as given. The derived
-/// keys an entity's and a relation's writes keep are kept
+/// keys an entity's and a relation's writes keep are kept. The value spec is no such check: every reader of the store,
+/// its keys and its indexes included, takes a stored value to be inside it, so a load that isn't is refused
+/// (`VALUE_INVALID`) and its unit keeps nothing
 pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
     for item in loads {
         match item {
             Load::Entity { id, fields, trashed } => {
+                for (name, value) in fields {
+                    in_spec(value, || format!("{id}'s {name}"))?;
+                }
                 if entities::record(t, id)?.is_none() {
                     entities::insert(t, id)?;
                 }
@@ -106,6 +124,10 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 }
             }
             Load::Relation { id, kind, source, target, info, weight } => {
+                if let Some(info) = info {
+                    in_spec(info, || format!("{id}'s info"))?;
+                }
+                finite(weight.is_none_or(f64::is_finite), || format!("{id}'s weight"))?;
                 if relations::get(t, id)?.is_some() {
                     relations::remove(t, id)?;
                 }
@@ -127,6 +149,7 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 t.put(&keys::sequence(name), &values::encode(&next.into()))?;
             }
             Load::Embedding { id, index, chunk, model, hash, vector } => {
+                finite(vector.iter().all(|f| f.is_finite()), || format!("{id}'s embedding in {index}"))?;
                 if entities::record(t, id)?.is_some() {
                     super::vector::restore(t, id, index, *chunk, model, hash, vector)?;
                 }
@@ -418,6 +441,17 @@ impl Database {
     /// need data the checks would refuse
     pub fn bulk_load(&self, loads: &[Load]) -> Result<()> {
         self.admin_load(loads)
+    }
+
+    /// `bulk_load` with the loads as msgpack bytes (`Load[]`), as the binding takes them: the whole buffer checked
+    /// against the value spec first, as a batch's is, so a value outside it is refused as such (`VALUE_INVALID`) and a
+    /// load that isn't one as `BATCH_INVALID`
+    pub fn bulk_load_bytes(&self, loads: &[u8]) -> Result<()> {
+        crate::format::value::validate(loads)
+            .map_err(|e| Error::new(e.code, format!("The loads aren't valid: {}", e.message)))?;
+        let loads: Vec<Load> = rmp_serde::from_slice(loads)
+            .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The loads don't decode: {e}")))?;
+        self.bulk_load(&loads)
     }
 }
 

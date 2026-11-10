@@ -167,6 +167,89 @@ fn an_unset_load_removes_any_field_and_keeps_derived_data_with_it() {
     assert!(db.check().unwrap().differences.is_empty());
 }
 
+#[test]
+fn a_load_holding_what_the_value_spec_doesnt_is_refused_and_none_of_it_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let entity = |value: rmpv::Value| Load::Entity {
+        id: "Task-bad".into(),
+        fields: BTreeMap::from([("a".to_owned(), value)]),
+        trashed: false,
+    };
+    let relation = |info: Option<rmpv::Value>, weight: Option<f64>| Load::Relation {
+        id: "Relation-bad".into(),
+        kind: "weighs".into(),
+        source: "Task-1".into(),
+        target: "Task-kept".into(),
+        info,
+        weight,
+    };
+    let embedding = |vector: Vec<f32>| Load::Embedding {
+        id: "Task-1".into(),
+        index: "none".into(),
+        chunk: 0,
+        model: "m".into(),
+        hash: "h".into(),
+        vector,
+    };
+    let nested = (0..300).fold(rmpv::Value::Nil, |inner, _| rmpv::Value::Array(vec![inner]));
+    let outside = vec![
+        ("a number that isn't finite", entity(rmpv::Value::F64(f64::NAN))),
+        ("an infinite number in a list", entity(rmpv::Value::Array(vec![rmpv::Value::F32(f32::INFINITY)]))),
+        ("an extension other than the timestamp", entity(rmpv::Value::Ext(5, vec![0]))),
+        ("a map key that is no string", entity(rmpv::Value::Map(vec![(1.into(), 1.into())]))),
+        ("a value nested past the limit", entity(nested)),
+        ("info holding a number that isn't finite", relation(Some(rmpv::Value::F64(f64::NAN)), None)),
+        ("a weight that is no number", relation(None, Some(f64::NAN))),
+        ("an infinite weight", relation(None, Some(f64::INFINITY))),
+        ("an infinite weight below zero", relation(None, Some(f64::NEG_INFINITY))),
+        ("a vector holding a number that isn't finite", embedding(vec![0.5, f32::NAN])),
+    ];
+    for (what, load) in outside {
+        // One unit: the load before the refused one goes with it
+        let kept = Load::Entity {
+            id: "Task-kept".into(),
+            fields: BTreeMap::from([("a".to_owned(), 1.into())]),
+            trashed: false,
+        };
+        let error = db.bulk_load(&[kept, load]).expect_err(what);
+        assert_eq!(error.code, crate::ErrorCode::ValueInvalid, "{what}: {error}");
+        assert!(row(&db, "Task-kept").is_none(), "{what}: the load before it was kept");
+    }
+    assert!(edges(&db).is_empty());
+    assert!(db.check().unwrap().is_clean());
+
+    // What the checks would refuse and the spec holds is loaded still: a weight below zero, which `check()` reports
+    db.bulk_load(&[relation(None, Some(-1.0))]).unwrap();
+    assert_eq!(edges(&db), ["Task-1|weighs|Task-kept"]);
+}
+
+#[test]
+fn loads_as_bytes_are_held_to_the_value_spec_before_they_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let bytes = |loads: serde_json::Value| rmp_serde::to_vec_named(&loads).unwrap();
+    db.bulk_load_bytes(&bytes(json!([{ "load": "entity", "id": "Task-1", "fields": { "a": 1 } }]))).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap()["a"], 1);
+
+    // A relation whose weight is NaN, as msgpack writes one: the float64 marker and a NaN's bits
+    let mut nan = rmp_serde::to_vec_named(&json!([{
+        "load": "relation", "id": "Relation-x", "kind": "weighs", "source": "Task-1", "target": "Task-1", "weight": 1.5
+    }]))
+    .unwrap();
+    let at = nan.windows(9).position(|w| w[0] == 0xcb && w[1..] == 1.5f64.to_be_bytes()).expect("the weight's bytes");
+    nan[at + 1..at + 9].copy_from_slice(&f64::NAN.to_be_bytes());
+    let error = db.bulk_load_bytes(&nan).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::ValueInvalid, "{error}");
+    assert!(error.message.starts_with("The loads aren't valid"), "{error}");
+
+    let error = db.bulk_load_bytes(&bytes(json!([{ "load": "no such load" }]))).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::BatchInvalid, "{error}");
+    assert!(error.message.starts_with("The loads don't decode"), "{error}");
+    assert!(edges(&db).is_empty());
+}
+
 /// The live entities of `types`, in the order they were made
 fn made(db: &Database, types: &[&str]) -> serde_json::Value {
     use crate::engine::plan::{ReadOp, Reads};

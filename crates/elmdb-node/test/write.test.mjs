@@ -116,6 +116,11 @@ test('admin: stats, check, a backup that opens on its own, reset, and a load the
   copy.close();
   db.bulkLoad(packr.pack([{ load: 'entity', id: 'Note-2', fields: {} }]));
   assert.match(db.check().violations[0].message, /lacks title/);
+  // A load skips the schema's rules, not the value spec: a weight that is no number is refused, and so are bytes that are no loads
+  const nan = { load: 'relation', id: 'Relation-x', kind: 'refs', source: 'Note-1', target: 'Note-2', weight: Number.NaN };
+  assert.throws(() => db.bulkLoad(packr.pack([nan])), { code: 'VALUE_INVALID' });
+  assert.throws(() => db.bulkLoad(packr.pack([{ load: 'explode' }])), { code: 'BATCH_INVALID' });
+  assert.equal(db.stats().relations.refs, undefined);
   assert.throws(() => db.purge({ type: 'Note' }), { code: 'SCHEMA_CHANGE_REFUSED' });
   db.reset();
   assert.equal(db.stats().types.Note, undefined);

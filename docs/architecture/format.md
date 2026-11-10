@@ -115,7 +115,8 @@ and a load by the build after it. That is how our databases are converted once, 
   failure removes only private staging files, leaving unrelated destination files intact and permitting retry.
   A publication-sync error reports that the complete database is visible; never delete or overwrite it blindly.
   Unix syncs affected directories; Windows requests write-through publication. A dump that fails removes its file.
-  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load.
+  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load; a value outside the
+  value spec is no such violation, and refuses the load (`VALUE_INVALID`).
   An abruptly killed process can leave an unpublished `.elmdb-load-*` directory. A retry starts new private staging
   and never adopts the partial database. Remove abandoned staging only after confirming its owner has stopped and
   coordinating exclusive destination ownership; preserve unrelated files.

@@ -424,7 +424,9 @@ unit is open.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
 - `bulkLoad(loads)`: entities, relations under their own ids, sequences, embeddings and fields taken away, applied in
   one durable unit without a write's checks (no schema, no refusals, a unique index taking duplicates), for imports, a
-  dump's load, and specs that need data the checks would refuse. The derived keys are kept as a write keeps them, and
+  dump's load, and specs that need data the checks would refuse. The value spec is no such check: a value outside it,
+  a weight or a vector's component that isn't finite among them, is refused (`VALUE_INVALID`) and the unit keeps
+  nothing, since every reader of the store takes a stored value to be inside it. The derived keys are kept as a write keeps them, and
   `check()` reports what the rules refuse.
 - `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
   one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).
