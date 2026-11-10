@@ -811,14 +811,14 @@ mod seeking {
                 f(k, v)
             })
         }
-        fn visit_from(&self, prefix: &[u8], from: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_from(prefix, from, |k, v| {
+        fn visit_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
         }
-        fn visit_back(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_back(prefix, |k, v| {
+        fn visit_back_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_back_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
