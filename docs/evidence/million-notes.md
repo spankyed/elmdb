@@ -172,3 +172,37 @@ hold, 18 MB, and the 204 MB of a key per term and entity are gone.
 the loop that joins a query's clauses around each match, a sixth reading the term's entries in place order, a sixth
 walking the set of matches, a seventh keeping the best ten, and a twentieth weighing counts. It comes to about 20 ns
 a match, 3.9 ms for the 200,000, where the layouts' reading above scored one term's entries in a loop of its own at 3.
+
+## With orders, ranges and pages read from a value index
+
+The same benchmark once an `orderBy`, a `range` and an `after` read a value index (`../architecture/engine.md`, Reads:
+plans), on `session/ordered-reads` at `e781d4d`, the same machine and day. It reads two things it didn't: the ten highest of the
+number, and a page of fifty near the end of the number's order. The machine was busy with other work: load 25.7 as it
+began and 25.5 as it ended, which the seconds below carry. SQLite's readings are its own of this run.
+
+| | Before | Now | SQLite |
+|---|---:|---:|---:|
+| The ten lowest of the indexed number | 750 ms | 0.032 ms | 0.006 ms |
+| The ten highest of it | | 0.038 ms | 0.005 ms |
+| The count of the last 500 of it | 983 ms, filtered by the caller | 0.020 ms | 0.005 ms |
+| A page of 50 near the end of creation order | 191 ms | 0.043 ms | 0.018 ms |
+| A page of 50 near the end of the number's order | | 0.063 ms | 0.032 ms |
+| Load | 56.6 s | 69.0 s | 52.5 s |
+| Bytes a note, as loaded | 1,174 | 1,174 | 151 |
+| Bytes a note, compacted | 1,186 | 1,186 | 145 |
+| A create of three terms every note holds, at a million | 0.172 ms | 0.149 ms | 0.068 ms |
+| A create of thirty terms, fifteen widely held, at a million | 0.425 ms | 0.324 ms | 0.085 ms |
+| A check | 34.3 s | 51.7 s | 2.3 s |
+| A rebuild | 36.4 s | 59.0 s | 2.1 s |
+
+What each read visited, which is the same on any run: ten entities for the ten lowest and for the ten highest, where
+the ten lowest visited 1,000,082; 500 index entries for the count, and no entity; fifty for each page, where the page
+in creation order walked to its cursor through 999,800.
+
+The seconds are the load's more than the change's. A run an hour before, at load 11.5 falling to 7.2 and on the same
+tree but for the count, which then handed on its 500 entities and took 0.437 ms, read a load of 60.2 s, a check of
+39.2 s and a rebuild of 43.8 s, with SQLite's own load at 44.1 s where it had been 32.9. A check and a rebuild read
+each entity's value once more for each index that accounts for it, which these loads are too uneven to show.
+
+The number and the status are fields every note holds, so an index's accounting for every entity of its type
+(`../architecture/schema.md`, Indexes) added no key, and the bytes are what they were.
