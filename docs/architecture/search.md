@@ -78,7 +78,9 @@ snapshot as a search when it needs to say that search is incomplete.
 
 - **Keys** (`format.md`, Keys): per type and index, a term's places (`d/ft`: the entities holding it, each with the
   term's count in each field), each entity's document — its terms, each with its positions in each field, and its
-  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key), the
+  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key: every
+  place's lengths, or a bit a place and the lengths of those holding any, whichever is fewer bytes, since a type's
+  entities may be few of the store's places), the
   index's statistics (`d/fs`: documents, each field's total length), and, in a stemming index, each word as written
   and how many entities hold it (`d/fw`). Every write that changes an indexed field refiles the entity from its stored
   document, in the same unit: a term the entity holds as often in each field as it did is left as filed. An index

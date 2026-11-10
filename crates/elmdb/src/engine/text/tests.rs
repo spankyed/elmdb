@@ -962,6 +962,35 @@ fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_a
 }
 
 #[test]
+fn an_entity_far_from_the_next_of_its_type_keeps_its_lengths_in_few_bytes_and_is_scored_by_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Places are every type's in turn: 300 entities of another type are between the two messages
+    write(&db, vec![create("Message", "Message-a", json!({ "text": "zebra crossing ahead" }))]);
+    write(&db, (0..300).map(|i| create("Plain", &format!("Plain-{i}"), json!({ "title": "t" }))).collect());
+    write(&db, vec![create("Message", "Message-b", json!({ "text": "zebra" }))]);
+    let lengths = || {
+        db.snapshot(|s| {
+            use crate::engine::unit::Read as _;
+            let blocks = s.scan(&crate::engine::keys::text_index_ranges("Message", "text")[3])?;
+            Ok(blocks.iter().map(|(_, block)| block.len()).sum::<usize>())
+        })
+        .unwrap()
+    };
+    // In one block or two, each message's two lengths with a bit a place at most: every place's would be 600 bytes
+    assert!(lengths() <= 2 * (1 + 64 + 2), "{}", lengths());
+    let exact = json!({ "fuzzy": false });
+    let expected = [("Message-b", bm25(1.0, 2.0, 2.0, 1.0, 2.0)), ("Message-a", bm25(1.0, 2.0, 2.0, 3.0, 2.0))];
+    assert_scores(scores(&db, "Message", "zebra", exact.clone()), &expected);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let before = lengths();
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(lengths(), before);
+    assert_scores(scores(&db, "Message", "zebra", exact), &expected);
+}
+
+#[test]
 fn a_limit_after_a_search_keeps_its_best_matches_and_reads_only_the_entities_it_hands_on() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
