@@ -537,3 +537,49 @@ fn a_schema_change_leaves_an_order_built_from_when_it_was_built() {
     assert!(read.complete, "the order reaches back as far as it did before the schema changed");
     assert_eq!(read.ids, ["Task-2"]);
 }
+
+/// The relation a link answered
+fn linked(db: &Database, source: &str, target: &str) -> String {
+    let op = json!({ "op": "link", "source": source, "kind": "refs", "target": target });
+    match &write(db, vec![op]).unwrap()[0] {
+        crate::OpResult::Relation { id, .. } => id.clone(),
+        other => panic!("not a relation: {other:?}"),
+    }
+}
+
+#[test]
+fn a_relation_moved_to_other_ends_moves_the_ends_it_left_and_its_change_names_them() {
+    use crate::engine::changes::Ends;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3"), task("Task-4")]).unwrap();
+    let relation = linked(&db, "Task-1", "Task-2");
+    let ends = |source: &str, target: &str| Ends { source: source.into(), target: target.into() };
+    let moved = |ops: Vec<serde_json::Value>| {
+        let cursor = db.sequence().unwrap();
+        let changes = super::write_changes(&db, ops);
+        (since(&db, &from(cursor), 100).ids, changes.relations[&relation].clone())
+    };
+
+    // Its target alone: the target it left has one edge fewer, as an unlink would leave it
+    let (ids, change) = moved(vec![json!({ "op": "updateRelation", "relation": relation, "target": "Task-3" })]);
+    assert_eq!(ids, ["Task-1", "Task-2", "Task-3"]);
+    assert_eq!((change.source.as_str(), change.target.as_str()), ("Task-1", "Task-3"));
+    assert_eq!(change.moved_from, Some(ends("Task-1", "Task-2")));
+
+    // Both ends, in two moves of one commit: the ends it had as the commit began
+    let (ids, change) = moved(vec![
+        json!({ "op": "updateRelation", "relation": relation, "source": "Task-4" }),
+        json!({ "op": "updateRelation", "relation": relation, "target": "Task-2" }),
+    ]);
+    assert_eq!(ids, ["Task-1", "Task-2", "Task-3", "Task-4"]);
+    assert_eq!((change.source.as_str(), change.target.as_str()), ("Task-4", "Task-2"));
+    assert_eq!(change.moved_from, Some(ends("Task-1", "Task-3")));
+
+    // Its info alone moves the ends it has and names no move
+    let info = json!({ "op": "updateRelation", "relation": relation, "info": { "n": 1 } });
+    let (ids, change) = moved(vec![info]);
+    assert_eq!(ids, ["Task-2", "Task-4"]);
+    assert_eq!(change.moved_from, None);
+    assert!(db.check().unwrap().is_clean());
+}

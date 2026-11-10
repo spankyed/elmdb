@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::{Cardinality, RelationDef};
 
-use super::changes::Event;
+use super::changes::{Ends, Event};
 use super::entities;
 use super::keys;
 use super::mirror::EdgeDelta;
@@ -402,6 +402,7 @@ pub fn link(
                 kind: kind.to_owned(),
                 source: source.to_owned(),
                 target: target.to_owned(),
+                moved_from: None,
             });
         }
         return Ok((relation, false));
@@ -546,11 +547,13 @@ pub fn update(
         super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
     }
     put(t, relation, &next)?;
+    let moved_from = moved.then_some(Ends { source: before.source, target: before.target });
     t.event(Event::RelationChanged {
         relation: relation.to_owned(),
         kind: next.kind,
         source: next.source,
         target: next.target,
+        moved_from,
     });
     Ok(())
 }

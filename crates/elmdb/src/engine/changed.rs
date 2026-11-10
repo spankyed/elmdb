@@ -89,11 +89,18 @@ impl Touched {
             match event {
                 Event::Created { id } | Event::Destroyed { id } => add(id, Some(event)),
                 Event::Field { id, .. } | Event::Trashed { id } | Event::Restored { id } => add(id, None),
-                Event::Linked { source, target, .. }
-                | Event::Unlinked { source, target, .. }
-                | Event::RelationChanged { source, target, .. } => {
+                Event::Linked { source, target, .. } | Event::Unlinked { source, target, .. } => {
                     add(source, None);
                     add(target, None);
+                }
+                // A relation moved changed the ends it left as an unlink would have
+                Event::RelationChanged { source, target, moved_from, .. } => {
+                    add(source, None);
+                    add(target, None);
+                    if let Some(left) = moved_from {
+                        add(&left.source, None);
+                        add(&left.target, None);
+                    }
                 }
             }
         }

@@ -90,8 +90,8 @@ carries nothing a reader depends on, so one lost costs delay, and a commit here 
 accounted for wakes its own listener as the lost wake would have.
 
 **Changed since.** Every entity keeps the sequence of the commit that last wrote it, a field, its trash state or a
-relation at either end, and for a type whose schema sets `changeOrder`, `d/h` keeps its entities in that order
-(`engine/changed.rs`). The order is built at open from the entities the type holds, and dropped when the schema stops
+relation at either end (a relation moved to other ends wrote the ends it left too), and for a type whose schema sets
+`changeOrder`, `d/h` keeps its entities in that order (`engine/changed.rs`). The order is built at open from the entities the type holds, and dropped when the schema stops
 asking. A commit to a type that keeps one costs about a fifth more (`examples/write-cost.rs`, 2026-11-06, load 6 to 9),
 so only a type something reads it from sets it; a type that keeps none pays nothing. `changed_since(types,
 from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
@@ -314,7 +314,8 @@ failure/page-reuse regressions are recorded in [remediation evidence](../evidenc
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
-fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
+fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
+had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A batch's result carries
 the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
