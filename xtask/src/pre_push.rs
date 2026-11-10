@@ -143,6 +143,14 @@ const THEN: &[Step] = &[
             "target/pre-push/read-codecs.json",
         ],
     ),
+    Step {
+        // Small enough to run in a second: that it still runs and the two engines answer alike, not a reading
+        stdout_to: Some("against-sqlite.json"),
+        ..step(
+            "against SQLite, at 2,000 notes",
+            &["node", "crates/elmdb-node/bench/against-sqlite.mjs", "--json", "--notes", "2000"],
+        )
+    },
 ];
 
 /// Linux's own: the process claim as a user with no account, home or /proc, and its fallbacks' assertions

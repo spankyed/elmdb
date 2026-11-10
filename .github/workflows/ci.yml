@@ -144,6 +144,7 @@ jobs:
           node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
           python3 -B scripts/test-read-profile.py
           python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
+          node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 > "$RUNNER_TEMP/against-sqlite.json"
       - name: preserve read measurement reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,6 +153,7 @@ jobs:
           path: |
             ${{ runner.temp }}/read-allocations.json
             ${{ runner.temp }}/read-codecs.json
+            ${{ runner.temp }}/against-sqlite.json
           if-no-files-found: error
       - name: process claim without an account, home directory or proc mount
         run: python3 scripts/check-process-claim-linux.py
