@@ -636,6 +636,33 @@ fn an_acyclic_kind_refuses_a_link_closing_a_cycle() {
 }
 
 #[test]
+fn an_acyclic_kinds_edge_moves_wherever_the_edges_beside_it_close_no_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, (1..=4).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}") })).collect())
+        .unwrap();
+    let link = |source: &str, target: &str| {
+        let op = json!({ "op": "link", "source": source, "kind": "parent_of", "target": target });
+        match &write(&db, vec![op]).unwrap()[0] {
+            OpResult::Relation { id, .. } => id.clone(),
+            other => panic!("not a relation: {other:?}"),
+        }
+    };
+    // Turned round: the edge as it was is no path from its new target back to its new source
+    let first = link("Task-1", "Task-2");
+    write(&db, vec![json!({ "op": "updateRelation", "relation": first, "source": "Task-2", "target": "Task-1" })])
+        .unwrap();
+    assert_eq!(edges(&db), ["Task-2|parent_of|Task-1"]);
+    // Through the edges beside it there is one: 2 to 1 and 1 to 3 leave an edge moved to 3 to 2 closing the round
+    link("Task-1", "Task-3");
+    let third = link("Task-3", "Task-4");
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": third, "target": "Task-2" })]);
+    assert_eq!(e.code, ErrorCode::Cycle);
+    assert_eq!(edges(&db), ["Task-1|parent_of|Task-3", "Task-2|parent_of|Task-1", "Task-3|parent_of|Task-4"]);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn a_kind_without_a_key_keeps_one_edge_per_pair_whose_info_a_link_replaces() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

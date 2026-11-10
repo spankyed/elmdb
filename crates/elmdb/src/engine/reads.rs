@@ -225,7 +225,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             for kind in kinds {
                 relations::definition(r, kind)?;
             }
-            let cycle = relations::would_cycle(r, source, target, kinds)?;
+            let cycle = relations::would_cycle(r, source, target, kinds, None)?;
             let mut w = W(out);
             w.map(2);
             w.kind("bool");
