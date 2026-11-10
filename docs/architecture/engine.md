@@ -283,7 +283,9 @@ The operations:
   (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
   moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
-  to an entity it creates later.
+  to an entity it creates later. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new
+  ends, its edge as it was counting for nothing: one turned round closes no cycle through itself. A write of several
+  fields of one unique index is held to the values it leaves, not to those the entity passes through field by field.
 - **The result** carries each operation's answer (an entity's id, code and whether it was created; a relation's id and
   whether it was linked; a label; `stale`), and the commit's change set.
 

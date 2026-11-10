@@ -22,9 +22,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         Op::Set { id, fields, touch } => {
             existing(t, id)?;
             let checked = check_fields(t, id, fields, "set")?;
-            for (name, value) in &checked {
-                entities::put_field(t, id, name, value)?;
-            }
+            entities::put_fields(t, id, &checked)?;
             if *touch && !checked.is_empty() {
                 stamp(t, id)?;
             }
@@ -421,9 +419,7 @@ fn upsert(
         ));
     }
     let checked = check_fields(t, id, fields, "upsert")?;
-    for (name, value) in &checked {
-        entities::put_field(t, id, name, value)?;
-    }
+    entities::put_fields(t, id, &checked)?;
     if !checked.is_empty() {
         stamp(t, id)?;
     }

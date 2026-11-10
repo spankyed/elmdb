@@ -461,6 +461,58 @@ fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
 }
 
 #[test]
+fn a_write_of_several_fields_of_a_unique_index_is_held_to_the_values_it_leaves() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    for name in ["shelf", "row"] {
+        fields[name] = json!({ "type": "string", "optional": true });
+    }
+    let indexes = json!({
+        "pair": { "kind": "value", "fields": ["title", "kind"], "unique": true },
+        "place": { "kind": "value", "fields": ["shelf", "row"] }
+    });
+    let db = with_schema(&dir, notes(fields, indexes)).unwrap();
+    let note = |id: &str, title: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "title": title, "kind": kind } });
+    write(
+        &db,
+        vec![note("Note-1", "b", "w"), note("Note-2", "b", "x"), note("Note-3", "b", "y"), note("Note-4", "c", "y")],
+    )
+    .unwrap();
+    let pair = |id: &str| {
+        let held = row(&db, id).unwrap();
+        (held["title"].as_str().unwrap().to_owned(), held["kind"].as_str().unwrap().to_owned())
+    };
+    let set = |id: &str, title: &str, kind: &str| json!({ "op": "set", "id": id, "fields": { "title": title, "kind": kind } });
+
+    // A write's fields are written in name order. By way of (b, x), which Note-2 holds, once its `kind` is written and
+    // its `title` not yet, to (c, x), which no row does
+    write(&db, vec![set("Note-1", "c", "x")]).unwrap();
+    assert_eq!(pair("Note-1"), ("c".to_owned(), "x".to_owned()));
+    // An upsert of a row that is there writes the same way: by way of Note-4's (c, y) to (d, y)
+    let upsert = json!({ "op": "upsert", "type": "Note", "id": "Note-1", "fields": { "title": "d", "kind": "y" } });
+    write(&db, vec![upsert]).unwrap();
+    assert_eq!(pair("Note-1"), ("d".to_owned(), "y".to_owned()));
+    // Where it ends on values another row holds it is refused, having met none on the way
+    let taken = write(&db, vec![set("Note-1", "b", "x")]).unwrap_err();
+    assert_eq!(taken.code, ErrorCode::Unique, "{taken}");
+    assert!(taken.message.contains("Note-2"), "{taken}");
+    assert_eq!(pair("Note-1"), ("d".to_owned(), "y".to_owned()));
+    // The values it holds already are no other row's
+    write(&db, vec![set("Note-1", "d", "y")]).unwrap();
+    // An index that isn't unique takes the values another row holds, written together as written apart
+    let placed = |id: &str| json!({ "op": "set", "id": id, "fields": { "shelf": "s", "row": "r" } });
+    write(&db, vec![placed("Note-1"), placed("Note-2")]).unwrap();
+
+    // In a unit that goes on after a refusal, the next write is held to the index as every write is
+    let mut unit = db.begin().unwrap();
+    assert_eq!(unit.write(&super::batch(vec![set("Note-1", "b", "x")])).unwrap_err().code, ErrorCode::Unique);
+    let one_field = json!({ "op": "set", "id": "Note-1", "fields": { "title": "b" } });
+    assert_eq!(unit.write(&super::batch(vec![one_field])).unwrap_err().code, ErrorCode::Unique, "(b, y) is Note-3's");
+    unit.abort();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rename_type_rewrites_ids_their_relations_and_the_refs_naming_them() {
     let dir = tempfile::tempdir().unwrap();
     let mut schema = notes(base_fields(), json!({}));

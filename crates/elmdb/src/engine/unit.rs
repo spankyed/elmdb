@@ -36,6 +36,10 @@ struct Level {
 pub struct UnitState {
     /// Whether the unit loads data unchecked (`bulkLoad`, a dump's load): a unique index then takes what it is given
     pub unchecked: bool,
+    /// The unique indexes one write of several of their fields is part way through (`entities::put_fields`): each is
+    /// checked once the last of the fields is written, against the values the write leaves, not at each field against
+    /// values the entity only passes through
+    pub(super) unique_deferred: Vec<String>,
     levels: Vec<Level>,
     pub(super) checks: Vec<Check>,
     pub(super) events: Vec<Event>,
