@@ -580,6 +580,43 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     let undeclared = plan("live", json!([{ "step": "withRole", "role": "nobody" }, order("k", false), limit(1)]));
     assert_eq!(read(&db, json!({ "read": "query", "plan": undeclared })).unwrap_err().code, ErrorCode::UnknownRole);
 
+    // A page of a walked order begins past its cursor, sought in the order's index: three are read for three, where
+    // sorting reads the five hundred open
+    let page = |filters: Vec<Json>, descending: bool, cursor: usize, take: usize| {
+        same(&db, "live", K, |field| {
+            let mut steps = filters.clone();
+            steps.extend([order(field, descending), after(&id(cursor)), limit(take)]);
+            json!(steps)
+        })
+    };
+    let open = is("status", json!("open"));
+    assert_eq!(page(vec![open.clone()], true, 597, 3), (vec![id(596), id(595), id(594)], 3));
+    assert_eq!(page(vec![open.clone()], false, 300, 2), (vec![id(301), id(302)], 2));
+    assert_eq!(page(vec![open.clone()], false, 598, 5), (vec![id(599)], 1));
+    // A cursor the filters don't keep, or that is no task, has no page, and nothing is read for it
+    assert_eq!(page(vec![open.clone()], false, 50, 2), (vec![], 0));
+    assert_eq!(page(vec![open.clone()], false, 999, 2), (vec![], 0));
+    // The walk is given up as a first page's is: none with this owner is below its cursor, which the hundred and
+    // twenty-eight read before asking don't show, and its hundred and forty-seven are then sorted
+    assert_eq!(page(vec![is("owner", json!(9))], true, 450, 2), (vec![], 128 + 147));
+    assert_eq!(page(vec![is("owner", json!(9))], false, 450, 2), (vec![id(451), id(452)], 2));
+    // And it isn't tried for filters that read few, nor without a limit straight after the cursor
+    assert_eq!(page(vec![is("owner", json!(7))], false, 597, 2), (vec![id(598), id(599)], 3));
+    let unlimited = same(&db, "live", K, |field| json!([open, order(field, true), after(&id(102))]));
+    assert_eq!(unlimited, (vec![id(101), id(100)], 500));
+    // The order's stage and its cursor's kept what the limit read for them
+    let steps = json!([open, order("k", true), after(&id(597)), limit(3)]);
+    let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", steps) })).unwrap();
+    let stage = |at: usize, key: &str| explained["stages"][at][key].clone();
+    assert_eq!(
+        [stage(2, "stage"), stage(2, "index"), stage(2, "wants")],
+        [json!("orderBy"), json!("byK"), json!("status, k")]
+    );
+    assert_eq!(
+        [stage(2, "visited"), stage(2, "kept"), stage(3, "kept"), stage(4, "kept")],
+        [json!(3), json!(3), json!(3), json!(3)]
+    );
+
     // A role's holders are read from its index and sorted, however many: the order isn't walked for them
     let stars = (0..200).map(|at| json!({ "op": "grant", "id": id(at), "role": "star" }));
     write(&db, stars.collect());

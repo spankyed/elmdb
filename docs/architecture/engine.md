@@ -247,7 +247,10 @@ an answer:
   is tried when reading the filters would read 128 entities or more, the entries of the index they are read from or
   the type's entities with none, and given up once the walk has read half as many as that reading would, which it
   asks at 128 entities and each time it has read twice as many. The two together cost a small multiple of the cheaper
-  (`docs/evidence/million-notes.md`, A filter before an order).
+  (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
+  the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
+  between the cursor and the page's last, and one given up is sorted whole. Only an index on both reads a page at
+  the cost of what it holds.
 - **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it

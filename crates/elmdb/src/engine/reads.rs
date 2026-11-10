@@ -1034,7 +1034,9 @@ impl<R: Read> Query<'_, R> {
                     let begin = match cursor {
                         Some(cursor) => {
                             self.sought.set(Some(upto));
-                            let Some(begin) = self.past_cursor(upto, &ordered, name, cursor)? else { return Ok(true) };
+                            let Some(begin) = self.past_cursor(before, &ordered, name, cursor)? else {
+                                return Ok(true);
+                            };
                             begin
                         }
                         None => Begin::First,
@@ -1098,33 +1100,44 @@ impl<R: Read> Query<'_, R> {
                     }
                     return each(first, visit);
                 }
-                // mutant-skip: replace > with < in Query<'_, R>::stage
-                // orderBy then limit through first_ordered, or the full sort and the first n: the same ids in the same
-                // order, and EXPLAIN's counts the same, the limit stopping the walk; first_ordered's cut and bound are
-                // its cost
-                if before > 0
-                    // mutant-skip: replace - with / in Query<'_, R>::stage (as above)
-                    && let Step::OrderBy { field: name, descending } = &self.plan.steps[before - 1]
-                    // An order read from an index comes in it, and the walk below stops it at what this takes
-                    && self.ordered(before - 1, name)?.is_none()
+                // The order this takes the first of, straight before it or before its page's cursor, with how many
+                // steps the order is of
+                let ordering = match &self.plan.steps[..before] {
+                    [under @ .., Step::OrderBy { field, descending }] => Some((under.len(), field, *descending, None)),
+                    [under @ .., Step::OrderBy { field, descending }, Step::After { id }] => {
+                        Some((under.len(), field, *descending, Some(id.as_str())))
+                    }
+                    _ => None,
+                };
+                // An order read from an index comes in it, and the walk below stops it at what this takes. Any other
+                // is walked while that is the cheaper way, or sorted with only what this takes held; a page of a
+                // sorted order is sorted whole, by the order's own stage
+                if let Some((under, name, descending, cursor)) = ordering
+                    && self.ordered(under, name)?.is_none()
                 {
-                    self.note_wanted(before, before - 1, name)?;
+                    let order = under + 1;
+                    self.note_wanted(order, under, name)?;
                     let walked = {
                         // What the walk reads is the order's stage's, as what the sort pulls is
-                        let _order = self.stages.map(|stages| stages.enter(before));
-                        self.walked_first(before - 1, name, *descending, take as usize)?
+                        let _order = self.stages.map(|stages| stages.enter(order));
+                        self.walked_first(under, name, descending, take as usize, cursor)?
                     };
-                    let first = match walked {
-                        Some(first) => first,
-                        None => self.first_ordered(before - 1, name, *descending, take as usize)?,
+                    let first = match (walked, cursor) {
+                        (Some(first), _) => Some(first),
+                        (None, None) => Some(self.first_ordered(under, name, descending, take as usize)?),
+                        (None, Some(_)) => None,
                     };
-                    // The `orderBy` stage, which this read for it, kept what it hands on
-                    if let Some(stages) = self.stages {
-                        for _ in &first {
-                            stages.kept(before);
+                    if let Some(first) = first {
+                        // The stages this read for, the order's and its cursor's, kept what they hand on
+                        if let Some(stages) = self.stages {
+                            for stage in order..=before {
+                                for _ in &first {
+                                    stages.kept(stage);
+                                }
+                            }
                         }
+                        return each(first, visit);
                     }
-                    return each(first, visit);
                 }
                 // A search straight before keeps no more of its matches than this takes
                 if matches!(self.plan.steps[..before].last(), Some(Step::Search { .. })) {
@@ -1819,15 +1832,15 @@ impl<R: Read> Query<'_, R> {
         Ok(Some(Ordered { entity_type, index, leading, from, to, without: limits.is_none() }))
     }
 
-    /// Where an ordered read begins for a page after `cursor`, the read being stage `upto`'s: past the cursor's entry,
-    /// or past its place among the entities without a value. None when the cursor isn't in the set, whose page then
-    /// holds nothing: another type's entity, one the scope doesn't reach, or one the steps the order is read under
-    /// don't keep
-    fn past_cursor(&self, upto: usize, ordered: &Ordered<'_>, name: &str, cursor: &str) -> Result<Option<Begin>> {
+    /// Where an ordered read begins for a page after `cursor`, the order being of the set the first `under` steps
+    /// keep: past the cursor's entry, or past its place among the entities without a value. None when the cursor
+    /// isn't in the set, whose page then holds nothing: another type's entity, one the scope doesn't reach, or one
+    /// those steps don't keep
+    fn past_cursor(&self, under: usize, ordered: &Ordered<'_>, name: &str, cursor: &str) -> Result<Option<Begin>> {
         let Some((_, seq)) = self.cursor_among(std::slice::from_ref(ordered.entity_type), cursor)? else {
             return Ok(None);
         };
-        if !self.passes(upto - 1, cursor)? {
+        if !self.passes(under, cursor)? {
             return Ok(None);
         }
         let value = get_value(self.r, cursor, name)?.filter(|value| !value.is_nil());
@@ -2057,16 +2070,28 @@ impl<R: Read> Query<'_, R> {
     /// isn't tried or is given up, and the set is sorted. It is tried when the steps are filters a type start begins
     /// with, which keep the same set whichever side of the order they stand (all of those but `withRole`, whose
     /// holders its index reads), an index reads the type in `name`'s order, and reading the filters reads
-    /// `WALK_BEFORE_ASKING` entities or more. It is given up once
-    /// reading the filters would cost less than the walk has: asked each time the walk has read twice what it had,
-    /// from `WALK_BEFORE_ASKING` on, it stops when the filters would read fewer than `WALK_FOR_EACH_READ` times
-    /// that. So the two together cost a small multiple of the cheaper, whatever the entities hold
-    fn walked_first(&self, upto: usize, name: &str, descending: bool, take: usize) -> Result<Option<Vec<String>>> {
+    /// `WALK_BEFORE_ASKING` entities or more. It is given up once reading the
+    /// filters would cost less than the walk has: asked each time the walk has read twice what it had, from
+    /// `WALK_BEFORE_ASKING` on, it stops when the filters would read fewer than `WALK_FOR_EACH_READ` times that. So
+    /// the two together cost a small multiple of the cheaper, whatever the entities hold. A page's walk begins past
+    /// its `cursor`, sought in the order's index, and holds nothing when the filters don't keep the cursor
+    fn walked_first(
+        &self,
+        upto: usize,
+        name: &str,
+        descending: bool,
+        take: usize,
+        cursor: Option<&str>,
+    ) -> Result<Option<Vec<String>>> {
         let filters = &self.plan.steps[..upto];
         let swaps = |step: &Step| {
             matches!(
                 step,
-                Step::OfType { .. } | Step::Within { .. } | Step::Where { .. } | Step::Has { .. } | Step::Lacks { .. }
+                Step::OfType { .. }
+                    | Step::Within { .. }
+                    | Step::Where { .. }
+                    | Step::Has { .. }
+                    | Step::Lacks { .. }
             )
         };
         if filters.is_empty() || !filters.iter().all(swaps) {
@@ -2077,11 +2102,18 @@ impl<R: Read> Query<'_, R> {
         if self.filters_read_fewer(entity_type, WALK_BEFORE_ASKING)? {
             return Ok(None);
         }
+        let begin = match cursor {
+            Some(cursor) => match self.past_cursor(upto, &ordered, name, cursor)? {
+                Some(begin) => begin,
+                None => return Ok(Some(Vec::new())),
+            },
+            None => Begin::First,
+        };
         let mut found = Vec::new();
         let mut read = 0u64;
         let mut ask_at = WALK_BEFORE_ASKING;
         let mut given_up = false;
-        self.in_order(&ordered, descending, Begin::First, &mut |id| {
+        self.in_order(&ordered, descending, begin, &mut |id| {
             read += 1;
             if read == ask_at {
                 if self.filters_read_fewer(entity_type, read * WALK_FOR_EACH_READ)? {
@@ -2101,12 +2133,13 @@ impl<R: Read> Query<'_, R> {
     /// Whether reading a type start's leading filters reads fewer than `than` entities from the store: the entries of
     /// the index they are read from (`driver`), counted no further than that, or with none, the type's entities
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
-        let entries = match self.driver().map(|at| &self.plan.steps[at]) {
-            Some(Step::Where { field, value }) => indexable(field, value)
-                .zip(index_on(self.r, entity_type, field))
-                .map(|(part, index)| keys::index_range(entity_type, &index, &[part])),
+        let read_from = match self.driver().map(|at| &self.plan.steps[at]) {
+            Some(Step::Where { field, value }) => indexable(field, value).map(|part| (field.as_str(), part)),
             _ => None,
         };
+        let entries = read_from.and_then(|(name, part)| {
+            index_on(self.r, entity_type, name).map(|index| keys::index_range(entity_type, &index, &[part]))
+        });
         let Some(entries) = entries else { return Ok(entities::count(self.r, entity_type)? < than) };
         let mut left = than;
         self.r.visit(&entries, |_, _| {
