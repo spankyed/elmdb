@@ -12,6 +12,7 @@ mod graph;
 mod lifecycle;
 mod maintenance;
 mod model;
+mod ordered;
 mod plans;
 mod rank_bound;
 mod rank_index;

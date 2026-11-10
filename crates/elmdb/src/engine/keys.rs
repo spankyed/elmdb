@@ -123,6 +123,40 @@ pub fn index_range(entity_type: &str, index: &str, parts: &[crate::format::key::
     })
 }
 
+/// The least key above every entry of an index under these leading parts
+pub fn index_past(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
+    let mut key = index_range(entity_type, index, parts);
+    key.push(crate::format::key::TAG_HIGH);
+    key
+}
+
+/// The least key an entry of an index for a string can have, which is above its every entry for null, a boolean or a
+/// number
+pub fn index_strings(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::Index, |w| {
+        w.string(entity_type).string(index).string_prefix("");
+    })
+}
+
+/// The entities of a type that a value index on one field files no one value of, in place order: those without a
+/// value (`Prefix::IndexWithout`), or those whose value it doesn't order (`Prefix::IndexUnordered`). An entity's key is
+/// this and its place (`place_under`)
+pub fn index_others(prefix: Prefix, entity_type: &str, index: &str) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// The ranges a value index's keys are in: its entries, the entities without a value and those whose value it doesn't
+/// order; that it is built is the one key `index_built` builds
+pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
+    [
+        index_range(entity_type, index, &[]),
+        index_others(Prefix::IndexWithout, entity_type, index),
+        index_others(Prefix::IndexUnordered, entity_type, index),
+    ]
+}
+
 /// That an index of a type is built
 pub fn index_built(entity_type: &str, index: &str) -> Vec<u8> {
     with(Prefix::IndexBuilt, |w| {

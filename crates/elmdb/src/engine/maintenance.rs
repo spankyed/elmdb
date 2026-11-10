@@ -113,11 +113,17 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 for (name, value) in fields {
                     in_spec(value, || format!("{id}'s {name}"))?;
                 }
-                if entities::record(t, id)?.is_none() {
-                    entities::insert(t, id)?;
-                }
+                let made = match entities::record(t, id)? {
+                    Some(_) => None,
+                    None => Some(entities::insert(t, id)?),
+                };
                 for (name, value) in fields {
                     entities::put_field(t, id, name, value)?;
+                }
+                if let Some(made) = made {
+                    entities::file_without(t, id, made.seq, |name| {
+                        fields.get(name).is_some_and(|value| !value.is_nil())
+                    })?;
                 }
                 if *trashed && entities::get(t, id, entities::field::TRASHED_AT)?.is_none() {
                     entities::put_field(t, id, entities::field::TRASHED_AT, &Value::from(0))?;

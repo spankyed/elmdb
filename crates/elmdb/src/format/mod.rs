@@ -53,6 +53,12 @@ pub enum Prefix {
     Index,
     /// `d/xb type index` → that a value index is built
     IndexBuilt,
+    /// `d/xw type index seq` → an entity of the type without a value in the field of a value index on one field: the
+    /// field is missing, or null
+    IndexWithout,
+    /// `d/xu type index seq` → an entity of the type whose value a value index on one field holds no one place for: a
+    /// list, or a value the index can't file
+    IndexUnordered,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
@@ -107,7 +113,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 36] = [
+    pub const ALL: [Prefix; 38] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -120,6 +126,8 @@ impl Prefix {
         Prefix::FieldName,
         Prefix::Index,
         Prefix::IndexBuilt,
+        Prefix::IndexWithout,
+        Prefix::IndexUnordered,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
@@ -161,6 +169,8 @@ impl Prefix {
             Prefix::FieldName => "d/f",
             Prefix::Index => "d/x",
             Prefix::IndexBuilt => "d/xb",
+            Prefix::IndexWithout => "d/xw",
+            Prefix::IndexUnordered => "d/xu",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",
