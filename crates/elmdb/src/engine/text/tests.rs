@@ -937,6 +937,13 @@ fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_a
     assert_eq!(kept.len(), 399);
     let ids_kept: Vec<String> = kept.iter().map(|i| id(*i)).collect();
     assert_eq!(holding("common"), ids_kept);
+    // More matches than the trash is asked for one by one: it is read whole, and what it holds is left out
+    let trashed = [id(kept[5]), id(kept[300])];
+    write(&db, trashed.iter().map(|id| json!({ "op": "trash", "id": id })).collect());
+    let live: Vec<String> = ids_kept.iter().filter(|held| !trashed.contains(held)).cloned().collect();
+    assert_eq!(holding("common"), live);
+    write(&db, trashed.iter().map(|id| json!({ "op": "restore", "id": id })).collect());
+    assert_eq!(holding("common"), ids_kept);
     // A rebuild of the index, and of everything, derives the keys the writes left
     db.rebuild(Some(("Message", "text"))).unwrap();
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
@@ -952,6 +959,35 @@ fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_a
     assert_eq!(keys_under(&db, Prefix::TextBlock), 0);
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
     assert_eq!(holding("common"), ids_kept[199..]);
+}
+
+#[test]
+fn an_entity_far_from_the_next_of_its_type_keeps_its_lengths_in_few_bytes_and_is_scored_by_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Places are every type's in turn: 300 entities of another type are between the two messages
+    write(&db, vec![create("Message", "Message-a", json!({ "text": "zebra crossing ahead" }))]);
+    write(&db, (0..300).map(|i| create("Plain", &format!("Plain-{i}"), json!({ "title": "t" }))).collect());
+    write(&db, vec![create("Message", "Message-b", json!({ "text": "zebra" }))]);
+    let lengths = || {
+        db.snapshot(|s| {
+            use crate::engine::unit::Read as _;
+            let blocks = s.scan(&crate::engine::keys::text_index_ranges("Message", "text")[3])?;
+            Ok(blocks.iter().map(|(_, block)| block.len()).sum::<usize>())
+        })
+        .unwrap()
+    };
+    // In one block or two, each message's two lengths with a bit a place at most: every place's would be 600 bytes
+    assert!(lengths() <= 2 * (1 + 64 + 2), "{}", lengths());
+    let exact = json!({ "fuzzy": false });
+    let expected = [("Message-b", bm25(1.0, 2.0, 2.0, 1.0, 2.0)), ("Message-a", bm25(1.0, 2.0, 2.0, 3.0, 2.0))];
+    assert_scores(scores(&db, "Message", "zebra", exact.clone()), &expected);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let before = lengths();
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(lengths(), before);
+    assert_scores(scores(&db, "Message", "zebra", exact), &expected);
 }
 
 #[test]
@@ -1032,6 +1068,11 @@ fn hits_after_a_limit_are_the_best_matches_with_their_scores_and_no_others() {
     assert!(all[0].1 > all[1].1 && all[1].1 > all[2].1, "{all:?}");
     assert_eq!(all[0].2, json!(["database", "lmdb"]));
     assert_eq!(hits(json!([either, { "step": "limit", "n": 2 }])), all[..2]);
+    // A hit is of an entity the search handed on: a match the limit left out, reached again by a step after it, is
+    // answered as an entity the search never scored
+    write(&db, vec![json!({ "op": "link", "source": "Message-1", "kind": "in", "target": "Message-3" })]);
+    let reached = hits(json!([either, { "step": "limit", "n": 1 }, { "step": "out", "kinds": ["in"] }]));
+    assert_eq!(reached, [("Message-3".to_owned(), 0.0, json!([]))]);
 }
 
 #[test]

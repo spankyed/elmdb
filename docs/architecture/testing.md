@@ -460,14 +460,19 @@ number, the ten lowest of the half of the notes a status keeps, the count of the
 the number's order; a check, a rebuild and a compaction. For elmdb it also reads how many entities each of those
 plans visited (`visits`, `explain`), which is a count and so the same on any machine.
 
-The two engines answer every read alike before one is timed, or the run fails. A Node whose SQLite is built
-without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`. The databases are made under
-`--dir`, the system's temporary directory unless given, and removed; a million notes need about 4 GB there.
+Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
+best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking
+orders alike; the other searches' matches tie, and are compared as counts. Those ten notes' numbers are past every
+other note's, so they are the ten highest, and the last 500 are counted below them. A Node whose SQLite is built
+without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`; `--require-text` fails the run
+there instead. The databases are made under `--dir`, the system's temporary directory unless given, and removed; a
+million notes need about 4 GB there.
 
 Without `--json` it prints a reading a line as `name=value`, which `cargo xtask compare` reads. The times are readings
 of one machine under its load, which the report records before and after: compare two reports from one host, and take
 a reading for a release on a quiet one. CI and `cargo xtask pre-push` run it at 2,000 notes, which shows that it runs
-and that the engines agree, and is no reading. The readings: `../evidence/million-notes.md`.
+and that the engines agree, and is no reading; CI's Node 24 job runs it with `--require-text`, since its Node 23
+job compares no search. The readings: `../evidence/million-notes.md`.
 
 ## Read allocation and codec reports
 

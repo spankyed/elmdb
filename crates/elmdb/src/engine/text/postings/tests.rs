@@ -393,6 +393,20 @@ fn places_that_dont_read_are_refused_as_corrupt() {
     let filed = raw(&IN_BLOCKS, None);
     let one = counts(&[(0, vec![0])], 1);
     assert_eq!(filed.write(false, |t| put(t, &filed.term(), 3, &one)).unwrap_err().code, ErrorCode::Corrupted);
+    // A write that meets a place twice in the term's own key lays out nothing from it
+    let filed = raw(&[3, 5, 1, 0, 1, 0, 1], None);
+    assert_eq!(filed.write(false, |t| put(t, &filed.term(), 7, &one)).unwrap_err().code, ErrorCode::Corrupted);
+    assert_eq!(filed.write(false, |t| remove(t, &filed.term(), 5)).unwrap_err().code, ErrorCode::Corrupted);
+    // A block that starts at no multiple of its range's size, and one whose every place is more than a part holds
+    assert_eq!(reading(&raw(&IN_BLOCKS, Some((3, &[1, 1, 0, 1])))), ErrorCode::Corrupted);
+    let filed = raw(&IN_BLOCKS, Some((2, &[1, 1, 0, 1])));
+    assert!(filed.snapshot(|r| read(r, &filed.term())).is_ok(), "the same block at a multiple of its size");
+    assert_eq!(reading(&raw(&IN_BLOCKS, Some((0, &[33, 0x80, 0x80, 0x80, 0x80, 0x20])))), ErrorCode::Corrupted);
+    // Counts that add up to more than a u64 holds
+    let most = [3, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1];
+    let filed = raw(&IN_BLOCKS, Some((0, &most)));
+    filed.write(false, |t| t.put(&filed.term().block(8), &most)).unwrap();
+    assert_eq!(filed.snapshot(|r| held(r, &filed.term(), &IN_BLOCKS)).unwrap_err().code, ErrorCode::Corrupted);
     // A block whose range is no power of two a place can be in
     let filed = raw(&IN_BLOCKS, Some((0, &[70, 1, 0, 1])));
     assert_eq!(filed.write(false, |t| remove(t, &filed.term(), 0)).unwrap_err().code, ErrorCode::Corrupted);
