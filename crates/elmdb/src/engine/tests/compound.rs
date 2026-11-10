@@ -563,6 +563,8 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     let ordering = |steps: Json| {
         let answer = read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", steps) })).unwrap();
         let stages = answer["stages"].as_array().unwrap();
+        // Each stage is whole: one that says it holds fewer keys than it writes leaves its last outside it
+        assert!(stages.iter().all(|stage| stage["kept"].is_number() && stage["ms"].is_number()), "{answer}");
         let stage = stages.iter().find(|stage| stage["stage"] == "orderBy").unwrap();
         (stage["index"].clone(), stage["wants"].clone(), stage["visited"].clone())
     };

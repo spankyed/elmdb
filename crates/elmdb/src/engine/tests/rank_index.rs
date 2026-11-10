@@ -141,6 +141,9 @@ fn ranked_reads_the_top_alone_and_refuses_what_it_cannot_answer() {
     assert_eq!(explained["visited"], json!(3), "read three of the index's keys and nothing else: {explained}");
     assert_eq!(explained["stages"][1]["index"], json!("taskRank"));
     assert!(explained["stages"][1]["error"].as_f64().unwrap() <= 1e-9);
+    // Each stage is whole: one that says it holds fewer keys than it writes leaves its last outside it
+    let stages = explained["stages"].as_array().unwrap();
+    assert!(stages.iter().all(|stage| stage["kept"].is_number() && stage["ms"].is_number()), "{explained}");
     // Ranked over a set the index doesn't hold entirely: a type it doesn't cover is refused
     let refused = read(
         &db,
@@ -222,6 +225,8 @@ fn an_index_not_built_yet_answers_as_it_will_once_built_and_says_so() {
     assert_eq!(stage["index"], "taskRank");
     assert_eq!(stage["building"], true);
     assert!(stage["error"].as_f64().unwrap() >= tolerance);
+    // And whole, with the keys every stage ends with
+    assert!(stage["kept"].is_number() && stage["ms"].is_number(), "{stage}");
 
     // A read that asked not to compute them is refused, and one whose index is built is answered regardless
     let refusing = |steps: Json| plan(steps, json!({ "answer": "ids" }));
