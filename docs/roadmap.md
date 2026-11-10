@@ -29,6 +29,10 @@ waiting on a trigger below, which add to them and reorder nothing.
 | 0.5, a known envelope | 6, 10 | readings at a million notes are published, each with its target |
 | 1.0 | | two releases break neither the format nor the protocol, and an upgrade from 0.3 is tested |
 
+Of milestone 0.2, compound indexes are read for an order or a range under equalities, and with none the order is
+walked while that is cheaper than sorting the filter's matches (`evidence/million-notes.md`, A filter before an
+order); an equality on every field of one, the smaller filter first, and least, greatest and sum are open.
+
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the
 format is frozen: its first step, a term's places in blocks and ranking read from them, is built. Change 6 is built
