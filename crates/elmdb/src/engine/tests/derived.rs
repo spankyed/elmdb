@@ -407,6 +407,60 @@ fn rename_field_and_rename_relation_move_data_to_a_declared_name() {
 }
 
 #[test]
+fn purge_and_rename_field_refuse_the_engine_s_own_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+            json!({ "op": "trash", "id": "Task-2" }),
+            json!({ "op": "grant", "id": "Task-1", "role": "r1" }),
+        ],
+    )
+    .unwrap();
+    let before = (row(&db, "Task-1").unwrap(), row(&db, "Task-2").unwrap());
+    // None is a field the schema declares, so each passed for what a removed declaration left: purging `trashedAt`
+    // restored every row, and renaming `shortCode` took every code
+    for name in ["id", "entityType", "shortCode", "createdAt", "updatedAt", "trashedAt", "role"] {
+        let purge = db.purge(&Purge::Field { entity_type: "Task".into(), field: name.into() }).unwrap_err();
+        assert_eq!(purge.code, ErrorCode::ReservedField, "purge {name}: {purge}");
+        let from = db.rename_field("Task", name, "title").unwrap_err();
+        assert_eq!(from.code, ErrorCode::ReservedField, "rename {name}: {from}");
+        let to = db.rename_field("Task", "title", name).unwrap_err();
+        assert_eq!(to.code, ErrorCode::ReservedField, "rename to {name}: {to}");
+    }
+    assert_eq!((row(&db, "Task-1").unwrap(), row(&db, "Task-2").unwrap()), before);
+    let stats = db.stats().unwrap();
+    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 1), "the trash is as it was");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["heading"] = json!({ "type": "string", "optional": true });
+    let db = with_schema(&dir, notes(fields, json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "only a title" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t", "heading": "h" } }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_field("Note", "title", "heading").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+    assert!(error.message.contains("Note-2"), "{error}");
+    let one = row(&db, "Note-1").unwrap();
+    assert_eq!((one["title"].clone(), one.get("heading")), (json!("only a title"), None), "none of it was moved");
+    let two = row(&db, "Note-2").unwrap();
+    assert_eq!((two["title"].clone(), two["heading"].clone()), (json!("t"), json!("h")));
+}
+
+#[test]
 fn rename_type_rewrites_ids_their_relations_and_the_refs_naming_them() {
     let dir = tempfile::tempdir().unwrap();
     let mut schema = notes(base_fields(), json!({}));

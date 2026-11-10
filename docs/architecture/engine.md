@@ -427,8 +427,11 @@ unit is open.
   visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
   a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
-  relations, a role. It refuses a name the schema still declares.
+  relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
+  (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
+  `renameField` refuses the engine's own fields (`RESERVED_FIELD`), and refuses, with nothing moved, while an entity
+  holds a value under both names (`SCHEMA_CHANGE_REFUSED`): the move would replace the one the new name holds.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
 - `bulkLoad(loads)`: entities, relations under their own ids, sequences, embeddings and fields taken away, applied in
   one durable unit without a write's checks (no schema, no refusals, a unique index taking duplicates), for imports, a
