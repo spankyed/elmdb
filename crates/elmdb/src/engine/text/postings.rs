@@ -29,7 +29,7 @@ use super::super::unit::{Read, Txn};
 pub const BLOCK_PLACES: usize = 256;
 
 fn corrupt() -> Error {
-    Error::new(ErrorCode::Corrupted, "A text index's places don't read")
+    Error::new(ErrorCode::Corrupted, "A text index's places don't read: rebuild() derives them again")
 }
 
 fn put_varint(out: &mut Vec<u8>, n: u64) {
@@ -128,11 +128,22 @@ pub fn weighted(counts: &[u8], weights: &[f64]) -> Result<f64> {
 /// An entry as a block is read: its place, and its counts as stored
 type Entry<'a> = (u64, &'a [u8]);
 
-/// Each entry `bytes` holds as it reads, the first's place counted from `start`. An entry is a byte at least, so
-/// there are no more of them than bytes, and the reading ends there whatever the bytes hold
+/// Each entry `bytes` holds as it reads, the first's place counted from `start`, and each after it at a later place
+/// than the one before, which is what every reader and every layout of them takes them to be. An entry is a byte at
+/// least, so there are no more of them than bytes, and the reading ends there whatever the bytes hold
 fn each_entry(bytes: &[u8], start: u64, fields: usize) -> impl Iterator<Item = Result<Entry<'_>>> {
     let mut entries = Entries { place: start, rest: bytes, fields };
-    (0..bytes.len()).map_while(move |_| (!entries.rest.is_empty()).then(|| entries.read()))
+    let mut last = None;
+    (0..bytes.len()).map_while(move |_| {
+        (!entries.rest.is_empty()).then(|| {
+            let entry = entries.read()?;
+            if last.is_some_and(|last| entry.0 <= last) {
+                return Err(corrupt());
+            }
+            last = Some(entry.0);
+            Ok(entry)
+        })
+    })
 }
 
 /// The entries `bytes` holds, the first's place counted from `start`
@@ -465,12 +476,15 @@ pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
     if count > 0 {
         return Ok(count);
     }
-    let mut total = 0;
+    let mut total = 0u64;
     let mut failed = None;
     r.visit(&term.blocks, |_, block| {
         let mut rest = block.get(1..).unwrap_or_default();
         match varint(&mut rest) {
-            Ok(count) => total += count,
+            Ok(count) => match total.checked_add(count) {
+                Some(sum) => total = sum,
+                None => failed = Some(corrupt()),
+            },
             Err(error) => failed = Some(error),
         }
         failed.is_none()
@@ -513,8 +527,10 @@ pub fn read_stored(r: &impl Read, term: &Term, stored: &[u8]) -> Result<Postings
             let level = u32::from(*stored.first().ok_or_else(corrupt)?);
             let mut rest = &stored[1..];
             let count = varint(&mut rest)?;
+            // A block starts at a multiple of its range's size, which is what lets its places be read as a range
+            let size = 1u64.checked_shl(level).filter(|size| start % size == 0).ok_or_else(corrupt)?;
             // A block whose every place is held needs no entry read to say which
-            let full = 1u64.checked_shl(level).filter(|size| *size == count);
+            let full = Some(size).filter(|size| *size == count);
             reading.run(start, full, rest)
         })();
         failed = run.err();
@@ -552,8 +568,10 @@ impl Reading {
     fn run(&mut self, start: u64, full: Option<u64>, stored: &[u8]) -> Result<()> {
         match full {
             Some(size) => {
+                // The places of one part: a range that reaches past it is no block's
                 let from = start as u32;
-                self.part(start)?.insert_range(from..=from + (size - 1) as u32);
+                let last = u32::try_from(size - 1).ok().and_then(|span| from.checked_add(span)).ok_or_else(corrupt)?;
+                self.part(start)?.insert_range(from..=last);
             }
             None => {
                 for entry in each_entry(stored, start, self.fields) {

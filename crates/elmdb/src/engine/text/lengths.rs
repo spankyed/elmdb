@@ -13,7 +13,7 @@ use crate::error::{Error, ErrorCode, Result};
 pub const PLACES: u64 = 512;
 
 fn corrupt() -> Error {
-    Error::new(ErrorCode::Corrupted, "A text index's lengths don't read")
+    Error::new(ErrorCode::Corrupted, "A text index's lengths don't read: rebuild() derives them again")
 }
 
 /// The block a place's lengths are in
