@@ -1039,6 +1039,11 @@ fn hits_after_a_limit_are_the_best_matches_with_their_scores_and_no_others() {
     assert!(all[0].1 > all[1].1 && all[1].1 > all[2].1, "{all:?}");
     assert_eq!(all[0].2, json!(["database", "lmdb"]));
     assert_eq!(hits(json!([either, { "step": "limit", "n": 2 }])), all[..2]);
+    // A hit is of an entity the search handed on: a match the limit left out, reached again by a step after it, is
+    // answered as an entity the search never scored
+    write(&db, vec![json!({ "op": "link", "source": "Message-1", "kind": "in", "target": "Message-3" })]);
+    let reached = hits(json!([either, { "step": "limit", "n": 1 }, { "step": "out", "kinds": ["in"] }]));
+    assert_eq!(reached, [("Message-3".to_owned(), 0.0, json!([]))]);
 }
 
 #[test]

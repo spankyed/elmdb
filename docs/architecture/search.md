@@ -113,7 +113,9 @@ snapshot as a search when it needs to say that search is incomplete.
   keeps its best matches as they are scored and reads that many entities, and a `count` straight after it counts the
   matches as the index holds them, scoring and reading none. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
-  `counts` is a facet; `after` pages by the last id of the page before.
+  `counts` is a facet; `after` pages by the last id of the page before. A hit is of an entity the search handed on:
+  a match a `limit` left out, reached again by a step after it, is answered with no score and no terms, as an entity
+  the search never matched is.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).
