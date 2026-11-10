@@ -170,13 +170,26 @@ fn automaton(distance: u8) -> &'static LevenshteinAutomatonBuilder {
     }
 }
 
-/// The edits a word of this length may be away from a term and still match it
-fn edits_for(word: &str) -> u8 {
-    match word.chars().count() {
-        0..=4 => 0,
-        5..=8 => 1,
-        _ => 2,
+/// The most edits a word may be away from an entry of a dictionary and still match it
+const MAX_EDITS: usize = 2;
+
+/// The edits a word of `length` characters may be away from an entry and still match it: none through `none`
+/// characters, one through `one`, and two past that. None again for a word longer than the longest entry an index
+/// holds by more than the most edits: it is further than that from every entry, and its automaton, whose size grows
+/// with the word, would be built to find nothing
+pub(super) fn edits(length: usize, none: usize, one: usize) -> u8 {
+    if length <= none || length > super::MAX_TERM_BYTES + MAX_EDITS {
+        0
+    } else if length <= one {
+        1
+    } else {
+        2
     }
+}
+
+/// The edits a searched word may be away from a term and still match it
+fn edits_for(word: &str) -> u8 {
+    edits(word.chars().count(), 4, 8)
 }
 
 /// The term a key of a text index's dictionary holds
@@ -349,9 +362,11 @@ pub struct Hit {
     pub fields: Vec<u32>,
 }
 
-/// A clause's words expanded, and the entities holding every word
+/// A clause's words expanded, how many entities hold each word in any of its expansions, and the entities holding
+/// every word
 struct Matched {
     words: Vec<Expansions>,
+    held: Vec<f64>,
     candidates: RoaringTreemap,
 }
 
@@ -421,15 +436,21 @@ pub fn search(
     let clauses = clauses(index, query, options);
     let mut matched = Vec::with_capacity(clauses.len());
     for clause in &clauses {
+        // A negation leaves out what holds the word as typed: a term an edit away is another word, which the query
+        // didn't name, as a term the word only starts is (`clauses`)
+        let fuzzy = options.fuzzy && !clause.negated;
         let words: Vec<_> =
-            clause.words.iter().map(|w| expand(r, entity_type, index, w, options.fuzzy)).collect::<Result<_>>()?;
-        let mut candidates = words.first().map(union).unwrap_or_default();
-        for word in words.iter().skip(1) {
+            clause.words.iter().map(|w| expand(r, entity_type, index, w, fuzzy)).collect::<Result<_>>()?;
+        let holders: Vec<RoaringTreemap> = words.iter().map(union).collect();
+        let held: Vec<f64> = holders.iter().map(|h| h.len() as f64).collect();
+        let mut holders = holders.into_iter();
+        let mut candidates = holders.next().unwrap_or_default();
+        for word in holders {
             // mutant-skip: replace &= with \|= in search
             // A clause of several words is checked by holds, which needs every word at consecutive places, so the union
             // of the words' postings keeps what their intersection keeps; and holds answers true for one word in any
             // field
-            candidates &= union(word);
+            candidates &= word;
         }
         if let Some(among) = among {
             candidates &= among;
@@ -438,15 +459,15 @@ pub fn search(
         let needs_places = words.len() > 1 || clause.fields.is_some();
         if needs_places {
             let mut kept = RoaringTreemap::new();
-            let probe = Matched { words, candidates: RoaringTreemap::new() };
+            let probe = Matched { words, held, candidates: RoaringTreemap::new() };
             for seq in &candidates {
                 if holds(r, entity_type, name, clause, &probe, seq)? {
                     kept.insert(seq);
                 }
             }
-            matched.push(Matched { words: probe.words, candidates: kept });
+            matched.push(Matched { candidates: kept, ..probe });
         } else {
-            matched.push(Matched { words, candidates });
+            matched.push(Matched { words, held, candidates });
         }
     }
     // The groups' matches, joined: every group, or with `any` one of them, and no negated clause
@@ -493,7 +514,11 @@ pub fn search(
                 continue;
             }
             let in_clause: Vec<u32> = clause.fields.clone().unwrap_or_else(|| allowed.clone());
-            for word in &m.words {
+            for (word, held) in m.words.iter().zip(&m.held) {
+                // A word is as rare as the entities holding it in any form it was matched in. Were each form scored by its
+                // own rarity, a rare term an edit away would outweigh the word asked for; scored as the word, the forms
+                // differ by their weights alone, the word as typed at the whole of it
+                let idf = (1.0 + (n - held + 0.5) / (held + 0.5)).ln();
                 let mut best: f64 = 0.0;
                 for (term, (w, postings)) in word {
                     if !postings.contains(seq) {
@@ -511,8 +536,6 @@ pub fn search(
                         continue;
                     }
                     terms.insert(term.clone());
-                    let df = postings.len() as f64;
-                    let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
                     let tf = frequency * (K1 + 1.0) / (frequency + K1 * (1.0 - B + B * length / average));
                     best = best.max(w * idf * tf);
                 }
@@ -594,11 +617,8 @@ pub fn suggest(
         (first.text, keys::text_terms(entity_type, name), starting)
     };
     let completions = started(r, &starting)?.into_iter().take(limit).map(|(t, _)| t).collect();
-    let edits = match term.chars().count() {
-        0..=2 => 0,
-        3..=6 => 1,
-        _ => 2,
-    };
+    // A word being typed is corrected sooner than a searched one is matched loosely
+    let edits = edits(term.chars().count(), 2, 6);
     let mut near: Vec<(u8, u64, String)> = Vec::new();
     // mutant-skip: replace > with >= in suggest (as above)
     if edits > 0 {

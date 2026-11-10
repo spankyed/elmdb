@@ -689,3 +689,61 @@ fn a_highlight_joins_the_terms_it_runs_across() {
     // "Database" and "Store" touch, and mark as one
     assert_eq!(answer["hits"][0]["highlights"]["text"], json!([[0, 4, 17], [0, 18, 23]]));
 }
+
+#[test]
+fn the_word_as_typed_outranks_a_rarer_word_an_edit_away_and_a_negation_takes_no_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Message", "Message-1", json!({ "text": "master plan" })),
+            create("Message", "Message-2", json!({ "text": "master copy" })),
+            create("Message", "Message-3", json!({ "text": "muster roll" })),
+        ],
+    );
+    // "muster" is an edit from "master" and the rarer of the two. Each match is scored as a holder of the word asked
+    // for, which all three are: one term of a text of two, the one an edit away at six tenths
+    let held_by_all = bm25(1.0, 3.0, 3.0, 2.0, 2.0);
+    assert_scores(
+        scores(&db, "Message", "master", json!({})),
+        &[("Message-1", held_by_all), ("Message-2", held_by_all), ("Message-3", 0.6 * held_by_all)],
+    );
+    // Matched in no other form, a word is as rare as its one term
+    let exact = json!({ "fuzzy": false });
+    let held_by_two = bm25(1.0, 2.0, 3.0, 2.0, 2.0);
+    assert_scores(scores(&db, "Message", "master", exact), &[("Message-1", held_by_two), ("Message-2", held_by_two)]);
+    // A word started is scored the same way: "ma" starts only "master", "m" starts "muster" too
+    let starts = json!({ "prefix": true, "fuzzy": false });
+    assert_scores(
+        scores(&db, "Message", "m", starts),
+        &[("Message-1", 0.8 * held_by_all), ("Message-2", 0.8 * held_by_all), ("Message-3", 0.8 * held_by_all)],
+    );
+
+    // A negation leaves out the word as typed, and nothing an edit from it
+    assert_eq!(search(&db, "Message", "roll -master", json!({})), json!(["Message-3"]));
+    assert_eq!(search(&db, "Message", "master -muster", json!({})), json!(["Message-1", "Message-2"]));
+    assert_eq!(search(&db, "Message", "roll -muster", json!({})), json!([]));
+}
+
+#[test]
+fn a_word_longer_than_any_term_by_more_than_two_takes_no_edits() {
+    use super::MAX_TERM_BYTES;
+    use super::search::edits;
+    // A searched word: none through four characters, one through eight; a word being typed, through two and six
+    assert_eq!([4, 5, 8, 9].map(|length| edits(length, 4, 8)), [0, 1, 1, 2]);
+    assert_eq!([2, 3, 6, 7].map(|length| edits(length, 2, 6)), [0, 1, 1, 2]);
+    // Two characters more than the longest term is two edits from it; three more is within two of none, so its
+    // automaton, which grows with the word, is never made
+    assert_eq!(edits(MAX_TERM_BYTES + 2, 4, 8), 2);
+    assert_eq!(edits(MAX_TERM_BYTES + 3, 4, 8), 0);
+    assert_eq!(edits(MAX_TERM_BYTES + 3, 2, 6), 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let longest = "b".repeat(MAX_TERM_BYTES);
+    write(&db, vec![create("Message", "Message-1", json!({ "text": longest }))]);
+    let two_more = format!("{longest}bb");
+    assert_eq!(search(&db, "Message", &two_more, json!({})), json!(["Message-1"]), "two edits away, and found");
+    assert_eq!(search(&db, "Message", &format!("{two_more}b"), json!({})), json!([]));
+}

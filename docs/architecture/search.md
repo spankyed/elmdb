@@ -84,11 +84,13 @@ snapshot as a search when it needs to say that search is incomplete.
   in the background as a value index is, and `check()` and `rebuild()` cover it.
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
-- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`; `field:word`;
-  `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
+- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves
+  out what holds the word as typed and nothing it only starts or is an edit from; `field:word`; `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
   written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
-  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; the word itself
-  outranks both. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
+  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; one longer than the
+  longest term by more than two is within two edits of none, and takes none. The word itself outranks both: each of a
+  word's matches is scored as a holder of the word, as rare as the entities holding it in any of the forms it matched,
+  the word as typed at the whole of that, a term it starts at 0.8, one edit away at 0.6 and two at 0.4. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
   with the bytes read can match it seeks past them all, so a dictionary of names sharing their first letters (ids,
   paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
