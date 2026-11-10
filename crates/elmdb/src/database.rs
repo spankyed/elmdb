@@ -415,15 +415,19 @@ struct AppliedSchema {
     commit: Option<crate::store::Commit>,
 }
 
-/// The builder over `schema`, whose rank chunks commit as writes do
+/// The builder over `schema`, whose chunks commit as writes do
 pub(crate) fn start_builder(
     store: &Arc<Store>,
     schema: &Arc<EngineSchema>,
     tracks: &crate::engine::watch::SharedTracks,
     observing: &Arc<RwLock<Arc<EngineSchema>>>,
 ) -> crate::engine::Builder {
-    let commits =
-        crate::engine::drain_commits(Arc::clone(tracks), Arc::clone(store), Arc::clone(observing), Arc::clone(schema));
+    let commits = crate::engine::builder_commits(
+        Arc::clone(tracks),
+        Arc::clone(store),
+        Arc::clone(observing),
+        Arc::clone(schema),
+    );
     crate::engine::Builder::start(Arc::clone(store), Arc::clone(schema), commits)
 }
 

@@ -600,6 +600,59 @@ fn a_read_of_a_text_index_still_being_built_is_refused_and_answered_once_it_is_b
 }
 
 #[test]
+fn a_reader_refused_while_a_text_index_is_built_hears_of_the_commit_that_ends_the_build() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    db.wait_for_index_builds().unwrap();
+    // As a build leaves it part way: its entries there, its marker not yet
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Message", "text"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let searching = |track: Option<u32>| -> Reads {
+        let plan = json!({ "start": { "from": "types", "types": ["Message"] },
+            "steps": [{ "step": "search", "query": "lmdb" }], "terminal": { "answer": "ids" } });
+        Reads { reads: vec![serde_json::from_value(json!({ "read": "query", "plan": plan })).unwrap()], track }
+    };
+
+    // One reader under a token, and one a watch
+    assert_eq!(db.read(&searching(Some(7))).unwrap_err().code, ErrorCode::IndexBuilding);
+    let answers = Arc::new(Mutex::new(Vec::<Result<Json, ErrorCode>>::new()));
+    let into = Arc::clone(&answers);
+    db.watch(
+        searching(None),
+        Box::new(move |answer| {
+            into.lock().unwrap().push(answer.as_ref().map(|bytes| decode(bytes)[0]["ids"].clone()).map_err(|e| e.code));
+        }),
+    )
+    .unwrap();
+    assert_eq!(*answers.lock().unwrap(), vec![Err(ErrorCode::IndexBuilding)]);
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u32>>::new()));
+    let hearing = Arc::clone(&heard);
+    db.hear_builder_commits(Some(Arc::new(move |_, touched| hearing.lock().unwrap().push(touched)))).unwrap();
+
+    // The builder ends the build: each read the marker to be refused, and the commit that writes it names them
+    let builders = db.builders().unwrap().expect("a writable database starts builders");
+    builders.queue(vec![crate::engine::Work::Index { entity_type: "Message".into(), index: "text".into() }]);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(*heard.lock().unwrap(), vec![vec![7]], "the build ended and told no reader it had refused");
+    assert_eq!(
+        *answers.lock().unwrap(),
+        vec![Err(ErrorCode::IndexBuilding), Ok(json!(["Message-3", "Message-1"]))],
+        "the watch was left on its refusal"
+    );
+    assert_eq!(decode(&db.read(&searching(Some(7))).unwrap())[0]["ids"], json!(["Message-3", "Message-1"]));
+}
+
+#[test]
 fn a_highlight_names_its_element_by_its_place_in_the_list() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

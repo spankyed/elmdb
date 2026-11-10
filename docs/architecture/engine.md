@@ -121,7 +121,11 @@ and ends, `wouldCreateCycle` (the walk a link's
 `suggest`, `findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its entities have
 held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so a watch over it
 runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
-(`UNKNOWN_INDEX`).
+(`UNKNOWN_INDEX`). A `search`, a `hybrid` or a `suggest` over a text index still being built is refused
+(`INDEX_BUILDING`): its terms and statistics are the answer, with no rows to walk in their place as a value or a trigram
+index's are, so read part way it would answer from the entities filed so far and say nothing of the rest. `waitForIndexBuilds`
+resolves once it is built; a tracked read and a watch are told by the commit that ends the build (below, Change sets
+and watch).
 
 A plan is a scope, a start, steps and a terminal:
 
@@ -412,7 +416,8 @@ unit is open.
   `s` the estimates', which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
   and the next open goes on.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
-  the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
+  the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them, and committed as a
+  write is, so the chunk that writes the marker tells the tracked reads and the watches that read it; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
   unbuilt, and `indexStatus()` names them. Each chunk seeks after its last entity sequence in both live/trash
   ranges and sorts only their bounded candidates: at most 2 × (chunk size + 1) rows in temporary storage. Cursor

@@ -5,7 +5,8 @@
 //!
 //! A rank index is built and kept here too: its nodes are added a chunk at a time, then pushed a chunk of `CHUNK`
 //! pushes at a time until none waits, which is also how the pushes a commit leaves over its budget are drained. A
-//! drain's chunks commit like any other write, telling the watches whose reads they wrote into.
+//! build's chunks and a drain's commit like any other write, telling the watches and the tracked reads whose reads
+//! they wrote into.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use crate::store::sync::{Clock, SystemClock};
 use crate::sync::{Condvar, Mutex};
 
 use super::derive::build_chunk;
-use super::unit::{Txn, UnitState};
+use super::unit::Txn;
 
 #[cfg(all(test, shuttle))]
 mod model;
@@ -180,7 +181,7 @@ impl Core {
     }
 }
 
-/// How a drain's chunk commits: the database's own commit, which delivers to the watches it wrote into
+/// How a build's chunk and a drain's commit: the database's own commit, which delivers to the watches it wrote into
 pub type Commits =
     Arc<dyn Fn(&mut dyn FnMut(&mut Txn<'_, '_>) -> crate::Result<bool>) -> crate::Result<bool> + Send + Sync>;
 
@@ -202,7 +203,7 @@ impl Builder {
                 .spawn(move || {
                     core.run(|work, stopping| match work {
                         Work::Index { entity_type, index } => {
-                            build_index(&store, &schema, entity_type, index, stopping)
+                            build_index(&store, &commits, entity_type, index, stopping)
                         }
                         Work::Rank { name } => {
                             build_rank(&store, &schema, &commits, name, stopping, &|| core.await_quiet(name))
@@ -288,34 +289,26 @@ fn chunks(
     }
 }
 
+/// Builds a type's index over the entities that predate it, a chunk at a time, the last chunk marking it built. A read
+/// that had no answer while it was built (`INDEX_BUILDING`, a text index's) read that marker to be refused, so the
+/// commit that writes it is the one that tells it to read again
 fn build_index(
     store: &Store,
-    schema: &EngineSchema,
+    commits: &Commits,
     entity_type: &str,
     index: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
     let mut after = 0;
     chunks(store, stopping, || {
-        let next = store.write(
-            |txn, db| {
-                schema.validate(txn, db)?;
-                let mut state = UnitState::default();
-                let mut t = Txn { txn, db, state: &mut state, schema, now: 0.0 };
-                let next = build_chunk(&mut t, entity_type, index, after, CHUNK)?;
-                // An index's chunk files no edge: the mirror moves to its commit unchanged
-                store.deposit(std::mem::take(&mut state.edges));
-                Ok(next)
-            },
-            false,
-        )?;
-        match next {
-            Some(last) => {
-                after = last;
-                Ok(false)
-            }
-            None => Ok(true),
-        }
+        // The cursor moves only once its chunk commits: a chunk refused leaves it where it was
+        let mut next = None;
+        let done = commits(&mut |t| {
+            next = build_chunk(t, entity_type, index, after, CHUNK)?;
+            Ok(next.is_none())
+        })?;
+        after = next.unwrap_or(after);
+        Ok(done)
     })
 }
 

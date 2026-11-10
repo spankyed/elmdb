@@ -2,7 +2,7 @@
 //! group commit and map growth (`docs/architecture/engine.md`, Durability; `docs/architecture/format.md`).
 //!
 //! Every transaction holds `gate` for reading, and growing the map holds it for writing, since LMDB grows a map only
-//! while its process has no transaction open. So `read` and `write` never call each other: a write reads through its
+//! while its process has no transaction open. So a read and a write never call each other: a write reads through its
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
 
@@ -502,25 +502,17 @@ impl Store {
         self.idle.clear();
     }
 
-    /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
-    /// aborted, the map grown and `f` run again, so `f` must do nothing but write through its transaction
+    /// `write_committed` with its commit finished, for a test that writes to the store under the engine
+    #[cfg(test)]
     pub fn write<T>(&self, f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
-        self.write_sequenced(f, durable).map(|(t, _)| t)
-    }
-
-    /// `write`, answering also the sequence of the commit it made
-    pub fn write_sequenced<T>(
-        &self,
-        f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
-        durable: bool,
-    ) -> Result<(T, u64)> {
         let (t, commit) = self.write_committed(f, durable)?;
-        let sequence = commit.sequence;
         commit.finish()?;
-        Ok((t, sequence))
+        Ok(t)
     }
 
-    /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
+    /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails, answering the commit it made, a
+    /// durable write's failed sync apart from the commit, which happened. A write that fills the map is aborted, the
+    /// map grown and `f` run again, so `f` must do nothing but write through its transaction
     pub(crate) fn write_committed<T>(
         &self,
         f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,

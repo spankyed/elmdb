@@ -66,15 +66,16 @@ fn finish_commit(
     Ok(changes)
 }
 
-/// How the builder's rank chunks commit: as a write does, each telling the watches whose reads it wrote into
-pub(crate) fn drain_commits(
+/// How the builder's chunks commit, an index's and a rank index's: as a write does, each telling the watches and the
+/// tracked reads whose reads it wrote into
+pub(crate) fn builder_commits(
     tracks: watch::SharedTracks,
     store: Arc<Store>,
     observing: Arc<RwLock<Arc<EngineSchema>>>,
     schema: Arc<EngineSchema>,
 ) -> builder::Commits {
     Arc::new(move |chunk| {
-        // mutant-skip: delete ! in drain_commits
+        // mutant-skip: delete ! in builder_commits
         // The rank index (`docs/archive/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches
         // run again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch
         // and each hears the same
