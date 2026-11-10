@@ -616,7 +616,8 @@ impl<'a> Entries<'a> {
     fn read(&mut self) -> Result<Entry<'a>> {
         self.place = self.place.checked_add(varint(&mut self.rest)?).ok_or_else(corrupt)?;
         let length = match self.rest.first() {
-            // An index of one field, and a count a byte holds
+            // mutant-skip: replace match guard self.fields == 1 && \*count < 0x80 with false in Entries<'a>::read
+            // An index of one field, and a count a byte holds: the length the arm below finds for it, without the call
             Some(count) if self.fields == 1 && *count < 0x80 => 1,
             _ => counts_len(self.rest, self.fields)?,
         };
