@@ -83,6 +83,8 @@ pub struct EntityChange {
     #[serde(rename = "type")]
     pub entity_type: String,
     pub created: bool,
+    /// The entity is gone as the commit ends: one destroyed and made again under its id in the commit is `created`
+    /// alone, and one made and destroyed in it is both
     pub destroyed: bool,
     pub trashed: bool,
     pub restored: bool,
@@ -128,7 +130,12 @@ impl ChangeSet {
                         .entry(id.clone())
                         .or_insert_with(|| EntityChange { entity_type: type_of(id), ..Default::default() });
                     match event {
-                        Event::Created { .. } => entry.created = true,
+                        Event::Created { .. } => {
+                            // Made again after the commit destroyed it: a reader that drops what `destroyed` names
+                            // would drop an entity that exists
+                            entry.created = true;
+                            entry.destroyed = false;
+                        }
                         Event::Field { field, .. } => {
                             entry.fields.insert(field.clone());
                         }
@@ -170,5 +177,24 @@ impl ChangeSet {
             }
         }
         set
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_entity_destroyed_and_made_again_in_a_commit_is_created_and_one_made_and_destroyed_is_both() {
+        let created = || Event::Created { id: "Task-1".into() };
+        let destroyed = || Event::Destroyed { id: "Task-1".into() };
+        let of = |events: &[Event]| {
+            let change = ChangeSet::of(events).entities["Task-1"].clone();
+            (change.created, change.destroyed)
+        };
+        assert_eq!(of(&[destroyed(), created()]), (true, false));
+        assert_eq!(of(&[created(), destroyed()]), (true, true));
+        assert_eq!(of(&[destroyed()]), (false, true));
+        assert_eq!(of(&[created(), destroyed(), created()]), (true, false));
     }
 }
