@@ -623,11 +623,21 @@ fn a_reader_from_before_a_type_was_renamed_is_told_to_start_again() {
     for entity_type in ["Note", "Memo", "Task"] {
         json["types"][entity_type]["changeOrder"] = json!(true);
     }
+    json["types"]["Task"]["fields"]["about"] = json!({ "type": "ref", "to": ["Note", "Memo"], "optional": true });
     let schema = crate::schema::Schema::from_json(&json).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let db =
         Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
-    write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1")]).unwrap();
+    write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+    // Two tasks name a note, one by an edge and one by a field declared to hold its id
+    write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Note-1" }),
+            json!({ "op": "set", "id": "Task-3", "fields": { "about": "Note-2" } }),
+        ],
+    )
+    .unwrap();
     let before = db.sequence().unwrap();
     db.rename_type("Note", "Memo").unwrap();
     let renamed = db.sequence().unwrap();
@@ -638,10 +648,15 @@ fn a_reader_from_before_a_type_was_renamed_is_told_to_start_again() {
     // The ids a reader held are gone and the ones in their place carry the stamps the old ones had
     assert!(!of(&["Note"], before).complete, "Note-1 and Note-2 went without a tombstone");
     assert!(!of(&["Memo"], before).complete, "Memo-1 and Memo-2 came without a stamp");
-    assert!(of(&["Task"], before).complete, "a type the rename left alone reads on");
+    // A type the rename left alone reads on, and is told of its entities whose edge or field named a renamed one
+    let tasks = of(&["Task"], before);
+    assert!(tasks.complete);
+    assert_eq!(tasks.ids, ["Task-2", "Task-3"]);
+    assert_eq!(super::row(&db, "Task-3").unwrap()["about"], json!("Memo-2"));
     assert!(of(&["Note", "Memo"], renamed).complete, "a reader from the rename on has missed nothing");
     let all = of(&["Memo"], 0);
-    assert_eq!(all.ids, ["Memo-1", "Memo-2"]);
+    // Memo-1 is an end of the edge the rename rewrote, so it was written last
+    assert_eq!(all.ids, ["Memo-2", "Memo-1"]);
     assert!(db.check().unwrap().is_clean());
 }
 
