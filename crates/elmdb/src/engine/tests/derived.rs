@@ -381,6 +381,76 @@ fn a_removed_type_keeps_its_entities_until_purged() {
 }
 
 #[test]
+fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let between_tasks = {
+        let db = open(&dir);
+        let made = write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "title": "t", "body": "b" } }),
+                json!({ "op": "create", "type": "Doc", "id": "Doc-2", "fields": { "title": "u" } }),
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
+                json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-1" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+        match &made[6] {
+            crate::OpResult::Relation { id, .. } => id.clone(),
+            other => panic!("not a relation: {other:?}"),
+        }
+    };
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["types"].as_object_mut().unwrap().remove("Doc");
+    let db = with_schema(&dir, schema).unwrap();
+    let before = (row(&db, "Doc-1").unwrap(), super::edges(&db), db.stats().unwrap());
+    let writes = [
+        ("set", json!({ "op": "set", "id": "Doc-1", "fields": { "title": "x" } })),
+        ("append", json!({ "op": "append", "id": "Doc-1", "field": "body", "value": "c" })),
+        ("merge", json!({ "op": "merge", "id": "Doc-1", "field": "body", "value": { "k": 1 } })),
+        ("delete", json!({ "op": "delete", "id": "Doc-1", "field": "body" })),
+        ("removeAt", json!({ "op": "removeAt", "id": "Doc-1", "field": "body", "index": 0 })),
+        ("removeValue", json!({ "op": "removeValue", "id": "Doc-1", "field": "body", "value": "b" })),
+        ("trash", json!({ "op": "trash", "id": "Doc-1" })),
+        ("restore", json!({ "op": "restore", "id": "Doc-1" })),
+        ("grant", json!({ "op": "grant", "id": "Doc-1", "role": "r2" })),
+        ("revoke", json!({ "op": "revoke", "id": "Doc-1", "role": "r1" })),
+        ("grantExclusive", json!({ "op": "grantExclusive", "id": "Doc-1", "role": "r2", "among": [] })),
+        ("link from it", json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-2" })),
+        ("link to it", json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" })),
+        ("unlink", json!({ "op": "unlink", "source": "Doc-1" })),
+        ("a relation moved from it", json!({ "op": "updateRelation", "relation": between_tasks, "source": "Doc-2" })),
+        ("a relation moved to it", json!({ "op": "updateRelation", "relation": between_tasks, "target": "Doc-2" })),
+        ("destroy", json!({ "op": "destroy", "id": "Doc-1" })),
+    ];
+    for (what, op) in writes {
+        let error = write(&db, vec![op]).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnknownType, "{what}: {error}");
+        assert!(error.message.contains("Doc"), "{what}: {error}");
+    }
+    assert_eq!((row(&db, "Doc-1").unwrap(), super::edges(&db), db.stats().unwrap()), before, "and none wrote anything");
+    // An edge of a declared kind between two entities of declared types moves and goes as ever
+    write(&db, vec![json!({ "op": "removeRelation", "relation": between_tasks })]).unwrap();
+    db.close().unwrap();
+
+    // Declared again, its entities are written as before
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "set", "id": "Doc-1", "fields": { "title": "x" } }),
+            json!({ "op": "trash", "id": "Doc-2" }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(row(&db, "Doc-1").unwrap()["title"], "x");
+}
+
+#[test]
 fn rename_field_and_rename_relation_move_data_to_a_declared_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();

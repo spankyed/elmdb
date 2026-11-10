@@ -114,6 +114,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         }
         Op::Link { source, kind, target, info, weight } => {
             existing(t, source)?;
+            declared_end(t, target)?;
             let (id, linked) = relations::link(t, source, kind, target, info.clone(), *weight)?;
             Ok(OpResult::Relation { id, linked })
         }
@@ -123,6 +124,9 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             Ok(OpResult::Done)
         }
         Op::UpdateRelation { relation, source, target, info, weight } => {
+            for end in [source, target].into_iter().flatten() {
+                declared_end(t, end)?;
+            }
             relations::update(t, relation, source.as_deref(), target.as_deref(), info.clone(), *weight)?;
             Ok(OpResult::Done)
         }
@@ -193,10 +197,32 @@ fn declared_role(t: &Txn<'_, '_>, role: &str) -> Result<()> {
     }
 }
 
-/// Refuses an id no entity has, naming where a relation's id goes
+/// Refuses an entity of a type the schema doesn't declare (`UNKNOWN_TYPE`): one a removed declaration left, whose data
+/// stays as it is until the type is declared again or purged (`docs/architecture/schema.md`, Changing a schema)
+fn declared_type(t: &Txn<'_, '_>, id: &str) -> Result<()> {
+    let entity_type = ids::type_of(id);
+    if t.schema.types.contains_key(entity_type) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::UnknownType,
+        format!(
+            "write(\"{id}\"): {entity_type} isn't a type the schema declares, so its entities are kept and not written. \
+             Declare it again to write them, or purge it to delete them"
+        ),
+    ))
+}
+
+/// `declared_type` of an end a relation is given, when an entity has that id: a link may name one its unit makes
+/// later, which a check as it commits holds to existing
+fn declared_end(t: &Txn<'_, '_>, id: &str) -> Result<()> {
+    if entities::record(t, id)?.is_some() { declared_type(t, id) } else { Ok(()) }
+}
+
+/// Refuses an id no entity has, naming where a relation's id goes, and an entity of a type the schema doesn't declare
 fn existing(t: &Txn<'_, '_>, id: &str) -> Result<()> {
     if entities::record(t, id)?.is_some() {
-        return Ok(());
+        return declared_type(t, id);
     }
     let message = if relations::get(t, id)?.is_some() {
         format!(
