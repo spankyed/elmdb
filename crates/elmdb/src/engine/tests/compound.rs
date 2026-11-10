@@ -319,10 +319,39 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
             assert_eq!((page.len(), visits), (0, 0), "descending {descending}, after {outside}");
         }
     }
-    // The range before the equality is the same set, read as a range alone is: with no index on the number alone,
-    // from the type's rows. A second range filters what the first read
+    // The range before the equality is the same set read the same way, by whichever of them comes last; and among
+    // two equalities, from the index on both and the number
     let (swapped, visits) = same(&db, "live", N, |field| json!([between(field), open]));
-    assert_eq!((swapped, visits), (found.clone(), 24));
+    assert_eq!((swapped, visits), (found.clone(), 6));
+    let first_owner = is("owner", json!(1));
+    // The range first, between the two, and last
+    for at in 0..3 {
+        let (owned, visits) = same(&db, "live", N, |field| {
+            let mut asked = vec![first_owner.clone(), open.clone()];
+            asked.insert(at, between(field));
+            json!(asked)
+        });
+        assert_eq!((owned, visits), (vec![id(6), id(12)], 2), "the range at {at}");
+    }
+    // The stage that ends them names the index, and the ones before it read nothing
+    let explained =
+        read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", json!([between("n"), open])) }));
+    let stages = explained.unwrap()["stages"].clone();
+    assert_eq!(
+        [&stages[1]["visited"], &stages[2]["index"], &stages[2]["visited"], &stages[2]["kept"]],
+        [&json!(0), &json!("statusN"), &json!(6), &json!(6)]
+    );
+    // An equality no index holds with them filters what the others read from theirs
+    let noted = |field: &str| json!([between(field), open, is("note", json!("x"))]);
+    assert_eq!(same(&db, "live", N, noted), (vec![], 6));
+    // Over two types the equality is read from each type's own index, or its rows, and the range filters
+    let both = |field: &str| {
+        json!({ "scope": "live", "start": { "from": "types", "types": ["Task", "Other"] },
+            "steps": [between(field), open], "terminal": { "answer": "ids" } })
+    };
+    assert_eq!(visited(&db, both("n")), (found.clone(), 24));
+    assert_eq!(visited(&db, both("m")).0, found);
+    // A second range filters what the first read
     let twice = |field: &str| json!([open, between(field), { "step": "range", "field": field, "above": 1 }]);
     assert_eq!(same(&db, "live", N, twice), (vec![id(4), id(12), id(20)], 6));
     // The trash is left out, or kept, as the scope says
@@ -330,6 +359,7 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
     assert_eq!(same(&db, "live", N, |field| json!([open, between(field)])).0.len(), 5);
     assert_eq!(same(&db, "withTrashed", N, |field| json!([open, between(field)])), (found.clone(), 6));
     assert_eq!(same(&db, "trashed", N, |field| json!([open, between(field)])), (vec![id(6)], 6));
+    assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 6));
 }
 
 #[test]
@@ -549,6 +579,7 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // And a role the schema doesn't declare is refused, as the filter itself refuses it
     let undeclared = plan("live", json!([{ "step": "withRole", "role": "nobody" }, order("k", false), limit(1)]));
     assert_eq!(read(&db, json!({ "read": "query", "plan": undeclared })).unwrap_err().code, ErrorCode::UnknownRole);
+
     // A role's holders are read from its index and sorted, however many: the order isn't walked for them
     let stars = (0..200).map(|at| json!({ "op": "grant", "id": id(at), "role": "star" }));
     write(&db, stars.collect());

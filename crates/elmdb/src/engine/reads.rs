@@ -742,26 +742,23 @@ impl<R: Read> Query<'_, R> {
                         self.past_filters(before, id, visit)
                     });
                 }
+                // A range of numbers among the equalities up to this one is read with them
+                if let Some(ended) = self.range_under(upto, visit)? {
+                    return Ok(ended);
+                }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
             }
             Step::Range { field: name, at_least, above, at_most, below } => {
                 let bounds = Bounds::of(&self.r.schema().collation, at_least, above, at_most, below)?;
-                if let Bounds::Numbers(limits) = &bounds
+                if before == 0
+                    && let Bounds::Numbers(limits) = &bounds
                     && let Some(types) = self.start_types()
                 {
-                    if before == 0 {
-                        return self.in_range(types, name, &bounds, limits, visit);
-                    }
-                    // After equalities alone, an index that reads the field under them reads the range
-                    if let [entity_type] = types
-                        && let Some((equals, None)) = self.asked(before, name)?
-                        && let Some((index, leading)) = self.order_index(entity_type, &equals, name)?
-                    {
-                        if let Some(stages) = self.stages {
-                            stages.reads_index(&index);
-                        }
-                        return self.between(entity_type, &index, &leading, limits, visit);
-                    }
+                    return self.in_range(types, name, &bounds, limits, visit);
+                }
+                // After equalities alone, an index that reads the field under them reads the range
+                if let Some(ended) = self.range_under(upto, visit)? {
+                    return Ok(ended);
                 }
                 self.pull(before, &mut |id| if self.within(id, name, &bounds)? { visit(id) } else { Ok(true) })
             }
@@ -1720,6 +1717,26 @@ impl<R: Read> Query<'_, R> {
             }
         }
         Ok(Some((equals, limits)))
+    }
+
+    /// Hands on what the first `upto` steps keep as an index reads it, when they are equalities and one range of a
+    /// field's numbers over a start of one type, whichever of them was written first, and the type has an index on
+    /// the equalities' fields and then the range's (`order_index`): its entries between the bounds under the
+    /// equalities' values, their entities by place. None, with nothing read, when the steps are any others or no
+    /// such index is built; false when `visit` stopped it
+    fn range_under(&self, upto: usize, visit: &mut Visit<'_>) -> Result<Option<bool>> {
+        let Some([entity_type]) = self.start_types() else { return Ok(None) };
+        let ranged = self.plan.steps[..upto].iter().find_map(|step| match step {
+            Step::Range { field, .. } => Some(field),
+            _ => None,
+        });
+        let Some(name) = ranged else { return Ok(None) };
+        let Some((equals, Some(limits))) = self.asked(upto, name)? else { return Ok(None) };
+        let Some((index, leading)) = self.order_index(entity_type, &equals, name)? else { return Ok(None) };
+        if let Some(stages) = self.stages {
+            stages.reads_index(&index);
+        }
+        self.between(entity_type, &index, &leading, &limits, visit).map(Some)
     }
 
     /// The built index of a type that reads the entities `equals` names in `name`'s order, with what its entries for

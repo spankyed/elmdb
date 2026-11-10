@@ -252,9 +252,10 @@ an answer:
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
   reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's
-  as a search leaves them out, and reads no entity. After equalities alone, a range is read from the index on their
-  fields and then its own, as an order is. A range of strings, one after any other step, and one over a type without
-  such an index filter what reaches them.
+  as a search leaves them out, and reads no entity. Among equalities alone, a range is read from the index on their
+  fields and then its own, as an order is, by whichever of them is written last: the range may stand before them,
+  between them or after. A range of strings, one among any other steps, and one over a type without such an index
+  filter what reaches them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own
   left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters
