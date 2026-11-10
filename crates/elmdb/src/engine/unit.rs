@@ -284,6 +284,39 @@ impl Read for Txn<'_, '_> {
     }
 }
 
+/// Refuses a key longer than LMDB stores (`VALUE_INVALID`), naming what it is made of: the ids and names in a key are
+/// the caller's, and LMDB's own refusal of one (`MDB_BAD_VALSIZE`) says neither which key nor why
+fn key_fits(key: &[u8]) -> Result<()> {
+    use crate::engine::values::MAX_KEY_BYTES;
+    use crate::format::key::Part;
+    if key.len() <= MAX_KEY_BYTES {
+        return Ok(());
+    }
+    // Each part as it reads, a long one cut short: enough to tell the id or the name that is too long
+    let part = |part: &Part| match part {
+        Part::String(s) if s.chars().count() > 24 => {
+            format!("{}… ({} bytes)", s.chars().take(24).collect::<String>(), s.len())
+        }
+        Part::String(s) => s.clone(),
+        Part::Number(n) => n.to_string(),
+        Part::Bool(b) => b.to_string(),
+        Part::Null => "null".to_owned(),
+        Part::Bytes(b) => format!("{} bytes", b.len()),
+    };
+    let made_of = match crate::format::key::decode(key) {
+        Ok(parts) => parts.iter().map(part).collect::<Vec<_>>().join(", "),
+        Err(_) => "what doesn't read as a key".to_owned(),
+    };
+    Err(crate::error::Error::new(
+        crate::error::ErrorCode::ValueInvalid,
+        format!(
+            "A key of {} bytes can't be stored, a key being at most {MAX_KEY_BYTES}: it is made of {made_of}. Shorten \
+             the id or the name in it that is long",
+            key.len()
+        ),
+    ))
+}
+
 /// The transaction and the unit's state for the length of one call
 pub struct Txn<'a, 'e> {
     pub txn: &'a mut RwTxn<'e>,
@@ -321,6 +354,7 @@ impl Txn<'_, '_> {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        key_fits(key)?;
         self.record(key)?;
         self.log(key);
         self.db.put(self.txn, key, value)?;
@@ -337,6 +371,7 @@ impl Txn<'_, '_> {
 
     /// `put`, given what `key` holds now, as the caller read it in this call
     pub fn put_over(&mut self, key: &[u8], value: &[u8], before: Option<&[u8]>) -> Result<()> {
+        key_fits(key)?;
         self.record_known(key, before);
         self.log(key);
         self.db.put(self.txn, key, value)?;

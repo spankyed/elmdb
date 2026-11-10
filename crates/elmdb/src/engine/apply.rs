@@ -378,6 +378,17 @@ fn create(
     }
     let id = match given {
         Some(given) => {
+            if given.len() > ids::MAX_ID_BYTES {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!(
+                        "create({quoted}): the id given is {} bytes, and an id is at most {}, so that its entity's keys \
+                         and its edges' fit the store's",
+                        given.len(),
+                        ids::MAX_ID_BYTES
+                    ),
+                ));
+            }
             if ids::type_of(given) != entity_type {
                 return Err(Error::new(
                     ErrorCode::TypeMismatch,

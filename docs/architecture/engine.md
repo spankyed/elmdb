@@ -276,7 +276,9 @@ The operations:
   field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts
   them; `docs/evidence/next-phase-7.md`).
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role, a missing required field, an id
-  in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
+  in use, an id of another type, an id longer than 128 bytes or a key the store can't hold however it is made
+  (`VALUE_INVALID`, naming what the key is made of), a write to an entity of a type the schema no longer declares
+  (`UNKNOWN_TYPE`), no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
