@@ -181,7 +181,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 18] = [
+const COMPARED: [Prefix; 19] = [
     Prefix::Live,
     Prefix::Changed,
     Prefix::Trashed,
@@ -193,8 +193,9 @@ const COMPARED: [Prefix; 18] = [
     Prefix::In,
     Prefix::Between,
     Prefix::TextTerm,
-    Prefix::TextPositions,
+    Prefix::TextBlock,
     Prefix::TextDocument,
+    Prefix::TextLengths,
     Prefix::TextStats,
     Prefix::TextWord,
     Prefix::Trigram,
@@ -203,11 +204,12 @@ const COMPARED: [Prefix; 18] = [
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 9] = [
+const PER_INDEX: [Prefix; 10] = [
     Prefix::Index,
     Prefix::TextTerm,
-    Prefix::TextPositions,
+    Prefix::TextBlock,
     Prefix::TextDocument,
+    Prefix::TextLengths,
     Prefix::TextStats,
     Prefix::TextWord,
     Prefix::Trigram,

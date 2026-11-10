@@ -464,12 +464,12 @@ Sorting D emitted rows costs O(D log D) comparisons and temporary disk proportio
 
 A single-index rebuild scans primary records rather than trusting derived type ranges. Value entries spill directly;
 unique entries sort by value and holder so conflicts are checked with one adjacent group, without a map of all values.
-Text document memberships spill and merge into one posting bitmap at a time, rather than retaining every term's
-bitmap. Vector identifiers spill; graph updates drain journal batches of at most 1,000 rows, decode one added vector
+Text document memberships spill and merge into one term's keys at a time, a block of its places and one place more
+held at once, rather than retaining every term's places. Vector identifiers spill; graph updates drain journal batches of at most 1,000 rows, decode one added vector
 at a time, and build each affected graph once after its updates. Rebuild deletes batches of at most 1,000 keys without
 retaining their values. Every replacement remains one atomic transaction, including failures after partial writes.
 
-These bounds concern intermediate collections. One decoded entity and its index expansion, a final text posting,
+These bounds concern intermediate collections. One decoded entity and its index expansion, a block of a term's places,
 hannoy's graph builder, and LMDB's dirty/resident pages have separate workload-dependent costs. A list-valued field
 can emit an entry per indexable element; compound value indexes take scalar fields. Full check/rebuild also retain
 entity/graph inventories, primary constraint/uniqueness auditing and output reports; the complete operation does not

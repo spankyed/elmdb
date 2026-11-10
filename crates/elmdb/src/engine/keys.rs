@@ -159,7 +159,7 @@ pub fn between_range(source: &str, kind: &str, target: &str) -> Vec<u8> {
     })
 }
 
-/// A text index's posting list for a term
+/// A text index's term: the places of the entities holding it, or that they are in blocks
 pub fn text_term(entity_type: &str, index: &str, term: &str) -> Vec<u8> {
     with(Prefix::TextTerm, |w| {
         w.string(entity_type).string(index).string(term);
@@ -180,10 +180,28 @@ pub fn text_terms_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<
     })
 }
 
-/// Where a term is in one entity's fields
-pub fn text_positions(entity_type: &str, index: &str, term: &str, seq: u64) -> Vec<u8> {
-    with(Prefix::TextPositions, |w| {
-        w.string(entity_type).string(index).string(term).number(seq as f64);
+/// Every block of the places of the entities holding a term of a text index, in place order: a block's key is this
+/// and the place it starts at (`place_under`)
+pub fn text_blocks(entity_type: &str, index: &str, term: &str) -> Vec<u8> {
+    with(Prefix::TextBlock, |w| {
+        w.string(entity_type).string(index).string(term);
+    })
+}
+
+/// The key of what is kept under `key` at a place: `key` with the place as its next part
+pub fn place_under(key: &[u8], place: u64) -> Vec<u8> {
+    crate::format::key::with_number(key, place as f64)
+}
+
+/// The place a key built by `place_under` ends with
+pub fn place_of(key: &[u8]) -> Option<u64> {
+    crate::format::key::last_number(key).map(|place| place as u64)
+}
+
+/// Each field's length in the entities of a text index in one block of places
+pub fn text_lengths(entity_type: &str, index: &str, block: u64) -> Vec<u8> {
+    with(Prefix::TextLengths, |w| {
+        w.string(entity_type).string(index).number(block as f64);
     })
 }
 
@@ -222,7 +240,7 @@ pub fn text_stats(entity_type: &str, index: &str) -> Vec<u8> {
     })
 }
 
-/// A stemming text index's posting list for a word as written
+/// How many entities of a stemming text index hold a word as written
 pub fn text_word(entity_type: &str, index: &str, word: &str) -> Vec<u8> {
     with(Prefix::TextWord, |w| {
         w.string(entity_type).string(index).string(word);
@@ -243,15 +261,21 @@ pub fn text_words_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<
     })
 }
 
-/// The ranges of a text index's terms, positions, documents and words; its statistics are the one key `text_stats`
-/// builds
-pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 4] {
+/// The ranges of a text index's terms, their blocks, its documents, their lengths and its words; its statistics are
+/// the one key `text_stats` builds
+pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 5] {
     let range = |prefix: Prefix| {
         with(prefix, |w| {
             w.string(entity_type).string(index);
         })
     };
-    [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument), range(Prefix::TextWord)]
+    [
+        range(Prefix::TextTerm),
+        range(Prefix::TextBlock),
+        range(Prefix::TextDocument),
+        range(Prefix::TextLengths),
+        range(Prefix::TextWord),
+    ]
 }
 
 /// A chunk's stored embedding, the vectors of an entity's chunks, and of an index

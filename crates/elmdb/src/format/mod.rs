@@ -59,15 +59,20 @@ pub enum Prefix {
     In,
     /// `d/b source kind target seq` → the edges between two entities
     Between,
-    /// `d/ft type index term` → a text index's posting list: the places of the entities holding the term
+    /// `d/ft type index term` → a text index's term: the places of the entities holding it, each with the term's count
+    /// in each of its fields, or that they are too many for one key and are in blocks
     TextTerm,
-    /// `d/fp type index term seq` → where in the entity's fields the term is
-    TextPositions,
-    /// `d/fd type index seq` → what a text index holds of one entity: its id, each field's length and its terms
+    /// `d/fb type index term start` → a block of the places of the entities holding a term held by too many for its own
+    /// key, from `start` on
+    TextBlock,
+    /// `d/fd type index seq` → what a text index holds of one entity: its terms, each with its positions in each field,
+    /// and its words as written
     TextDocument,
+    /// `d/fl type index block` → each field's length in the entities of one block of places
+    TextLengths,
     /// `d/fs type index` → a text index's statistics: its entities and each field's total length
     TextStats,
-    /// `d/fw type index word` → a stemming text index's words as written: the places of the entities holding the word
+    /// `d/fw type index word` → a stemming text index's word as written: how many entities hold it
     TextWord,
     /// `d/g type index trigram block` → the places of the entities holding the trigram, case folded, in one block of places
     Trigram,
@@ -102,7 +107,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 35] = [
+    pub const ALL: [Prefix; 36] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -119,8 +124,9 @@ impl Prefix {
         Prefix::In,
         Prefix::Between,
         Prefix::TextTerm,
-        Prefix::TextPositions,
+        Prefix::TextBlock,
         Prefix::TextDocument,
+        Prefix::TextLengths,
         Prefix::TextStats,
         Prefix::TextWord,
         Prefix::Trigram,
@@ -159,8 +165,9 @@ impl Prefix {
             Prefix::In => "d/n",
             Prefix::Between => "d/b",
             Prefix::TextTerm => "d/ft",
-            Prefix::TextPositions => "d/fp",
+            Prefix::TextBlock => "d/fb",
             Prefix::TextDocument => "d/fd",
+            Prefix::TextLengths => "d/fl",
             Prefix::TextStats => "d/fs",
             Prefix::TextWord => "d/fw",
             Prefix::Trigram => "d/g",

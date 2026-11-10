@@ -90,12 +90,7 @@ impl KeyWriter {
 
     /// A number. NaN is refused by `Part`'s constructors' callers; here it panics, since no caller should reach it
     pub fn number(&mut self, n: f64) -> &mut Self {
-        assert!(!n.is_nan(), "a key holds no NaN");
-        let n = if n == 0.0 { 0.0 } else { n };
-        let bits = n.to_bits();
-        let ordered = if n.is_sign_negative() { !bits } else { bits ^ (1 << 63) };
-        self.bytes.push(NUMBER);
-        self.bytes.extend_from_slice(&ordered.to_be_bytes());
+        self.bytes.extend_from_slice(&number_part(n));
         self
     }
 
@@ -158,6 +153,38 @@ impl KeyWriter {
     pub fn to_vec(&self) -> Vec<u8> {
         self.bytes.clone()
     }
+}
+
+/// A number part's bytes: its tag, then the float with its sign bit flipped, or every bit for a negative one
+fn number_part(n: f64) -> [u8; 9] {
+    assert!(!n.is_nan(), "a key holds no NaN");
+    let n = if n == 0.0 { 0.0 } else { n };
+    let bits = n.to_bits();
+    // mutant-skip: replace \^ with \| in number_part
+    // A number that isn't negative has its sign bit clear, so flipping the bit and setting it are the same
+    let ordered = if n.is_sign_negative() { !bits } else { bits ^ (1 << 63) };
+    let mut part = [NUMBER; 9];
+    part[1..].copy_from_slice(&ordered.to_be_bytes());
+    part
+}
+
+/// `key` with a number as its next part: the key of one of many kept under `key` by a number, built without writing
+/// `key`'s own parts again
+pub fn with_number(key: &[u8], n: f64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(key.len() + 9);
+    out.extend_from_slice(key);
+    out.extend_from_slice(&number_part(n));
+    out
+}
+
+/// The number a key's last part is, for a key the caller knows to end with one: read from its last nine bytes, the
+/// parts before them left undecoded
+pub fn last_number(key: &[u8]) -> Option<f64> {
+    let part = key.len().checked_sub(9).map(|at| &key[at..])?;
+    let (&NUMBER, raw) = part.split_first()? else { return None };
+    let ordered = u64::from_be_bytes(raw.try_into().ok()?);
+    let bits = if ordered & (1 << 63) != 0 { ordered ^ (1 << 63) } else { !ordered };
+    Some(f64::from_bits(bits))
 }
 
 /// A key of these parts
@@ -296,6 +323,20 @@ mod tests {
             let extends = other.len() > prefix.len() && other[..prefix.len()] == prefix[..];
             prop_assert_eq!(low.as_slice() <= key.as_slice() && key.as_slice() < high.as_slice(), extends);
         }
+    }
+
+    #[test]
+    fn a_number_added_to_a_key_is_its_next_part_and_is_read_back_from_its_end() {
+        let key = encode(&[Part::from("d/fb"), Part::from("Note")]);
+        for n in [0.0, 1.0, 255.0, 256.0, 9_007_199_254_740_991.0, -3.5] {
+            let with = with_number(&key, n);
+            assert_eq!(with, encode(&[Part::from("d/fb"), Part::from("Note"), Part::Number(n)]));
+            assert_eq!(last_number(&with), Some(n));
+        }
+        // A key that ends with a string, or is too short to hold a number, ends with none
+        assert_eq!(last_number(&key), None);
+        assert_eq!(last_number(&[NUMBER, 0, 0]), None);
+        assert_eq!(last_number(&[]), None);
     }
 
     #[test]

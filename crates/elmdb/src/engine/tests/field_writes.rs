@@ -68,7 +68,8 @@ fn a_field_write_reads_what_it_replaces_and_what_its_indexes_need_and_nothing_tw
     assert_eq!(reads_of("note", "changed"), 1);
     // A value index's: that, the entity's place, and the undo log's reads of the index entry it removes and the one it adds
     assert_eq!(reads_of("status", "done"), 4);
-    // A text index's: that, the place, the stored document and statistics; for the two terms it loses and the two it
-    // gains, their postings and positions (a lost term's positions read by the undo log); and the kept term's positions
-    assert_eq!(reads_of("body", "other words entirely"), 13);
+    // A text index's: that, the place, the stored document, the lengths of its block of places and the statistics; and
+    // for the two terms it loses and the two it gains, their places. The term it keeps, as often as it held it, is read
+    // nowhere
+    assert_eq!(reads_of("body", "other words entirely"), 9);
 }

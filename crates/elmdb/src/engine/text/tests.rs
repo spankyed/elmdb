@@ -272,6 +272,17 @@ fn recency_halves_a_score_every_half_life() {
     );
     // Equal texts tie, in creation order
     assert_eq!(search(&db, "Message", "deploy", json!({})), json!(["Message-old", "Message-new"]));
+    // Among a set, in the set's order
+    let among = read(
+        &db,
+        json!({ "read": "query", "plan": {
+            "start": { "from": "ids", "ids": ["Message-new", "Message-old"] },
+            "steps": [{ "step": "search", "query": "deploy" }],
+            "terminal": { "answer": "ids" }
+        } }),
+    )
+    .unwrap();
+    assert_eq!(among["ids"], json!(["Message-new", "Message-old"]));
     let recent = json!({ "recency": { "field": "at", "halfLife": 10_000, "now": 100_000 } });
     assert_eq!(search(&db, "Message", "deploy", recent), json!(["Message-new", "Message-old"]));
 }
@@ -544,7 +555,9 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
             let mut n = 0;
             for prefix in [
                 crate::format::Prefix::TextTerm,
+                crate::format::Prefix::TextBlock,
                 crate::format::Prefix::TextDocument,
+                crate::format::Prefix::TextLengths,
                 crate::format::Prefix::TextStats,
                 crate::format::Prefix::TextWord,
             ] {
@@ -748,6 +761,9 @@ fn a_score_is_bm25_over_the_weighted_fields_searched() {
     let mut any = exact.clone();
     any["any"] = json!(true);
     assert_scores(scores(&db, "Doc", "\"beta alpha\" alpha", any), &[("Doc-a", alpha)]);
+    // A phrase that does is scored as its words are, each wherever the entity holds it
+    let phrase = alpha + bm25(1.0, 2.0, 2.0, 5.0, 5.5);
+    assert_scores(scores(&db, "Doc", "\"alpha beta\"", exact), &[("Doc-a", phrase)]);
 }
 
 #[test]
@@ -839,4 +855,184 @@ fn a_word_longer_than_any_term_by_more_than_two_takes_no_edits() {
     let two_more = format!("{longest}bb");
     assert_eq!(search(&db, "Message", &two_more, json!({})), json!(["Message-1"]), "two edits away, and found");
     assert_eq!(search(&db, "Message", &format!("{two_more}b"), json!({})), json!([]));
+}
+
+/// How many keys the database holds under a prefix
+fn keys_under(db: &Database, prefix: crate::format::Prefix) -> usize {
+    db.snapshot(|s| {
+        use crate::engine::unit::Read as _;
+        let mut n = 0;
+        s.visit(&prefix.key().to_vec(), |_, _| {
+            n += 1;
+            true
+        })?;
+        Ok(n)
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_as_it_was_filed() {
+    use crate::format::Prefix;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // 700 messages hold "common"; one of them holds "zebra" twice, in a text of four words where the others' have two
+    let text = |i: usize| if i == 650 { format!("zebra zebra common w{i}") } else { format!("common w{i}") };
+    let id = |i: usize| format!("Message-{i:03}");
+    write(&db, (0..700).map(|i| create("Message", &id(i), json!({ "text": text(i) }))).collect());
+    assert!(keys_under(&db, Prefix::TextBlock) >= 3, "700 places are more than two blocks hold");
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let exact = json!({ "fuzzy": false });
+    let holding = |word: &str| {
+        let mut ids: Vec<String> = search(&db, "Message", word, exact.clone())
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().unwrap().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(holding("common"), (0..700).map(id).collect::<Vec<_>>());
+    // How many hold a term in blocks is read from its blocks: the most held of the words "co" starts
+    write(&db, vec![create("Message", "Message-cold", json!({ "text": "cold" }))]);
+    let answer = read(&db, json!({ "read": "suggest", "type": "Message", "term": "co" })).unwrap();
+    assert_eq!(answer["completions"], json!(["common", "cold"]));
+    write(&db, vec![json!({ "op": "destroy", "id": "Message-cold" })]);
+    // A match's lengths are read from the block of places it is in, here not the first
+    let average = (699.0 * 2.0 + 4.0) / 700.0;
+    let twice = id(650);
+    assert_scores(
+        scores(&db, "Message", "zebra", exact.clone()),
+        &[(twice.as_str(), bm25(2.0, 1.0, 700.0, 4.0, average))],
+    );
+
+    // Each of a word's matches reads its own lengths, whichever block of places the match before it was in
+    let every: std::collections::HashMap<String, f64> =
+        scores(&db, "Message", "common", exact.clone()).into_iter().collect();
+    assert_eq!(every.len(), 700);
+    for (i, length) in [(0, 2.0), (511, 2.0), (650, 4.0), (699, 2.0)] {
+        let expected = bm25(1.0, 700.0, 700.0, length, average);
+        assert!((every[&id(i)] - expected).abs() < 1e-9, "{}: {}, not {expected}", id(i), every[&id(i)]);
+    }
+
+    // Entities filed under other terms and destroyed, inside blocks and at their ends
+    let mut ops: Vec<Json> = (0..700)
+        .step_by(3)
+        .map(|i| json!({ "op": "set", "id": id(i), "fields": { "text": format!("other w{i}") } }))
+        .collect();
+    ops.extend((1..700).step_by(7).map(|i| json!({ "op": "destroy", "id": id(i) })));
+    write(&db, ops);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    let kept: Vec<usize> = (0..700).filter(|i| i % 3 != 0 && i % 7 != 1).collect();
+    assert_eq!(kept.len(), 399);
+    let ids_kept: Vec<String> = kept.iter().map(|i| id(*i)).collect();
+    assert_eq!(holding("common"), ids_kept);
+    // A rebuild of the index, and of everything, derives the keys the writes left
+    db.rebuild(Some(("Message", "text"))).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(holding("common"), ids_kept);
+    assert!(keys_under(&db, Prefix::TextBlock) >= 2);
+
+    // Few enough hold it for its own key again: no term is in blocks
+    let fewer: Vec<Json> =
+        kept[..199].iter().map(|i| json!({ "op": "delete", "id": id(*i), "field": "text" })).collect();
+    write(&db, fewer);
+    assert_eq!(keys_under(&db, Prefix::TextBlock), 0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(holding("common"), ids_kept[199..]);
+}
+
+#[test]
+fn a_hit_names_the_terms_and_fields_its_clauses_matched_it_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![create("Doc", "Doc-a", json!({ "title": "alpha gamma", "body": "alpha beta" }))]);
+    let marked = |query: &str, options: Json| {
+        let plan = json!({
+            "start": { "from": "types", "types": ["Doc"] },
+            "steps": [{ "step": "search", "query": query, "index": "text", "options": options }],
+            "terminal": { "answer": "hits", "highlights": true }
+        });
+        let answer = read(&db, json!({ "read": "query", "plan": plan })).unwrap();
+        (answer["hits"][0]["terms"].clone(), answer["hits"][0]["highlights"].clone())
+    };
+    let exact = json!({ "fuzzy": false });
+    // Held in both fields, and marked in both
+    assert_eq!(
+        marked("alpha", exact.clone()),
+        (json!(["alpha"]), json!({ "title": [[0, 0, 5]], "body": [[0, 0, 5]] }))
+    );
+    let both = json!({ "fuzzy": false, "fields": ["title", "body"] });
+    assert_eq!(marked("alpha", both), (json!(["alpha"]), json!({ "title": [[0, 0, 5]], "body": [[0, 0, 5]] })));
+    // A clause held to one field marks it there alone, and a search of some fields marks none of the others
+    assert_eq!(marked("title:alpha", exact.clone()), (json!(["alpha"]), json!({ "title": [[0, 0, 5]] })));
+    let body = json!({ "fuzzy": false, "fields": ["body"] });
+    assert_eq!(marked("alpha", body), (json!(["alpha"]), json!({ "body": [[0, 0, 5]] })));
+    // Each clause's terms, where each matched: "beta" only in the body, and "gamma" asked for only in the title
+    assert_eq!(
+        marked("beta title:gamma", exact.clone()),
+        (json!(["beta", "gamma"]), json!({ "title": [[0, 6, 11]], "body": [[0, 6, 10]] }))
+    );
+    // A term of a clause the entity doesn't match is none of its hit's: "alpha gamma" is no phrase of its body
+    let mut any = exact;
+    any["any"] = json!(true);
+    assert_eq!(marked("beta body:\"alpha gamma\"", any), (json!(["beta"]), json!({ "body": [[0, 6, 10]] })));
+}
+
+#[test]
+fn a_stemming_index_counts_the_entities_holding_each_word_as_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let completions = || {
+        read(&db, json!({ "read": "suggest", "type": "Doc", "index": "stemmed", "term": "run" })).unwrap()["completions"]
+            .clone()
+    };
+    write(
+        &db,
+        vec![
+            create("Doc", "Doc-1", json!({ "body": "running running" })),
+            create("Doc", "Doc-2", json!({ "body": "runner" })),
+            create("Doc", "Doc-3", json!({ "body": "runner up" })),
+        ],
+    );
+    // Most held first: an entity counts once however often it holds the word
+    assert_eq!(completions(), json!(["runner", "running"]));
+    write(
+        &db,
+        vec![
+            json!({ "op": "destroy", "id": "Doc-2" }),
+            json!({ "op": "set", "id": "Doc-3", "fields": { "body": "running late" } }),
+        ],
+    );
+    assert_eq!(completions(), json!(["running"]));
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    write(&db, vec![create("Doc", "Doc-4", json!({ "body": "runner" }))]);
+    assert_eq!(completions(), json!(["running", "runner"]));
+    db.rebuild(Some(("Doc", "stemmed"))).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    assert_eq!(completions(), json!(["running", "runner"]));
+}
+
+#[test]
+fn a_term_an_entity_holds_more_or_less_often_than_it_did_is_filed_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    let exact = json!({ "fuzzy": false });
+    // Message-3 holds "lmdb" three times among six words, then once among two, then twice among three
+    let score = |frequency: f64, length: f64, total: f64| bm25(frequency, 2.0, 4.0, length, total / 4.0);
+    let of_third = || scores(&db, "Message", "lmdb", exact.clone()).into_iter().find(|(id, _)| id == "Message-3");
+    let held = |expected: f64| {
+        let (_, found) = of_third().unwrap();
+        assert!((found - expected).abs() < 1e-9, "{found}, not {expected}");
+        assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+    };
+    held(score(3.0, 6.0, 18.0));
+    write(&db, vec![json!({ "op": "set", "id": "Message-3", "fields": { "text": "lmdb notes" } })]);
+    held(score(1.0, 2.0, 14.0));
+    write(&db, vec![json!({ "op": "set", "id": "Message-3", "fields": { "text": "lmdb about lmdb" } })]);
+    held(score(2.0, 3.0, 15.0));
 }
