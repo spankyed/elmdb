@@ -408,6 +408,9 @@ drained on the database's own thread (`elmdb-index` in a sample), which is where
 the graph, pushing and writing back. `profile-reads` repeats one of the read benchmark's reads (`field`, `page`, `page_projected`, `all_rows`) after its
 fixture is built; `--unstable-presymbolicate` writes the symbols beside the profile, so it can be read without the
 binary. `read-allocations` counts each read's allocations with dhat. Readings: `docs/evidence/read-allocation-codec.md`.
+`search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
+holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
+and prints nothing, for a sampler.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
@@ -421,6 +424,7 @@ evidence is [measurement tooling evidence](../evidence/maintenance-verification-
 ```sh
 cargo xtask compare main --runs 2 -- cargo bench -p elmdb --bench maintenance -- 'graph/rankIndexChange/1e-6'
 cargo xtask compare main -- cargo run --release -p elmdb --example rank-write-stall -- --edges
+cargo xtask compare main -- cargo run --release -p elmdb --example search-cost
 ```
 
 One command on two revisions, in turn and each run in the other order, each in a worktree under `target/compare/` that stays
