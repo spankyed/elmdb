@@ -372,12 +372,11 @@ impl Database {
         Ok(serde_json::to_value(stats).expect("stats serialize"))
     }
 
-    /// Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does
+    /// Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
+    /// value outside the value spec is refused all the same
     #[napi]
     pub fn bulk_load(&self, loads: Buffer) -> Result<(), Code> {
-        let loads: Vec<elmdb::engine::maintenance::Load> = rmp_serde::from_slice(&loads)
-            .map_err(|e| napi::Error::new(Code("BATCH_INVALID"), format!("The loads don't decode: {e}")))?;
-        self.inner.bulk_load(&loads).map_err(to_js)
+        self.inner.bulk_load_bytes(&loads).map_err(to_js)
     }
 
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or

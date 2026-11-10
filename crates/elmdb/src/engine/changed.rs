@@ -89,11 +89,18 @@ impl Touched {
             match event {
                 Event::Created { id } | Event::Destroyed { id } => add(id, Some(event)),
                 Event::Field { id, .. } | Event::Trashed { id } | Event::Restored { id } => add(id, None),
-                Event::Linked { source, target, .. }
-                | Event::Unlinked { source, target, .. }
-                | Event::RelationChanged { source, target, .. } => {
+                Event::Linked { source, target, .. } | Event::Unlinked { source, target, .. } => {
                     add(source, None);
                     add(target, None);
+                }
+                // A relation moved changed the ends it left as an unlink would have
+                Event::RelationChanged { source, target, moved_from, .. } => {
+                    add(source, None);
+                    add(target, None);
+                    if let Some(left) = moved_from {
+                        add(&left.source, None);
+                        add(&left.target, None);
+                    }
                 }
             }
         }
@@ -253,6 +260,25 @@ pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::
     Ok(())
 }
 
+/// Says that the types keeping a change order, `only` these when given, have theirs from `sequence` on: the commit that
+/// replaced their entities whole, as a reset, a replacement and a type's rename do. What such a commit took away left
+/// no tombstone and what it brought carries no stamp of its own, so a reader from before it can't be told what changed,
+/// and `since` answers it as it does one from before the order was built
+pub(crate) fn replaced(
+    txn: &mut heed::RwTxn<'_>,
+    db: Db,
+    schema: &crate::schema::Schema,
+    only: Option<&[&str]>,
+    sequence: u64,
+) -> Result<()> {
+    for (entity_type, def) in &schema.types {
+        if def.change_order && only.is_none_or(|types| types.contains(&entity_type.as_str())) {
+            db.main.put(txn, &built_meta(entity_type), &sequence.to_be_bytes())?;
+        }
+    }
+    Ok(())
+}
+
 /// Whether some type keeping a change order hasn't built it, or one no longer kept still has one: what `settle` does
 pub(crate) fn needs_settling(
     txn: &heed::RoTxn<'_, heed::AnyTls>,
@@ -301,7 +327,7 @@ pub struct Changed {
     /// itself can tell its own commits' from another's
     #[cfg_attr(feature = "codegen", ts(type = "number[]"))]
     pub sequences: Vec<u64>,
-    /// The entities destroyed since, which nothing else names
+    /// The entities destroyed since and not made again, which nothing else names, each once
     pub destroyed: Vec<String>,
     /// Where to read from next
     pub next: Position,
@@ -375,6 +401,7 @@ pub(crate) fn since(
     };
     let through = next.sequence;
     let mut destroyed = Vec::new();
+    let mut named = std::collections::HashSet::new();
     let low = keys::destroyed_through(from.sequence.saturating_add(1));
     for item in db.main.range(txn, &(Bound::Included(low.as_slice()), Bound::Unbounded))? {
         let (key, _) = item?;
@@ -388,7 +415,13 @@ pub(crate) fn since(
         if *sequence as u64 > through {
             break;
         }
-        if types.contains(entity_type.as_str()) {
+        // An entity made again under its id since is there to read, and among `ids` once a page reaches the commit that
+        // made it: named here it would be dropped by a reader that drops what was destroyed. One destroyed in several
+        // commits is named once
+        if types.contains(entity_type.as_str())
+            && db.main.get(txn, &keys::entity(id))?.is_none()
+            && named.insert(id.clone())
+        {
             destroyed.push(id.clone());
         }
     }

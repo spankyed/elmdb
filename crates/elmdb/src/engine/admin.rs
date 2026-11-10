@@ -54,6 +54,21 @@ fn still_declared(what: &str) -> Error {
     )
 }
 
+/// Refuses one of the engine's own fields (`RESERVED_FIELD`). No schema declares `shortCode`, `trashedAt` or the rest,
+/// so none reads as what a removed declaration left or as a name to move data from; each is an entity's identity or
+/// its state, kept by the writes that own it
+fn refuse_engine_field(name: &str, via: &str) -> Result<()> {
+    if !field::RESERVED.contains(&name) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::ReservedField,
+        format!(
+            "{via}: \"{name}\" is the engine's own field, written with the entity it describes: it is neither purged nor renamed"
+        ),
+    ))
+}
+
 pub fn purge(t: &mut Txn<'_, '_>, what: &Purge) -> Result<()> {
     match what {
         Purge::Type(entity_type) => {
@@ -66,6 +81,7 @@ pub fn purge(t: &mut Txn<'_, '_>, what: &Purge) -> Result<()> {
             }
         }
         Purge::Field { entity_type, field: name } => {
+            refuse_engine_field(name, "purge")?;
             if t.schema.types.get(entity_type).is_some_and(|d| d.fields.contains_key(name)) {
                 return Err(still_declared(&format!("{entity_type}.{name}")));
             }
@@ -117,14 +133,27 @@ fn requires_declared(declared: bool, what: &str) -> Result<()> {
     }
 }
 
-/// Moves a field's values on every entity of a type to another name the type declares
+/// Moves a field's values on every entity of a type to another name the type declares. Refused, with nothing moved,
+/// when an entity holds a value under both names: the move would replace the one the new name holds, and which of the
+/// two to keep is the migration's to say
 pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str) -> Result<()> {
+    refuse_engine_field(from, "renameField")?;
+    refuse_engine_field(to, "renameField")?;
     requires_declared(
         t.schema.types.get(entity_type).is_some_and(|d| d.fields.contains_key(to)),
         &format!("{entity_type}.{to}"),
     )?;
     for id in ids_of_type(t, entity_type)? {
         if let Some(value) = entities::get(t, &id, from)? {
+            if entities::get(t, &id, to)?.is_some() {
+                return Err(Error::new(
+                    ErrorCode::SchemaChangeRefused,
+                    format!(
+                        "renameField: {id} holds both {entity_type}.{from} and {entity_type}.{to}, and the move would \
+                         replace the second: delete the one not to keep from each such row, then rename"
+                    ),
+                ));
+            }
             entities::delete_field(t, &id, from)?;
             entities::put_field(t, &id, to, &value)?;
         }
@@ -147,8 +176,10 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 
 /// Renames a type: every entity's id from `<from>-…` to `<to>-…`, and with it the relations' ends, the declared `ref`
 /// fields that named it, and the type's sequences. A string field holding an id that isn't a declared `ref` isn't
-/// rewritten. Derived data is rebuilt from what this leaves
-pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
+/// rewritten. Derived data is rebuilt from what this leaves. `sequence` is the commit's: a reader of what changed in
+/// either type from before it is told to start again, the ids it read having gone and the ones in their place carrying
+/// the stamps those had
+pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
         .into_iter()
@@ -252,5 +283,6 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
             }
         }
     }
+    super::changed::replaced(t.txn, t.db, t.schema, Some(&[from, to]), sequence)?;
     derive::rebuild(t, None)
 }

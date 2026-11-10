@@ -190,6 +190,41 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     Ok(())
 }
 
+/// Writes several fields of one entity as one write does, each as `put_field` writes it. A unique index over more than
+/// one of them is held to the values the write leaves: checked at each field it would be held to values the entity
+/// only passes through, with the fields before written and those after not yet, and refuse a write for values another
+/// entity holds that this one never ends on
+pub fn put_fields(t: &mut Txn<'_, '_>, id: &str, fields: &[(String, Value)]) -> Result<()> {
+    let entity_type = ids::type_of(id).to_owned();
+    let written = |index: &ValueIndex| {
+        // mutant-skip: replace == with != in put_fields
+        // Either counts in an index the write writes one field of, or none. Checked once the write's other fields
+        // are in, the first is held to the values of its own that its field's write would have held it to, and the
+        // second holds nothing new to check: only which of two refusals a write is given tells them from the code
+        index.fields.iter().filter(|f| fields.iter().any(|(name, _)| name == *f)).count()
+    };
+    let spanning: Vec<ValueIndex> = if t.state.unchecked {
+        Vec::new()
+    } else {
+        // mutant-skip: replace > with >= in put_fields (as above)
+        value_indexes(t.schema(), &entity_type).into_iter().filter(|i| i.unique && written(i) > 1).collect()
+    };
+    let held = |t: &Txn<'_, '_>, index: &ValueIndex| -> Result<Vec<Option<Value>>> {
+        index.fields.iter().map(|f| get(t, id, f)).collect()
+    };
+    let before: Vec<Vec<Option<Value>>> = spanning.iter().map(|index| held(t, index)).collect::<Result<_>>()?;
+    t.state.unique_deferred = spanning.iter().map(|index| index.name.clone()).collect();
+    let put = fields.iter().try_for_each(|(name, value)| put_field(t, id, name, value));
+    // Cleared whatever came of the writes: a unit goes on after a refused batch, its next write checked as every one is
+    t.state.unique_deferred.clear();
+    put?;
+    for (index, before) in spanning.iter().zip(&before) {
+        let after = held(t, index)?;
+        check_unique(t, &entity_type, index, id, before, &after)?;
+    }
+    Ok(())
+}
+
 /// Registers a field the entity didn't hold, so the write that finds it registered writes nothing a catalog reads
 fn register_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     let key = keys::field_name(ids::type_of(id), field);
@@ -431,7 +466,7 @@ fn reindex(
                 values_after.push(other);
             }
         }
-        if index.unique && !t.state.unchecked {
+        if index.unique && !t.state.unchecked && !t.state.unique_deferred.contains(&index.name) {
             check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
         }
         let was = entries_of(&values_before);

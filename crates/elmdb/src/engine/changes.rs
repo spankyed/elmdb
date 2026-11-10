@@ -8,14 +8,52 @@ use serde::{Deserialize, Serialize};
 /// One thing a unit did
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    Created { id: String },
-    Field { id: String, field: String },
-    Trashed { id: String },
-    Restored { id: String },
-    Destroyed { id: String },
-    Linked { relation: String, kind: String, source: String, target: String },
-    Unlinked { relation: String, kind: String, source: String, target: String },
-    RelationChanged { relation: String, kind: String, source: String, target: String },
+    Created {
+        id: String,
+    },
+    Field {
+        id: String,
+        field: String,
+    },
+    Trashed {
+        id: String,
+    },
+    Restored {
+        id: String,
+    },
+    Destroyed {
+        id: String,
+    },
+    Linked {
+        relation: String,
+        kind: String,
+        source: String,
+        target: String,
+    },
+    Unlinked {
+        relation: String,
+        kind: String,
+        source: String,
+        target: String,
+    },
+    /// A relation's ends, info or weight replaced: its ends as they are now, and with `moved_from` the ends it had when
+    /// this change moved it
+    RelationChanged {
+        relation: String,
+        kind: String,
+        source: String,
+        target: String,
+        moved_from: Option<Ends>,
+    },
+}
+
+/// The two entities a relation joins
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Ends {
+    pub source: String,
+    pub target: String,
 }
 
 /// What one commit changed
@@ -62,6 +100,11 @@ pub struct RelationChange {
     pub linked: bool,
     pub unlinked: bool,
     pub changed: bool,
+    /// The ends the relation had as the commit began, when the commit moved it to others: the entities that lost the
+    /// edge, which `source` and `target`, the ends it has now, don't name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    pub moved_from: Option<Ends>,
 }
 
 impl ChangeSet {
@@ -98,7 +141,7 @@ impl ChangeSet {
                 }
                 Event::Linked { relation, kind, source, target }
                 | Event::Unlinked { relation, kind, source, target }
-                | Event::RelationChanged { relation, kind, source, target } => {
+                | Event::RelationChanged { relation, kind, source, target, .. } => {
                     let entry = set.relations.entry(relation.clone()).or_insert_with(|| RelationChange {
                         kind: kind.clone(),
                         source: source.clone(),
@@ -106,13 +149,21 @@ impl ChangeSet {
                         linked: false,
                         unlinked: false,
                         changed: false,
+                        moved_from: None,
                     });
                     entry.source = source.clone();
                     entry.target = target.clone();
                     match event {
                         Event::Linked { .. } => entry.linked = true,
                         Event::Unlinked { .. } => entry.unlinked = true,
-                        _ => entry.changed = true,
+                        Event::RelationChanged { moved_from, .. } => {
+                            entry.changed = true;
+                            // The first move's: the ends a later one left are ends this commit gave it
+                            if entry.moved_from.is_none() {
+                                entry.moved_from.clone_from(moved_from);
+                            }
+                        }
+                        _ => unreachable!(),
                     }
                     set.kinds.insert(kind.clone());
                 }

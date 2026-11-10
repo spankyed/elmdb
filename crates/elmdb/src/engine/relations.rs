@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::{Cardinality, RelationDef};
 
-use super::changes::Event;
+use super::changes::{Ends, Event};
 use super::entities;
 use super::keys;
 use super::mirror::EdgeDelta;
@@ -227,8 +227,9 @@ pub fn definition<'s>(t: &'s impl Read, kind: &str) -> Result<&'s RelationDef> {
 
 /// Whether linking `source` to `target` would close a cycle through `kinds`: `target` already reaches `source` over
 /// edges of any of them. Every edge counts, a trashed entity's included, since restoring it would otherwise close the
-/// cycle. A link checks its own kind; the `wouldCreateCycle` read asks the same of the kinds it names
-pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String]) -> Result<bool> {
+/// cycle; all but `moving`, the relation being moved to these ends, whose edge as it is goes with the move. A link
+/// checks its own kind; the `wouldCreateCycle` read asks the same of the kinds it names
+pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String], moving: Option<&str>) -> Result<bool> {
     let mut seen = std::collections::HashSet::new();
     let mut stack = vec![target.to_owned()];
     while let Some(node) = stack.pop() {
@@ -236,8 +237,8 @@ pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String]) 
             return Ok(true);
         }
         for kind in kinds {
-            for (_, far) in edges(t, &node, true, Some(kind))? {
-                if seen.insert(far.clone()) {
+            for (relation, far) in edges(t, &node, true, Some(kind))? {
+                if moving != Some(relation.as_str()) && seen.insert(far.clone()) {
                     stack.push(far);
                 }
             }
@@ -280,7 +281,7 @@ fn check_rules(
             format!("{source} already has a {kind} target, and a {kind} source has one; unlink it first"),
         ));
     }
-    if def.acyclic && would_cycle(t, source, target, &[kind.to_owned()])? {
+    if def.acyclic && would_cycle(t, source, target, &[kind.to_owned()], relation)? {
         return Err(Error::new(ErrorCode::Cycle, format!("Cannot create a {kind} relation that would form a cycle")));
     }
     Ok(())
@@ -402,6 +403,7 @@ pub fn link(
                 kind: kind.to_owned(),
                 source: source.to_owned(),
                 target: target.to_owned(),
+                moved_from: None,
             });
         }
         return Ok((relation, false));
@@ -546,11 +548,13 @@ pub fn update(
         super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
     }
     put(t, relation, &next)?;
+    let moved_from = moved.then_some(Ends { source: before.source, target: before.target });
     t.event(Event::RelationChanged {
         relation: relation.to_owned(),
         kind: next.kind,
         source: next.source,
         target: next.target,
+        moved_from,
     });
     Ok(())
 }

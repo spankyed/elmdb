@@ -191,13 +191,21 @@ impl Database {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
         }
         // The builder works to the schema it was started with, so it stops first and starts again on the one held
-        // after, whichever that is
-        let interrupted = if let Some(mut builder) = self.builder().take() {
+        // after, whichever that is. Told to stop, it is waited for with the schema's lock and the builder's slot let
+        // go: its thread may be delivering a commit of its own to a watch, whose read and whose listener's calls of
+        // the database take them, and would wait on this thread as it waits on theirs. One started meanwhile, by a
+        // commit that left it work, stops the same way; a unit begun meanwhile refuses the change as it does any write
+        let mut interrupted = Vec::new();
+        loop {
+            let running = self.builder().take();
+            let Some(mut builder) = running else { break };
+            builder.tell_to_stop();
+            drop(current);
             builder.stop();
-            builder.pending()
-        } else {
-            Vec::new()
-        };
+            interrupted.extend(builder.pending());
+            run_point!(SCHEMA_BUILDER_STOPPED);
+            current = self.engine_schema.write();
+        }
         let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
             *current = Arc::new(EngineSchema::stored(applied.schema.clone(), applied.hash.clone()));
@@ -356,10 +364,21 @@ impl Database {
                 "A watch listener is running on this thread: close the database after the listener returns",
             ));
         }
-        self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
-        let taken = {
-            // Held while the builder stops and the store is taken, so a schema change can't start a builder after;
-            // released before the wait, which an operation finishing may need it for
+        // A build in progress stops between chunks, for the next open to finish. A builder is waited for with nothing
+        // held that its thread may wait for: it may be delivering a commit of its own to a watch, whose read and whose
+        // listener's calls of the database take the schema's lock, the store's slot and the builder's
+        let stop = |running: Option<crate::engine::Builder>| {
+            if let Some(mut builder) = running {
+                if at_exit {
+                    builder.abandon();
+                } else {
+                    builder.stop();
+                }
+            }
+        };
+        let (taken, running) = {
+            // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
+            // after; released before either is waited for
             let _schema = self.engine_schema.write();
             let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
             match slot.as_ref() {
@@ -367,24 +386,27 @@ impl Database {
                 Some(store) if store.unit_is_open() => return Ok(false),
                 Some(_) => {}
             }
-            // A build in progress stops between chunks, for the next open to finish
-            if let Some(mut builder) = self.builder().take() {
-                if at_exit {
-                    builder.abandon();
-                } else {
-                    builder.stop();
-                }
+            let running = self.builder().take();
+            if let Some(builder) = &running {
+                builder.tell_to_stop();
             }
-            slot.take()
+            (slot.take(), running)
         };
+        stop(running);
         let Some(mut store) = taken else { return Ok(true) };
+        run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
         // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
         let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
-                Ok(store) if at_exit => return store.close_at_exit(wait.unwrap_or_default()).map(|()| true),
-                Ok(store) => return store.close().map(|()| true),
+                Ok(store) => {
+                    // Dropped by the close that closes: one refused for an open unit, or given up on below, leaves the
+                    // database open, and its listener is still to hear the builder's commits
+                    self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+                    let closed = if at_exit { store.close_at_exit(wait.unwrap_or_default()) } else { store.close() };
+                    return closed.map(|()| true);
+                }
                 Err(shared) => {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                         let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
@@ -392,6 +414,11 @@ impl Database {
                         return synced.map(|()| false);
                     }
                     store = shared;
+                    // An operation that took the store before the close, a commit or another process's wake, may queue
+                    // index work after it, which starts a builder that holds the store for as long as it runs: stopped
+                    // as the first was, or the wait for the store would never end
+                    let running = self.builder().take();
+                    stop(running);
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
@@ -415,15 +442,19 @@ struct AppliedSchema {
     commit: Option<crate::store::Commit>,
 }
 
-/// The builder over `schema`, whose rank chunks commit as writes do
+/// The builder over `schema`, whose chunks commit as writes do
 pub(crate) fn start_builder(
     store: &Arc<Store>,
     schema: &Arc<EngineSchema>,
     tracks: &crate::engine::watch::SharedTracks,
     observing: &Arc<RwLock<Arc<EngineSchema>>>,
 ) -> crate::engine::Builder {
-    let commits =
-        crate::engine::drain_commits(Arc::clone(tracks), Arc::clone(store), Arc::clone(observing), Arc::clone(schema));
+    let commits = crate::engine::builder_commits(
+        Arc::clone(tracks),
+        Arc::clone(store),
+        Arc::clone(observing),
+        Arc::clone(schema),
+    );
     crate::engine::Builder::start(Arc::clone(store), Arc::clone(schema), commits)
 }
 

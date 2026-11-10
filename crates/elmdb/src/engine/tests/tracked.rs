@@ -730,3 +730,102 @@ fn a_unit_opened_between_writer_checks_is_refused_without_holding_schema() {
     drop(unit);
     handle.join().unwrap();
 }
+
+/// What a watch's listener does on the builder's thread that needs the schema's lock while another thread changes the
+/// schema or closes
+#[derive(Clone, Copy)]
+enum Needs {
+    /// Writes into what its watch reads before the other thread starts, so the delivery reads again once it returns
+    AnotherRead,
+    /// Calls the database once the other thread has started
+    TheDatabase,
+}
+
+/// A schema change or a close made while the builder's thread delivers a commit of its own to a watch: both wait for
+/// that thread to end, and must not hold what its delivery, or its listener, waits for
+fn ends_beside_a_builder_s_delivery(action: &'static str, needs: Needs) {
+    use std::time::Duration;
+    let schema = |tolerance: f64| {
+        let mut json = super::schema_json();
+        json["ranks"] = json!({ "taskRank": {
+            "types": ["Task"], "relations": ["refs"], "direction": "out", "weights": false, "tolerance": tolerance
+        } });
+        crate::schema::Schema::from_json(&json).unwrap()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let options = crate::OpenOptions { schema: Some(schema(1e-9)), syncs: false, ..Default::default() };
+    let db = Arc::new(Database::open(dir.path(), options).unwrap());
+    write(&db, (0..60).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect())
+        .unwrap();
+    db.wait_for_index_builds().unwrap();
+
+    // The scores, which the builder's drain moves, so its commit's answer differs and the listener is called on the
+    // builder's thread; and a row, which the listener's own write changes
+    let top = json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Task"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }],
+        "terminal": { "answer": "hits" } } });
+    let (go, told) = std::sync::mpsc::channel();
+    let mut go = Some(go);
+    let weak = Arc::downgrade(&db);
+    db.watch(
+        reads(vec![top, row("Task-1")], None),
+        Box::new(move |_| {
+            if std::thread::current().name() != Some("elmdb-index") {
+                return;
+            }
+            let Some(go) = go.take() else { return };
+            let db = weak.upgrade().unwrap();
+            if let Needs::AnotherRead = needs {
+                let named = json!({ "op": "set", "id": "Task-1", "fields": { "title": "the listener's" } });
+                write(&db, vec![named]).unwrap();
+            }
+            go.send(()).unwrap();
+            // Until the other thread has taken what it takes and waits for this one to end
+            std::thread::sleep(Duration::from_millis(300));
+            if let Needs::TheDatabase = needs {
+                // Answered or refused as closed, either way without waiting on the thread that waits for this one
+                let _ = db.read(&reads(vec![row("Task-2")], None));
+            }
+        }),
+    )
+    .unwrap();
+    let links =
+        (1..60).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }));
+    write(&db, links.collect()).unwrap();
+    told.recv_timeout(Duration::from_secs(4)).expect("the builder's drain delivered to the watch");
+
+    let (done, returned) = std::sync::mpsc::channel();
+    let called = Arc::clone(&db);
+    std::thread::spawn(move || {
+        let outcome = match action {
+            "schema" => called.set_schema(schema(1e-8)).map(|_| ()),
+            _ => called.close(),
+        };
+        let _ = done.send(outcome);
+    });
+    returned
+        .recv_timeout(Duration::from_secs(4))
+        .unwrap_or_else(|_| panic!("{action}: it waits for the builder's thread, which waits for what it holds"))
+        .unwrap();
+}
+
+#[test]
+fn a_schema_change_ends_while_the_builder_s_delivery_owes_its_watch_another_read() {
+    ends_beside_a_builder_s_delivery("schema", Needs::AnotherRead);
+}
+
+#[test]
+fn a_schema_change_ends_while_a_listener_on_the_builder_s_thread_calls_the_database() {
+    ends_beside_a_builder_s_delivery("schema", Needs::TheDatabase);
+}
+
+#[test]
+fn a_close_ends_while_the_builder_s_delivery_owes_its_watch_another_read() {
+    ends_beside_a_builder_s_delivery("close", Needs::AnotherRead);
+}
+
+#[test]
+fn a_close_ends_while_a_listener_on_the_builder_s_thread_calls_the_database() {
+    ends_beside_a_builder_s_delivery("close", Needs::TheDatabase);
+}

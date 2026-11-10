@@ -81,14 +81,17 @@ snapshot as a search when it needs to say that search is incomplete.
   terms and words as written — (`d/fd`), the index's statistics (`d/fs`: documents, each field's total length), and,
   in a stemming index, each word as written and the entities holding it (`d/fw`). Every write that changes an indexed
   field refiles the entity from its stored document, in the same unit; an index declared over existing data is built
-  in the background as a value index is, and `check()` and `rebuild()` cover it.
+  in the background as a value index is, a read of it refused until it is (`INDEX_BUILDING`), and `check()` and
+  `rebuild()` cover it.
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
-- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`; `field:word`;
-  `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
+- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves
+  out what holds the word as typed and nothing it only starts or is an edit from; `field:word`; `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
   written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
-  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; the word itself
-  outranks both. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
+  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; one longer than the
+  longest term by more than two is within two edits of none, and takes none. The word itself outranks both: each of a
+  word's matches is scored as a holder of the word, as rare as the entities holding it in any of the forms it matched,
+  the word as typed at the whole of that, a term it starts at 0.8, one edit away at 0.6 and two at 0.4. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
   with the bytes read can match it seeks past them all, so a dictionary of names sharing their first letters (ids,
   paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
@@ -133,9 +136,14 @@ snapshot as a search when it needs to say that search is incomplete.
   chunk both ways (`d/qi`, `d/qm`), a unit's graph changes (`d/qj`) and each index's graph number (`d/qn`). The graphs
   are hannoy's, in LMDB databases of their own (`elmdb.graphs.cosine`, `elmdb.graphs.euclidean`).
 - **Writes** refile a changed entity's chunks in the same unit: a chunk whose text changed loses its embedding and its
-  graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
+  graph item and is pending. A chunk whose text only moved among its entity's chunks, as every one after an
+  inserted or a removed paragraph does, takes its embedding to its new place: an embedding is of a text wherever the
+  text lies, and making one again is the caller's cost. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
 - **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
-  everything else; `check()` and `rebuild()` treat them as derived from the stored embeddings.
+  everything else; each build is seeded by the changes it makes, so one history builds one graph and builds that
+  change other items draw their levels otherwise (seeded alike, a graph grown an embedding a commit holds every item
+  on one level, each an entry point every insert and search measures against);
+  `check()` and `rebuild()` treat them as derived from the stored embeddings.
   Reads within a unit omit journaled items from the committed graph results and merge the current primary
   embeddings for those items, using the graph's distance metric. New embeddings are visible even before the
   first graph is built. Savepoint rollback restores this read view with the journal and primary data; a read

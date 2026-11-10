@@ -174,7 +174,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             Ok(())
         }
         ReadOp::Suggest { entity_type, index, term, limit } => {
-            let found = text::resolve(r.schema(), entity_type, index.as_deref(), "suggest")?;
+            let found = text::resolve_built(r, entity_type, index.as_deref(), "suggest")?;
             let (completions, corrections) = text::search::suggest(r, entity_type, &found, term, *limit as usize)?;
             let mut w = W(out);
             w.map(3);
@@ -225,7 +225,7 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             for kind in kinds {
                 relations::definition(r, kind)?;
             }
-            let cycle = relations::would_cycle(r, source, target, kinds)?;
+            let cycle = relations::would_cycle(r, source, target, kinds, None)?;
             let mut w = W(out);
             w.map(2);
             w.kind("bool");
@@ -1082,7 +1082,7 @@ impl<R: Read> Query<'_, R> {
             among.as_ref().map(|ids| ids.iter().enumerate().rev().map(|(at, id)| (id.as_str(), at)).collect());
         let mut found: Vec<((usize, u64), Hit, String)> = Vec::new();
         for (at, entity_type) in types.iter().enumerate() {
-            let text_index = match text::resolve(self.r.schema(), entity_type, index, "search") {
+            let text_index = match text::resolve_built(self.r, entity_type, index, "search") {
                 Ok(found) => found,
                 // Among a set, a type with no text index holds no match; one with several, none named, is refused
                 Err(_)
@@ -1295,7 +1295,7 @@ impl<R: Read> Query<'_, R> {
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
         let mut texts: Vec<(Hit, String)> = Vec::new();
         for entity_type in &types {
-            let def = match text::resolve(self.r.schema(), entity_type, text_index, "hybrid") {
+            let def = match text::resolve_built(self.r, entity_type, text_index, "hybrid") {
                 Ok(def) => def,
                 Err(_)
                     if among.is_some()

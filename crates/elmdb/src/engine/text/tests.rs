@@ -560,6 +560,99 @@ fn an_index_declared_over_existing_data_is_built_in_the_background_and_dropped_w
 }
 
 #[test]
+fn a_read_of_a_text_index_still_being_built_is_refused_and_answered_once_it_is_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    // As a build leaves it part way: its entries there, its marker not yet
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Message", "text"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let query = |start: Json| {
+        json!({ "read": "query", "plan": {
+            "start": start, "steps": [{ "step": "search", "query": "lmdb" }], "terminal": { "answer": "ids" }
+        } })
+    };
+    let from_the_type = read(&db, query(json!({ "from": "types", "types": ["Message"] }))).unwrap_err();
+    assert_eq!(from_the_type.code, ErrorCode::IndexBuilding, "{from_the_type}");
+    assert!(from_the_type.message.contains("Message") && from_the_type.message.contains("text"), "{from_the_type}");
+    let among_a_set = read(&db, query(json!({ "from": "ids", "ids": ["Message-1", "Message-3"] }))).unwrap_err();
+    assert_eq!(among_a_set.code, ErrorCode::IndexBuilding, "{among_a_set}");
+    let suggested = read(&db, json!({ "read": "suggest", "type": "Message", "term": "lm" })).unwrap_err();
+    assert_eq!(suggested.code, ErrorCode::IndexBuilding, "{suggested}");
+    // A set holding nothing of the type reads no index of it
+    let elsewhere = read(&db, query(json!({ "from": "ids", "ids": [] }))).unwrap();
+    assert_eq!(elsewhere["ids"], json!([]));
+
+    db.rebuild(Some(("Message", "text"))).unwrap();
+    assert_eq!(search(&db, "Message", "lmdb", json!({})), json!(["Message-3", "Message-1"]));
+    assert_eq!(
+        read(&db, json!({ "read": "suggest", "type": "Message", "term": "lm" })).unwrap()["completions"],
+        json!(["lmdb"])
+    );
+}
+
+#[test]
+fn a_reader_refused_while_a_text_index_is_built_hears_of_the_commit_that_ends_the_build() {
+    use std::sync::{Arc, Mutex};
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    db.wait_for_index_builds().unwrap();
+    // As a build leaves it part way: its entries there, its marker not yet
+    db.store()
+        .unwrap()
+        .write(
+            |txn, main| {
+                main.delete(txn, &crate::engine::keys::index_built("Message", "text"))?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    let searching = |track: Option<u32>| -> Reads {
+        let plan = json!({ "start": { "from": "types", "types": ["Message"] },
+            "steps": [{ "step": "search", "query": "lmdb" }], "terminal": { "answer": "ids" } });
+        Reads { reads: vec![serde_json::from_value(json!({ "read": "query", "plan": plan })).unwrap()], track }
+    };
+
+    // One reader under a token, and one a watch
+    assert_eq!(db.read(&searching(Some(7))).unwrap_err().code, ErrorCode::IndexBuilding);
+    let answers = Arc::new(Mutex::new(Vec::<Result<Json, ErrorCode>>::new()));
+    let into = Arc::clone(&answers);
+    db.watch(
+        searching(None),
+        Box::new(move |answer| {
+            into.lock().unwrap().push(answer.as_ref().map(|bytes| decode(bytes)[0]["ids"].clone()).map_err(|e| e.code));
+        }),
+    )
+    .unwrap();
+    assert_eq!(*answers.lock().unwrap(), vec![Err(ErrorCode::IndexBuilding)]);
+    let heard = Arc::new(Mutex::new(Vec::<Vec<u32>>::new()));
+    let hearing = Arc::clone(&heard);
+    db.hear_builder_commits(Some(Arc::new(move |_, touched| hearing.lock().unwrap().push(touched)))).unwrap();
+
+    // The builder ends the build: each read the marker to be refused, and the commit that writes it names them
+    let builders = db.builders().unwrap().expect("a writable database starts builders");
+    builders.queue(vec![crate::engine::Work::Index { entity_type: "Message".into(), index: "text".into() }]);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(*heard.lock().unwrap(), vec![vec![7]], "the build ended and told no reader it had refused");
+    assert_eq!(
+        *answers.lock().unwrap(),
+        vec![Err(ErrorCode::IndexBuilding), Ok(json!(["Message-3", "Message-1"]))],
+        "the watch was left on its refusal"
+    );
+    assert_eq!(decode(&db.read(&searching(Some(7))).unwrap())[0]["ids"], json!(["Message-3", "Message-1"]));
+}
+
+#[test]
 fn a_highlight_names_its_element_by_its_place_in_the_list() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -688,4 +781,62 @@ fn a_highlight_joins_the_terms_it_runs_across() {
     .unwrap();
     // "Database" and "Store" touch, and mark as one
     assert_eq!(answer["hits"][0]["highlights"]["text"], json!([[0, 4, 17], [0, 18, 23]]));
+}
+
+#[test]
+fn the_word_as_typed_outranks_a_rarer_word_an_edit_away_and_a_negation_takes_no_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Message", "Message-1", json!({ "text": "master plan" })),
+            create("Message", "Message-2", json!({ "text": "master copy" })),
+            create("Message", "Message-3", json!({ "text": "muster roll" })),
+        ],
+    );
+    // "muster" is an edit from "master" and the rarer of the two. Each match is scored as a holder of the word asked
+    // for, which all three are: one term of a text of two, the one an edit away at six tenths
+    let held_by_all = bm25(1.0, 3.0, 3.0, 2.0, 2.0);
+    assert_scores(
+        scores(&db, "Message", "master", json!({})),
+        &[("Message-1", held_by_all), ("Message-2", held_by_all), ("Message-3", 0.6 * held_by_all)],
+    );
+    // Matched in no other form, a word is as rare as its one term
+    let exact = json!({ "fuzzy": false });
+    let held_by_two = bm25(1.0, 2.0, 3.0, 2.0, 2.0);
+    assert_scores(scores(&db, "Message", "master", exact), &[("Message-1", held_by_two), ("Message-2", held_by_two)]);
+    // A word started is scored the same way: "ma" starts only "master", "m" starts "muster" too
+    let starts = json!({ "prefix": true, "fuzzy": false });
+    assert_scores(
+        scores(&db, "Message", "m", starts),
+        &[("Message-1", 0.8 * held_by_all), ("Message-2", 0.8 * held_by_all), ("Message-3", 0.8 * held_by_all)],
+    );
+
+    // A negation leaves out the word as typed, and nothing an edit from it
+    assert_eq!(search(&db, "Message", "roll -master", json!({})), json!(["Message-3"]));
+    assert_eq!(search(&db, "Message", "master -muster", json!({})), json!(["Message-1", "Message-2"]));
+    assert_eq!(search(&db, "Message", "roll -muster", json!({})), json!([]));
+}
+
+#[test]
+fn a_word_longer_than_any_term_by_more_than_two_takes_no_edits() {
+    use super::MAX_TERM_BYTES;
+    use super::search::edits;
+    // A searched word: none through four characters, one through eight; a word being typed, through two and six
+    assert_eq!([4, 5, 8, 9].map(|length| edits(length, 4, 8)), [0, 1, 1, 2]);
+    assert_eq!([2, 3, 6, 7].map(|length| edits(length, 2, 6)), [0, 1, 1, 2]);
+    // Two characters more than the longest term is two edits from it; three more is within two of none, so its
+    // automaton, which grows with the word, is never made
+    assert_eq!(edits(MAX_TERM_BYTES + 2, 4, 8), 2);
+    assert_eq!(edits(MAX_TERM_BYTES + 3, 4, 8), 0);
+    assert_eq!(edits(MAX_TERM_BYTES + 3, 2, 6), 0);
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let longest = "b".repeat(MAX_TERM_BYTES);
+    write(&db, vec![create("Message", "Message-1", json!({ "text": longest }))]);
+    let two_more = format!("{longest}bb");
+    assert_eq!(search(&db, "Message", &two_more, json!({})), json!(["Message-1"]), "two edits away, and found");
+    assert_eq!(search(&db, "Message", &format!("{two_more}b"), json!({})), json!([]));
 }

@@ -1,6 +1,11 @@
 //! Ids. An entity's id is `<Type>-<suffix>`: its type is read from it and stored nowhere else, so none can disagree. A
 //! relation's is `Relation-<suffix>`, which no entity type may be named.
 
+/// The longest id a write may bring, in bytes. An id is in every key of its entity and, with the other end's, in each
+/// of its edges': at this length two of them, a kind's name and a place fit a key (`values::MAX_KEY_BYTES`) with room
+/// for a name of over two hundred bytes
+pub const MAX_ID_BYTES: usize = 128;
+
 /// The type an entity's id names
 pub fn type_of(id: &str) -> &str {
     id.split_once('-').map_or(id, |(t, _)| t)

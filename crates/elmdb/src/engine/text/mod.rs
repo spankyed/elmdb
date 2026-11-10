@@ -95,6 +95,25 @@ pub fn resolve(schema: &Schema, entity_type: &str, name: Option<&str>, via: &str
     }
 }
 
+/// The text index a read of a type reads, as `resolve` finds it, refused while it is still being built
+/// (`INDEX_BUILDING`). A value index's and a trigram index's rows can be walked in its place until it is built; a text
+/// index's terms and statistics are the answer themselves, so one read part way through its build would answer from
+/// the entities filed so far and say nothing of the rest
+pub fn resolve_built(r: &impl Read, entity_type: &str, name: Option<&str>, via: &str) -> Result<TextIndex> {
+    let index = resolve(r.schema(), entity_type, name, via)?;
+    if super::derive::is_built(r, entity_type, &index.name)? {
+        return Ok(index);
+    }
+    Err(Error::new(
+        ErrorCode::IndexBuilding,
+        format!(
+            "{via}: {entity_type}'s text index \"{}\" is still being built, and would answer only from the entities it \
+             has reached: wait for the build (waitForIndexBuilds, on a handle open for writing), then read again",
+            index.name
+        ),
+    ))
+}
+
 /// One entity as a text index holds it
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Document {

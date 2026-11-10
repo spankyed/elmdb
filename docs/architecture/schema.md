@@ -278,14 +278,14 @@ stored one.
 
 | Change | What happens |
 |---|---|
-| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built |
+| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built, and a text index, which has no rows to walk in its place, refuses its reads until then (`INDEX_BUILDING`) |
 | A required field added to a type with rows, or a type or relation kind declared again over the data its removal kept | enforced, as a tightened rule is: `check()` reports the rows that break it |
-| An index's definition changed | rebuilt in the background under its name |
+| An index's definition changed | rebuilt in the background under its name; a text index is searched again once it is built, and refused (`INDEX_BUILDING`) until then |
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
 | A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
-| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `stats()` counts it, and `purge` deletes it |
+| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, every write to an entity of a removed type among them (`UNKNOWN_TYPE`), a trash, a destroy and a link at either end included; `stats()` counts it, and `purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic` added, a field dropped from a relation's `key`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
 | A short code prefix changed or removed, a type declared again with another prefix than its stored codes hold or with none, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |

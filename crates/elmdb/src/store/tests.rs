@@ -1132,3 +1132,70 @@ fn a_replacement_that_failed_before_committing_vouches_for_no_later_write() {
     let (txn, _gate, _writer) = store.begin().unwrap();
     assert_eq!(store.commit_txn(txn).unwrap_err().code, ErrorCode::DataReplaced, "a unit refused too");
 }
+
+#[test]
+fn asking_whether_another_committed_adopts_the_map_another_process_grew_the_file_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = 16 << 10;
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * page), ..quiet() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(!store.committed_elsewhere().unwrap());
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let before = store.map_size();
+    // The first this handle hears of the growth, as a handle that asks before it reads does
+    assert!(store.committed_elsewhere().unwrap(), "the child committed, past the map this handle had");
+    assert!(store.map_size() > before);
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
+#[test]
+fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
+    let dir = tempfile::tempdir().unwrap();
+    // Syncs on, and none on the worker's own account, so the one below is the one asked for
+    let patient = Duration::from_secs(600);
+    let options = StoreOptions { sync_idle: patient, sync_interval: patient, ..Default::default() };
+    let store = Arc::new(Store::open(dir.path(), options).unwrap());
+    type Read = fn(&Store);
+    let reads: [(&str, Read); 4] = [
+        ("the map's size", |store| {
+            store.map_size();
+        }),
+        ("whether the map is half used", |store| {
+            store.map_half_used();
+        }),
+        ("whether another handle committed", |store| {
+            store.committed_elsewhere().unwrap();
+        }),
+        ("a sync", |store| store.durable().expect("the store syncs").wait().unwrap()),
+    ];
+    for (what, read) in reads {
+        put(&store, "a", what.as_bytes()).unwrap();
+        // As `grow` and `adopt_map_size` hold it while LMDB unmaps the file and maps it again
+        let resizing = store.gate.write();
+        let (done, waited) = std::sync::mpsc::channel();
+        let reader = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                read(&store);
+                done.send(()).unwrap();
+            })
+        };
+        assert!(waited.recv_timeout(Duration::from_millis(300)).is_err(), "{what} was read while the map was resized");
+        drop(resizing);
+        waited.recv_timeout(Duration::from_secs(30)).unwrap_or_else(|_| panic!("{what} is read once the resize ends"));
+        reader.join().unwrap();
+    }
+    // A process that is exiting waits on no thread, one resizing the map among them: it syncs what it can read
+    put(&store, "a", b"owed").unwrap();
+    let resizing = store.gate.write();
+    assert_eq!(store.sync_owed().unwrap_err().code, ErrorCode::Io);
+    drop(resizing);
+    store.sync_owed().unwrap();
+}

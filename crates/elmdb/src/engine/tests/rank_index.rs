@@ -2763,3 +2763,69 @@ fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
     run_owing_child(&dir);
     heard.recv_timeout(std::time::Duration::from_secs(10)).expect("still woken");
 }
+
+#[test]
+fn a_loaded_weight_that_is_no_number_is_refused_before_the_index_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "rates", "target": "Task-1", "weight": 2.0 })])
+        .unwrap();
+    assert_within_bound(&db, "out", true);
+    // A second arc out of a node that holds one, its weight NaN: the index would have added it to that node's
+    // out-weight and filed the node under a score that is no number
+    let error = db
+        .bulk_load(&[crate::engine::maintenance::Load::Relation {
+            id: "Relation-nan".into(),
+            kind: "rates".into(),
+            source: "Task-0".into(),
+            target: "Task-2".into(),
+            info: None,
+            weight: Some(f64::NAN),
+        }])
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
+    assert_within_bound(&db, "out", true);
+}
+
+#[test]
+fn a_close_that_leaves_the_database_open_leaves_its_builder_s_commits_heard() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let listener: crate::engine::watch::BuilderCommitListener = Arc::new(|_, _| {});
+    db.hear_builder_commits(Some(Arc::clone(&listener))).unwrap();
+
+    // Refused for an open unit
+    let unit = db.begin().unwrap();
+    assert_eq!(db.close().unwrap_err().code, ErrorCode::UnitOpen);
+    assert!(db.is_open());
+    assert_eq!(Arc::strong_count(&listener), 2, "the database is open and holds its listener still");
+    drop(unit);
+
+    // Given up on while an operation holds the store
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
+    assert!(db.is_open());
+    assert_eq!(Arc::strong_count(&listener), 2, "as it is after a close that gave up");
+    drop(held);
+
+    db.close().unwrap();
+    assert_eq!(Arc::strong_count(&listener), 1, "a close that closes drops whoever is listening");
+}
+
+#[test]
+fn a_close_stops_a_builder_started_after_it_stopped_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // As a commit, or another process's wake, does that took the store before the close and queues index work after it
+    let builders = db.builders().unwrap().expect("a writable database starts builders");
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_TAKEN, move || {
+        builders.queue(vec![crate::engine::Work::Rank { name: "taskRank".into() }]);
+    });
+    let closed = db.close_within(Some(std::time::Duration::from_secs(3))).unwrap();
+    assert!(closed, "the close waited on a store the builder it left running held");
+    assert!(!db.is_open());
+}

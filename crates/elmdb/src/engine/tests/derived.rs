@@ -381,6 +381,76 @@ fn a_removed_type_keeps_its_entities_until_purged() {
 }
 
 #[test]
+fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let between_tasks = {
+        let db = open(&dir);
+        let made = write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "title": "t", "body": "b" } }),
+                json!({ "op": "create", "type": "Doc", "id": "Doc-2", "fields": { "title": "u" } }),
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
+                json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-1" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+        match &made[6] {
+            crate::OpResult::Relation { id, .. } => id.clone(),
+            other => panic!("not a relation: {other:?}"),
+        }
+    };
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["types"].as_object_mut().unwrap().remove("Doc");
+    let db = with_schema(&dir, schema).unwrap();
+    let before = (row(&db, "Doc-1").unwrap(), super::edges(&db), db.stats().unwrap());
+    let writes = [
+        ("set", json!({ "op": "set", "id": "Doc-1", "fields": { "title": "x" } })),
+        ("append", json!({ "op": "append", "id": "Doc-1", "field": "body", "value": "c" })),
+        ("merge", json!({ "op": "merge", "id": "Doc-1", "field": "body", "value": { "k": 1 } })),
+        ("delete", json!({ "op": "delete", "id": "Doc-1", "field": "body" })),
+        ("removeAt", json!({ "op": "removeAt", "id": "Doc-1", "field": "body", "index": 0 })),
+        ("removeValue", json!({ "op": "removeValue", "id": "Doc-1", "field": "body", "value": "b" })),
+        ("trash", json!({ "op": "trash", "id": "Doc-1" })),
+        ("restore", json!({ "op": "restore", "id": "Doc-1" })),
+        ("grant", json!({ "op": "grant", "id": "Doc-1", "role": "r2" })),
+        ("revoke", json!({ "op": "revoke", "id": "Doc-1", "role": "r1" })),
+        ("grantExclusive", json!({ "op": "grantExclusive", "id": "Doc-1", "role": "r2", "among": [] })),
+        ("link from it", json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-2" })),
+        ("link to it", json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" })),
+        ("unlink", json!({ "op": "unlink", "source": "Doc-1" })),
+        ("a relation moved from it", json!({ "op": "updateRelation", "relation": between_tasks, "source": "Doc-2" })),
+        ("a relation moved to it", json!({ "op": "updateRelation", "relation": between_tasks, "target": "Doc-2" })),
+        ("destroy", json!({ "op": "destroy", "id": "Doc-1" })),
+    ];
+    for (what, op) in writes {
+        let error = write(&db, vec![op]).unwrap_err();
+        assert_eq!(error.code, ErrorCode::UnknownType, "{what}: {error}");
+        assert!(error.message.contains("Doc"), "{what}: {error}");
+    }
+    assert_eq!((row(&db, "Doc-1").unwrap(), super::edges(&db), db.stats().unwrap()), before, "and none wrote anything");
+    // An edge of a declared kind between two entities of declared types moves and goes as ever
+    write(&db, vec![json!({ "op": "removeRelation", "relation": between_tasks })]).unwrap();
+    db.close().unwrap();
+
+    // Declared again, its entities are written as before
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "set", "id": "Doc-1", "fields": { "title": "x" } }),
+            json!({ "op": "trash", "id": "Doc-2" }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(row(&db, "Doc-1").unwrap()["title"], "x");
+}
+
+#[test]
 fn rename_field_and_rename_relation_move_data_to_a_declared_name() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
@@ -403,6 +473,112 @@ fn rename_field_and_rename_relation_move_data_to_a_declared_name() {
     db.rename_relation("refs", "cites").unwrap();
     assert_eq!(super::edges(&db), ["Note-1|cites|Note-2"]);
     assert_eq!(db.rename_field("Note", "kind", "nope").unwrap_err().code, ErrorCode::SchemaChangeRefused);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn purge_and_rename_field_refuse_the_engine_s_own_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+            json!({ "op": "trash", "id": "Task-2" }),
+            json!({ "op": "grant", "id": "Task-1", "role": "r1" }),
+        ],
+    )
+    .unwrap();
+    let before = (row(&db, "Task-1").unwrap(), row(&db, "Task-2").unwrap());
+    // None is a field the schema declares, so each passed for what a removed declaration left: purging `trashedAt`
+    // restored every row, and renaming `shortCode` took every code
+    for name in ["id", "entityType", "shortCode", "createdAt", "updatedAt", "trashedAt", "role"] {
+        let purge = db.purge(&Purge::Field { entity_type: "Task".into(), field: name.into() }).unwrap_err();
+        assert_eq!(purge.code, ErrorCode::ReservedField, "purge {name}: {purge}");
+        let from = db.rename_field("Task", name, "title").unwrap_err();
+        assert_eq!(from.code, ErrorCode::ReservedField, "rename {name}: {from}");
+        let to = db.rename_field("Task", "title", name).unwrap_err();
+        assert_eq!(to.code, ErrorCode::ReservedField, "rename to {name}: {to}");
+    }
+    assert_eq!((row(&db, "Task-1").unwrap(), row(&db, "Task-2").unwrap()), before);
+    let stats = db.stats().unwrap();
+    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 1), "the trash is as it was");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    fields["heading"] = json!({ "type": "string", "optional": true });
+    let db = with_schema(&dir, notes(fields, json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "only a title" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t", "heading": "h" } }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_field("Note", "title", "heading").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+    assert!(error.message.contains("Note-2"), "{error}");
+    let one = row(&db, "Note-1").unwrap();
+    assert_eq!((one["title"].clone(), one.get("heading")), (json!("only a title"), None), "none of it was moved");
+    let two = row(&db, "Note-2").unwrap();
+    assert_eq!((two["title"].clone(), two["heading"].clone()), (json!("t"), json!("h")));
+}
+
+#[test]
+fn a_write_of_several_fields_of_a_unique_index_is_held_to_the_values_it_leaves() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut fields = base_fields();
+    for name in ["shelf", "row"] {
+        fields[name] = json!({ "type": "string", "optional": true });
+    }
+    let indexes = json!({
+        "pair": { "kind": "value", "fields": ["title", "kind"], "unique": true },
+        "place": { "kind": "value", "fields": ["shelf", "row"] }
+    });
+    let db = with_schema(&dir, notes(fields, indexes)).unwrap();
+    let note = |id: &str, title: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "title": title, "kind": kind } });
+    write(
+        &db,
+        vec![note("Note-1", "b", "w"), note("Note-2", "b", "x"), note("Note-3", "b", "y"), note("Note-4", "c", "y")],
+    )
+    .unwrap();
+    let pair = |id: &str| {
+        let held = row(&db, id).unwrap();
+        (held["title"].as_str().unwrap().to_owned(), held["kind"].as_str().unwrap().to_owned())
+    };
+    let set = |id: &str, title: &str, kind: &str| json!({ "op": "set", "id": id, "fields": { "title": title, "kind": kind } });
+
+    // A write's fields are written in name order. By way of (b, x), which Note-2 holds, once its `kind` is written and
+    // its `title` not yet, to (c, x), which no row does
+    write(&db, vec![set("Note-1", "c", "x")]).unwrap();
+    assert_eq!(pair("Note-1"), ("c".to_owned(), "x".to_owned()));
+    // An upsert of a row that is there writes the same way: by way of Note-4's (c, y) to (d, y)
+    let upsert = json!({ "op": "upsert", "type": "Note", "id": "Note-1", "fields": { "title": "d", "kind": "y" } });
+    write(&db, vec![upsert]).unwrap();
+    assert_eq!(pair("Note-1"), ("d".to_owned(), "y".to_owned()));
+    // Where it ends on values another row holds it is refused, having met none on the way
+    let taken = write(&db, vec![set("Note-1", "b", "x")]).unwrap_err();
+    assert_eq!(taken.code, ErrorCode::Unique, "{taken}");
+    assert!(taken.message.contains("Note-2"), "{taken}");
+    assert_eq!(pair("Note-1"), ("d".to_owned(), "y".to_owned()));
+    // The values it holds already are no other row's
+    write(&db, vec![set("Note-1", "d", "y")]).unwrap();
+    // An index that isn't unique takes the values another row holds, written together as written apart
+    let placed = |id: &str| json!({ "op": "set", "id": id, "fields": { "shelf": "s", "row": "r" } });
+    write(&db, vec![placed("Note-1"), placed("Note-2")]).unwrap();
+
+    // In a unit that goes on after a refusal, the next write is held to the index as every write is
+    let mut unit = db.begin().unwrap();
+    assert_eq!(unit.write(&super::batch(vec![set("Note-1", "b", "x")])).unwrap_err().code, ErrorCode::Unique);
+    let one_field = json!({ "op": "set", "id": "Note-1", "fields": { "title": "b" } });
+    assert_eq!(unit.write(&super::batch(vec![one_field])).unwrap_err().code, ErrorCode::Unique, "(b, y) is Note-3's");
+    unit.abort();
     assert!(db.check().unwrap().is_clean());
 }
 

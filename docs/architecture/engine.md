@@ -13,7 +13,9 @@ matter; `durable()` then resolves at once.
 
 The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
-engine can run it again without the caller. Mapping capacity and physical file length are separate. On Windows,
+engine can run it again without the caller. A growth also keeps out whatever else reads through the map: a sync and
+each read of the environment's sizes wait for it as a transaction does. A map another process grew is adopted by the
+first read to meet it, `committedElsewhere` included. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
 adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
 the writable capacity. Writable mappings retain the normal capacity policy.
@@ -90,13 +92,15 @@ carries nothing a reader depends on, so one lost costs delay, and a commit here 
 accounted for wakes its own listener as the lost wake would have.
 
 **Changed since.** Every entity keeps the sequence of the commit that last wrote it, a field, its trash state or a
-relation at either end, and for a type whose schema sets `changeOrder`, `d/h` keeps its entities in that order
-(`engine/changed.rs`). The order is built at open from the entities the type holds, and dropped when the schema stops
+relation at either end (a relation moved to other ends wrote the ends it left too), and for a type whose schema sets
+`changeOrder`, `d/h` keeps its entities in that order (`engine/changed.rs`). The order is built at open from the entities the type holds, and dropped when the schema stops
 asking. A commit to a type that keeps one costs about a fifth more (`examples/write-cost.rs`, 2026-11-06, load 6 to 9),
 so only a type something reads it from sets it; a type that keeps none pays nothing. `changed_since(types,
 from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
-entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits. A reader
-older than the kept tombstones, of a type with a destroy since, is told the answer is incomplete. A commit stamps what
+entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits, each once,
+and none that was made again under its id, which is among the changed. A reader older than the kept tombstones, of a
+type with a destroy since, is told the answer is incomplete; so is one from before a `reset`, a `replaceWith` or a
+`renameType` of the type, which take entities away with no tombstone and bring others with no stamp of their own. A commit stamps what
 it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
 before it commits, so a reader inside it can say where it will have read to.
 
@@ -121,7 +125,11 @@ and ends, `wouldCreateCycle` (the walk a link's
 `suggest`, `findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its entities have
 held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so a watch over it
 runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
-(`UNKNOWN_INDEX`).
+(`UNKNOWN_INDEX`). A `search`, a `hybrid` or a `suggest` over a text index still being built is refused
+(`INDEX_BUILDING`): its terms and statistics are the answer, with no rows to walk in their place as a value or a trigram
+index's are, so read part way it would answer from the entities filed so far and say nothing of the rest. `waitForIndexBuilds`
+resolves once it is built; a tracked read and a watch are told by the commit that ends the build (below, Change sets
+and watch).
 
 A plan is a scope, a start, steps and a terminal:
 
@@ -270,14 +278,18 @@ The operations:
   field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts
   them; `docs/evidence/next-phase-7.md`).
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role, a missing required field, an id
-  in use, an id of another type, no such entity or relation, a reserved field, a value that isn't a list, an invalid
+  in use, an id of another type, an id longer than 128 bytes or a key the store can't hold however it is made
+  (`VALUE_INVALID`, naming what the key is made of), a write to an entity of a type the schema no longer declares
+  (`UNKNOWN_TYPE`), no such entity or relation, a reserved field, a value that isn't a list, an invalid
   or taken code (a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that would
   pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
   moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
-  to an entity it creates later.
+  to an entity it creates later. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new
+  ends, its edge as it was counting for nothing: one turned round closes no cycle through itself. A write of several
+  fields of one unique index is held to the values it leaves, not to those the entity passes through field by field.
 - **The result** carries each operation's answer (an entity's id, code and whether it was created; a relation's id and
   whether it was linked; a label; `stale`), and the commit's change set.
 
@@ -310,7 +322,8 @@ failure/page-reuse regressions are recorded in [remediation evidence](../evidenc
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
-fields and relation kinds touched, and the commit's **sequence**, a number that only increases for as long as the
+fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
+had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A batch's result carries
 the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
@@ -336,12 +349,17 @@ in either order. `db.sequence` is the last commit's.
 - `Database::hear_builder_commits(listener)` (`hearBuilderCommits` in the binding) tells one listener of each commit the
   index builder makes that wrote into a tracked read, with its sequence and those reads' tokens: a write's result names
   its own tokens, and a builder's commit has no result to read. Without it, a reader tracking a rank index holds what it
-  read until something else writes. A second listener is refused (`ALREADY_LISTENING`). The binding's keeps no process
-  alive, and closing the database drops it.
+  read until something else writes, and one refused while a text index was built (`INDEX_BUILDING`) isn't told the
+  build ended: it read the index's marker to be refused, which the build's last chunk writes. A second listener is refused (`ALREADY_LISTENING`). The binding's keeps no process
+  alive, and closing the database drops it; a close that leaves the database open, refused for an open unit or given
+  up on, leaves it listening.
 - `Database::watch(reads, listener)` is a convenience over tracked reads, in Rust: it runs the reads tracked under a
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
-  after the commit, outside its transaction, on the thread that committed. An unwinding listener panic removes that
+  after the commit, outside its transaction, on the thread that committed, which for a commit of the index builder's
+  is the builder's own. A schema change and a close wait for that thread to end, and wait holding nothing its
+  delivery takes, the schema's lock least of all: a watch's read, and whatever its listener calls of the database,
+  goes on while they wait, and the listener's calls after a close are answered `CLOSED`. An unwinding listener panic removes that
   watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
   its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
   A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does
@@ -412,19 +430,25 @@ unit is open.
   `s` the estimates', which a read reports; once none waits, that is within the index's tolerance. Closing stops the thread between units,
   and the next open goes on.
 - Index builds: an index is read once built (its `d/xb` marker). One added over existing data is built by a thread of
-  the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them; writes keep every
+  the database's in chunks of 1,000 entities, each a unit of its own, so writes go on between them, and committed as a
+  write is, so the chunk that writes the marker tells the tracked reads and the watches that read it; writes keep every
   index all along, so a build fills in only what predates it. A unique index over rows holding the same values is left
   unbuilt, and `indexStatus()` names them. Each chunk seeks after its last entity sequence in both live/trash
   ranges and sorts only their bounded candidates: at most 2 × (chunk size + 1) rows in temporary storage. Cursor
   visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
   a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
-  relations, a role. It refuses a name the schema still declares.
+  relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
+  (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit.
+  `renameField` refuses the engine's own fields (`RESERVED_FIELD`), and refuses, with nothing moved, while an entity
+  holds a value under both names (`SCHEMA_CHANGE_REFUSED`): the move would replace the one the new name holds.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
 - `bulkLoad(loads)`: entities, relations under their own ids, sequences, embeddings and fields taken away, applied in
   one durable unit without a write's checks (no schema, no refusals, a unique index taking duplicates), for imports, a
-  dump's load, and specs that need data the checks would refuse. The derived keys are kept as a write keeps them, and
+  dump's load, and specs that need data the checks would refuse. The value spec is no such check: a value outside it,
+  a weight or a vector's component that isn't finite among them, is refused (`VALUE_INVALID`) and the unit keeps
+  nothing, since every reader of the store takes a stored value to be inside it. The derived keys are kept as a write keeps them, and
   `check()` reports what the rules refuse.
 - `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
   one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).

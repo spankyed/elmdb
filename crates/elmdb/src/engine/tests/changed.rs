@@ -537,3 +537,130 @@ fn a_schema_change_leaves_an_order_built_from_when_it_was_built() {
     assert!(read.complete, "the order reaches back as far as it did before the schema changed");
     assert_eq!(read.ids, ["Task-2"]);
 }
+
+/// The relation a link answered
+fn linked(db: &Database, source: &str, target: &str) -> String {
+    let op = json!({ "op": "link", "source": source, "kind": "refs", "target": target });
+    match &write(db, vec![op]).unwrap()[0] {
+        crate::OpResult::Relation { id, .. } => id.clone(),
+        other => panic!("not a relation: {other:?}"),
+    }
+}
+
+#[test]
+fn a_relation_moved_to_other_ends_moves_the_ends_it_left_and_its_change_names_them() {
+    use crate::engine::changes::Ends;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3"), task("Task-4")]).unwrap();
+    let relation = linked(&db, "Task-1", "Task-2");
+    let ends = |source: &str, target: &str| Ends { source: source.into(), target: target.into() };
+    let moved = |ops: Vec<serde_json::Value>| {
+        let cursor = db.sequence().unwrap();
+        let changes = super::write_changes(&db, ops);
+        (since(&db, &from(cursor), 100).ids, changes.relations[&relation].clone())
+    };
+
+    // Its target alone: the target it left has one edge fewer, as an unlink would leave it
+    let (ids, change) = moved(vec![json!({ "op": "updateRelation", "relation": relation, "target": "Task-3" })]);
+    assert_eq!(ids, ["Task-1", "Task-2", "Task-3"]);
+    assert_eq!((change.source.as_str(), change.target.as_str()), ("Task-1", "Task-3"));
+    assert_eq!(change.moved_from, Some(ends("Task-1", "Task-2")));
+
+    // Both ends, in two moves of one commit: the ends it had as the commit began
+    let (ids, change) = moved(vec![
+        json!({ "op": "updateRelation", "relation": relation, "source": "Task-4" }),
+        json!({ "op": "updateRelation", "relation": relation, "target": "Task-2" }),
+    ]);
+    assert_eq!(ids, ["Task-1", "Task-2", "Task-3", "Task-4"]);
+    assert_eq!((change.source.as_str(), change.target.as_str()), ("Task-4", "Task-2"));
+    assert_eq!(change.moved_from, Some(ends("Task-1", "Task-3")));
+
+    // Its info alone moves the ends it has and names no move
+    let info = json!({ "op": "updateRelation", "relation": relation, "info": { "n": 1 } });
+    let (ids, change) = moved(vec![info]);
+    assert_eq!(ids, ["Task-2", "Task-4"]);
+    assert_eq!(change.moved_from, None);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_reader_from_before_every_row_was_replaced_is_told_to_start_again() {
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let other = open(&source);
+        write(&other, vec![task("Task-other")]).unwrap();
+        other.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
+
+    // A reset destroys what the reader read and keeps no tombstone of it
+    let before = db.sequence().unwrap();
+    db.reset().unwrap();
+    let reset = db.sequence().unwrap();
+    let read = since(&db, &from(before), 100);
+    assert!(read.ids.is_empty() && read.destroyed.is_empty());
+    assert!(!read.complete, "what the reset removed is named nowhere");
+    assert!(since(&db, &from(reset), 100).complete, "a reader from the reset on has missed nothing");
+
+    // A replacement stamps what it brought, and says as little of what it took away
+    write(&db, vec![task("Task-3")]).unwrap();
+    let before = db.sequence().unwrap();
+    db.replace_with(source.path()).unwrap();
+    let replaced = db.sequence().unwrap();
+    let read = since(&db, &from(before), 100);
+    assert_eq!(read.ids, ["Task-other"]);
+    assert!(!read.complete, "Task-3 went without a tombstone");
+    assert!(since(&db, &from(replaced), 100).complete);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_reader_from_before_a_type_was_renamed_is_told_to_start_again() {
+    let mut json = super::schema_json();
+    json["types"]["Memo"] = json["types"]["Note"].clone();
+    for entity_type in ["Note", "Memo", "Task"] {
+        json["types"][entity_type]["changeOrder"] = json!(true);
+    }
+    let schema = crate::schema::Schema::from_json(&json).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![note("Note-1"), note("Note-2"), task("Task-1")]).unwrap();
+    let before = db.sequence().unwrap();
+    db.rename_type("Note", "Memo").unwrap();
+    let renamed = db.sequence().unwrap();
+    let of = |types: &[&str], sequence: u64| {
+        let types: Vec<String> = types.iter().map(|t| (*t).to_owned()).collect();
+        db.changed_since(&types, &from(sequence), 100).unwrap()
+    };
+    // The ids a reader held are gone and the ones in their place carry the stamps the old ones had
+    assert!(!of(&["Note"], before).complete, "Note-1 and Note-2 went without a tombstone");
+    assert!(!of(&["Memo"], before).complete, "Memo-1 and Memo-2 came without a stamp");
+    assert!(of(&["Task"], before).complete, "a type the rename left alone reads on");
+    assert!(of(&["Note", "Memo"], renamed).complete, "a reader from the rename on has missed nothing");
+    let all = of(&["Memo"], 0);
+    assert_eq!(all.ids, ["Memo-1", "Memo-2"]);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn an_entity_destroyed_and_made_again_under_its_id_is_read_as_changed_and_not_as_destroyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
+    let cursor = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    write(&db, vec![task("Task-1")]).unwrap();
+    let changed = since(&db, &from(cursor), 100);
+    assert_eq!(changed.ids, ["Task-1"]);
+    assert_eq!(changed.destroyed, Vec::<String>::new(), "it is there: a reader that dropped it would lose it");
+
+    // Destroyed again, and once more after another life: named once
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    write(&db, vec![task("Task-1")]).unwrap();
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    let changed = since(&db, &from(cursor), 100);
+    assert_eq!((changed.ids, changed.destroyed), (vec![], vec!["Task-1".to_owned()]));
+}
