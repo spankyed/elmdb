@@ -5,6 +5,10 @@
 //! while its process has no transaction open. So a read and a write never call each other: a write reads through its
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
+//!
+//! A transaction isn't all that reads through the map. LMDB's meta pages are in it, and a sync, the environment's
+//! sizes and its statistics each read them through a pointer into it, which a growth leaves pointing at nothing between
+//! unmapping the file and mapping it again. Each of those holds the gate for reading too.
 
 mod backup;
 mod idle_reads;
@@ -316,10 +320,11 @@ impl Store {
         }
         let writers = writers::Writers::open(&canonical, options.read_only)?;
         let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
+        let gate = Arc::new(RecursiveRwLock::new(()));
         let commit = (!options.read_only && options.syncs).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer { env: env.clone(), path: canonical.clone() }),
+                Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
                 Box::new(SystemClock),
             )
         });
@@ -342,7 +347,7 @@ impl Store {
             read_only: options.read_only,
             env,
             db,
-            gate: Arc::new(RecursiveRwLock::new(())),
+            gate,
             commit,
             unit: UnitSlot::new(),
             idle,
@@ -647,18 +652,31 @@ impl Store {
     /// Whether another handle has committed since this one last asked, or since it opened. A replacement of every row
     /// that took the sequence back counts as one
     pub(crate) fn committed_elsewhere(&self) -> Result<bool> {
-        let mut accounted = self.accounted.lock();
-        // A transaction of its own rather than an idle read kept for a burst, which may be from before the latest commit
-        let now = {
-            let txn = read_txn(&self.env)?;
+        loop {
+            // The gate before the count of what is accounted for, the order a commit takes them in
+            let gate = self.gate();
+            let mut accounted = self.accounted.lock();
+            // A transaction of its own rather than an idle read kept for a burst, which may be from before the latest
+            // commit. A handle that asks before it reads may hear here first that another process grew the file past
+            // its map, which it adopts as a read does
+            let txn = match read_txn(&self.env) {
+                Ok(txn) => txn,
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    drop(accounted);
+                    drop(gate);
+                    self.adopt_map_size()?;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
             let held = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
-            held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
-        };
-        if now != accounted.through {
-            accounted.elsewhere = true;
-            accounted.through = now;
+            let now = held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+            if now != accounted.through {
+                accounted.elsewhere = true;
+                accounted.through = now;
+            }
+            return Ok(std::mem::take(&mut accounted.elsewhere));
         }
-        Ok(std::mem::take(&mut accounted.elsewhere))
     }
 
     /// The sequence the write transaction `txn` commits as. It holds the environment's one write lock, so the stored
@@ -805,9 +823,7 @@ impl Store {
         self.check_writable()?;
         self.unit.reserve()?;
         let begun = (|| {
-            let info = self.env.info();
-            let page = self.env.unnamed_database_stat().page_size as usize;
-            if (info.last_page_number + 1) * page * 2 > info.map_size {
+            if self.map_half_used() {
                 self.grow()?;
             }
             loop {
@@ -834,6 +850,14 @@ impl Store {
             self.end_unit();
         }
         begun
+    }
+
+    /// Whether more than half the map is used, which a unit about to open grows it for
+    fn map_half_used(&self) -> bool {
+        let _gate = self.gate();
+        let info = self.env.info();
+        let page = self.env.unnamed_database_stat().page_size as usize;
+        (info.last_page_number + 1) * page * 2 > info.map_size
     }
 
     /// The open unit ended, committed or not: whoever waits for the write transaction hears of it
@@ -874,7 +898,8 @@ impl Store {
             return Err(Error::new(ErrorCode::MapFull, format!("A test's database grew past {TEST_MAP_LIMIT} bytes")));
         }
         // SAFETY: the gate held for writing means no read or write runs in this process, and the idle read
-        // transactions are dropped: no transaction is open, which LMDB requires
+        // transactions are dropped: no transaction is open, which LMDB requires. Nor does anything else read through
+        // the map it unmaps: a sync and each read of the environment's sizes hold the gate for reading
         unsafe { self.env.resize(grown) }?;
         Ok(())
     }
@@ -899,6 +924,7 @@ impl Store {
 
     /// The map's size now
     pub fn map_size(&self) -> usize {
+        let _gate = self.gate();
         self.env.info().map_size
     }
 
@@ -927,11 +953,19 @@ impl Store {
         synced
     }
 
-    /// Syncs on the calling thread what group commit owes, without its worker
+    /// Syncs on the calling thread what group commit owes, without its worker, as a process that is exiting does. The
+    /// gate is tried and not waited for: a thread that held it for a growth may be gone with it, and a map being grown
+    /// isn't one to read through
     pub fn sync_owed(&self) -> Result<()> {
         match self.commit {
             Some(_) => {
                 failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
+                let Some(_gate) = self.gate.try_read() else {
+                    return Err(Error::new(
+                        ErrorCode::Io,
+                        "The map was being grown as the process exited, so what was owed wasn't synced",
+                    ));
+                };
                 self.env.force_sync().map_err(Into::into)
             }
             None => Ok(()),
@@ -987,6 +1021,9 @@ impl Drop for Store {
 
 struct EnvSyncer {
     env: Env<WithoutTls>,
+    /// The store's gate: a sync reads the map's meta pages to know how much to flush, on the worker's thread, so it
+    /// keeps a growth out as a transaction does
+    gate: Arc<RecursiveRwLock<()>>,
     /// What a test arms the `SYNC` failpoint for
     #[cfg_attr(not(test), allow(dead_code))]
     path: PathBuf,
@@ -995,6 +1032,7 @@ struct EnvSyncer {
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
         failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
+        let _gate = self.gate.read();
         self.env.force_sync().map_err(Into::into)
     }
 }
