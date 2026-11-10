@@ -644,3 +644,23 @@ fn a_reader_from_before_a_type_was_renamed_is_told_to_start_again() {
     assert_eq!(all.ids, ["Memo-1", "Memo-2"]);
     assert!(db.check().unwrap().is_clean());
 }
+
+#[test]
+fn an_entity_destroyed_and_made_again_under_its_id_is_read_as_changed_and_not_as_destroyed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
+    let cursor = db.sequence().unwrap();
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    write(&db, vec![task("Task-1")]).unwrap();
+    let changed = since(&db, &from(cursor), 100);
+    assert_eq!(changed.ids, ["Task-1"]);
+    assert_eq!(changed.destroyed, Vec::<String>::new(), "it is there: a reader that dropped it would lose it");
+
+    // Destroyed again, and once more after another life: named once
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    write(&db, vec![task("Task-1")]).unwrap();
+    write(&db, vec![json!({ "op": "destroy", "id": "Task-1" })]).unwrap();
+    let changed = since(&db, &from(cursor), 100);
+    assert_eq!((changed.ids, changed.destroyed), (vec![], vec!["Task-1".to_owned()]));
+}

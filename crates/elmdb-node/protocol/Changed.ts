@@ -15,7 +15,7 @@ ids: Array<string>,
  */
 sequences: number[], 
 /**
- * The entities destroyed since, which nothing else names
+ * The entities destroyed since and not made again, which nothing else names, each once
  */
 destroyed: Array<string>, 
 /**

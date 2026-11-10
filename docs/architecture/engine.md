@@ -95,8 +95,10 @@ relation at either end (a relation moved to other ends wrote the ends it left to
 asking. A commit to a type that keeps one costs about a fifth more (`examples/write-cost.rs`, 2026-11-06, load 6 to 9),
 so only a type something reads it from sets it; a type that keeps none pays nothing. `changed_since(types,
 from, limit)` reads what changed after a position, however far behind it is, in pages that may end within one commit's
-entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits. A reader
-older than the kept tombstones, of a type with a destroy since, is told the answer is incomplete. A commit stamps what
+entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits, each once,
+and none that was made again under its id, which is among the changed. A reader older than the kept tombstones, of a
+type with a destroy since, is told the answer is incomplete; so is one from before a `reset`, a `replaceWith` or a
+`renameType` of the type, which take entities away with no tombstone and bring others with no stamp of their own. A commit stamps what
 it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
 before it commits, so a reader inside it can say where it will have read to.
 

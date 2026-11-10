@@ -327,7 +327,7 @@ pub struct Changed {
     /// itself can tell its own commits' from another's
     #[cfg_attr(feature = "codegen", ts(type = "number[]"))]
     pub sequences: Vec<u64>,
-    /// The entities destroyed since, which nothing else names
+    /// The entities destroyed since and not made again, which nothing else names, each once
     pub destroyed: Vec<String>,
     /// Where to read from next
     pub next: Position,
@@ -401,6 +401,7 @@ pub(crate) fn since(
     };
     let through = next.sequence;
     let mut destroyed = Vec::new();
+    let mut named = std::collections::HashSet::new();
     let low = keys::destroyed_through(from.sequence.saturating_add(1));
     for item in db.main.range(txn, &(Bound::Included(low.as_slice()), Bound::Unbounded))? {
         let (key, _) = item?;
@@ -414,7 +415,13 @@ pub(crate) fn since(
         if *sequence as u64 > through {
             break;
         }
-        if types.contains(entity_type.as_str()) {
+        // An entity made again under its id since is there to read, and among `ids` once a page reaches the commit that
+        // made it: named here it would be dropped by a reader that drops what was destroyed. One destroyed in several
+        // commits is named once
+        if types.contains(entity_type.as_str())
+            && db.main.get(txn, &keys::entity(id))?.is_none()
+            && named.insert(id.clone())
+        {
             destroyed.push(id.clone());
         }
     }
