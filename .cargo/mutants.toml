@@ -99,7 +99,7 @@ exclude_re = [
     "crates/elmdb/src/engine/derive.rs:655:.*replace == with != in build_chunk",
     "crates/elmdb/src/engine/entities.rs:208:.*replace == with != in put_fields",
     "crates/elmdb/src/engine/entities.rs:214:.*replace > with >= in put_fields",
-    "crates/elmdb/src/engine/entities.rs:503:.*replace == with != in check_unique",
+    "crates/elmdb/src/engine/entities.rs:526:.*replace == with != in check_unique",
     "crates/elmdb/src/engine/mirror.rs:59:.*delete -",
     "crates/elmdb/src/engine/mirror.rs:166:.*replace > with >= in EdgeMirror::commit",
     "crates/elmdb/src/engine/mod.rs:82:.*delete ! in builder_commits",

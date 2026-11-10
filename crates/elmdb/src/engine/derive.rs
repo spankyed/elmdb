@@ -60,7 +60,7 @@ fn index_entries_into(
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        for parts in entries_of(&fields) {
+        for parts in entries_of(&fields, index.lists()) {
             emit(keys::index_entry(entity_type, &index.name, &parts, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
@@ -68,7 +68,7 @@ fn index_entries_into(
 }
 
 /// What an index that accounts for its entities holds besides its entries: each of these entities it files among
-/// those without a value in its last field, or among those holding a value it doesn't order (`entities::other_of`)
+/// those without a value in its last field, or among those holding a value it doesn't order (`entities::others_of`)
 fn index_others_into(
     r: &impl Read,
     entity_type: &str,
@@ -82,7 +82,7 @@ fn index_others_into(
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        if let Some(other) = entities::other_of(&fields) {
+        for other in entities::others_of(&fields, index.lists()) {
             emit(other.key(entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
@@ -643,7 +643,7 @@ pub fn build_chunk(
     };
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
-        for parts in entries_of(&fields) {
+        for parts in entries_of(&fields, index.lists()) {
             if index.unique {
                 let mut holder = None;
                 t.visit(&keys::index_range(entity_type, name, &parts), |_, v| {
@@ -662,10 +662,10 @@ pub fn build_chunk(
             entities::key_fits(&key, id, entity_type, name)?;
             t.put(&key, &values::encode(&id.as_str().into()))?;
         }
-        if index.accounts()
-            && let Some(other) = entities::other_of(&fields)
-        {
-            t.put(&other.key(entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
+        if index.accounts() {
+            for other in entities::others_of(&fields, index.lists()) {
+                t.put(&other.key(entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
+            }
         }
         last = *seq;
     }

@@ -28,10 +28,13 @@ fn schema_json() -> Json {
                     "k": { "type": "number", "optional": true },
                     "j": { "type": "number", "optional": true },
                     "rank": { "type": "number", "optional": true },
-                    "note": { "type": "string", "optional": true }
+                    "note": { "type": "string", "optional": true },
+                    "tags": { "type": "any", "optional": true }
                 },
                 "indexes": {
                     "statusN": { "kind": "value", "fields": ["status", "n"] },
+                    "tagsStatusN": { "kind": "value", "fields": ["tags", "status", "n"] },
+                    "onceNoteRank": { "kind": "value", "fields": ["note", "rank"], "unique": true },
                     "ownerStatusN": { "kind": "value", "fields": ["owner", "status", "n"] },
                     "byStatus": { "kind": "value", "fields": ["status"] },
                     "byOwner": { "kind": "value", "fields": ["owner"] },
@@ -379,16 +382,17 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     write(&db, vec![set(0, "n", json!(3))]);
     assert_eq!(first(&db, &open), 2, "a number in its place is read in order again");
 
-    // A list in the ordered field, or in the equality's, is a value the index doesn't order at all
-    for (field, value) in [("n", json!([1, 2])), ("status", json!(["open", "done"]))] {
+    // A list in the ordered field is a value the index doesn't order at all, as is one in the equality's field that
+    // holds what no index holds
+    for (field, value) in [("n", json!([1, 2])), ("status", json!(["open", { "a": 1 }]))] {
         write(&db, vec![set(1, field, value.clone())]);
         assert_eq!(filed(&db, Prefix::IndexUnordered, "statusN"), [id(1)], "{field}");
         let both = (first(&db, &open), first(&db, &done));
         let listed = usize::from(field == "status");
-        assert_eq!(both, (holding("open") + listed, holding("done")), "{field}: both are sorted");
+        assert_eq!(both, (holding("open") + listed, holding("done") - listed), "{field}: both are sorted");
         // And a range under the equality is filtered from the equality's own index
         let ranged = |field: &str| json!([done, { "step": "range", "field": field, "atLeast": 0 }]);
-        assert_eq!(same(&db, "live", N, ranged).1 as usize, holding("done"), "{field}");
+        assert_eq!(same(&db, "live", N, ranged).1 as usize, holding("done") - listed, "{field}");
         clean(&db);
         write(&db, vec![set(1, field, if field == "n" { json!(1) } else { json!("done") })]);
         assert_eq!(first(&db, &done), 2, "{field}: gone, the index is read");
@@ -405,6 +409,88 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     let (indexed, visits) = visited(&db, two("n"));
     assert_eq!(indexed, visited(&db, two("m")).0);
     assert!(visits > 1);
+}
+
+#[test]
+fn a_list_before_the_last_field_is_read_under_each_of_its_elements() {
+    let (_dir, db) = open();
+    mixed(&db);
+    // Statuses in lists: one holding two, one holding a status twice, one holding a status no other task has, and
+    // one a list where it had none; and two tasks tagged, one of them under two tags and two statuses
+    write(
+        &db,
+        vec![
+            set(1, "status", json!(["done", "open"])),
+            set(5, "status", json!(["done", "done"])),
+            set(7, "status", json!(["late"])),
+            set(3, "status", json!(["open", "late"])),
+            set(9, "tags", json!(["a", "b"])),
+            set(9, "status", json!(["open", "late"])),
+            set(12, "tags", json!("a")),
+        ],
+    );
+    assert!(filed(&db, Prefix::IndexUnordered, "statusN").is_empty());
+    assert!(filed(&db, Prefix::IndexUnordered, "tagsStatusN").is_empty());
+    let pages = |filters: Vec<Json>, holders: usize| {
+        for descending in [false, true] {
+            let steps = |field: &str| {
+                let mut steps = filters.clone();
+                steps.push(order(field, descending));
+                steps
+            };
+            // Each task once, in the number's order, with as many entries read as there are tasks
+            let (sorted, visits) = same(&db, "live", N, |field| json!(steps(field)));
+            assert_eq!((sorted.len(), visits as usize), (holders, holders), "{filters:?}, descending {descending}");
+            let (first, visits) = same(&db, "live", N, |field| {
+                let mut steps = steps(field);
+                steps.push(limit(2));
+                json!(steps)
+            });
+            let kept = holders.min(2);
+            assert_eq!(
+                (first, visits as usize),
+                (sorted[..kept].to_vec(), kept),
+                "{filters:?}, descending {descending}"
+            );
+            for (at, cursor) in sorted.iter().enumerate() {
+                let (page, visits) = same(&db, "live", N, |field| {
+                    let mut steps = steps(field);
+                    steps.extend([after(cursor), limit(2)]);
+                    json!(steps)
+                });
+                let rest = &sorted[at + 1..];
+                assert_eq!(
+                    (page.as_slice(), visits as usize),
+                    (&rest[..rest.len().min(2)], rest.len().min(2)),
+                    "{cursor}"
+                );
+            }
+        }
+    };
+    // Of the twenty-four, 1 and 5 were done, 3 had no status, and 7 and 9 were done and none
+    pages(vec![is("status", json!("open"))], holding("open") + 3);
+    pages(vec![is("status", json!("done"))], holding("done") - 1);
+    pages(vec![is("status", json!("late"))], 3);
+    pages(vec![is("tags", json!("a")), is("status", json!("open"))], 2);
+    pages(vec![is("status", json!("late")), is("tags", json!("b"))], 1);
+    pages(vec![is("tags", json!("b")), is("status", json!("done"))], 0);
+    // A range under the equality reads the entries between its bounds: 9's number is 1
+    let ranged = |field: &str| json!([is("status", json!("late")), { "step": "range", "field": field, "atLeast": 0, "atMost": 2 }]);
+    assert_eq!(same(&db, "live", N, ranged), (vec![id(9)], 1));
+    clean(&db);
+    // A list made shorter, or a value in its place, leaves the task under what it holds now
+    write(&db, vec![set(9, "status", json!(["late"])), set(3, "status", json!("open")), set(9, "tags", json!(["b"]))]);
+    pages(vec![is("status", json!("open"))], holding("open") + 2);
+    pages(vec![is("status", json!("late"))], 2);
+    pages(vec![is("tags", json!("a")), is("status", json!("open"))], 1);
+    pages(vec![is("tags", json!("b")), is("status", json!("late"))], 1);
+    clean(&db);
+    for index in [Some(("Task", "tagsStatusN")), None] {
+        db.rebuild(index).unwrap();
+        db.wait_for_index_builds().unwrap();
+        clean(&db);
+        pages(vec![is("tags", json!("b")), is("status", json!("late"))], 1);
+    }
 }
 
 #[test]
@@ -453,14 +539,46 @@ fn an_index_on_several_fields_accounts_for_the_tasks_an_equality_can_name() {
     expect(&db, &[2, 0, 3, 8], &[6, 7], "a number removed");
     write(&db, vec![set(6, "n", json!(6)), set(7, "status", json!("open"))]);
     expect(&db, &[2, 0, 3, 8], &[], "values the index orders for those it didn't");
-    write(&db, vec![set(8, "status", json!([1]))]);
-    expect(&db, &[2, 0, 3], &[8], "a list for a status");
+    // A list for a status stands for each of its elements, once each: the task is under every one of them
+    write(&db, vec![set(8, "status", json!(["open", "done", "open"]))]);
+    expect(&db, &[2, 8, 0, 3, 8], &[], "a list for a status");
+    assert_eq!(without(&db, "ownerStatusN"), [id(8), id(8)]);
+    write(&db, vec![set(8, "status", json!(["done"]))]);
+    expect(&db, &[2, 8, 0, 3], &[], "a shorter list");
+    // An empty list names nothing, and one holding what no index holds is not ordered
+    write(&db, vec![set(8, "status", json!([]))]);
+    expect(&db, &[2, 0, 3], &[], "an empty list");
+    assert!(without(&db, "ownerStatusN").is_empty() && unordered(&db, "ownerStatusN").is_empty());
+    write(&db, vec![set(8, "status", json!(["open", [1]]))]);
+    expect(&db, &[2, 0, 3], &[8], "a list in a list");
     assert_eq!(unordered(&db, "ownerStatusN"), [id(8)]);
-    assert!(without(&db, "ownerStatusN").is_empty());
+    write(&db, vec![set(8, "status", json!([1]))]);
+    expect(&db, &[8, 2, 0, 3], &[], "a list of one number");
+    assert_eq!(without(&db, "ownerStatusN"), [id(8)]);
+    // A unique index holds a task to one tuple of values, so a list among them is still a value it doesn't order
+    write(&db, vec![task(10, json!({ "tags": ["a", "b"], "status": "open", "k": 1 }))]);
+    assert!(unordered(&db, "tagsStatusN").is_empty() && unordered(&db, "onceNoteRank").is_empty());
+    let listed = crate::engine::maintenance::Load::Entity {
+        id: id(11),
+        fields: [
+            ("note".to_owned(), rmpv::Value::Array(vec!["x".into(), "y".into()])),
+            ("rank".to_owned(), 1.into()),
+            ("tags".to_owned(), rmpv::Value::Array(vec!["x".into(), "y".into()])),
+            ("status".to_owned(), "open".into()),
+            ("n".to_owned(), 1.into()),
+        ]
+        .into(),
+        trashed: false,
+    };
+    db.bulk_load(&[listed]).unwrap();
+    assert_eq!(unordered(&db, "onceNoteRank"), [id(11)]);
+    assert!(unordered(&db, "tagsStatusN").is_empty());
+    // A load takes a list where the field is declared a string, which a check then says: the task is taken out
+    write(&db, vec![json!({ "op": "destroy", "id": id(10) }), json!({ "op": "destroy", "id": id(11) })]);
 
     // The trash moves nothing, and a destroyed task is filed nowhere
     write(&db, vec![json!({ "op": "trash", "id": id(0) })]);
-    expect(&db, &[2, 0, 3], &[8], "in the trash");
+    expect(&db, &[8, 2, 0, 3], &[], "in the trash");
     for at in [0, 2, 3, 8, 5, 4] {
         write(&db, vec![json!({ "op": "destroy", "id": id(at) })]);
     }
@@ -480,7 +598,7 @@ fn an_index_on_several_fields_declared_over_tasks_or_built_again_accounts_for_th
     }
     let (_dir, db) = open_with(bare);
     mixed(&db);
-    write(&db, vec![set(1, "n", json!([1]))]);
+    write(&db, vec![set(1, "n", json!([1])), set(7, "status", json!(["open", "done"]))]);
     assert!(filed(&db, Prefix::IndexWithout, "statusN").is_empty());
     db.set_schema(Schema::from_json(&schema_json()).unwrap()).unwrap();
     db.wait_for_index_builds().unwrap();
@@ -492,6 +610,11 @@ fn an_index_on_several_fields_declared_over_tasks_or_built_again_accounts_for_th
     write(&db, vec![set(1, "n", json!(1))]);
     let open = is("status", json!("open"));
     assert_eq!(same(&db, "live", N, |field| json!([open, order(field, true), limit(3)])).1, 3, "built, it is read");
+    // The build filed a list of statuses under each: this task's number, false, is the least under either
+    for status in ["open", "done"] {
+        let least = same(&db, "live", N, |field| json!([is("status", json!(status)), order(field, false), limit(1)]));
+        assert_eq!(least, (vec![id(7)], 1), "{status}");
+    }
     for index in [Some(("Task", "statusN")), None] {
         db.rebuild(index).unwrap();
         db.wait_for_index_builds().unwrap();

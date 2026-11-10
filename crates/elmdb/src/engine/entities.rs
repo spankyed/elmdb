@@ -300,11 +300,18 @@ impl ValueIndex {
     /// Whether the index accounts for every entity an equality on each of its fields but the last can name, as a
     /// declared index does: such an entity is in its entries, under what those fields hold and then the boolean, the
     /// number or the string its last field holds, or among those without a value there, or among those holding a
-    /// value it doesn't order (`other_of`). A plan reads those entities in the last field's order from such an index,
+    /// value it doesn't order (`others_of`). A plan reads those entities in the last field's order from such an index,
     /// which leaves none out; for an index on one field they are every entity of its type. The short code's and the
     /// roles' indexes hold only what their lookups read
     pub fn accounts(&self) -> bool {
         !self.fields.iter().any(|name| name == field::SHORT_CODE || name == field::ROLE)
+    }
+
+    /// Whether a list in a field before the index's last stands for each of its elements, as a list in an index on
+    /// one field does: the entity is filed once under each, so an equality on the field names it by any of them.
+    /// A unique index holds an entity to one tuple of values, which a list among them is not
+    pub fn lists(&self) -> bool {
+        !self.unique
     }
 }
 
@@ -328,29 +335,48 @@ impl Other {
     }
 }
 
-/// Where an index that accounts for its entities files one, besides its entries, given what each of the index's
-/// fields holds: among those it doesn't order when a field holds a list or a value it can't hold (a map, bytes, a
-/// timestamp, a string past `MAX_INDEXED_STRING`); among those without a value when the last field is missing or
-/// null and each field before it holds a scalar, which an equality can ask for; and nowhere when the last field
-/// holds a boolean, a number or a string the index holds, which its entry orders, or when a field before it is
-/// missing or null, which no equality names
-pub fn other_of(fields: &[Option<Value>]) -> Option<Other> {
-    let (last, before) = fields.split_last()?;
-    let mut leading = Vec::with_capacity(before.len());
-    let mut named = true;
+/// What an index's fields before its last hold, as the tuples of parts equalities on them can name: one for each
+/// combination of their values, a list standing for each of its distinct elements where `lists` says so
+/// (`ValueIndex::lists`). No tuple when one of the fields is missing, null or an empty list, which no equality
+/// names. None when one holds a value the index can't hold (a map, bytes, a timestamp, a string past
+/// `MAX_INDEXED_STRING`), in itself or in a list, or a list where lists don't stand for their elements
+fn leading_of(before: &[Option<Value>], lists: bool) -> Option<Vec<Vec<Part>>> {
+    let mut tuples: Vec<Vec<Part>> = vec![Vec::new()];
     for value in before {
+        let mut parts: Vec<Part> = Vec::new();
         match value {
-            None | Some(Value::Nil) => named = false,
-            Some(held) => match values::index_part(held) {
-                Some(part) => leading.push(part),
-                None => return Some(Other::Unordered),
-            },
+            None | Some(Value::Nil) => {}
+            Some(Value::Array(items)) if lists => {
+                for item in items {
+                    let part = values::index_part(item)?;
+                    if !parts.contains(&part) {
+                        parts.push(part);
+                    }
+                }
+            }
+            Some(held) => parts.push(values::index_part(held)?),
         }
+        tuples = tuples
+            .iter()
+            .flat_map(|tuple| parts.iter().map(move |part| tuple.iter().chain([part]).cloned().collect()))
+            .collect();
     }
+    Some(tuples)
+}
+
+/// Where an index that accounts for its entities files one, besides its entries, given what each of the index's
+/// fields holds: among those it doesn't order when a field holds a value it can't hold, or the last a list
+/// (`leading_of`); among those without a value when the last field is missing or null, once under each tuple the
+/// fields before it hold, which equalities can ask for; and nowhere when the last field holds a boolean, a number
+/// or a string the index holds, which its entries order, or when a field before it holds nothing an equality names
+pub fn others_of(fields: &[Option<Value>], lists: bool) -> Vec<Other> {
+    let Some((last, before)) = fields.split_last() else { return Vec::new() };
+    let Some(leading) = leading_of(before, lists) else { return vec![Other::Unordered] };
     match last {
-        None | Some(Value::Nil) => named.then_some(Other::Without(leading)),
-        // A list is no scalar an index holds, though its elements are entries
-        Some(held) => values::index_part(held).is_none().then_some(Other::Unordered),
+        None | Some(Value::Nil) => leading.into_iter().map(Other::Without).collect(),
+        // A list is no scalar an index holds in its last field, though in an index on one field its elements are entries
+        Some(held) if values::index_part(held).is_none() => vec![Other::Unordered],
+        Some(_) => Vec::new(),
     }
 }
 
@@ -387,19 +413,16 @@ pub fn value_indexes(schema: &crate::schema::Schema, entity_type: &str) -> Vec<V
 }
 
 /// The parts tuples an index files an entity under, given each of the index's fields' values: a single field's value or
-/// each element of its list; a compound index's fields, each a scalar, together, or nothing when any is missing
-pub fn entries_of(fields: &[Option<Value>]) -> Vec<Vec<Part>> {
+/// each element of its list; a compound index's last field, a scalar, under each tuple its fields before it hold
+/// (`leading_of`), or nothing when the last is missing or one before it names nothing
+pub fn entries_of(fields: &[Option<Value>], lists: bool) -> Vec<Vec<Part>> {
     if let [only] = fields {
         return values::index_parts(only.as_ref()).into_iter().map(|p| vec![p]).collect();
     }
-    let mut tuple = Vec::new();
-    for value in fields {
-        match value.as_ref().and_then(values::index_part) {
-            Some(part) => tuple.push(part),
-            None => return Vec::new(),
-        }
-    }
-    vec![tuple]
+    let Some((last, before)) = fields.split_last() else { return Vec::new() };
+    let Some(part) = last.as_ref().and_then(values::index_part) else { return Vec::new() };
+    let leading = leading_of(before, lists).unwrap_or_default();
+    leading.into_iter().map(|tuple| tuple.into_iter().chain([part.clone()]).collect()).collect()
 }
 
 /// Refuses an index entry whose key is longer than LMDB stores (`VALUE_INVALID`), naming the entity and the index
@@ -558,8 +581,9 @@ fn reindex(
         if index.unique && !t.state.unchecked && !t.state.unique_deferred.contains(&index.name) {
             check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
         }
-        let was = entries_of(&values_before);
-        let now = entries_of(&values_after);
+        let lists = index.lists();
+        let was = entries_of(&values_before, lists);
+        let now = entries_of(&values_after, lists);
         for parts in was.iter().filter(|p| !now.contains(p)) {
             t.del(&keys::index_entry(&entity_type, &index.name, parts, seq))?;
         }
@@ -569,21 +593,19 @@ fn reindex(
             t.put(&key, &values::encode(&id.into()))?;
         }
         if index.accounts() {
-            let was = other_of(&values_before);
-            let now = if going { None } else { other_of(&values_after) };
-            if was != now {
-                if let Some(was) = was {
-                    // An entity just made is filed nowhere until its fields are written (`file_without`), and one
-                    // being destroyed is taken out as the first of an index's fields goes, so there may be nothing
-                    // to remove
-                    let key = was.key(&entity_type, &index.name, seq);
-                    if t.contains(&key)? {
-                        t.del(&key)?;
-                    }
+            let was = others_of(&values_before, lists);
+            let now = if going { Vec::new() } else { others_of(&values_after, lists) };
+            for other in was.iter().filter(|other| !now.contains(other)) {
+                // An entity just made is filed nowhere until its fields are written (`file_without`), and one
+                // being destroyed is taken out as the first of an index's fields goes, so there may be nothing
+                // to remove
+                let key = other.key(&entity_type, &index.name, seq);
+                if t.contains(&key)? {
+                    t.del(&key)?;
                 }
-                if let Some(now) = now {
-                    t.put(&now.key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
-                }
+            }
+            for other in now.iter().filter(|other| !was.contains(other)) {
+                t.put(&other.key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
             }
         }
     }

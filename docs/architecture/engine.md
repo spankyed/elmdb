@@ -235,9 +235,10 @@ an answer:
   from a built index whose last field is the ordered one and whose fields before it are the equalities', whichever
   way round they were asked: its entries for those values, in the last field's order. `where status = open`, then
   `orderBy n`, then `limit 10` reads ten entries of an index on `[status, n]`, and a page after a cursor is sought
-  in it as in any order read from an index. It is read while no entity holds, in a field of the index, a value the
-  index doesn't order, and while its entries under those values hold no string; otherwise the equalities are
-  filtered and their matches sorted.
+  in it as in any order read from an index. A list in an equality's field is under each of its elements
+  (`schema.md`, Indexes), so `where tags = x`, then `orderBy updatedAt`, reads an index on `[tags, updatedAt]`.
+  The index is read while no entity holds, in a field of it, a value it doesn't order, and while its entries under
+  those values hold no string; otherwise the equalities are filtered and their matches sorted.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,
   after the filters a type start begins with, has two ways to its first entities: read the filters and sort what
   they keep, or walk the order from an index on its field alone and test each entity against the filters, which
