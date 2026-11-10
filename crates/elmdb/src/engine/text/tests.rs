@@ -857,6 +857,15 @@ fn a_word_longer_than_any_term_by_more_than_two_takes_no_edits() {
     assert_eq!(search(&db, "Message", &format!("{two_more}b"), json!({})), json!([]));
 }
 
+/// A plan over Message from its type: its answer, and how many entities it read
+fn visited(db: &Database, scope: &str, steps: Json, terminal: Json) -> (Json, u64) {
+    let plan = json!({
+        "scope": scope, "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": terminal
+    });
+    let answer = read(db, json!({ "read": "query", "visits": true, "plan": plan })).unwrap();
+    (answer["answer"].clone(), answer["visited"].as_u64().unwrap())
+}
+
 /// How many keys the database holds under a prefix
 fn keys_under(db: &Database, prefix: crate::format::Prefix) -> usize {
     db.snapshot(|s| {
@@ -943,6 +952,86 @@ fn a_term_more_entities_hold_than_its_key_keeps_is_filed_in_blocks_and_derived_a
     assert_eq!(keys_under(&db, Prefix::TextBlock), 0);
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
     assert_eq!(holding("common"), ids_kept[199..]);
+}
+
+#[test]
+fn a_limit_after_a_search_keeps_its_best_matches_and_reads_only_the_entities_it_hands_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Each holds "lmdb" once, in a text some words longer: the shorter the text, the better the match. Three texts
+    // are the word alone, which tie in the order they were made
+    let id = |i: usize| format!("Message-{i:02}");
+    let longer = |i: usize| if i >= 30 { 0 } else { (i * 7) % 30 };
+    write(
+        &db,
+        (0..32)
+            .map(|i| create("Message", &id(i), json!({ "text": format!("lmdb{}", " filler".repeat(longer(i))) })))
+            .collect(),
+    );
+    let mut best: Vec<usize> = (0..32).collect();
+    best.sort_by_key(|i| (longer(*i), *i));
+    assert_eq!(best[..4], [0, 30, 31, 13]);
+    let ids = |of: &[usize]| json!(of.iter().map(|i| id(*i)).collect::<Vec<_>>());
+    let lmdb = json!({ "step": "search", "query": "lmdb", "options": { "fuzzy": false } });
+    let answer = json!({ "answer": "ids" });
+
+    let (all, read_for_all) = visited(&db, "live", json!([lmdb]), answer.clone());
+    assert_eq!((all["ids"].clone(), read_for_all), (ids(&best), 32));
+    for n in [1, 2, 5, 31, 32, 40] {
+        let (first, entities) = visited(&db, "live", json!([lmdb, { "step": "limit", "n": n }]), answer.clone());
+        let kept = &best[..n.min(32)];
+        assert_eq!((first["ids"].clone(), entities), (ids(kept), kept.len() as u64), "the best {n}");
+    }
+    // A limit further on stops the walk as it stops any, without the search keeping only that many
+    let late = json!([lmdb, { "step": "has", "field": "text" }, { "step": "limit", "n": 3 }]);
+    let (first, entities) = visited(&db, "live", late, answer.clone());
+    assert_eq!((first["ids"].clone(), entities), (ids(&best[..3]), 3));
+    let (first, entities) = visited(&db, "live", json!([lmdb]), json!({ "answer": "first" }));
+    assert_eq!((first["id"].clone(), entities), (json!(id(0)), 1));
+
+    // The trash is left out before any match is kept, so a limit still hands on as many as it takes
+    write(&db, vec![json!({ "op": "trash", "id": id(0) }), json!({ "op": "trash", "id": id(13) })]);
+    let live: Vec<usize> = best.iter().copied().filter(|i| ![0, 13].contains(i)).collect();
+    let three = json!([lmdb, { "step": "limit", "n": 3 }]);
+    let (first, entities) = visited(&db, "live", three.clone(), answer.clone());
+    assert_eq!((first["ids"].clone(), entities), (ids(&live[..3]), 3));
+    let (first, entities) = visited(&db, "trashed", three.clone(), answer.clone());
+    assert_eq!((first["ids"].clone(), entities), (ids(&[0, 13]), 2));
+    let (first, entities) = visited(&db, "withTrashed", three, answer.clone());
+    assert_eq!((first["ids"].clone(), entities), (ids(&best[..3]), 3));
+
+    // A count reads the matches as the index holds them, and no entity
+    let count = json!({ "answer": "count" });
+    for (scope, matches) in [("live", 30), ("trashed", 2), ("withTrashed", 32)] {
+        let (counted, entities) = visited(&db, scope, json!([lmdb]), count.clone());
+        assert_eq!((counted["n"].clone(), entities), (json!(matches), 0), "{scope}");
+    }
+    // After a step past the search it is the walk's again, which reads what it counts
+    let (counted, entities) = visited(&db, "live", json!([lmdb, { "step": "has", "field": "text" }]), count);
+    assert_eq!((counted["n"].clone(), entities), (json!(30), 30));
+}
+
+#[test]
+fn hits_after_a_limit_are_the_best_matches_with_their_scores_and_no_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    let hits = |steps: Json| {
+        let plan = json!({
+            "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": { "answer": "hits" }
+        });
+        let answer = read(&db, json!({ "read": "query", "plan": plan })).unwrap();
+        let hits = answer["hits"].as_array().unwrap().clone();
+        hits.iter()
+            .map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap(), h["terms"].clone()))
+            .collect::<Vec<_>>()
+    };
+    let either = json!({ "step": "search", "query": "database lmdb", "options": { "any": true, "fuzzy": false } });
+    let all = hits(json!([either]));
+    assert_eq!(all.iter().map(|(id, _, _)| id.as_str()).collect::<Vec<_>>(), ["Message-1", "Message-3", "Message-2"]);
+    assert!(all[0].1 > all[1].1 && all[1].1 > all[2].1, "{all:?}");
+    assert_eq!(all[0].2, json!(["database", "lmdb"]));
+    assert_eq!(hits(json!([either, { "step": "limit", "n": 2 }])), all[..2]);
 }
 
 #[test]

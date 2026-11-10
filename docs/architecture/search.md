@@ -107,8 +107,11 @@ snapshot as a search when it needs to say that search is incomplete.
   order. A match's frequencies are read from its terms' places and its lengths from the lengths by place, so scoring
   it reads no key of its own; a phrase's candidates read their documents for positions, and a recency decay reads
   its field of every match.
-- **As a plan step**: `search` after a type start reads the terms' places; after other steps it searches among the
-  entities they reached, in which a type with no text index holds no match. `hits` answers each entity's score,
+- **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
+  other steps it searches among the entities they reached, in which a type with no text index holds no match. Every
+  match is scored, and an entity is read only as the step hands it on, best first: a `limit` straight after the step
+  keeps its best matches as they are scored and reads that many entities, and a `count` straight after it counts the
+  matches as the index holds them, scoring and reading none. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
   `counts` is a facet; `after` pages by the last id of the page before.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a

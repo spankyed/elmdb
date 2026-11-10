@@ -5,10 +5,11 @@
 //! matches visited as they are read; `orderBy` followed by `limit` holds only the first `limit`.
 
 use std::cell::{Cell, RefCell};
-use std::cmp::Ordering;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::cmp::{Ordering, Reverse};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
 use rmpv::Value;
+use roaring::RoaringTreemap;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
@@ -420,6 +421,9 @@ struct Query<'r, R: Read> {
     backward_hop: Cell<Option<usize>>,
     /// The stage of a hop that did, handing its ids on already reversed
     walked_back: Cell<Option<usize>>,
+    /// How many of its matches the stage about to run need keep, the best of them: set by a `limit` as it pulls the
+    /// search straight before it (`Step::Limit`), and taken by whichever stage runs next
+    best: Cell<Option<usize>>,
     /// What the plan's last rank or ranked step says of its scores, for the `hits` terminal
     ranked: RefCell<Option<Scored>>,
 }
@@ -433,6 +437,79 @@ enum Scored {
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
+
+/// A search's match as it is ranked: its score; what breaks a tie, its place in the set searched among, or its
+/// type's among the types searched and then its own in creation order; and which of the indexes searched it is of
+#[derive(PartialEq)]
+struct Ranked {
+    score: f64,
+    first: u64,
+    seq: u64,
+    slot: usize,
+}
+
+impl Ord for Ranked {
+    /// The better match is the greater: a higher score, then an earlier place
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| other.first.cmp(&self.first))
+            .then_with(|| other.seq.cmp(&self.seq))
+    }
+}
+
+impl PartialOrd for Ranked {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// No score is NaN, a sum of products of numbers that aren't, so a match is its own equal as its order needs
+impl Eq for Ranked {}
+
+/// The matches a search hands on: every one, or no more than the best `take` of them, kept as they are scored
+enum Best {
+    Every(Vec<Ranked>),
+    First(usize, BinaryHeap<Reverse<Ranked>>),
+}
+
+impl Best {
+    fn new(take: Option<usize>) -> Self {
+        match take {
+            Some(take) => Best::First(take, BinaryHeap::new()),
+            None => Best::Every(Vec::new()),
+        }
+    }
+
+    #[inline]
+    fn keep(&mut self, ranked: Ranked) {
+        match self {
+            Best::Every(all) => all.push(ranked),
+            Best::First(take, kept) => {
+                // mutant-skip: replace < with <= in Best::keep
+                // One kept past what the limit takes is the worst of those kept, which the limit never asks for
+                if kept.len() < *take {
+                    return kept.push(Reverse(ranked));
+                }
+                // mutant-skip: replace > with >= in Best::keep
+                // No match is another's equal: each has a place among them of its own
+                if kept.peek().is_some_and(|Reverse(least)| ranked > *least) {
+                    kept.pop();
+                    kept.push(Reverse(ranked));
+                }
+            }
+        }
+    }
+
+    /// The matches kept, the best the first out
+    fn into_heap(self) -> BinaryHeap<Ranked> {
+        match self {
+            Best::Every(all) => BinaryHeap::from(all),
+            Best::First(_, kept) => kept.into_iter().map(|Reverse(ranked)| ranked).collect(),
+        }
+    }
+}
 
 /// FxHash, for the maps the graph algorithms build, which hash an id per edge: its keys are fixed, where one keyed per
 /// process would make a read's work differ from run to run, which the instruction counts compare
@@ -554,6 +631,8 @@ impl<R: Read> Query<'_, R> {
 
     /// Stage `upto` of the plan: its start, or its `upto`th step over the stages before it
     fn stage(&self, upto: usize, visit: &mut Visit<'_>) -> Result<bool> {
+        // What a limit asked of this stage, which only a search acts on
+        let take = self.best.take();
         if upto == 0 {
             return match &self.plan.start {
                 Start::Types { types } => {
@@ -962,6 +1041,10 @@ impl<R: Read> Query<'_, R> {
                     }
                     return each(first, visit);
                 }
+                // A search straight before keeps no more of its matches than this takes
+                if matches!(self.plan.steps[..before].last(), Some(Step::Search { .. })) {
+                    self.best.set(Some(take as usize));
+                }
                 let mut taken = 0i64;
                 let mut stopped = false;
                 self.pull(before, &mut |id| {
@@ -987,7 +1070,9 @@ impl<R: Read> Query<'_, R> {
                     Ok(true)
                 })
             }
-            Step::Search { query, index, options } => self.search(before, query, index.as_deref(), options, visit),
+            Step::Search { query, index, options } => {
+                self.search(before, take, query, index.as_deref(), options, visit)
+            }
             Step::Containing { text, index, case_insensitive } => self.containing(
                 before,
                 &Matcher::substring(text, *case_insensitive),
@@ -1050,10 +1135,13 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The entities a search matches, most relevant first, ties in the order they came: a type start's whole types,
-    /// or the set before the step, of whose types one with no text index holds no match
+    /// or the set before the step, of whose types one with no text index holds no match. Every match is scored from
+    /// the index, and an entity is read only as it is handed on: a limit straight after the step keeps its best
+    /// matches as they are scored, and any step stopping the walk leaves the rest unread
     fn search(
         &self,
         before: usize,
+        take: Option<usize>,
         query: &str,
         index: Option<&str>,
         options: &SearchOptions,
@@ -1061,68 +1149,133 @@ impl<R: Read> Query<'_, R> {
     ) -> Result<bool> {
         let raw = text::search::parse(query);
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
-        let among = match self.start_types() {
-            Some(_) if before == 0 => None,
-            _ => Some(self.collect(before)?),
-        };
-        let types: Vec<String> = match &among {
-            None => self.start_types().unwrap_or_default().to_vec(),
-            Some(ids) => {
-                let mut types: Vec<String> = Vec::new();
-                for id in ids {
-                    let t = ids::type_of(id);
-                    if !types.iter().any(|known| known == t) {
-                        types.push(t.to_owned());
-                    }
-                }
-                types
-            }
-        };
+        let (types, among) = self.searched(before)?;
         let order: Option<HashMap<&str, usize>> =
             among.as_ref().map(|ids| ids.iter().enumerate().rev().map(|(at, id)| (id.as_str(), at)).collect());
-        let mut found: Vec<((usize, u64), Hit, String)> = Vec::new();
-        for (at, entity_type) in types.iter().enumerate() {
-            let text_index = match text::resolve_built(self.r, entity_type, index, "search") {
-                Ok(found) => found,
+        let mut indexes = Vec::with_capacity(types.len());
+        for entity_type in &types {
+            match text::resolve_built(self.r, entity_type, index, "search") {
+                Ok(found) => indexes.push((entity_type, found)),
                 // Among a set, a type with no text index holds no match; one with several, none named, is refused
                 Err(_)
                     if among.is_some()
                         && index.is_none()
-                        && text::text_indexes(self.r.schema(), entity_type).is_empty() =>
-                {
-                    continue;
-                }
+                        && text::text_indexes(self.r.schema(), entity_type).is_empty() => {}
                 Err(e) => return Err(e),
-            };
-            let within = match &among {
-                None => None,
+            }
+        }
+        let mut best = Best::new(take);
+        let mut searched = Vec::with_capacity(indexes.len());
+        for (slot, (entity_type, text_index)) in indexes.iter().enumerate() {
+            // Among a set, the id at each of its places of this type; from a type, the places the scope holds
+            let ids = match &among {
                 Some(ids) => {
                     let of_type: Vec<String> =
-                        ids.iter().filter(|id| ids::type_of(id) == entity_type).cloned().collect();
-                    Some(text::search::places(self.r, &of_type)?.into_keys().collect::<roaring::RoaringTreemap>())
+                        ids.iter().filter(|id| ids::type_of(id) == entity_type.as_str()).cloned().collect();
+                    Some(text::search::places(self.r, &of_type)?)
                 }
+                None => None,
             };
-            for hit in text::search::search(self.r, entity_type, &text_index, &raw, options, within.as_ref(), now)? {
-                self.count_visit();
-                let place = match &order {
-                    Some(order) => (order.get(hit.id.as_str()).copied().unwrap_or(usize::MAX), 0),
-                    None if self.admits(&hit.id)? => (at, hit.seq),
-                    None => continue,
+            let (within, without) = match &ids {
+                Some(ids) => (Some(ids.keys().copied().collect::<RoaringTreemap>()), None),
+                None => self.searched_places(entity_type)?,
+            };
+            let matches = text::search::matches(
+                self.r,
+                entity_type,
+                text_index,
+                &raw,
+                options,
+                within.as_ref(),
+                without.as_ref(),
+            )?;
+            matches.scored(self.r, now, |seq, score| {
+                // A tie is broken by the set's own order, or by the types' and then by creation's
+                let first = match (&order, &ids) {
+                    (Some(order), Some(ids)) => {
+                        ids.get(&seq).and_then(|id| order.get(id.as_str())).map_or(u64::MAX, |at| *at as u64)
+                    }
+                    _ => slot as u64,
                 };
-                found.push((place, hit, text_index.name.clone()));
-            }
+                best.keep(Ranked { score, first, seq, slot });
+            })?;
+            searched.push((matches, ids));
         }
-        found.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
-        let ids: Vec<String> = found.iter().map(|(_, hit, _)| hit.id.clone()).collect();
         // These scores replace a rank's before them, so the answer no longer says how that rank settled
         self.ranked.replace(None);
-        {
-            let mut hits = self.hits.borrow_mut();
-            for (_, hit, name) in found {
-                hits.insert(hit.id.clone(), (hit, name));
+        // Each hit recorded as its entity is handed on, and none for a plan whose terminal doesn't answer them
+        let record = matches!(self.plan.terminal, Terminal::Hits { .. });
+        let mut best = best.into_heap();
+        while let Some(Ranked { score, seq, slot, .. }) = best.pop() {
+            let (entity_type, text_index) = &indexes[slot];
+            let (matches, ids) = &searched[slot];
+            self.count_visit();
+            let id = match ids {
+                Some(ids) => ids.get(&seq).cloned(),
+                None => self.at_place(entity_type, seq)?,
+            };
+            let Some(id) = id else { continue };
+            if record {
+                let (terms, fields) = matches.held_by(seq)?;
+                let hit = Hit { id: id.clone(), seq, score, terms, fields };
+                self.hits.borrow_mut().insert(id.clone(), (hit, text_index.name.clone()));
+            }
+            if !visit(&id)? {
+                return Ok(false);
             }
         }
-        each(ids, visit)
+        Ok(true)
+    }
+
+    /// The places of a type a search from it reads, as those to search among and those to leave out: all but the trash
+    /// for a live plan, the trash for a plan of it, and every place for one of both
+    fn searched_places(&self, entity_type: &str) -> Result<(Option<RoaringTreemap>, Option<RoaringTreemap>)> {
+        if self.plan.scope == Scope::WithTrashed {
+            return Ok((None, None));
+        }
+        let mut trashed = RoaringTreemap::new();
+        self.r.visit(&keys::type_range(true, entity_type), |key, _| {
+            trashed.extend(keys::place_of(key));
+            true
+        })?;
+        Ok(if self.plan.scope == Scope::Trashed { (Some(trashed), None) } else { (None, Some(trashed)) })
+    }
+
+    /// The entity of a type at a place, read from the type's entities the plan's scope holds
+    fn at_place(&self, entity_type: &str, seq: u64) -> Result<Option<String>> {
+        let ranges: &[bool] = match self.plan.scope {
+            Scope::Live => &[false],
+            Scope::Trashed => &[true],
+            Scope::WithTrashed => &[false, true],
+        };
+        for &trashed in ranges {
+            if let Some(held) = self.r.get(&keys::of_type(trashed, entity_type, seq))? {
+                return Ok(values::decode(&held)?.as_str().map(str::to_owned));
+            }
+        }
+        Ok(None)
+    }
+
+    /// How many entities of the start's types a search straight after it matches, in the plan's scope: its matches
+    /// counted from the index, none of them scored or read
+    fn matched(&self, types: &[String], query: &str, index: Option<&str>, options: &SearchOptions) -> Result<u64> {
+        let raw = text::search::parse(query);
+        let mut n = 0;
+        for entity_type in types {
+            let text_index = text::resolve_built(self.r, entity_type, index, "search")?;
+            let (within, without) = self.searched_places(entity_type)?;
+            let matches = text::search::matches(
+                self.r,
+                entity_type,
+                &text_index,
+                &raw,
+                options,
+                within.as_ref(),
+                without.as_ref(),
+            )?;
+            n += matches.found.len();
+        }
+        Ok(n)
     }
 
     /// The entities whose text in a trigram index matches, in the order they came. A type start's whole types are
@@ -1591,6 +1744,7 @@ impl<R: Read> Query<'_, R> {
             hits: RefCell::default(),
             backward_hop: Cell::new(None),
             walked_back: Cell::new(None),
+            best: Cell::new(None),
             ranked: RefCell::default(),
         };
         query.pull(1, &mut |_| Ok(true))?;
@@ -2502,6 +2656,7 @@ fn query_with(
         hits: RefCell::new(HashMap::default()),
         backward_hop: Cell::new(None),
         walked_back: Cell::new(None),
+        best: Cell::new(None),
         ranked: RefCell::new(None),
     };
     let last = plan.steps.len();
@@ -2519,13 +2674,17 @@ fn query_with(
         }
         Terminal::Count => {
             // A type's live entities are counted as they enter and leave: one read where any step would need the walk
-            let n = match (&plan.start, plan.scope, plan.steps.is_empty()) {
-                (Start::Types { types }, Scope::Live, true) => {
+            let n = match (&plan.start, plan.scope, plan.steps.as_slice()) {
+                (Start::Types { types }, Scope::Live, []) => {
                     let mut n = 0;
                     for t in types {
                         n += entities::count(r, t)?;
                     }
                     n
+                }
+                // A search's matches are counted as the index holds them, where the walk would score and read each
+                (Start::Types { types }, _, [Step::Search { query, index, options }]) => {
+                    q.matched(types, query, index.as_deref(), options)?
                 }
                 _ => {
                     let mut n = 0u64;
