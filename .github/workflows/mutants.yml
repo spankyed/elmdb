@@ -3,12 +3,25 @@ name: mutants
 # Mutants of what a pull request changes, each crate against its own suite: a survivor fails the job, reported on its line
 # and in the job's summary (docs/architecture/testing.md, Mutation testing). Linux splits the change's mutants
 # over four runners, leaving out code compiled only on another platform; Windows mutates only the code that compiles on
-# Windows alone, and does nothing when the change has none
+# Windows alone, and does nothing when the change has none.
+#
+# A job can't be run again while the run it is in goes on, so one share whose runner was lost waits for the other three.
+# Dispatched by hand on a branch, with the ref the branch merges into and a share, the workflow runs that share alone:
+#   gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 on:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: The ref the branch merges into, as the checkout names it (origin/main)
+        required: true
+        default: origin/main
+      shard:
+        description: The one share of four to run (0 to 3), or none for all four
+        required: false
 
 concurrency:
-  group: mutants-${{ github.event.pull_request.number }}
+  group: mutants-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, inputs.shard) }}
   cancel-in-progress: true
 
 env:
@@ -22,14 +35,19 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-24.04
+    env:
+      # A pull request's merge commit has the base it merges into as its first parent; a dispatch names its base
+      BASE: ${{ inputs.base || 'HEAD^1' }}
     steps:
-      # The merge commit and its first parent, the base it merges into
+      # The merge commit and its first parent; for a dispatch the whole history, where the branch left its base
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '2' }}
+      # Nothing to do for a change of documentation alone, or for a share a dispatch didn't ask for
       - id: scope
+        if: inputs.shard == '' || inputs.shard == matrix.shard
         run: |
-          if git diff --name-only HEAD^1 HEAD | grep -qvE '^docs/|\.md$'; then
+          if git diff --name-only "$BASE...HEAD" | grep -qvE '^docs/|\.md$'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.scope.outputs.code == 'true'
@@ -41,7 +59,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.148
       - if: steps.scope.outputs.code == 'true'
-        run: python3 scripts/mutants-in-diff.py HEAD^1 2 --shard ${{ matrix.shard }}/4
+        run: python3 scripts/mutants-in-diff.py "$BASE" 2 --shard ${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: always() && steps.scope.outputs.code == 'true'
         with:
@@ -51,6 +69,8 @@ jobs:
 
   windows:
     name: mutants in the change (Windows-only code)
+    # A dispatch is for one of Linux's shares
+    if: github.event_name == 'pull_request'
     runs-on: windows-latest
     defaults:
       run:

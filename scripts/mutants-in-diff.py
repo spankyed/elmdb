@@ -1,11 +1,19 @@
 """Mutate what a change touches, each crate against its own suite, and fail on a survivor.
 
-`python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only]`: cargo-mutants over
+`python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only] [--resume]`: cargo-mutants over
 `git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, since `.cargo/mutants.toml` tests
 every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero when a
 mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass): a survivor is a test
 missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed and doesn't fail the run, since
 load alone can cause one. In GitHub Actions each is annotated on its line and written to the step summary.
+
+It also exits nonzero when a mutant failed to build for want of a file or a manifest that reads, and not for what
+the mutant changed: cargo-mutants lists such a mutant as unviable, as it does one whose replacement doesn't compile, but
+it means the copy of the tree the mutant was built in was damaged, and the mutant was never tested.
+
+`--resume` leaves out the mutants an earlier run of the same change caught, so a run that was stopped, or one of
+several shares run again, tests only what is left. What was caught is kept in `target/mutants-in-diff/<crate>/caught.txt`
+beside the diff it was caught in, and forgotten when the diff is another.
 
 `--shard K/N` tests the Kth of N shares of the mutants, so N runners split them; each runs the unmutated baseline,
 which is what its timeouts are measured from. `--windows-only` mutates only the code that compiles on Windows alone,
@@ -35,13 +43,17 @@ parser.add_argument("base")
 parser.add_argument("jobs", nargs="?", default="3")
 parser.add_argument("--shard", help="K/N: the Kth of N shares of the mutants")
 parser.add_argument("--windows-only", action="store_true")
+parser.add_argument("--resume", action="store_true", help="leave out what an earlier run of the same change caught")
 args = parser.parse_args()
 
 root = Path.cwd()
 out = root / "target/mutants-in-diff"
 out.mkdir(parents=True, exist_ok=True)
 diff = out / "branch.diff"
-diff.write_bytes(subprocess.check_output(["git", "diff", f"{args.base}...HEAD"]))
+change = subprocess.check_output(["git", "diff", f"{args.base}...HEAD"])
+# What an earlier run caught holds only for the diff it was caught in
+same_change = diff.exists() and diff.read_bytes() == change
+diff.write_bytes(change)
 changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}...HEAD"], text=True).split()
 
 
@@ -153,23 +165,50 @@ assert crates, "the workspace names no crate"
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
 sharding = ["--shard", args.shard] if args.shard else []
-missed, timeouts = [], []
+# What a build's log says when a file of the tree it was built in is missing or doesn't read
+DAMAGED = re.compile(r"could not parse .* \(manifest\)|failed to (read|load) |No such file or directory")
+
+
+def lines_of(path):
+    return path.read_text().splitlines() if path.exists() else []
+
+
+missed, timeouts, damaged = [], [], []
 for name, path, features in crates:
     files = [f"{path}/**"] if scope is None else [file for file in scope if file.startswith(f"{path}/")]
     if not files:
         continue
     # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
     with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
-    run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), "--in-diff", str(diff),
-                          *(arg for file in files for arg in ("--file", file)), *sharding, *platform_args, "--test-package", name,
-                          *with_features, *SUITE_ARGS.get(name, [])],
+    results = out / name / "mutants.out"
+    # Every mutant a run of this diff caught, the last run's among them, which a run that was stopped never added
+    kept = out / name / "caught.txt"
+    caught = set(lines_of(kept) + lines_of(results / "caught.txt")) if same_change else set()
+    selection = ["--in-diff", str(diff), *(arg for file in files for arg in ("--file", file))]
+    chosen = [*sharding, *platform_args]
+    if args.resume and caught:
+        # The mutants this run would test, less those caught: named one by one, since a share of what is left is not
+        # what is left of a share
+        listed = subprocess.check_output(["cargo", "mutants", "--list", *selection, *chosen], env=env, text=True)
+        left = [mutant for mutant in listed.splitlines() if mutant not in caught]
+        print(f"{name}: {len(left)} mutants left of {len(listed.splitlines())}")
+        if not left:
+            continue
+        chosen = [arg for mutant in left for arg in ("--re", f"^{re.escape(mutant)}$")]
+    run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), *selection, *chosen,
+                          "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])],
                          env=env)
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text("".join(f"{mutant}\n" for mutant in sorted(caught | set(lines_of(results / "caught.txt")))))
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
-    results = out / name / "mutants.out"
     for found, file in ((missed, "missed.txt"), (timeouts, "timeout.txt")):
-        if (results / file).exists():
-            found += (results / file).read_text().splitlines()
+        found += lines_of(results / file)
+    if (results / "outcomes.json").exists():
+        for outcome in json.loads((results / "outcomes.json").read_text())["outcomes"]:
+            log = results / outcome.get("log_path", "")
+            if outcome["summary"] == "Unviable" and log.is_file() and DAMAGED.search(log.read_text(errors="replace")):
+                damaged.append(outcome["scenario"]["Mutant"]["name"])
 
 what = "Windows-only code" if args.windows_only else "the change"
 what += f", shard {args.shard}" if args.shard else ""
@@ -180,6 +219,10 @@ for line in missed:
     print(f"MISSED  {line}")
 for line in timeouts:
     print(f"TIMEOUT {line}")
+for line in damaged:
+    print(f"UNTESTED {line}")
+if damaged:
+    print(f"{len(damaged)} mutants were never tested: the tree they were built in lacked a file. Run again with --resume")
 
 if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
     for line in missed:
@@ -192,4 +235,4 @@ if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
                 written.write(f"### {heading}\n\n" + "".join(f"- `{line}`\n" for line in lines) + "\n")
 
 # A survivor fails the run: kill it with a test, or name it in a `// mutant-skip:` with why it is equivalent
-sys.exit(1 if missed else 0)
+sys.exit(1 if missed or damaged else 0)
