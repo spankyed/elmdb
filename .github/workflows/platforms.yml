@@ -1,0 +1,75 @@
+name: platforms
+
+# A glibc Linux, macOS or Windows target's suites: the workspace's, then the binding built once on the Node floor and
+# loaded unchanged by Node 24 and Electron (docs/architecture/testing.md, Platforms). Called with the targets to run:
+# by ci.yml with the fast tier's two, by full.yml with the rest. A job that calls a workflow can set no time limit, so
+# each target brings its own, in minutes.
+on:
+  workflow_call:
+    inputs:
+      targets:
+        description: The targets to run, a JSON list of objects with a `runner`, a `target` and a `timeout` in minutes
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  platforms:
+    name: ${{ matrix.target }} on Node 22.17.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.targets) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.148
+      - run: cargo nextest run --workspace --profile ci
+      # On Windows, @napi-rs/cli 3.10.9's build times out on its own filesystem-reconciliation lock, so the binding
+      # is built by cargo and named as napi's loader expects; everywhere else napi builds it
+      - name: binding
+        shell: bash
+        run: |
+          npm ci
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo build -p elmdb-node --release
+            cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
+          else
+            npm run build
+          fi
+          npm test
+      # Reuse the exact same .node file: an ABI-stable binding must load without recompiling for another runtime.
+      - name: record the built binding identity
+        shell: bash
+        run: |
+          node scripts/runtime-binding.cjs record node-floor
+          node scripts/check-runtime-binding.cjs
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Node 24 loads the existing binding and runs the binding suite
+        shell: bash
+        run: |
+          node scripts/runtime-binding.cjs verify node24
+          npm test
+          # Node 23's SQLite has no FTS5, so the smoke above compares no search: here both engines answer them
+          node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 --require-text > /dev/null
+      # The app currently pins Electron 37.2.4. This runs Node's test runner inside that Electron executable,
+      # not Electron's npm launcher under the setup-node runtime. No app windows or developer profiles are used.
+      - name: Electron 37.2.4 loads the existing binding and runs the binding suite
+        shell: bash
+        env:
+          ELECTRON_RUN_AS_NODE: '1'
+        run: |
+          npm exec --yes --package=electron@37.2.4 -- electron scripts/runtime-binding.cjs verify electron
+          npm exec --yes --package=electron@37.2.4 -- electron --test "crates/elmdb-node/test/**/*.test.mjs"
