@@ -1,0 +1,115 @@
+# One-off, on a branch that is never merged: how often Node 24.22.2 on Windows aborts as it exits with the binding as
+# main has it and with the fix, over the Windows job's own benchmark command, a process that ends while V8 frees twenty
+# thousand answers it dropped, and the exit tests. A count is reported, never a failure.
+name: probe exit crash
+on:
+  push:
+    branches: [probe/exit-crash]
+
+jobs:
+  probe:
+    name: the binding as ${{ matrix.binding }} has it
+    strategy:
+      fail-fast: false
+      matrix:
+        binding: [main, fix]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The binding's sources as main has them, under this branch's tests and benchmark
+      - if: matrix.binding == 'main'
+        run: git checkout origin/main -- crates/elmdb-node/src && git status --short
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: binding
+        run: |
+          npm ci
+          cargo build -p elmdb-node --release
+          cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.22.2
+      - name: keep a dump of a node.exe that aborts
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $key = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\node.exe'
+          New-Item -Path $key -Force | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\dumps" | Out-Null
+          Set-ItemProperty -Path $key -Name DumpFolder -Value "$env:RUNNER_TEMP\dumps" -Type ExpandString
+          Set-ItemProperty -Path $key -Name DumpType -Value 1 -Type DWord
+          Set-ItemProperty -Path $key -Name DumpCount -Value 3 -Type DWord
+      - name: the Windows job's benchmark command, 200 times
+        run: |
+          node --version
+          failed=0
+          : > "$RUNNER_TEMP/last.txt"
+          for i in $(seq 1 200); do
+            if ! node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 --require-text > /dev/null 2> "$RUNNER_TEMP/err.txt"; then
+              failed=$((failed + 1)); tail -n 1 "$RUNNER_TEMP/err.txt" >> "$RUNNER_TEMP/last.txt"
+            fi
+          done
+          sort "$RUNNER_TEMP/last.txt" | uniq -c
+          echo "benchmark: $failed of 200 processes died" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: a process that ends while V8 frees twenty thousand answers, 200 times
+        run: |
+          failed=0
+          : > "$RUNNER_TEMP/last.txt"
+          for i in $(seq 1 200); do
+            if ! node probe/stress.cjs "$PWD/crates/elmdb-node/index.js" 2> "$RUNNER_TEMP/err.txt"; then
+              failed=$((failed + 1)); tail -n 1 "$RUNNER_TEMP/err.txt" >> "$RUNNER_TEMP/last.txt"
+            fi
+          done
+          sort "$RUNNER_TEMP/last.txt" | uniq -c
+          echo "stress: $failed of 200 processes died" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the exit tests, 20 times
+        run: |
+          failed=0
+          : > "$RUNNER_TEMP/last.txt"
+          for i in $(seq 1 20); do
+            if ! node --test crates/elmdb-node/test/exit.test.mjs > "$RUNNER_TEMP/out.txt" 2>&1; then
+              failed=$((failed + 1)); grep -E "^✖|Assertion failed" "$RUNNER_TEMP/out.txt" >> "$RUNNER_TEMP/last.txt" || true
+            fi
+          done
+          sort "$RUNNER_TEMP/last.txt" | uniq -c
+          echo "exit.test.mjs: $failed of 20 runs failed" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: the answers test
+        run: |
+          if node --test crates/elmdb-node/test/answers.test.mjs > "$RUNNER_TEMP/out.txt" 2>&1; then
+            echo "answers.test.mjs: passed" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            grep -E "^✖|answered" "$RUNNER_TEMP/out.txt" | head -n 4
+            echo "answers.test.mjs: failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+      # Best effort: the runner may write no dump, or hold no debugger
+      - name: the stacks in a dump
+        if: always()
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $dumps = @(Get-ChildItem "$env:RUNNER_TEMP\dumps" -Filter *.dmp -ErrorAction SilentlyContinue)
+          "dumps: $($dumps.Count)"
+          if ($dumps.Count -eq 0) { exit 0 }
+          $cdb = 'C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe'
+          if (-not (Test-Path $cdb)) { 'no cdb on this runner; the dumps are in the artifact'; exit 0 }
+          Invoke-WebRequest https://nodejs.org/dist/v24.22.2/win-x64/node_pdb.zip -OutFile "$env:RUNNER_TEMP\node_pdb.zip"
+          if ((Get-FileHash "$env:RUNNER_TEMP\node_pdb.zip" -Algorithm SHA256).Hash -ne '8F305BEE61B83FB404C5E38748D038712F2FABBD284D797D9D9598EE0EF35154') { throw 'node_pdb.zip is not the release' }
+          Expand-Archive "$env:RUNNER_TEMP\node_pdb.zip" -DestinationPath "$env:RUNNER_TEMP\pdb"
+          $symbols = (@(Get-ChildItem "$env:RUNNER_TEMP\pdb" -Recurse -Filter *.pdb | ForEach-Object DirectoryName | Sort-Object -Unique) + "$PWD\target\release") -join ';'
+          & $cdb -z $dumps[0].FullName -y $symbols -c '.ecxr; kc 40; ~*kc 14; q' | Select-Object -Last 260
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dumps-${{ matrix.binding }}
+          path: ${{ runner.temp }}/dumps
+          if-no-files-found: ignore
+          retention-days: 7
