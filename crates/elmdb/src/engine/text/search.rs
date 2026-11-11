@@ -623,8 +623,30 @@ impl Matches<'_> {
 
     /// Hands `each` every match's place and score, in place order: BM25F over the fields searched, then the recency
     /// the options ask for. `now` measures a recency option's ages
-    pub fn scored(&self, r: &impl Read, now: f64, mut each: impl FnMut(u64, f64)) -> Result<()> {
-        if self.found.is_empty() {
+    pub fn scored(&self, r: &impl Read, now: f64, each: impl FnMut(u64, f64)) -> Result<()> {
+        self.scored_at(r, now, &self.found, each)
+    }
+
+    /// The score `scored` hands the match at a place, or none for a place that is no match's. It is read as `scored`
+    /// reads it, so it is that number to the bit: what a page's cursor is ranked by among the matches it is one of
+    pub fn score_of(&self, r: &impl Read, now: f64, seq: u64) -> Result<Option<f64>> {
+        if !self.found.contains(seq) {
+            return Ok(None);
+        }
+        let mut score = None;
+        self.scored_at(r, now, &RoaringTreemap::from_iter([seq]), |_, own| score = Some(own))?;
+        Ok(score)
+    }
+
+    /// Hands `each` the place and score of each of `places`, which are matches', in place order
+    fn scored_at(
+        &self,
+        r: &impl Read,
+        now: f64,
+        places: &RoaringTreemap,
+        mut each: impl FnMut(u64, f64),
+    ) -> Result<()> {
+        if places.is_empty() {
             return Ok(());
         }
         let name = self.index.name.as_str();
@@ -653,7 +675,7 @@ impl Matches<'_> {
             read.push((in_clause.collect(), words.collect()));
         }
         let mut lengths: Option<(u64, Option<Lengths<Vec<u8>>>)> = None;
-        for seq in &self.found {
+        for seq in places {
             let block = lengths::block_of(seq);
             if lengths.as_ref().is_none_or(|(held, _)| *held != block) {
                 let stored = r.get(&keys::text_lengths(self.entity_type, name, block))?;

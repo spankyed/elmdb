@@ -2,9 +2,9 @@
 // otherwise: `node crates/elmdb-node/bench/against-sqlite.mjs [--json] [--notes N] [--dir PATH]` after `npm run build`
 // (`docs/architecture/testing.md`, Against SQLite). Each note has a title in a text index and a number and a status in
 // value indexes. It reads what a note costs in bytes, what a create's commit costs at a twentieth of the notes and at
-// all of them, and what a search, an ordered read, one of the notes a filter keeps, a range, a page in the order the
-// notes were made and one in their number's, a check and a rebuild cost at all of them. Neither engine syncs. The two
-// answer each read alike before any is timed.
+// all of them, and what a search, a page of one past a cursor, an ordered read, one of the notes a filter keeps, a
+// range, a page in the order the notes were made and one in their number's, a check and a rebuild cost at all of
+// them. Neither engine syncs. The two answer each read alike before any is timed.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -67,6 +67,13 @@ const RANKED = Array.from({ length: 10 }, (_, k) => ({
 }));
 const RANKED_BEST = RANKED.map((one) => one.id).reverse();
 
+// Where a page of a search begins: the id it is after, which is elmdb's cursor, and how many matches are ranked up to
+// it, which is SQLite's offset. One is after the third of the ranked notes, whose order any ranking gives. The other
+// is 200 from the last of the notes holding a word every note holds, which tie in the order they were made behind
+// the first commits' shorter notes: a page that walked to its cursor would read nearly all of them
+const RANKED_PAGE = { cursor: RANKED_BEST[2], before: 3 };
+const EVERY_PAGE = { cursor: id(NOTES - 200), before: COMMITS + NOTES - 199 };
+
 const ms = (from) => Number(process.hrtime.bigint() - from) / 1e6;
 const median = (samples) => [...samples].sort((a, b) => a - b)[Math.floor(samples.length / 2)];
 const round = (value, places = 3) => Number(value.toFixed(places));
@@ -125,6 +132,7 @@ function elmdb() {
     return packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan, ...extra }] })))[0];
   };
   const search = (text, fuzzy) => ({ step: 'search', query: text, ...(fuzzy ? {} : { options: { fuzzy: false } }) });
+  const bestAfter = (text, cursor) => [search(text, false), { step: 'after', id: cursor }, { step: 'limit', n: 10 }];
   return {
     text: true,
     load: (notes) => db.write(packr.pack({ ops: notes.map(create) })),
@@ -134,6 +142,10 @@ function elmdb() {
     // How many entities the plan visited to answer the best ten
     visited: (text) => query([search(text, false), { step: 'limit', n: 10 }], { answer: 'ids' }, { explain: true }).visited,
     count: (text) => query([search(text, false)], { answer: 'count' }).n,
+    // The ten best ranked past a page's cursor, how many entities reading them visited, and whether any matches
+    bestAfter: (text, page) => query(bestAfter(text, page.cursor), { answer: 'ids' }).ids,
+    bestAfterVisited: (text, page) => query(bestAfter(text, page.cursor), { answer: 'ids' }, { visits: true }).visited,
+    any: (text) => query([search(text, false)], { answer: 'exists' }).value,
     lowest: () => query(LOWEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
     highest: () => query(HIGHEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
     openLowest: () => query(OPEN_LOWEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
@@ -193,6 +205,14 @@ function sqlite() {
   const create = (one) => insert.run(one.id, one.title, one.n, one.status);
   const best = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10');
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
+  // FTS5 ranks as it reads, with no key to seek a rank by. A page is read two ways: past its offset, the common
+  // idiom, and past the rank and rowid of its cursor, which a caller keeps from the page before: that one scores
+  // every match and keeps ten, as elmdb does past its cursor
+  const bestAfter = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10 OFFSET ?');
+  const keyOf = text && db.prepare('SELECT f.rank AS rank, f.rowid AS at FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? AND n.id = ?');
+  const bestPast = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? AND (f.rank > ? OR (f.rank = ? AND f.rowid > ?)) ORDER BY f.rank, f.rowid LIMIT 10');
+  const keys = new Map();
+  const any = text && db.prepare('SELECT EXISTS (SELECT 1 FROM notes_fts WHERE notes_fts MATCH ?) AS found');
   const lowest = db.prepare('SELECT n FROM notes ORDER BY n LIMIT 10');
   const highest = db.prepare('SELECT n FROM notes ORDER BY n DESC LIMIT 10');
   const openLowest = db.prepare("SELECT n FROM notes WHERE status = 'open' ORDER BY n LIMIT 10");
@@ -213,6 +233,15 @@ function sqlite() {
     settle: () => {},
     best: (text) => best.all(text).map((row) => row.id),
     count: (text) => count.get(text).n,
+    bestAfter: (text, page) => bestAfter.all(text, page.before).map((row) => row.id),
+    // The cursor's rank and rowid are found once, outside any timing, as kept from the page before
+    bestPast: (text, page) => {
+      const name = `${text} ${page.cursor}`;
+      if (!keys.has(name)) keys.set(name, keyOf.get(text, page.cursor));
+      const key = keys.get(name);
+      return bestPast.all(text, key.rank, key.rank, key.at).map((row) => row.id);
+    },
+    any: (text) => any.get(text).found === 1,
     lowest: () => lowest.all().map((row) => row.n),
     highest: () => highest.all().map((row) => row.n),
     openLowest: () => openLowest.all().map((row) => row.n),
@@ -297,15 +326,26 @@ function measure(name, engine) {
   };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
-    Object.assign(answers, { everyCount: engine.count('the'), twelfthCount: engine.count('alpha'), twelfthBest: engine.best('alpha').length, ranked: engine.best('quokka') });
+    Object.assign(answers, {
+      everyCount: engine.count('the'), twelfthCount: engine.count('alpha'), twelfthBest: engine.best('alpha').length,
+      ranked: engine.best('quokka'), rankedPage: engine.bestAfter('quokka', RANKED_PAGE),
+      everyPage: engine.bestAfter('the', EVERY_PAGE).length, everyAny: engine.any('the'), noneAny: engine.any('zyzzyva'),
+    });
     out.searches = {
       everyBestTenMs: timed(5, () => engine.best('the')).ms,
       everyCountMs: timed(5, () => engine.count('the')).ms,
+      everyPageNearEndMs: timed(5, () => engine.bestAfter('the', EVERY_PAGE)).ms,
+      everyAnyMs: timed(5, () => engine.any('the')).ms,
       twelfthBestTenMs: timed(5, () => engine.best('alpha')).ms,
       twelfthCountMs: timed(5, () => engine.count('alpha')).ms,
       misspelledMs: timed(5, () => engine.best('foxtrott', true)).ms,
       misspelledFound: engine.best('foxtrott', true).length,
     };
+    if (engine.bestPast) {
+      assert.deepEqual(engine.bestPast('quokka', RANKED_PAGE), answers.rankedPage, `${name} cut a page past a rank elsewhere than past its offset`);
+      assert.equal(engine.bestPast('the', EVERY_PAGE).length, answers.everyPage, `${name} read another page past a rank than past its offset`);
+      out.searches.everyPageNearEndPastRankMs = timed(5, () => engine.bestPast('the', EVERY_PAGE)).ms;
+    }
   }
   out.reads = {
     lowestTenMs: timed(5, () => engine.lowest()).ms,
@@ -317,6 +357,7 @@ function measure(name, engine) {
   };
   if (engine.visited) {
     out.searches.everyBestTenVisited = engine.visited('the');
+    out.searches.everyPageNearEndVisited = engine.bestAfterVisited('the', EVERY_PAGE);
     Object.assign(out.reads, engine.visits());
   }
   progress(`${name}: read`);
@@ -356,6 +397,8 @@ try {
   }
   // elmdb's own searches, held to what the notes say whether or not SQLite answered any
   assert.deepEqual(ours.answers.ranked, RANKED_BEST, 'elmdb ranked the notes holding a word most often out of order');
+  assert.deepEqual(ours.answers.rankedPage, RANKED_BEST.slice(3), 'elmdb cut a page of the ranked notes elsewhere than past its cursor');
+  assert.deepEqual([ours.answers.everyPage, ours.answers.everyAny, ours.answers.noneAny], [10, true, false], 'elmdb answered a page of ten, or whether a word has a match, otherwise');
   assert.equal(ours.out.searches.misspelledFound, 10, 'elmdb found fewer than ten notes for a word one letter off');
   report.elmdb = ours.out;
   report.sqlite = theirs.out;

@@ -15,7 +15,8 @@ query and a trigram search each answer a set the steps after them filter.
 Since the road to 1.0's fifth change (`../roadmap.md`), an `orderBy` of one type reads a value index on the field in
 order, a `range` of numbers reads the entries between its bounds, and an `after` has the stage before it seek to its
 cursor: each index on one field accounts for every entity of its type, so an order read from it leaves none out
-(`../architecture/engine.md`, Reads: plans).
+(`../architecture/engine.md`, Reads: plans). A search has the stage's part in a page too: before an `after` it hands
+on the matches ranked past the cursor, and a `limit`, `first` or `exists` asks it for no more than the answer takes.
 
 An order or a range under equalities is read from an index on the equalities' fields and then its own, and with no
 such index an `orderBy` before a `limit` walks its order and tests the filters while that costs less than sorting
