@@ -523,9 +523,9 @@ impl Spread {
         }
     }
 
-    /// Whether this list's places have been further apart than `other`'s
-    fn wider(&self, other: &Spread) -> bool {
-        u128::from(self.apart) * u128::from(other.seen) > u128::from(other.apart) * u128::from(self.seen)
+    /// Whether this list's places have been more than `times` as far apart as `other`'s
+    fn wider(&self, times: u128, other: &Spread) -> bool {
+        u128::from(self.apart) * u128::from(other.seen) > times * u128::from(other.apart) * u128::from(self.seen)
     }
 }
 
@@ -1978,8 +1978,6 @@ impl<R: Read> Query<'_, R> {
             // range alone is the fewest
             let mut upto = RANGE_ASKED;
             while lists.is_empty() && ranged.len() > 1 {
-                // mutant-skip: replace \*= with \+= in Query<'_, R>::filtered_of
-                // Counting two keys further each time counts the same keys, in more askings
                 upto *= 2;
                 self.read_ranges(&mut lists, &mut ranged, &mut read, upto)?;
             }
@@ -2161,8 +2159,6 @@ impl<R: Read> Query<'_, R> {
             let mut fewest: Option<(usize, u64)> = None;
             for (at, range) in ranged.iter().enumerate() {
                 let held = self.counted_within(&range.from, &range.to, upto)?;
-                // mutant-skip: replace < with <= in Query<'_, R>::read_ranges
-                // Of two ranges holding as many, either is the one holding the fewest
                 if held < upto && fewest.is_none_or(|(_, fewer)| held < fewer) {
                     fewest = Some((at, held));
                 }
@@ -2208,11 +2204,12 @@ impl<R: Read> Query<'_, R> {
     ///
     /// The list walked is the one whose places have been furthest apart, one from the next, where the read has seen
     /// them (`Spread`): where each list's first place is says so to begin with, and a list whose places come to
-    /// be further apart than the walked one's is walked in its place. Walking the list with the fewest places
+    /// be twice as far apart as the walked one's is walked in its place. Walking the list with the fewest places
     /// reads the fewest entries, an entry walked being the next one where a place sought is found from the root.
     /// So for each place the shortest list holds, the read costs each other list an entry sought, and the walked
-    /// one as many as `PASSED_OVER` passed over and one sought: a bound by the shortest list. Of lists whose
-    /// places are as far apart, the first written is the one walked.
+    /// one as many as `PASSED_OVER` passed over and one sought: a bound by the shortest list. Which list is walked
+    /// follows from what the read has seen, which the order the filters are written in decides to begin with: so
+    /// that order can change what is read, within the bound.
     ///
     /// A tracked read depends on every entry it read: those of the walked list up to where the read stopped,
     /// and of each other list the entry at each place sought, with whatever lies between a place sought and the
@@ -2246,7 +2243,7 @@ impl<R: Read> Query<'_, R> {
         loop {
             let mut furthest = 0;
             for at in 1..lists.len() {
-                if lists[at].spread.wider(&lists[furthest].spread) {
+                if lists[at].spread.wider(1, &lists[furthest].spread) {
                     furthest = at;
                 }
             }
@@ -2277,8 +2274,10 @@ impl<R: Read> Query<'_, R> {
                             if *read >= asks.pause_at {
                                 left = Some(Left::Paused);
                             }
-                            // One whose places are further apart than this list's is walked in its place
-                            return Ok(left.is_none() && !others[at].spread.wider(&spread));
+                            // One whose places are twice as far apart as this list's is walked in its place. A list
+                            // sought is seen only where it was asked, so its places look at least as far apart as
+                            // the walked one's leaps: with no margin the two would change places at every leap
+                            return Ok(left.is_none() && !others[at].spread.wider(2, &spread));
                         }
                         Some(_) => {}
                     }
