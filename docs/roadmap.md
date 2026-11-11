@@ -31,7 +31,9 @@ waiting on a trigger below, which add to them and reorder nothing.
 
 Of milestone 0.2, compound indexes are read for an order or a range under equalities, and with none the order is
 walked while that is cheaper than sorting the filter's matches (`evidence/million-notes.md`, A filter before an
-order); an equality on every field of one, the smaller filter first, and least, greatest and sum are open.
+order). The smaller filter first is built as the places the filters' indexes hold in common, which reads no more
+than the shortest of them holds whichever is written first (`architecture/engine.md`, Reads: plans); an equality on
+every field of a compound index, and least, greatest and sum are open.
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the

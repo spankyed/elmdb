@@ -215,8 +215,8 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
     assert_eq!(
         stages,
         vec![
-            json!({ "stage": "types", "visited": all, "kept": all }),
-            json!({ "stage": "lacks", "visited": all, "kept": untitled }),
+            json!({ "stage": "types", "visited": 0, "kept": 0 }),
+            json!({ "stage": "lacks", "index": "none: walks the type", "visited": all, "kept": untitled }),
             json!({ "stage": "where", "visited": untitled, "kept": both }),
             json!({ "stage": "count", "visited": both, "kept": both }),
         ]

@@ -206,52 +206,48 @@ A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRo
 their answer, and a live type's `count` is read off its counter. The planner makes these choices, none of which changes
 an answer:
 
-- **A type start's filters are read from the index that holds the fewest entries for them.** The filters a type
-  start begins with (`where`, `withRole`, `has`, `lacks`, `ofType`, `within`, `range`) keep the same set in any
-  order, so one index's matches are read and every other filter is tested against each: the answer and its order,
-  creation order, are those of a walk of the type. The indexes that can read them, each needing to be built for
-  every start type, are a `where`'s on its one field (for a value other than null), the role index for a
-  `withRole`, a `range`'s on its one field (for number bounds, where the index accounts for every entity of the
-  type), and, over one type, an index on several fields for the plan's first steps when they are equalities and a
-  range of its last field, whichever way round they were asked. That last holds no more entries than an index on
-  any one of those steps, so it stands for them all, the one on the most steps. An index on several fields is not
-  read for equalities alone. With none of these the types are walked, except that the plan's first step, a
-  `where`, `withRole` or `range`, still reads the index each type has for it and walks only the types without one.
-  With one it is read; with several, the choice is made once a read, in one place (`reads.rs`, `Query::access`), by
-  counting, a `range`'s own index past the plan's first step being read only as the third point below says:
-  - Each index's entries for its filter are counted, keys alone, no further than 16 in each start type, then 128,
-    then 1,024. An index is counted to its end when its entries in every start type were. Of those that are, the
-    one holding the fewest over all the types is read; of equals, the index on several steps, then the first
-    written, a `range` past the plan's first step after the others. It is read as soon as no index still being
-    counted could hold as few, which one already counted past that can't; after the count to 1,024 it is read
-    whatever the others may hold. So over one start type, where the fewest are `n`, under 1,024, that index is
-    read, and the count has read no more than 16 keys of each index or eight times `n`, whichever is more.
-  - When no index is counted to its end, each holding 1,024 entries or more in some start type, they are not told
-    apart, and the first of them is read: the index on several steps, then the filters' own in the order written.
-    Such a read may read more entries than the best index holds, by as many as the first holds over it; it reads
-    no more than 1,024 keys of each index, in each start type, to learn so.
-  - An equality's entries are handed on as they are read. A range's are in its numbers' order, so all of them are
-    read and put in creation order before the first is handed on, from its own index or from one on several
-    steps. A `range` the plan starts with, and an index on several steps, are read so whatever they hold, when
-    they are all there is to read or the first of those not told apart. A `range`'s own index past the first step
-    is read only when it is counted to its end, alone or not: holding 1,024 entries or more in a start type it is
-    a filter of what else is read, or of the walk.
-  - A `first`, `exists` or `limit` after the filters therefore waits on at most 1,024 counted keys of each index
-    in each start type, whatever the store holds. What it then reads before its first entity is nothing for an
-    equality's index, fewer than 1,024 entities of each start type for a range's own past the first step, and
-    every entry between the bounds for a range the plan starts with or an index on several steps, however many
-    those are. What is counted decides only what is read: the keys are no entity's and not among a plan's
-    visits, and a tracked read records none of them. It depends on the index it read and the fields it tested,
-    and on whether each index it asked after is built and orders every entity, one found not built among
-    them.
+- **A type start's filters are read as the places their indexes hold in common.** The filters a type start begins
+  with (`where`, `withRole`, `has`, `lacks`, `ofType`, `within`, `range`) keep the same set in any order, so the
+  stage of the last of them reads for them all (`reads.rs`, `Query::filtered`), each start type by turn: the answer
+  and its order, creation order, are those of a walk of the type testing each filter.
+  - **A filter with an index is a list of places.** In each type, a `where` of a value other than null, where the
+    type has a built index on that one field, and a `withRole`, read the entries of that one value or role, which
+    are keyed by place: a list of the type's places in creation order. An entity the filters keep is at a place
+    every such list holds, so the places they hold in common are read. One list is walked, and each place it holds
+    is sought in the others: a list that doesn't hold it answers with the next place it does hold, which no place
+    before can be in them all, and the walk goes on to that. The filters with no list are tested against the
+    entity at each place the lists share, and a type with no list has its rows walked and every filter tested.
+  - **What that reads.** Nothing is counted to choose an index. What is read is bounded by the shortest list and
+    not the longest, whichever order the filters are written in: for each place the shortest holds, a few entries
+    of each of the others. A `first`, `exists` or `limit` reads an entry or two of each list for each entity it
+    takes. The list walked is the one whose places have been furthest apart, which where each list's first place
+    is says to begin with, and a list that comes to leap twice as far is walked in its place: an entry walked is
+    the next one read, where a place sought is found from the root.
+  - **A range's index is read once the read has paid for it.** A `range` of numbers has an index to read where
+    the type has one on its field alone that accounts for every entity, or, over one type, where the plan's first
+    steps are equalities and the range and an index is on their fields and then its own, whichever way round they
+    were asked: that one stands for all those steps, the one on the most of them. Its entries are in the numbers'
+    order, so they are no list until all are read and sorted by place. They are read once that costs no more than
+    the read has read already, which is asked each time it has read twice what it had, from 16 entries on, the
+    entries counted, keys alone, no further than that; and at the start, a range holding fewer than 16 is read,
+    the one holding the fewest of several. Until then the range is tested against each entity. So a read that
+    stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
+    of the cheaper way. A read that takes every entity the filters keep, and has no list, reads the first such
+    range whatever it holds. An index on several fields is not read for equalities alone.
+  - **A plan of the trash** reads the type's trash, its rows keyed by place, as a list among the others, where an
+    index's entries are of every entity: only entities in the trash are read. It reads a range's index only once
+    it has read as many entries, never at the start.
+  - **A tracked read** depends on each entry it read: those of the list it walked up to where it stopped, those of
+    the others at the places sought, with what lay between a place sought and the one answered, and the fields it
+    tested. What was counted decides only what is read: the keys are no entity's and not among a plan's visits,
+    and a tracked read records none of them.
 
   A filter no stage would take, a `withRole` of an undeclared role or a `range` with bounds it can't take, is
   refused before anything is read, the last written first, as when every stage runs. A page's cursor straight
-  after the filters is sought in the index when the index read is the last filter's and that is a `where` or a
-  `withRole`; otherwise the entities up to the cursor are passed over. A filter after any other step filters what
-  reaches it. A plan of the trash walks the trash where that reads less: an index's entries are of every entity,
-  each read to learn it is not in the trash, so the trash's own rows are read when there are fewer of them than
-  1,024 and than the entries the index would read.
+  after the filters is sought: each list is read from the cursor's place, and nothing is read for a cursor the
+  filters don't keep. Where no index reads any of the filters in any start type, the stage of the first of them
+  walks the types for it, and each stage after tests its own filter against what the one before hands on. A
+  filter after any other step filters what reaches it.
 - **An index lookup visits its matches as it reads them.** One value's entries are keyed by place, so they come in
   creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
 - **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
@@ -296,21 +292,19 @@ an answer:
   is, holding only what the `limit` takes: the entities ordered past the cursor, those of its own value that come
   after it among them. A cursor the filters don't keep has no page, and nothing is read to say so. Only an index on
   both reads a page at the cost of what it holds.
-- **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
-  bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
-  creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
-  reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's
-  as a search leaves them out, and reads no entity. Among equalities alone, a range is read from the index on their
-  fields and then its own, as an order is, by whichever of them is written last: the range may stand before them,
-  between them or after; an index on the equalities up to the range and on it is read for those, before an index
-  of an equality after them. With no such index the first of them to have an index is read: a range the plan
-  starts with reads the index on its own field, and one with none is a filter of the equality's index after it.
-  A range of strings, one among any other steps, and one over a type without such an index filter what reaches
-  them.
+- **A range is read from an index.** A `range` of numbers among the filters a type start begins with reads the
+  entries between its bounds from an index on its field, when the index holds no list or other value it doesn't
+  order, and hands them on in creation order, as the first point says: at once when they are a handful, or when
+  the read takes every entity and has no list to read in their place, and otherwise once it has read as many
+  entries as they are. An `orderBy` of the same field straight after it reads those entries in order instead, as
+  above, and a `count` of it counts them by their places, less the trash's as a search leaves them out, and reads
+  no entity. Among equalities alone, a range is read from the index on their fields and then its own, as an order
+  is: the range may stand before them, between them or after. A range of strings, one among any other steps, and
+  one over a type without such an index filter what reaches them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own
-  left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters
-  are read from (the cursor's entry among the value's, or its place in the walk of a type with no index), and an
+  left out), the filters a type start begins with, read together (each list from the cursor's place, or the walk of a
+  type with no list begun there), and an
   `orderBy` read from an index (the cursor's entry, or its place among the entities without a value). The page then
   costs what it holds wherever the cursor is. A cursor that isn't in the set (another type's entity, one the scope
   doesn't reach, one a filter leaves out, one without the value) answers nothing and reads nothing. After any other
@@ -327,11 +321,12 @@ its terminal, in order — as `{ stage, index?, visited, kept, ms }`, and a stag
 `topological`, `weakComponents`, `strongComponents`, `communities`) with its `nodes` and `edges`, the `weight` of its
 edges added up when it read weights, a rank's `iterations` and whether it `converged`, a `ranked` stage's rank index as
 its `index`, the bound on its scores as its `error` and, while the index isn't built and the stage computed them, `building: true`, and a topological order's `cycles`; a `similar` stage with the `neighbours` of `to`, the `candidates` it scored and the `edges` it read. `stage` names it (`types`, `where`, `orderBy`, `rows`,
-…); `index` is the value index the stage read, or `none: walks the type` for a lookup no built index covers; `visited`
+…); `index` is the value index the stage read, each one named where it read several as lists, or `none: walks the
+type` for filters no built index covers; `visited`
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
-the stages' times add up to at most the whole. A stage a driving index answered, a filter before it, visits and keeps
-nothing of its own: the stage reading the index does its filtering. An `orderBy` stage that sorted, or walked its
+the stages' times add up to at most the whole. A filter before the stage that reads a type start's filters together
+visits and keeps nothing of its own: that stage does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
 index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
 engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name. So does a `range` the `orderBy` after it reads

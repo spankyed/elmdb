@@ -3,7 +3,7 @@
 //! against the filters while that is the cheaper way. `n` and `k` are in indexes and their twins `m` and `j`, which
 //! every write here gives the same values, in none, so a plan over the one is held to what it answers over the
 //! other, which is filtered and then sorted; what a plan visited shows which of the ways it read. A type start's
-//! filters are read from whichever index holds the fewest entries for them, which the same counts show.
+//! filters are read as the places their indexes hold in common, which the same counts show.
 
 use serde_json::{Value as Json, json};
 
@@ -371,12 +371,13 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
     // An equality no index holds with them filters what the others read from theirs
     let noted = |field: &str| json!([between(field), open, is("note", json!("x"))]);
     assert_eq!(same(&db, "live", N, noted), (vec![], 6));
-    // Over two types the equality is read from each type's own index, or its rows, and the range filters
+    // Over two types the index on both is not read: the equality is read from each type's own index, or its rows,
+    // the twelve open tasks, and the range filters
     let both = |field: &str| {
         json!({ "scope": "live", "start": { "from": "types", "types": ["Task", "Other"] },
             "steps": [between(field), open], "terminal": { "answer": "ids" } })
     };
-    assert_eq!(visited(&db, both("n")), (found.clone(), 24));
+    assert_eq!(visited(&db, both("n")), (found.clone(), 12));
     assert_eq!(visited(&db, both("m")).0, found);
     // A second range filters what the first read
     let twice = |field: &str| json!([open, between(field), { "step": "range", "field": field, "above": 1 }]);
@@ -385,8 +386,8 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
     write(&db, vec![json!({ "op": "trash", "id": id(6) })]);
     assert_eq!(same(&db, "live", N, |field| json!([open, between(field)])).0.len(), 5);
     assert_eq!(same(&db, "withTrashed", N, |field| json!([open, between(field)])), (found.clone(), 6));
-    // A plan of the trash walks the trash, one task, where that is fewer than the index's entries, which are of
-    // every task: wherever the range stands
+    // A plan of the trash reads the trash's one row with the status's entries, which are of every task, and
+    // tests the range against the task at the one place both hold: wherever the range stands
     assert_eq!(same(&db, "trashed", N, |field| json!([open, between(field)])), (vec![id(6)], 1));
     assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 1));
     let among = |field: &str| json!([first_owner, between(field), open]);
@@ -425,10 +426,11 @@ fn a_range_read_with_an_equality_is_read_before_an_index_a_later_equality_has() 
     // And with the range first, which has no index of its own
     let ranked = json!([between, is("note", json!("x")), is("owner", json!(1))]);
     assert_eq!(visited(&db, plan("live", ranked)), (vec![id(0), id(3)], 2));
-    // A role after them has an index of its own, which holds the one task: fewer than those two, so it is read
+    // A role after them has an index of its own, which holds the one task: the two, being so few, are read at
+    // once, and the role's list is asked for each
     write(&db, vec![json!({ "op": "grant", "id": id(0), "role": "lead" })]);
     let led = json!([is("note", json!("x")), between, { "step": "withRole", "role": "lead" }]);
-    assert_eq!(visited(&db, plan("live", led)), (vec![id(0)], 1));
+    assert_eq!(visited(&db, plan("live", led)), (vec![id(0)], 2));
 }
 
 #[test]
@@ -482,12 +484,16 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     write(&db, vec![json!({ "op": "trash", "id": id(2) }), json!({ "op": "trash", "id": id(4) })]);
     let (trash, visits) = same(&db, "trashed", N, |field| json!([open, order(field, false), limit(1)]));
     assert_eq!((trash.len(), visits as usize), (1, 2), "the trash's two are walked, fewer than the open's entries");
-    // As many entries as the trash holds tasks are read from the index: walking the trash would read no fewer
+    // A plan of the trash reads the trash's rows with the index's entries: no task is among both, and none is read
     write(&db, vec![set(20, "status", json!("zed")), set(21, "status", json!("zed"))]);
     let zed = plan("trashed", json!([is("status", json!("zed"))]));
     let explained = read(&db, json!({ "read": "query", "explain": true, "plan": zed })).unwrap();
     let stage = &explained["stages"][1];
-    assert_eq!((&stage["index"], &stage["visited"]), (&json!("byStatus"), &json!(2)), "{explained}");
+    assert_eq!((&stage["index"], &stage["visited"]), (&json!("byStatus"), &json!(0)), "{explained}");
+    // One of them put in the trash is the one read
+    write(&db, vec![json!({ "op": "trash", "id": id(21) })]);
+    assert_eq!(visited(&db, plan("trashed", json!([is("status", json!("zed"))]))), (vec![id(21)], 1));
+    write(&db, vec![json!({ "op": "restore", "id": id(21) })]);
     let two = |field: &str| {
         json!({ "start": { "from": "types", "types": ["Task", "Other"] },
             "steps": [open, order(field, false), limit(1)], "terminal": { "answer": "ids" } })
@@ -833,8 +839,8 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // A filter of null is no equality an index reads: the tasks with no owner are the first four hundred and fifty,
     // met a hundred and fifty in from the greatest
     assert_eq!(first(vec![is("owner", json!(null))], true, 2), (vec![id(449), id(448)], 152));
-    // Several filters: the one whose index they are read from says what reading them would read, the one holding
-    // the fewest entries. The owner's three are read and sorted, after the five hundred open as before them; a
+    // Several filters: what reading them would read is what the shortest of their lists holds. The owner's three
+    // are read and sorted, after the five hundred open as before them; a
     // hundred and forty-seven are enough to walk for, and the walk meets one of them after the last three
     assert_eq!(first(vec![noted, is("owner", json!(7))], true, 1), (vec![id(599)], 3));
     assert_eq!(first(vec![is("status", json!("open")), is("owner", json!(7))], false, 1), (vec![id(597)], 3));
@@ -943,13 +949,12 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     let both =
         same(&db, "withTrashed", K, |field| json!([{ "step": "has", "field": "note" }, order(field, false), limit(1)]));
     assert_eq!(both, (vec![id(597)], 512 + 600));
-    // A plan of the trash walks the trash, three hundred tasks, where an index would read more entries than that,
-    // which are of every task: this owner's three and the hundred done are read from their index, the five hundred
-    // open are not
+    // A plan of the trash reads the trash's three hundred rows with an index's entries, which are of every task,
+    // and only the tasks among both: none of this owner's three, the hundred done, and two hundred of the open
     let trashed = |filter: Json| visited(&db, plan("trashed", json!([filter]))).1;
     let from_trash =
         (trashed(is("owner", json!(7))), trashed(is("status", json!("done"))), trashed(is("status", json!("open"))));
-    assert_eq!(from_trash, (3, 100, 300));
+    assert_eq!(from_trash, (0, 100, 200));
     // A role the schema no longer declares is refused though tasks still hold it, as its filter refuses it
     let mut fewer = schema_json();
     fewer["roles"].as_object_mut().unwrap().remove("star");
@@ -1040,10 +1045,11 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     assert_eq!(trash.unwrap()["stages"][1].get("wants"), None);
 }
 
-/// A reader that counts the keys its probes count, reading through another
+/// A reader that counts the keys its probes count, and the entries its walks are handed, reading through another
 struct Probing<'r, R> {
     inner: &'r R,
     counted: Cell<u64>,
+    walked: Cell<u64>,
 }
 
 impl<R: Read> Read for Probing<'_, R> {
@@ -1056,8 +1062,11 @@ impl<R: Read> Read for Probing<'_, R> {
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> crate::Result<()> {
         self.inner.visit_starting(bytes, visit)
     }
-    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> crate::Result<()> {
-        self.inner.visit_within(from, to, visit)
+    fn visit_within(&self, from: &[u8], to: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> crate::Result<()> {
+        self.inner.visit_within(from, to, |key, value| {
+            self.walked.set(self.walked.get() + 1);
+            visit(key, value)
+        })
     }
     fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> crate::Result<()> {
         self.inner.visit_back_within(from, to, visit)
@@ -1081,11 +1090,27 @@ fn probed(db: &Database, steps: Json, terminal: &str) -> (Json, u64, u64) {
     plan["terminal"]["answer"] = json!(terminal);
     let plan: Plan = serde_json::from_value(plan).unwrap();
     db.snapshot(|s| {
-        let probing = Probing { inner: s, counted: Cell::new(0) };
+        let probing = Probing { inner: s, counted: Cell::new(0), walked: Cell::new(0) };
         let (bytes, visited) = reads::run_counted(&probing, &plan)?;
         let answer = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
         let answer = if terminal == "ids" { answer["ids"].clone() } else { answer["id"].clone() };
         Ok((answer, visited.entities, probing.counted.get()))
+    })
+    .unwrap()
+}
+
+/// How many ids a plan of tasks with these steps answers, and how many entries of the store its walks were handed:
+/// each entry of a list of places, walked or sought, and each row
+fn walked(db: &Database, steps: Json, terminal: &str) -> (usize, u64) {
+    let mut plan = plan("live", steps);
+    plan["terminal"]["answer"] = json!(terminal);
+    let plan: Plan = serde_json::from_value(plan).unwrap();
+    db.snapshot(|s| {
+        let probing = Probing { inner: s, counted: Cell::new(0), walked: Cell::new(0) };
+        let (bytes, _) = reads::run_counted(&probing, &plan)?;
+        let answer = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+        let ids = answer["ids"].as_array().map_or(usize::from(!answer["id"].is_null()), Vec::len);
+        Ok((ids, probing.walked.get()))
     })
     .unwrap()
 }
@@ -1124,50 +1149,53 @@ fn held(db: &Database) {
 }
 
 #[test]
-fn the_filters_a_type_start_begins_with_are_read_from_the_index_holding_the_fewest() {
+fn the_filters_a_type_start_begins_with_are_read_as_the_places_their_indexes_hold_in_common() {
     let (_dir, db) = open();
     held(&db);
     let open = is("status", json!("open"));
     let owned = |owner: u64| is("owner", json!(owner));
     let ids = |range: std::ops::Range<usize>| range.map(id).collect::<Vec<_>>();
-    // Five hundred tasks are open and three have this owner: the owner's three entries are read whichever of the
-    // two is written first, and the same for the three that hold a role
+    // Five hundred tasks are open and three have this owner: the three are read whichever of the two is written
+    // first. Three hold a role, two of them open: only those two are read
     for filters in orders(&[open.clone(), owned(7)]) {
         assert_eq!(visited(&db, plan("live", json!(filters))), (ids(597..600), 3), "{filters:?}");
     }
     for filters in orders(&[open.clone(), role("lead")]) {
-        assert_eq!(visited(&db, plan("live", json!(filters))), (vec![id(300), id(599)], 3), "{filters:?}");
-        // Their least by the number is sorted for from those three: so few that the order isn't walked
+        assert_eq!(visited(&db, plan("live", json!(filters))), (vec![id(300), id(599)], 2), "{filters:?}");
+        // Their least by the number is sorted for from those two: so few that the order isn't walked
         let mut steps = filters.clone();
         steps.extend([order("k", false), limit(1)]);
-        assert_eq!(visited(&db, plan("live", json!(steps))), (vec![id(300)], 3), "{filters:?}");
+        assert_eq!(visited(&db, plan("live", json!(steps))), (vec![id(300)], 2), "{filters:?}");
     }
-    // Four filters with an index each, of 500, 147, 190 and 60 entries, and one with none, in every order: the same
-    // tasks in the order they were made, read from the range's sixty entries, ten of which the owner doesn't keep
-    let lacking = json!({ "step": "lacks", "field": "note" });
-    let between = json!({ "step": "range", "field": "k", "atLeast": 440, "below": 500 });
-    let wide = [open.clone(), owned(9), role("star"), between, lacking.clone()];
-    for filters in orders(&wide) {
-        assert_eq!(visited(&db, plan("live", json!(filters))), (ids(450..500), 60), "{filters:?}");
-    }
-    // Without the range, from the owner's hundred and forty-seven, seven of which the role doesn't keep; and a page
+    // Three filters with a list each, of 500, 147 and 190 places, and one with none, in every order: the hundred
+    // and forty tasks all three lists hold are read, which the filter with none is tested against; and a page
     // after a cursor is the tasks past it, none for a cursor the filters don't keep
-    let narrow = [open.clone(), owned(9), role("star"), lacking];
+    let lacking = json!({ "step": "lacks", "field": "note" });
+    let narrow = [open.clone(), owned(9), role("star"), lacking.clone()];
     for filters in orders(&narrow) {
-        assert_eq!(visited(&db, plan("live", json!(filters))), (ids(450..590), 147), "{filters:?}");
+        assert_eq!(visited(&db, plan("live", json!(filters))), (ids(450..590), 140), "{filters:?}");
         for (cursor, page) in [(450, ids(451..453)), (500, ids(501..503)), (588, ids(589..590)), (589, vec![])] {
             let mut steps = filters.clone();
             steps.extend([after(&id(cursor)), limit(2)]);
-            assert_eq!(visited(&db, plan("live", json!(steps))).0, page, "{filters:?} after {cursor}");
+            assert_eq!(visited(&db, plan("live", json!(steps))), (page.clone(), page.len() as u64), "{filters:?}");
         }
         for outside in [449, 590, 597] {
             let mut steps = filters.clone();
             steps.extend([after(&id(outside)), limit(2)]);
-            assert!(visited(&db, plan("live", json!(steps))).0.is_empty(), "{filters:?} after {outside}");
+            assert_eq!(visited(&db, plan("live", json!(steps))), (vec![], 0), "{filters:?} after {outside}");
         }
     }
-    // A cursor the index read holds and a filter before it doesn't keep has no page either, though tasks past it
-    // are kept
+    // With a range of sixty entries among them, in every order: the same tasks in the order they were made. The
+    // range is tested against each task until as many entries have been read as it holds, then read itself, and
+    // from there only its own tasks are: its sixty, and before them no more tasks than it took entries to pay for
+    let between = json!({ "step": "range", "field": "k", "atLeast": 440, "below": 500 });
+    let wide = [open.clone(), owned(9), role("star"), between, lacking];
+    for filters in orders(&wide) {
+        let (found, visits) = visited(&db, plan("live", json!(filters)));
+        assert_eq!(found, ids(450..500), "{filters:?}");
+        assert!((60..60 + 64).contains(&visits), "{filters:?}: {visits}");
+    }
+    // A cursor the lists hold and a filter with none doesn't keep has no page either, though tasks past it are kept
     let listed: Vec<String> = (450..460).filter(|at| *at != 455).map(id).collect();
     for filters in orders(&[json!({ "step": "within", "ids": listed }), owned(9)]) {
         let page = |cursor: usize| {
@@ -1177,106 +1205,98 @@ fn the_filters_a_type_start_begins_with_are_read_from_the_index_holding_the_fewe
         };
         assert_eq!((page(454), page(455)), (vec![id(456), id(457)], vec![]), "{filters:?}");
     }
-    // Indexes holding as many entries as each other: the one written first is read, which a read asked to explain
-    // itself names. Three tasks have the owner and three hold the role
+    // The stage of the last filter reads for them all, and a read asked to explain itself names there each index
+    // read, what was read and what was kept: one task has the owner and holds the role, and two that hold it are open
     let index_read = |steps: Json| {
         let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", steps) })).unwrap();
         let stages = explained["stages"].as_array().unwrap().clone();
         let reading: Vec<Json> = stages.iter().filter(|stage| stage.get("index").is_some()).cloned().collect();
-        assert_eq!(reading.len(), 1, "one stage reads an index: {explained}");
+        assert_eq!(reading.len(), 1, "one stage reads: {explained}");
         let stage = &reading[0];
         (stage["stage"].clone(), stage["index"].clone(), stage["visited"].clone(), stage["kept"].clone())
     };
-    assert_eq!(index_read(json!([owned(7), role("lead")])), (json!("where"), json!("byOwner"), json!(3), json!(3)));
-    assert_eq!(index_read(json!([role("lead"), owned(7)])), (json!("withRole"), json!("role"), json!(3), json!(3)));
-    // The stage of the index read says what it read and kept, wherever it stands: after the filter it tests
-    // against each of its matches, or before the one that tests them
-    assert_eq!(index_read(json!([open, role("lead")])), (json!("withRole"), json!("role"), json!(3), json!(2)));
-    assert_eq!(index_read(json!([role("lead"), open])), (json!("withRole"), json!("role"), json!(3), json!(3)));
+    let read_by = |steps: Json| index_read(steps);
+    assert_eq!(
+        read_by(json!([owned(7), role("lead")])),
+        (json!("withRole"), json!("byOwner, role"), json!(1), json!(1))
+    );
+    assert_eq!(read_by(json!([role("lead"), owned(7)])), (json!("where"), json!("role, byOwner"), json!(1), json!(1)));
+    assert_eq!(read_by(json!([open, role("lead")])), (json!("withRole"), json!("byStatus, role"), json!(2), json!(2)));
+    // A range holding a handful is read at once, a list with the others: its ten tasks are the ten read
     let from = json!({ "step": "range", "field": "k", "atLeast": 590 });
-    assert_eq!(index_read(json!([open, from])), (json!("range"), json!("byK"), json!(10), json!(10)));
-    // An index on several of the plan's first steps is read where it holds the fewest, and a filter after them
-    // tests its matches: seven tasks have this owner and a rank, five of them among the role's hundred and ninety
+    assert_eq!(read_by(json!([open, from])), (json!("range"), json!("byStatus, byK"), json!(10), json!(10)));
+    // An index on several of the plan's first steps is read for them all, and the list of each gives way to it:
+    // seven tasks have this owner and a rank, five of them among the role's hundred and ninety
     write(&db, (585..592).map(|at| set(at, "rank", json!(at))).collect());
     let ranked = json!({ "step": "range", "field": "rank", "atLeast": 0 });
-    let together = index_read(json!([owned(9), ranked, role("star")]));
-    assert_eq!(together, (json!("range"), json!("ownerRank"), json!(7), json!(7)));
+    let together = read_by(json!([owned(9), ranked, role("star")]));
+    assert_eq!(together, (json!("withRole"), json!("role, ownerRank"), json!(7), json!(5)));
     let kept = visited(&db, plan("live", json!([owned(9), ranked, role("star")])));
     assert_eq!(kept, (ids(585..590), 7));
 
-    // Over two types, a filter whose index both have is read from each, and counted over both: the three tasks
-    // from this number up, as few as hold the role and written first
+    // Over two types each type's own lists are read: the three tasks from this number up, one of which holds the
+    // role, and no entity of a type that has none
     let over = |types: [&str; 2], steps: Json| {
         json!({ "scope": "live", "start": { "from": "types", "types": types }, "steps": steps,
             "terminal": { "answer": "ids" } })
     };
     let last = json!({ "step": "range", "field": "k", "atLeast": 597 });
-    let explained = |plan: Json| {
-        let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
-        let stages = explained["stages"].as_array().unwrap().clone();
-        let named: Vec<Json> = stages.iter().filter_map(|stage| stage.get("index").cloned()).collect();
-        named
-    };
-    assert_eq!(explained(over(["Task", "Small"], json!([last, role("lead")]))), [json!("byK")]);
-    assert_eq!(explained(over(["Task", "Small"], json!([role("lead"), last]))), [json!("role")]);
-    // A filter whose index only one of the types has is read from it by the plan's first step alone, which walks
-    // the other type; later in the plan it tests what the walk of both hands it
+    for steps in [json!([last, role("lead")]), json!([role("lead"), last])] {
+        assert_eq!(visited(&db, over(["Task", "Small"], steps.clone())), (vec![id(599)], 3), "{steps}");
+    }
+    // A type with no index for a filter has its rows walked, and the filter tested: the other type's lists are read
     let noted = json!({ "step": "has", "field": "k" });
     assert_eq!(visited(&db, over(["Task", "Other"], json!([open]))), (ids(100..600), 500));
     assert_eq!(visited(&db, over(["Task", "Other"], json!([from]))), (ids(590..600), 10));
-    assert_eq!(visited(&db, over(["Task", "Other"], json!([noted, open]))), (ids(100..600), 600));
-    assert_eq!(visited(&db, over(["Task", "Other"], json!([noted, from]))), (ids(590..600), 600));
+    assert_eq!(visited(&db, over(["Task", "Other"], json!([noted, open]))), (ids(100..600), 500));
+    assert_eq!(visited(&db, over(["Task", "Other"], json!([noted, from]))), (ids(590..600), 10));
 
-    // The trash is left out, or kept, or alone, as the scope says, in every order of the filters: a plan of the
-    // trash walks its five tasks, fewer than any index's entries
+    // The trash is left out, or kept, or alone, as the scope says, in every order of the filters. A plan of the
+    // trash reads the trash's five rows as a list among the others: the three tasks all of them hold
     write(&db, [20, 455, 470, 480, 598].iter().map(|at| json!({ "op": "trash", "id": id(*at) })).collect());
     let live: Vec<String> = (450..500).filter(|at| ![455, 470, 480].contains(at)).map(id).collect();
     for filters in orders(&wide) {
-        assert_eq!(visited(&db, plan("live", json!(filters))), (live.clone(), 60), "{filters:?}");
-        assert_eq!(visited(&db, plan("withTrashed", json!(filters))), (ids(450..500), 60), "{filters:?}");
+        assert_eq!(visited(&db, plan("live", json!(filters))).0, live, "{filters:?}");
+        assert_eq!(visited(&db, plan("withTrashed", json!(filters))).0, ids(450..500), "{filters:?}");
         assert_eq!(
             visited(&db, plan("trashed", json!(filters))),
-            (ids(455..456).into_iter().chain([id(470), id(480)]).collect(), 5),
+            (ids(455..456).into_iter().chain([id(470), id(480)]).collect(), 3),
             "{filters:?}"
         );
     }
 }
 
 #[test]
-fn what_choosing_an_index_counts_is_bounded_and_no_entity_read() {
+fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_counts_nothing() {
     let (_dir, db) = open();
     held(&db);
     let open = is("status", json!("open"));
     let owned = |owner: u64| is("owner", json!(owner));
     let late = json!((597..600).map(id).collect::<Vec<_>>());
-    // One index alone is read without a count, with or without filters that have none
+    // Lists of places are read without a count, with or without filters that have none
     assert_eq!(probed(&db, json!([open]), "ids").2, 0);
     assert_eq!(probed(&db, json!([{ "step": "has", "field": "note" }, open]), "ids"), (late.clone(), 500, 0));
-    // And so is an index on several filters together, though each of them has one of its own
-    let between = json!({ "step": "range", "field": "k", "atLeast": 590 });
-    let ranked = json!({ "step": "range", "field": "rank", "atLeast": 0 });
-    assert_eq!(probed(&db, json!([owned(7), ranked]), "ids").2, 0);
-    // Of two, each is counted to sixteen: the owner's three end the count, the visits are theirs, and the keys
-    // counted are no visit
     for filters in orders(&[open.clone(), owned(7)]) {
-        assert_eq!(probed(&db, json!(filters), "ids"), (late.clone(), 3, 16 + 3), "{filters:?}");
-        assert_eq!(probed(&db, json!(filters), "first"), (json!(id(597)), 1, 16 + 3), "{filters:?}");
+        assert_eq!(probed(&db, json!(filters), "ids"), (late.clone(), 3, 0), "{filters:?}");
+        assert_eq!(probed(&db, json!(filters), "first"), (json!(id(597)), 1, 0), "{filters:?}");
+        // The five hundred are asked where the three are, and at their own first place: a handful of entries
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 3 && entries <= 8, "{filters:?}: {entries}");
     }
-    // The range's ten are more than the owner's three, and the five hundred open more still: three indexes counted
-    assert_eq!(probed(&db, json!([open, between, owned(7)]), "ids"), (late.clone(), 3, 16 + 10 + 3));
-    // Two ranges of one field from the same number are counted each as its own: the narrower holds two of the
-    // wider's ten
+    let (_, visits, counted) = probed(&db, json!([open, owned(9)]), "ids");
+    assert_eq!((visits, counted), (147, 0));
+    // A range's entries are counted, to learn it holds a handful, and then read: its ten tasks, where the owner's
+    // three would have been fewer, which no count says
+    let between = json!({ "step": "range", "field": "k", "atLeast": 590 });
+    assert_eq!(probed(&db, json!([open, between, owned(7)]), "ids"), (late.clone(), 10, 10));
+    // Of two ranges that each hold a handful the one holding fewer is read, and the other tested against its tasks
     let narrow = json!({ "step": "range", "field": "k", "atLeast": 590, "below": 592 });
     for filters in orders(&[between.clone(), narrow]) {
         assert_eq!(probed(&db, json!(filters), "ids"), (json!([id(590), id(591)]), 2, 10 + 2), "{filters:?}");
     }
-    // A hundred and forty-seven are counted to their end in the round that counts to a thousand and twenty-four,
-    // as the five hundred are: each key once over the three rounds
-    let (_, visits, counted) = probed(&db, json!([open, owned(9)]), "ids");
-    assert_eq!((visits, counted), (147, 500 + 147));
 
-    // Indexes that each hold a thousand and twenty-four entries or more are not told apart: the one written first
-    // is read, and what was counted is that many of each, however many they hold
+    // Two lists of a thousand and twenty-four places, and of more: what they hold in common is read, whichever
+    // is written first, and nothing is counted, however many they hold
     let (_dir, db) = open_with(schema_json());
     let tasks: Vec<Json> = (0..2200)
         .map(|at| {
@@ -1296,32 +1316,38 @@ fn what_choosing_an_index_counts_is_bounded_and_no_entity_read() {
         let (ids, visits, counted) = probed(&db, steps, "ids");
         (ids.as_array().unwrap().len(), visits, counted)
     };
-    assert_eq!(read(json!([open, owned(1)])), (1024, 2200, 2048));
-    assert_eq!(read(json!([owned(1), open])), (1024, 1024, 2048));
-    // One entry fewer is counted to its end, and read wherever it is written
-    assert_eq!(read(json!([open, owned(2)])), (1023, 1023, 1024 + 1023));
-    assert_eq!(read(json!([owned(2), open])), (1023, 1023, 1024 + 1023));
-    // A range the plan starts with is read as the first written; one past its first step, after an equality written
-    // after it, whose entries are handed on as they are read: every task's number is in this one
+    for filters in orders(&[open.clone(), owned(1)]) {
+        assert_eq!(read(json!(filters)), (1024, 1024, 0), "{filters:?}");
+        // A read that stops at its first match reads that one task, and two for a limit of two
+        assert_eq!(probed(&db, json!(filters), "first"), (json!(id(0)), 1, 0), "{filters:?}");
+        let mut two = filters.clone();
+        two.push(limit(2));
+        assert_eq!(probed(&db, json!(two), "ids"), (json!([id(0), id(1)]), 2, 0), "{filters:?}");
+        // The list walked is the owner's: an entry walked and an entry sought for each task, and no more
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 1024 && entries <= 2 * 1024 + 8, "{filters:?}: {entries}");
+        assert!(walked(&db, json!(filters), "first").1 <= 4, "{filters:?}");
+    }
+    for filters in orders(&[open.clone(), owned(2)]) {
+        assert_eq!(read(json!(filters)), (1023, 1023, 0), "{filters:?}");
+    }
+    // A range holding more than was read is tested against each task, wherever it is written: every task's number
+    // is in this one. Its entries are counted as far as the read has read, each key once over all its askings
     let every = json!({ "step": "range", "field": "k", "atLeast": 0 });
     let noted = json!({ "step": "lacks", "field": "note" });
-    assert_eq!(read(json!([every, owned(1)])), (1024, 2200, 2048));
-    assert_eq!(read(json!([noted, every, owned(1)])), (1024, 1024, 2048));
-    assert_eq!(read(json!([noted, owned(1), every])), (1024, 1024, 2048));
-    // A range past the first step is read only when counted to its end, its entries all being read before the
-    // first is handed on: alone and holding more, it is counted and the tasks walked, so a read that stops at its
-    // first match reads one
-    assert_eq!(read(json!([noted, every])), (2200, 2200, 1024));
-    assert_eq!(probed(&db, json!([noted, every]), "first"), (json!(id(0)), 1, 1024));
+    for steps in [json!([every, owned(1)]), json!([noted, every, owned(1)]), json!([noted, owned(1), every])] {
+        assert_eq!(read(steps.clone()), (1024, 1024, 1024), "{steps}");
+    }
+    // With no list, a read that takes every task reads the range whatever it holds, a handful of its entries
+    // counted to learn it holds no fewer; one that stops at its first match counts as many and walks the tasks
+    assert_eq!(read(json!([noted, every])), (2200, 2200, 16));
+    assert_eq!(probed(&db, json!([noted, every]), "first"), (json!(id(0)), 1, 16));
     let few = json!({ "step": "range", "field": "k", "below": 1000 });
-    assert_eq!(read(json!([noted, few])), (1000, 1000, 1000));
-    // A read that stops at its first match reads that one task, and waits on no more keys than the same
-    assert_eq!(probed(&db, json!([open, owned(1)]), "first"), (json!(id(0)), 1, 2048));
-    assert_eq!(probed(&db, json!([open, owned(1), limit(2)]), "ids"), (json!([id(0), id(1)]), 2, 2048));
+    assert_eq!(read(json!([noted, few])), (1000, 1000, 16));
 }
 
 #[test]
-fn a_tracked_read_depends_on_the_index_it_read_and_not_on_the_ones_it_counted() {
+fn a_tracked_read_depends_on_the_list_it_walked_and_on_the_others_only_at_its_places() {
     let (_dir, db) = open();
     held(&db);
     let track = |steps: Json, token: u32| {
@@ -1331,11 +1357,11 @@ fn a_tracked_read_depends_on_the_index_it_read_and_not_on_the_ones_it_counted() 
     };
     let touched = |ops: Vec<Json>| db.write(&super::batch(ops), false).unwrap().1.touched;
     let open = is("status", json!("open"));
-    // The open tasks of an owner of three, read from the owner's index whichever is written first: the open
-    // tasks' entries were counted and none of them read
+    // The open tasks of an owner of three: the owner's list is walked whichever is written first, and the open
+    // tasks' asked only where it holds a place
     track(json!([open, is("owner", json!(7))]), 1);
     track(json!([is("owner", json!(7)), open]), 2);
-    // An open task of another owner, and an open task of no owner made done, move the entries that were counted
+    // An open task of another owner, and an open task of no owner made done, move entries that were not read
     assert!(touched(vec![task(700, json!({ "k": 700, "status": "open", "owner": 9 }))]).is_empty());
     assert!(touched(vec![set(200, "status", json!("done"))]).is_empty());
     // One of the three made done is no longer answered, and a task given the owner is

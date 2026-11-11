@@ -21,9 +21,13 @@ An order or a range under equalities is read from an index on the equalities' fi
 such index an `orderBy` before a `limit` walks its order and tests the filters while that costs less than sorting
 what they keep, which it learns by counting the entries the filters would read as it goes.
 
-What the planner still does not do: choose which of two indexed filters drives (the first wins, whichever is smaller),
-intersect two indexes rather than check one per match, or run a search inside a filter's set when the filter comes
-first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
+Since then a type start's leading filters are read as the places their indexes hold in common, each index's
+entries for a value a list in place order: one list is walked and its places sought in the others, so no more is read
+than the shortest holds whichever filter is written first, and nothing is counted to choose (`../architecture/engine.md`,
+Reads: plans). That answers what the first phase below was for without its `d/xn` key.
+
+What the planner still does not do: read those lists as bitmaps, a seek a place where a block would be an AND, or run
+a search inside a filter's set when the filter comes first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
 the test is a lookup in a set.
 
 ## The measurements

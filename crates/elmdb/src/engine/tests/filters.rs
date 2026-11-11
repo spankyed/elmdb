@@ -1,7 +1,7 @@
-//! A type start's leading filters against a model of them: whichever index the plan reads them from
-//! (`reads.rs`, `Query::access`), in whatever order they are written, the answer is the entities the filters keep in
-//! creation order, a tracked read is touched by the write that changes it, and the index read is the one holding
-//! the fewest entries.
+//! A type start's leading filters against a model of them: however the plan reads them (`reads.rs`,
+//! `Query::filtered`), in whatever order they are written, the answer is the entities the filters keep in creation
+//! order, a tracked read is touched by the write that changes it, and no more entities are read than the places the
+//! filters' lists hold in common.
 
 use std::collections::BTreeSet;
 
@@ -628,8 +628,8 @@ fn alternating(count: usize, fields: impl Fn(usize, &str) -> Json) -> (tempfile:
 }
 
 #[test]
-fn an_index_counted_to_its_end_in_each_start_type_is_read_though_its_entries_over_them_pass_the_count() {
-    // 700 entries for the value in each type, 1,400 over both, and 2,000 a type for the role
+fn the_entities_read_are_those_at_the_places_the_lists_hold_in_common_whichever_filter_is_written_first() {
+    // 700 hold the value in each type, 1,400 over both, and every one of a type's 2,000 the role
     let (_dir, db) = alternating(4000, |at, _| json!({ "a": if at < 1400 { 1 } else { 0 } }));
     let role = json!({ "step": "withRole", "role": "r1" });
     let one = json!({ "step": "where", "field": "a", "value": 1 });
@@ -645,9 +645,9 @@ fn an_index_counted_to_its_end_in_each_start_type_is_read_though_its_entries_ove
 }
 
 #[test]
-fn the_fewest_is_chosen_over_the_start_types_together_and_not_at_the_first_round_an_index_ends_in() {
-    // The role's entries end in the first round in each type, 15 and 15. The value's are none in `A` and 20 in
-    // `B`, past that round's count there: fewer over both, which the next round learns
+fn a_type_whose_lists_hold_no_place_in_common_has_no_entity_read() {
+    // The role is held by 15 of each type. The value is held by none of `A` and by 20 of `B`, 15 of them with
+    // the role: those 15 are read, and none of `A`
     let (_dir, db) = open();
     let mut ops = Vec::new();
     for at in 0..400 {
@@ -663,16 +663,15 @@ fn the_fewest_is_chosen_over_the_start_types_together_and_not_at_the_first_round
     let role = json!({ "step": "withRole", "role": "r1" });
     let one = json!({ "step": "where", "field": "a", "value": 1 });
     for steps in [vec![role.clone(), one.clone()], vec![one.clone(), role.clone()]] {
-        // The 15 of `B` with the role are among its first 20, which hold the value
-        assert_eq!(visits(&db, plan(&["A", "B"], "live", steps.clone(), "ids")), (15, 20), "{steps:?}");
+        assert_eq!(visits(&db, plan(&["A", "B"], "live", steps.clone(), "ids")), (15, 15), "{steps:?}");
+        assert_eq!(visits(&db, plan(&["A"], "live", steps.clone(), "ids")), (0, 0), "{steps:?}");
     }
 }
 
 #[test]
-fn an_index_counted_to_its_end_is_read_after_the_last_count_whatever_one_still_being_counted_holds() {
-    // The value's entries are 1,000 in each type, counted to their end only in the last round. The role's are none
-    // in `A` and every one of `B`'s 1,500: never counted to their end, and the count of them, 1,024, is under the
-    // value's 2,000, so only the last round settles on the value's
+fn lists_that_each_hold_more_than_a_thousand_places_are_read_for_what_they_hold_in_common() {
+    // The value is held by 1,000 of each type. The role is held by none of `A` and by every one of `B`'s 1,500:
+    // the thousand of `B` both lists hold are read
     let (_dir, db) = open();
     let mut ops = Vec::new();
     for at in 0..3000 {
@@ -689,43 +688,6 @@ fn an_index_counted_to_its_end_is_read_after_the_last_count_whatever_one_still_b
     let role = json!({ "step": "withRole", "role": "r1" });
     let one = json!({ "step": "where", "field": "a", "value": 1 });
     for steps in [vec![role.clone(), one.clone()], vec![one.clone(), role.clone()]] {
-        assert_eq!(visits(&db, plan(&["A", "B"], "live", steps.clone(), "ids")), (1000, 2000), "{steps:?}");
+        assert_eq!(visits(&db, plan(&["A", "B"], "live", steps.clone(), "ids")), (1000, 1000), "{steps:?}");
     }
-}
-
-#[test]
-fn indexes_holding_as_many_over_the_start_types_are_told_apart_by_which_is_written_first() {
-    // Sixteen entries each: the value's all in `A`, as many as the first count goes to there, so not yet known to
-    // be all of them when the role's, eight in each type, are
-    let (_dir, db) = open();
-    let mut ops = Vec::new();
-    for at in 0..60 {
-        let ty = if at < 40 { "A" } else { "B" };
-        let id = format!("{ty}-{at:05}");
-        ops.push(json!({ "op": "create", "type": ty, "id": id, "fields": { "a": if at < 16 { 1 } else { 0 } } }));
-        if at < 8 || (40..48).contains(&at) {
-            ops.push(json!({ "op": "grant", "id": id, "role": "r1" }));
-        }
-    }
-    super::write(&db, ops).unwrap();
-    let role = json!({ "step": "withRole", "role": "r1" });
-    let one = json!({ "step": "where", "field": "a", "value": 1 });
-    // The stage of an explained read that read an index
-    let reading = |steps: Vec<Json>| {
-        let op = json!({ "read": "query", "explain": true, "plan": plan(&["A", "B"], "live", steps, "ids") });
-        let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None };
-        let answers = serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&reads).unwrap()[..]).unwrap());
-        let explained = answers.unwrap()[0].take();
-        let stages: Vec<Json> = explained["stages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|stage| stage.get("index").is_some())
-            .cloned()
-            .collect();
-        assert_eq!(stages.len(), 1, "one stage reads an index: {explained}");
-        (stages[0]["stage"].clone(), stages[0]["visited"].clone())
-    };
-    assert_eq!(reading(vec![one.clone(), role.clone()]), (json!("where"), json!(16)));
-    assert_eq!(reading(vec![role, one]), (json!("withRole"), json!(16)));
 }
