@@ -121,8 +121,15 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         }
         Op::Unlink { source, kind, target } => {
             existing(t, source)?;
-            if let Some(target) = target {
-                declared_end(t, target)?;
+            match target {
+                Some(target) => declared_end(t, target)?,
+                // With no target named, every edge of the kind goes, or of every kind: each one's far end is
+                // written as a named one is
+                None => {
+                    for (_, far) in relations::edges(t, source, true, kind.as_deref())? {
+                        declared_end(t, &far)?;
+                    }
+                }
             }
             relations::unlink(t, source, kind.as_deref(), target.as_deref())?;
             Ok(OpResult::Done)

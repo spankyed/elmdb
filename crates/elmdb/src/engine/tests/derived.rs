@@ -395,6 +395,7 @@ fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_ag
                 json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
                 json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-1" }),
                 json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+                json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" }),
             ],
         )
         .unwrap();
@@ -425,6 +426,8 @@ fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_ag
         ("link to it", json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" })),
         ("unlink", json!({ "op": "unlink", "source": "Doc-1" })),
         ("unlink to it", json!({ "op": "unlink", "source": "Task-1", "target": "Doc-1" })),
+        ("unlink every edge of one linked to it", json!({ "op": "unlink", "source": "Task-2" })),
+        ("unlink a kind's edges of one linked to it", json!({ "op": "unlink", "source": "Task-2", "kind": "refs" })),
         (
             "its role taken for another",
             json!({ "op": "grantExclusive", "id": "Task-1", "role": "r1", "among": ["Doc-1"] }),
