@@ -36,6 +36,22 @@ fn to_js(error: elmdb::Error) -> napi::Error<Code> {
     napi::Error::new(Code(error.code.as_str()), error.message)
 }
 
+/// `bytes` copied into a Buffer whose memory V8 allocates and frees itself, which is how every answer in bytes reaches
+/// JavaScript. A `Buffer` made from a `Vec` is an external buffer: the bytes stay the `Vec`'s, and V8's collector frees
+/// them on a thread of its own, where Node wakes a handle of the environment to have the JavaScript thread run the
+/// finalizer. An environment that is ending closes that handle before it stops waking it, and libuv on Windows aborts
+/// the process on a wake of a closing handle (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`), so a process
+/// that ends while answers it dropped are being collected would die there. Freeing a copy calls nothing
+fn copied<'env>(env: &Env, bytes: &[u8]) -> napi::Result<BufferSlice<'env>> {
+    BufferSlice::copy_from(env, bytes)
+}
+
+/// `copied`, for an export whose failures are elmdb's. N-API failing to make the Buffer is none of elmdb's: where Node
+/// left an exception of its own pending, that one is thrown, and otherwise an error with N-API's `GenericFailure`
+fn answer<'env>(env: &Env, bytes: &[u8]) -> Result<BufferSlice<'env>, Code> {
+    copied(env, bytes).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
+}
+
 #[napi(object)]
 pub struct OpenOptions {
     /// Open existing files without writing: every write is refused, and the stored schema is used
@@ -152,15 +168,15 @@ impl Database {
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
     /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
     #[napi]
-    pub fn write(&self, batch: Buffer, durable: Option<bool>) -> Result<Buffer, Code> {
-        self.inner.write_bytes(&batch, durable.unwrap_or(false)).map(Buffer::from).map_err(to_js)
+    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
     }
 
     /// Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
     /// answer per read
     #[napi]
-    pub fn read_sync(&self, reads: Buffer) -> Result<Buffer, Code> {
-        self.inner.read_bytes(&reads).map(Buffer::from).map_err(to_js)
+    pub fn read_sync<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?)
     }
 
     /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
@@ -296,15 +312,21 @@ impl Database {
 
     /// The checkpoint named `name`, as the latest commit left it
     #[napi]
-    pub fn checkpoint(&self, name: String) -> Result<Option<Buffer>, Code> {
-        Ok(self.inner.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
+    pub fn checkpoint<'env>(&self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
+        self.inner.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
     }
 
     /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
     /// its `Changed`
     #[napi]
-    pub fn changed_since(&self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
-        self.inner.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
+    pub fn changed_since<'env>(
+        &self,
+        env: &'env Env,
+        types: Vec<String>,
+        from: Buffer,
+        limit: u32,
+    ) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.inner.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
     }
 
     /// Blocks until every index waiting to be built is built or has failed
@@ -406,7 +428,7 @@ pub struct ReadTask {
 
 impl Task for ReadTask {
     type Output = Vec<u8>;
-    type JsValue = Buffer;
+    type JsValue = BufferSlice<'static>;
 
     fn compute(&mut self) -> napi::Result<Vec<u8>> {
         self.db.read_bytes(&self.reads).map_err(|error| {
@@ -416,11 +438,11 @@ impl Task for ReadTask {
         })
     }
 
-    fn resolve(&mut self, _env: Env, answer: Vec<u8>) -> napi::Result<Buffer> {
-        Ok(answer.into())
+    fn resolve(&mut self, env: Env, answer: Vec<u8>) -> napi::Result<BufferSlice<'static>> {
+        copied(&env, &answer)
     }
 
-    fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<Buffer> {
+    fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<BufferSlice<'static>> {
         match self.failed.take() {
             Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
             None => Err(error),
@@ -480,8 +502,8 @@ impl Unit {
     /// Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
     /// bytes of `{ results: OpResult[] }`
     #[napi]
-    pub fn write(&mut self, batch: Buffer) -> Result<Buffer, Code> {
-        self.open()?.write_bytes(&batch).map(Buffer::from).map_err(to_js)
+    pub fn write<'env>(&mut self, env: &'env Env, batch: Buffer) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.open()?.write_bytes(&batch).map_err(to_js)?)
     }
 
     /// Records `value` as the checkpoint `name`, committing with this unit or not at all
@@ -492,20 +514,26 @@ impl Unit {
 
     /// The checkpoint named `name`, as this unit sees it
     #[napi]
-    pub fn checkpoint(&mut self, name: String) -> Result<Option<Buffer>, Code> {
-        Ok(self.open()?.checkpoint(&name).map_err(to_js)?.map(Buffer::from))
+    pub fn checkpoint<'env>(&mut self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
+        self.open()?.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
     }
 
     /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
     #[napi]
-    pub fn pending_changes(&mut self) -> Result<Buffer, Code> {
-        self.open()?.pending_changes_bytes().map(Buffer::from).map_err(to_js)
+    pub fn pending_changes<'env>(&mut self, env: &'env Env) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.open()?.pending_changes_bytes().map_err(to_js)?)
     }
 
     /// `Database.changedSince` read in the unit, before its own writes are stamped
     #[napi]
-    pub fn changed_since(&mut self, types: Vec<String>, from: Buffer, limit: u32) -> Result<Buffer, Code> {
-        self.open()?.changed_since_bytes(&types, &from, limit as usize).map(Buffer::from).map_err(to_js)
+    pub fn changed_since<'env>(
+        &mut self,
+        env: &'env Env,
+        types: Vec<String>,
+        from: Buffer,
+        limit: u32,
+    ) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.open()?.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
     }
 
     /// The sequence this unit commits as, which what it writes is stamped with
@@ -516,8 +544,8 @@ impl Unit {
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes
     #[napi]
-    pub fn read(&mut self, reads: Buffer) -> Result<Buffer, Code> {
-        self.open()?.read_bytes(&reads).map(Buffer::from).map_err(to_js)
+    pub fn read<'env>(&mut self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
+        answer(env, &self.open()?.read_bytes(&reads).map_err(to_js)?)
     }
 
     /// Opens a savepoint, answering its depth
@@ -540,11 +568,11 @@ impl Unit {
 
     /// Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it
     #[napi]
-    pub fn commit(&mut self, durable: Option<bool>) -> Result<Buffer, Code> {
+    pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
         let unit =
             self.inner.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;
         let changes = unit.commit(durable.unwrap_or(false)).map_err(to_js)?;
-        Ok(rmp_serde::to_vec_named(&changes).expect("a change set serializes").into())
+        answer(env, &rmp_serde::to_vec_named(&changes).expect("a change set serializes"))
     }
 
     /// Ends the unit, keeping nothing of it
