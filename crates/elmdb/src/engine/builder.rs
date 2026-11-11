@@ -241,8 +241,9 @@ impl Builder {
         self.store.wake_unit_waiters();
     }
 
-    /// Whether the caller is on the builder's thread: a listener one of its commits delivered to, calling the
-    /// database from there
+    /// Whether the caller is on this builder's thread: a listener one of its commits delivered to, calling the
+    /// database from there. False once the builder is stopped, which lets go of its thread: what must know of a
+    /// listener on a builder no longer the database's asks `watch::in_callback`
     pub fn on_its_thread(&self) -> bool {
         self.thread.as_ref().is_some_and(|thread| thread.thread().id() == std::thread::current().id())
     }

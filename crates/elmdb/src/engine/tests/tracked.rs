@@ -870,6 +870,7 @@ fn a_listener_on_the_builder_s_thread_changes_the_schema() {
     let mut tell = Some(tell);
     let weak = Arc::downgrade(&db);
     let changed = schema(1e-8);
+    let again = top.clone();
     db.watch(
         reads(vec![top], None),
         Box::new(move |_| {
@@ -892,29 +893,77 @@ fn a_listener_on_the_builder_s_thread_changes_the_schema() {
     db.wait_for_index_builds().unwrap();
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
+    // Built under the new schema, the index is read: the task every other links to is its first
+    let ranked = db.read(&reads(vec![again], None)).unwrap();
+    let ranked = serde_json::to_value(rmpv::decode::read_value(&mut &ranked[..]).unwrap()).unwrap();
+    assert_eq!(ranked[0]["hits"][0]["id"], "Task-0", "{ranked}");
     db.close().unwrap();
 }
 
-/// A close waits for the store, which the builder's thread holds until it ends: asked for on that thread, by the
-/// listener of the builder's commits, it is refused as one made by a watch's listener is
-#[test]
-fn a_close_on_the_builder_s_thread_is_refused() {
+/// What a listener of the builder's commits asks for on the builder's thread, where it runs, and what it is told:
+/// `asks` is handed the database, and its answer comes back
+fn asked_on_the_builder_s_thread<T: Send + 'static>(
+    asks: impl Fn(&Database) -> T + Send + Sync + 'static,
+) -> (tempfile::TempDir, Arc<Database>, T) {
     use std::time::Duration;
-    let (_dir, db, _, top) = ranked_tasks();
+    let (dir, db, _, top) = ranked_tasks();
     db.read(&reads(vec![top], Some(7))).unwrap();
     let (tell, told) = std::sync::mpsc::channel();
     let tell = Mutex::new(Some(tell));
     let weak = Arc::downgrade(&db);
     db.hear_builder_commits(Some(Arc::new(move |_, _| {
         let Some(tell) = tell.lock().unwrap().take() else { return };
-        let db = weak.upgrade().unwrap();
-        tell.send(db.close_within(Some(Duration::from_millis(50))).map_err(|refused| refused.code)).unwrap();
+        assert_eq!(std::thread::current().name(), Some("elmdb-index"));
+        tell.send(asks(&weak.upgrade().unwrap())).unwrap();
     })))
     .unwrap();
     link_all(&db);
-    let outcome = told.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
-    assert_eq!(outcome, Err(crate::ErrorCode::CallbackActive));
+    let answer = told
+        .recv_timeout(Duration::from_secs(4))
+        .expect("the builder's commit told its listener, which was answered and not left waiting for its own thread");
+    (dir, db, answer)
+}
+
+/// A close waits for the store, which the builder's thread holds until it ends: asked for on that thread, by the
+/// listener of the builder's commits, it is refused as one made by a watch's listener is, with or without a time
+/// to wait
+#[test]
+fn a_close_on_the_builder_s_thread_is_refused() {
+    use std::time::Duration;
+    let (_dir, db, closes) = asked_on_the_builder_s_thread(|db| {
+        let code = |refused: crate::Error| refused.code;
+        (db.close_within(Some(Duration::from_millis(50))).map_err(code), db.close().map_err(code))
+    });
+    assert_eq!(closes, (Err(crate::ErrorCode::CallbackActive), Err(crate::ErrorCode::CallbackActive)));
     // And on any other thread it closes
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}
+
+/// A schema change by the listener of the builder's commits leaves another builder the database's, or none. A
+/// close the same listener then asks for still waits for the store its own thread holds, and is refused as it is
+/// before the change
+#[test]
+fn a_close_after_a_schema_change_on_the_builder_s_thread_is_refused() {
+    use std::time::Duration;
+    let changed = ranked_tasks().2(1e-8);
+    let (_dir, db, (schema, close)) = asked_on_the_builder_s_thread(move |db| {
+        let schema = db.set_schema(changed.clone()).map(|changes| changes.len());
+        (schema, db.close_within(Some(Duration::from_millis(50))).map_err(|refused| refused.code))
+    });
+    assert_eq!(schema.unwrap(), 1, "the tolerance changed");
+    assert_eq!(close, Err(crate::ErrorCode::CallbackActive));
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}
+
+/// The builds go on once the listener of the builder's commits returns, so a wait for them that it asks for would
+/// wait for itself: it is refused, and on any other thread it waits
+#[test]
+fn a_wait_for_the_builds_on_the_builder_s_thread_is_refused() {
+    let (_dir, db, waited) =
+        asked_on_the_builder_s_thread(|db| db.wait_for_index_builds().map_err(|refused| refused.code));
+    assert_eq!(waited, Err(crate::ErrorCode::CallbackActive));
     db.wait_for_index_builds().unwrap();
     db.close().unwrap();
 }

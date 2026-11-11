@@ -287,7 +287,8 @@ impl Database {
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a unit
     /// is open (`UNIT_OPEN`): the unit holds the environment's write transaction, so commit or abort it first.
-    /// Refused from this database's watch callback (`CALLBACK_ACTIVE`); close after the callback returns
+    /// Refused from a listener of this database, a watch's or the builder's commits' (`CALLBACK_ACTIVE`); close
+    /// after it returns
     pub fn close(&self) -> Result<()> {
         if self.close_within(None)? {
             return Ok(());
@@ -358,18 +359,12 @@ impl Database {
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
+        // A watch's listener, or the listener of the builder's commits, which runs on the builder's thread: a close
+        // waits for the operation the listener is called from, and for the store that thread holds
         if crate::engine::watch::in_callback(&self.tracks) {
             return Err(Error::new(
                 ErrorCode::CallbackActive,
-                "A watch listener is running on this thread: close the database after the listener returns",
-            ));
-        }
-        // As is the builder's own thread, where a listener of its commits runs: a close waits for the store the
-        // thread holds, which it lets go only once that listener has returned
-        if self.builder().as_ref().is_some_and(crate::engine::Builder::on_its_thread) {
-            return Err(Error::new(
-                ErrorCode::CallbackActive,
-                "A listener of the builder's commits is running on this thread: close the database after it returns",
+                "A listener of this database is running on this thread: close the database after it returns",
             ));
         }
         // A build in progress stops between chunks, for the next open to finish. A builder is waited for with nothing

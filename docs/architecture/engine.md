@@ -357,7 +357,7 @@ in either order. `db.sequence` is the last commit's.
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
   after the commit, outside its transaction, on the thread that committed, which for a commit of the index builder's
-  is the builder's own. A schema change and a close wait for that thread to end, and wait holding nothing its
+  is the builder's own. A schema change and a close on another thread wait for that thread to end, and wait holding nothing its
   delivery takes, the schema's lock least of all: a watch's read, and whatever its listener calls of the database,
   goes on while they wait, and the listener's calls after a close are answered `CLOSED`. An unwinding listener panic removes that
   watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
@@ -373,10 +373,12 @@ in either order. `db.sequence` is the last commit's.
   listener needs.
   This recovery requires unwinding; aborting panics terminate the process. Closing this database from its callback
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
-  So does closing it from the listener of the builder's commits, which runs on the builder's thread: a close waits
-  for the store that thread holds. A schema change made by a listener on that thread, a watch's that a builder's
-  commit delivered to, stops the builder without waiting for it, there being no other thread to wait: the builder
-  ends once the listener returns, and the one started for the new schema builds what it left.
+  The listener of the builder's commits is such a callback, run on the builder's thread, and a close it asks for
+  is refused the same way: a close waits for the store that thread holds. So is a wait for the index builds asked
+  for on that thread, which would wait for the listener asking. A schema change made by a listener on that thread,
+  a watch's or the builder's commits', stops the builder without waiting for it, there being no other thread to
+  wait: the builder ends once it has delivered that commit, and the one started for the new schema builds what it
+  left. A close after such a change, by the same listener, is refused like any it asks for.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a

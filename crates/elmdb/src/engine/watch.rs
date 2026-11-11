@@ -44,6 +44,15 @@ impl Drop for CallbackScope {
     }
 }
 
+/// Runs `run` as a callback of this database on this thread, as a watch's listener is run: while it runs, what it
+/// calls of the database knows it is called from one (`in_callback`), and refuses to wait for what the callback's
+/// own thread holds
+pub(crate) fn as_callback<R>(tracks: &SharedTracks, run: impl FnOnce() -> R) -> R {
+    CallbackScope::run(tracks, run)
+}
+
+/// Whether a callback of this database is running on this thread: a watch's listener, or the listener of the
+/// builder's commits
 pub(crate) fn in_callback(tracks: &SharedTracks) -> bool {
     let identity = Arc::as_ptr(tracks) as usize;
     let mut node = CALLBACKS.with(Cell::get);
