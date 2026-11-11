@@ -288,7 +288,8 @@ Every pull request, draft or ready for review, also runs the fast tier's platfor
 pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
 every suite, the model and crash harnesses included, on it, and adds the instruction counts and the diagnostics
-overhead. A dispatch of either workflow runs its platforms on a branch.
+overhead. A dispatch of either workflow runs its platforms on a branch, and reports none of the checks a merge waits
+on.
 
 A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
 and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
@@ -300,6 +301,9 @@ commit alone, neither cancelled nor repeated. Only a pull request ready for revi
 push reports the full tier's last job under another name, because a check on a draft's head still stands when the
 pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
 that is ready therefore merges only after the full tier passed on its head.
+
+Changing a pull request's base starts no workflow. Its checks stay the ones its head earned against the old base, the
+mutants of the old diff among them, so after a base change a push comes before the merge.
 
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).

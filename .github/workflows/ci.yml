@@ -197,8 +197,10 @@ jobs:
         {"runner":"windows-latest","target":"x86_64-pc-windows-msvc","timeout":30}]
 
   # The check a merge waits on: every job above passed or was skipped (a documentation-only change, or the platforms on
-  # a push to main)
+  # a push to main). A dispatch reports under another name: it runs the branch's tip and not the merge, on the commit
+  # the pull request's run reports on, where its pass would otherwise replace that run's failure
   ci-pass:
+    name: ${{ github.event_name != 'workflow_dispatch' && 'ci-pass' || 'CI (dispatched, not a merge gate)' }}
     if: always()
     needs: [changes, checks, heap, repo, loom, shuttle, platforms]
     runs-on: ubuntu-24.04
