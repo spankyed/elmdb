@@ -607,9 +607,13 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // The walk is given up as a first page's is: none with this owner is below its cursor, which the hundred and
     // twenty-eight read before asking don't show, and its hundred and forty-seven are then sorted
     assert_eq!(page(vec![is("owner", json!(9))], true, 450, 2), (vec![], 128 + 147));
+    // One is below this cursor: the page given up on is sorted for as a first page is, holding only what it takes
+    assert_eq!(page(vec![is("owner", json!(9))], true, 451, 2), (vec![id(450)], 128 + 147));
     assert_eq!(page(vec![is("owner", json!(9))], false, 450, 2), (vec![id(451), id(452)], 2));
     // And it isn't tried for filters that read few, nor without a limit straight after the cursor
     assert_eq!(page(vec![is("owner", json!(7))], false, 597, 2), (vec![id(598), id(599)], 3));
+    assert_eq!(page(vec![is("owner", json!(7))], true, 598, 2), (vec![id(597)], 3));
+    assert_eq!(page(vec![is("owner", json!(7))], false, 100, 2), (vec![], 3), "a cursor the sorted set doesn't hold");
     let unlimited = same(&db, "live", K, |field| json!([open, order(field, true), after(&id(102))]));
     assert_eq!(unlimited, (vec![id(101), id(100)], 500));
     // The order's stage and its cursor's kept what the limit read for them
@@ -635,6 +639,15 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     };
     assert_eq!(with_role("star", false), (vec![id(0)], 1));
     assert_eq!(with_role("star", true), (vec![id(199)], 128 + 200));
+    // A page under a role is walked from its cursor, and one given up on is sorted
+    let role_page = |descending: bool, cursor: usize| {
+        let steps =
+            json!([{ "step": "withRole", "role": "star" }, order("k", descending), after(&id(cursor)), limit(2)]);
+        visited(&db, plan("live", steps))
+    };
+    assert_eq!(role_page(false, 0), (vec![id(1), id(2)], 2));
+    assert_eq!(role_page(true, 199), (vec![id(198), id(197)], 2));
+    assert_eq!(role_page(true, 599), (vec![], 0), "no holder");
     // Three hold this one: so few are read from the role's index and sorted
     write(&db, [10, 300, 599].iter().map(|at| json!({ "op": "grant", "id": id(*at), "role": "lead" })).collect());
     assert_eq!(with_role("lead", true), (vec![id(599)], 3));

@@ -248,8 +248,9 @@ an answer:
   asks at 128 entities and each time it has read twice as many. The two together cost a small multiple of the cheaper
   (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
   the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
-  between the cursor and the page's last, and one given up is sorted whole. Only an index on both reads a page at
-  the cost of what it holds.
+  between the cursor and the page's last. One given up, like any page of a sorted order, is sorted as a first page
+  is, holding only what the `limit` takes: the entities ordered past the cursor, those of its own value that come
+  after it among them. Only an index on both reads a page at the cost of what it holds.
 - **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it

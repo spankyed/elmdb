@@ -1115,8 +1115,8 @@ impl<R: Read> Query<'_, R> {
                     _ => None,
                 };
                 // An order read from an index comes in it, and the walk below stops it at what this takes. Any other
-                // is walked while that is the cheaper way, or sorted with only what this takes held; a page of a
-                // sorted order is sorted whole, by the order's own stage
+                // is walked while that is the cheaper way, or sorted with only what this takes held, a page's as
+                // the first's
                 if let Some((under, name, descending, cursor)) = ordering
                     && self.ordered(under, name)?.is_none()
                 {
@@ -1127,22 +1127,19 @@ impl<R: Read> Query<'_, R> {
                         let _order = self.stages.map(|stages| stages.enter(order));
                         self.walked_first(under, name, descending, take as usize, cursor)?
                     };
-                    let first = match (walked, cursor) {
-                        (Some(first), _) => Some(first),
-                        (None, None) => Some(self.first_ordered(under, name, descending, take as usize)?),
-                        (None, Some(_)) => None,
+                    let first = match walked {
+                        Some(first) => first,
+                        None => self.first_ordered(under, name, descending, take as usize, cursor)?,
                     };
-                    if let Some(first) = first {
-                        // The stages this read for, the order's and its cursor's, kept what they hand on
-                        if let Some(stages) = self.stages {
-                            for stage in order..=before {
-                                for _ in &first {
-                                    stages.kept(stage);
-                                }
+                    // The stages this read for, the order's and its cursor's, kept what they hand on
+                    if let Some(stages) = self.stages {
+                        for stage in order..=before {
+                            for _ in &first {
+                                stages.kept(stage);
                             }
                         }
-                        return each(first, visit);
                     }
+                    return each(first, visit);
                 }
                 // A search straight before keeps no more of its matches than this takes
                 if matches!(self.plan.steps[..before].last(), Some(Step::Search { .. })) {
@@ -2193,8 +2190,17 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The first `take` ids after the first `upto` steps in `name`'s order, as sorting them all and taking the first
-    /// would answer, equal values in the order they came: only `take` are held at once
-    fn first_ordered(&self, upto: usize, name: &str, descending: bool, take: usize) -> Result<Vec<String>> {
+    /// would answer, equal values in the order they came: only `take` are held at once. A page's are the first past
+    /// its `cursor` in that order: the ids ordered after the cursor's value, and those of its value that came after
+    /// it, which is where a sort that keeps ties has them; none when the cursor never comes
+    fn first_ordered(
+        &self,
+        upto: usize,
+        name: &str,
+        descending: bool,
+        take: usize,
+        cursor: Option<&str>,
+    ) -> Result<Vec<String>> {
         let collator = collator(&self.r.schema().collation)?;
         let order = |a: &SortKey, b: &SortKey| {
             let o = compare(&collator, a, b);
@@ -2210,13 +2216,32 @@ impl<R: Read> Query<'_, R> {
             kept.sort_by(|(a, _), (b, _)| order(a, b));
             kept.truncate(take);
         };
+        // What the cursor is ordered by, and whether it has come: until it has, an id of its value is before it
+        let after = match cursor {
+            Some(cursor) => Some((cursor, sort_key(get_value(self.r, cursor, name)?.as_ref()))),
+            None => None,
+        };
+        let mut come = false;
         self.pull(upto, &mut |id| {
             let key = sort_key(get_value(self.r, id, name)?.as_ref());
+            if let Some((cursor, at)) = &after {
+                match order(&key, at) {
+                    Ordering::Less => return Ok(true),
+                    Ordering::Equal if !come => {
+                        come = id == *cursor;
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
             if bound.as_ref().is_some_and(|last| order(last, &key) != Ordering::Greater) {
                 return Ok(true);
             }
             kept.push((key, id.to_owned()));
-            // mutant-skip: replace >= with < in Query<'_, R>::first_ordered (as above)
+            // mutant-skip: replace >= with < in Query<'_, R>::first_ordered
+            // The first of an order through this, or the full sort and its first: the same ids in the same order
+            // whenever the ids held are cut, and EXPLAIN's counts the same; when they are cut, and the bound a cut
+            // leaves, are only what it costs
             if kept.len() >= take.saturating_mul(2).max(1) {
                 cut(&mut kept);
                 // mutant-skip: replace == with != in Query<'_, R>::first_ordered (as above)
@@ -2224,6 +2249,9 @@ impl<R: Read> Query<'_, R> {
             }
             Ok(true)
         })?;
+        if after.is_some() && !come {
+            return Ok(Vec::new());
+        }
         cut(&mut kept);
         Ok(kept.into_iter().map(|(_, id)| id).collect())
     }
