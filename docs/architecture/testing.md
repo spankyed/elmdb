@@ -277,6 +277,13 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
+An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
+over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
+the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on
+Windows, whose libuv checks, aborts there (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`).
+`answers.test.mjs` holds each export that answers bytes to it, by Node's count of the bytes V8 allocated, and
+`exit.test.mjs` ends a process while V8 frees twenty thousand answers it dropped.
+
 ## Platforms
 
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux. A draft pull request runs the fast

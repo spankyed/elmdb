@@ -108,6 +108,27 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   assert.equal(reopened, sequence);
 });
 
+test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  // Twenty thousand answers left as garbage, then a minor collection, whose sweep of them V8 runs on a thread of its
+  // own while the process, out of work, ends. Were an answer an external buffer, that thread would wake the environment
+  // for each one freed, and a wake that lands once the environment has begun closing aborts Node on Windows, the one
+  // platform whose libuv checks (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Node 24.22.2); elsewhere
+  // the wake goes unnoticed, and `answers.test.mjs` is what holds an answer to being V8's own
+  const child = [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
+    'const reads = Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]);',
+    'for (let i = 0; i < 20000; i++) db.readSync(reads);',
+    'db.close();',
+    `require('node:v8').setFlagsFromString('--expose-gc');`,
+    `require('node:vm').runInNewContext('gc')({ type: 'minor' });`,
+  ].join('\n');
+  // Which thread gets where first is the scheduler's, so the process ends five times
+  for (let run = 0; run < 5; run++) execFileSync(process.execPath, ['-e', child], { timeout: 30_000, stdio: 'pipe' });
+});
+
 test('a listener for the builder\'s commits keeps no process alive, open database or not', { timeout: 60_000 }, () => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
   const script = [
