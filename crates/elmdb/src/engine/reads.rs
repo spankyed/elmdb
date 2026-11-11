@@ -2412,6 +2412,12 @@ impl<R: Read> Query<'_, R> {
     /// those are filtered as they come. No index's fields are those of two equalities on one field, or of one on
     /// `name`, so those find none to read
     fn asked(&self, before: usize, name: &str) -> Result<Option<Asked<'_>>> {
+        // A step that is no filter is none of these, and the filters are refused as their stages would refuse
+        // them, the last written first: reading a range's bounds here would refuse the first
+        if before > self.filters {
+            return Ok(None);
+        }
+        self.filters_taken(before)?;
         let mut equals: Vec<(&str, Part)> = Vec::new();
         let mut limits = None;
         for (at, step) in self.plan.steps[..before].iter().enumerate() {
