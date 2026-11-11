@@ -168,6 +168,10 @@ runner doesn't compile builds unchanged and passes every test, so it would show 
 reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
 Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing
 there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing.
+`mutants-pass`, the workflow's last job, passes when every job before it did, at once for a change with nothing to
+mutate, and is the check a merge waits on. A dispatched share reports under another name: it runs on the pull
+request's own commit, where one share passing would otherwise stand for all of them until the pull request's run
+reported.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 
