@@ -1,13 +1,16 @@
 //! Text indexes (`docs/architecture/search.md`): a type's text fields as terms, kept by every write that changes one, in the same
 //! unit. Under a type and an index (`docs/architecture/format.md`, Keys):
 //!
-//! - `d/ft term` → the term's posting list, the places (`seq`) of the entities holding it, as a roaring bitmap
-//! - `d/fp term seq` → where the entity holds it: each field's index among the index's fields, and its positions
-//! - `d/fd seq` → the entity's document: its id, each field's length in words, and its terms
+//! - `d/ft term` → the places (`seq`) of the entities holding the term, each with the term's count in each field, or
+//!   that they are in blocks (`postings`)
+//! - `d/fb term start` → a block of those places, for a term more entities hold than its own key keeps
+//! - `d/fd seq` → the entity's document: its terms, each with the fields and positions it is at, and its words as
+//!   written
+//! - `d/fl block` → each field's length in words in the entities of one block of places (`lengths`)
 //! - `d/fs` → the index's statistics: how many documents, and each field's total length
-//! - `d/fw word` → a stemming index's words as written, each the places of the entities holding it: where search as
-//!   you type and suggestions find what a word being typed starts, which its stem may not (`runni` starts `running`,
-//!   held as `run`)
+//! - `d/fw word` → a stemming index's words as written, each with how many entities hold it: where search as you
+//!   type and suggestions find what a word being typed starts, which its stem may not (`runni` starts `running`, held
+//!   as `run`)
 //!
 //! A field holding a list of strings is its elements' terms, each element's positions starting `ELEMENT_GAP` past
 //! the last one's, so no phrase spans two elements. A value that is neither is no text, and a term longer than
@@ -15,6 +18,8 @@
 
 pub mod analyze;
 pub mod labels;
+pub mod lengths;
+pub mod postings;
 pub mod search;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -114,13 +119,16 @@ pub fn resolve_built(r: &impl Read, entity_type: &str, name: Option<&str>, via: 
     ))
 }
 
+/// Where an entity holds a term: `(field, positions)` for each field holding it, in field order
+pub type Places = Vec<(u32, Vec<u32>)>;
+
 /// One entity as a text index holds it
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Document {
     /// Each field's length in words, in the index's field order
     pub lengths: Vec<u32>,
-    /// Each term, with the fields and positions it is at: `(field, positions)` in field order
-    pub terms: BTreeMap<String, Vec<(u32, Vec<u32>)>>,
+    /// Each term, with the fields and positions it is at
+    pub terms: BTreeMap<String, Places>,
     /// The words as written its terms were read from, when the index stems; none when every term is its word
     pub words: BTreeSet<String>,
 }
@@ -190,11 +198,12 @@ fn field_values(r: &impl Read, index: &TextIndex, id: &str) -> Result<Vec<Option
 }
 
 fn corrupt(what: &str) -> Error {
-    Error::new(ErrorCode::Corrupted, format!("A text index's {what} doesn't read"))
+    Error::new(ErrorCode::Corrupted, format!("A text index's {what} doesn't read: rebuild() derives it again"))
 }
 
 // The stored forms, written and read only here, so `derive` writes exactly what the writes do
 
+/// A set of places as a roaring bitmap, as a trigram index's blocks hold them
 pub fn encode_postings(bitmap: &RoaringTreemap) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(bitmap.serialized_size());
     bitmap.serialize_into(&mut bytes).expect("writing to a Vec doesn't fail");
@@ -208,19 +217,19 @@ pub fn decode_postings(stored: &[u8]) -> Result<RoaringTreemap> {
     }
 }
 
-fn encode_places(places: &[(u32, Vec<u32>)]) -> Vec<u8> {
-    values::encode(&Value::Array(
+/// Where an entity holds a term: `[field, positions]` for each field holding it, in field order
+fn places_value(places: &[(u32, Vec<u32>)]) -> Value {
+    Value::Array(
         places
             .iter()
             .map(|(field, positions)| {
                 Value::Array(vec![(*field).into(), Value::Array(positions.iter().map(|p| (*p).into()).collect())])
             })
             .collect(),
-    ))
+    )
 }
 
-pub fn decode_places(stored: &[u8]) -> Result<Vec<(u32, Vec<u32>)>> {
-    let value = values::decode(stored)?;
+fn places_from(value: &Value) -> Result<Places> {
     let items = value.as_array().ok_or_else(|| corrupt("positions"))?;
     items
         .iter()
@@ -238,42 +247,55 @@ pub fn decode_places(stored: &[u8]) -> Result<Vec<(u32, Vec<u32>)>> {
         .collect()
 }
 
-/// A document's stored record: the entity's id, each field's length, its terms, its words as written
-fn encode_document(id: &str, doc: &Document) -> Vec<u8> {
+/// A document's stored record: its terms in term order, each with where the entity holds it, and its words as written
+fn encode_document(doc: &Document) -> Vec<u8> {
     values::encode(&Value::Array(vec![
-        id.into(),
-        Value::Array(doc.lengths.iter().map(|l| (*l).into()).collect()),
-        Value::Array(doc.terms.keys().map(|t| t.as_str().into()).collect()),
+        Value::Array(
+            doc.terms
+                .iter()
+                .map(|(term, places)| Value::Array(vec![term.as_str().into(), places_value(places)]))
+                .collect(),
+        ),
         Value::Array(doc.words.iter().map(|w| w.as_str().into()).collect()),
     ]))
 }
 
-/// A stored document: the entity's id, each field's length, its terms, and its words as written, in order
+/// A stored document: its terms in term order, each with the fields and positions it is at, and its words as written,
+/// in order
+#[derive(Debug, Default, PartialEq)]
 pub struct StoredDocument {
-    pub id: String,
-    pub lengths: Vec<u32>,
-    pub terms: Vec<String>,
+    pub terms: Vec<(String, Places)>,
     pub words: Vec<String>,
+}
+
+impl StoredDocument {
+    /// Where the entity holds a term, if it does
+    pub fn places(&self, term: &str) -> Option<&[(u32, Vec<u32>)]> {
+        let at = self.terms.binary_search_by(|(held, _)| held.as_str().cmp(term)).ok()?;
+        Some(&self.terms[at].1)
+    }
 }
 
 pub fn decode_document(stored: &[u8]) -> Result<StoredDocument> {
     let value = values::decode(stored)?;
-    let items = value.as_array().filter(|i| i.len() == 4).ok_or_else(|| corrupt("document"))?;
-    let id = items[0].as_str().ok_or_else(|| corrupt("document"))?.to_owned();
-    let lengths = items[1]
+    let items = value.as_array().filter(|i| i.len() == 2).ok_or_else(|| corrupt("document"))?;
+    let terms = items[0]
         .as_array()
         .ok_or_else(|| corrupt("document"))?
         .iter()
-        .map(|l| l.as_u64().map(|l| l as u32).ok_or_else(|| corrupt("document")))
+        .map(|item| {
+            let pair = item.as_array().filter(|p| p.len() == 2).ok_or_else(|| corrupt("document"))?;
+            let term = pair[0].as_str().ok_or_else(|| corrupt("document"))?.to_owned();
+            Ok((term, places_from(&pair[1])?))
+        })
         .collect::<Result<_>>()?;
-    let strings = |item: &Value| -> Result<Vec<String>> {
-        item.as_array()
-            .ok_or_else(|| corrupt("document"))?
-            .iter()
-            .map(|t| t.as_str().map(str::to_owned).ok_or_else(|| corrupt("document")))
-            .collect()
-    };
-    Ok(StoredDocument { id, lengths, terms: strings(&items[2])?, words: strings(&items[3])? })
+    let words = items[1]
+        .as_array()
+        .ok_or_else(|| corrupt("document"))?
+        .iter()
+        .map(|t| t.as_str().map(str::to_owned).ok_or_else(|| corrupt("document")))
+        .collect::<Result<_>>()?;
+    Ok(StoredDocument { terms, words })
 }
 
 /// A text index's statistics: its documents, and each field's total length
@@ -316,6 +338,24 @@ pub fn document(r: &impl Read, entity_type: &str, index: &str, seq: u64) -> Resu
     r.get(&keys::text_document(entity_type, index, seq))?.map(|b| decode_document(&b)).transpose()
 }
 
+/// How many entities hold a word as written, as its key holds it
+pub fn word_held(stored: &[u8]) -> Result<u64> {
+    values::decode(stored)?.as_u64().ok_or_else(|| corrupt("word"))
+}
+
+/// Counts one entity more, or one fewer, among those holding a word as written
+fn count_word(t: &mut Txn<'_, '_>, key: &[u8], more: bool) -> Result<()> {
+    let stored = t.get(key)?;
+    let held = stored.as_deref().map(word_held).transpose()?.unwrap_or(0);
+    // A word no entity is counted as holding is held by the one that now gives it up: the count is no record of them
+    let now = if more { held + 1 } else { held.checked_sub(1).ok_or_else(|| corrupt("word"))? };
+    if now == 0 {
+        t.del_over(key, stored.as_deref())
+    } else {
+        t.put_over(key, &values::encode(&now.into()), stored.as_deref())
+    }
+}
+
 /// Refiles the entity at `seq` (none for one not stored) in each text index of its type covering `field`, which now
 /// holds `written`: the terms it no longer holds lose it, the terms it now holds gain it, and the statistics follow
 pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: &str, seq: Option<u64>, written: Option<&Value>) -> Result<()> {
@@ -329,7 +369,7 @@ pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: &str, seq: Option<u64>, writ
             .iter()
             .map(|(f, _)| if f == field { Ok(written.cloned()) } else { entities::get(t, id, f) })
             .collect::<Result<Vec<_>>>()?;
-        file(t, &entity_type, &index, id, seq, &document_of(&index, &values))?;
+        file(t, &entity_type, &index, seq, &document_of(&index, &values))?;
     }
     Ok(())
 }
@@ -338,7 +378,7 @@ pub fn refile(t: &mut Txn<'_, '_>, id: &str, field: &str, seq: Option<u64>, writ
 /// written before the index was declared, and nothing for one a write has already filed
 pub fn refile_at(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq: u64) -> Result<()> {
     let now = document_of(index, &field_values(t, index, id)?);
-    file(t, entity_type, index, id, seq, &now)
+    file(t, entity_type, index, seq, &now)
 }
 
 /// Takes the entity out of every text index of its type, as destroying it does
@@ -346,14 +386,15 @@ pub fn remove(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     let Some(seq) = entities::record(t, id)?.map(|r| r.seq) else { return Ok(()) };
     for index in text_indexes(t.schema, &entity_type) {
-        file(t, &entity_type, &index, id, seq, &Document::default())?;
+        file(t, &entity_type, &index, seq, &Document::default())?;
     }
     Ok(())
 }
 
 /// Moves what the index holds of the entity at `seq` from its stored document to `now`
-fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq: u64, now: &Document) -> Result<()> {
+fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, seq: u64, now: &Document) -> Result<()> {
     let name = index.name.as_str();
+    let fields = index.fields.len();
     // Each key read here is replaced with what was read, so the unit's undo log reads none of them again
     let document_key = keys::text_document(entity_type, name, seq);
     let stored_document = t.get(&document_key)?;
@@ -361,62 +402,46 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
     if before.is_none() && now.is_empty() {
         return Ok(());
     }
-    let before_terms: Vec<String> = before.as_ref().map(|d| d.terms.clone()).unwrap_or_default();
-    for term in before_terms.iter().filter(|term| !now.terms.contains_key(*term)) {
-        let key = keys::text_term(entity_type, name, term);
-        if let Some(stored) = t.get(&key)? {
-            let mut postings = decode_postings(&stored)?;
-            postings.remove(seq);
-            if postings.is_empty() {
-                t.del_over(&key, Some(&stored))?
-            } else {
-                t.put_over(&key, &encode_postings(&postings), Some(&stored))?
-            }
-        }
-        t.del(&keys::text_positions(entity_type, name, term, seq))?;
+    let nothing = StoredDocument::default();
+    let held = before.as_ref().unwrap_or(&nothing);
+    // A field the index doesn't have is no place a count is kept for
+    if held.terms.iter().flat_map(|(_, places)| places).any(|(field, _)| *field as usize >= fields) {
+        return Err(corrupt("document"));
+    }
+    for (term, _) in held.terms.iter().filter(|(term, _)| !now.terms.contains_key(term)) {
+        postings::remove(t, &postings::Term::new(entity_type, name, fields, term), seq)?;
     }
     for (term, places) in &now.terms {
-        if before_terms.binary_search(term).is_err() {
-            let key = keys::text_term(entity_type, name, term);
-            let stored = t.get(&key)?;
-            let mut postings = stored.as_deref().map(decode_postings).transpose()?.unwrap_or_default();
-            postings.insert(seq);
-            t.put_over(&key, &encode_postings(&postings), stored.as_deref())?;
+        let counts = postings::counts(places, fields);
+        // A term the entity holds as often in each field as it did is filed as it was, wherever its positions moved
+        if held.places(term).is_some_and(|before| postings::counts(before, fields) == counts) {
+            continue;
         }
-        let key = keys::text_positions(entity_type, name, term, seq);
-        let encoded = encode_places(places);
-        let held = t.get(&key)?;
-        if held.as_deref() != Some(encoded.as_slice()) {
-            t.put_over(&key, &encoded, held.as_deref())?;
-        }
+        postings::put(t, &postings::Term::new(entity_type, name, fields, term), seq, &counts)?;
     }
-    let before_words: Vec<String> = before.as_ref().map(|d| d.words.clone()).unwrap_or_default();
-    for word in before_words.iter().filter(|word| !now.words.contains(*word)) {
-        let key = keys::text_word(entity_type, name, word);
-        if let Some(stored) = t.get(&key)? {
-            let mut postings = decode_postings(&stored)?;
-            postings.remove(seq);
-            if postings.is_empty() {
-                t.del_over(&key, Some(&stored))?
-            } else {
-                t.put_over(&key, &encode_postings(&postings), Some(&stored))?
-            }
-        }
+    for word in held.words.iter().filter(|word| !now.words.contains(*word)) {
+        count_word(t, &keys::text_word(entity_type, name, word), false)?;
     }
-    for word in now.words.iter().filter(|word| before_words.binary_search(word).is_err()) {
-        let key = keys::text_word(entity_type, name, word);
-        let stored = t.get(&key)?;
-        let mut postings = stored.as_deref().map(decode_postings).transpose()?.unwrap_or_default();
-        postings.insert(seq);
-        t.put_over(&key, &encode_postings(&postings), stored.as_deref())?;
+    for word in now.words.iter().filter(|word| held.words.binary_search(word).is_err()) {
+        count_word(t, &keys::text_word(entity_type, name, word), true)?;
+    }
+    let lengths_key = keys::text_lengths(entity_type, name, lengths::block_of(seq));
+    let stored_lengths = t.get(&lengths_key)?;
+    let none = vec![0; fields];
+    let (held_lengths, block) =
+        lengths::set(stored_lengths.as_deref(), seq, if now.is_empty() { &none } else { &now.lengths })?;
+    match block {
+        Some(block) => t.put_over(&lengths_key, &block, stored_lengths.as_deref())?,
+        None => t.del_over(&lengths_key, stored_lengths.as_deref())?,
     }
     let stats_key = keys::text_stats(entity_type, name);
     let stored_stats = t.get(&stats_key)?;
     let mut stats = stats_from(stored_stats.as_deref(), index)?;
-    if let Some(before) = &before {
-        stats.documents -= 1;
-        for (total, l) in stats.lengths.iter_mut().zip(&before.lengths) {
-            *total -= u64::from(*l);
+    if before.is_some() {
+        // Statistics that count fewer than the index holds are no record of it
+        stats.documents = stats.documents.checked_sub(1).ok_or_else(|| corrupt("statistics"))?;
+        for (total, l) in stats.lengths.iter_mut().zip(&held_lengths) {
+            *total = total.checked_sub(u64::from(*l)).ok_or_else(|| corrupt("statistics"))?;
         }
     }
     if !now.is_empty() {
@@ -424,7 +449,7 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, id: &str, seq
         for (total, l) in stats.lengths.iter_mut().zip(&now.lengths) {
             *total += u64::from(*l);
         }
-        t.put_over(&document_key, &encode_document(id, now), stored_document.as_deref())?;
+        t.put_over(&document_key, &encode_document(now), stored_document.as_deref())?;
     } else {
         t.del_over(&document_key, stored_document.as_deref())?;
     }
@@ -449,12 +474,27 @@ pub fn entries_into(
     entries.finish(emit)
 }
 
-/// Accumulate term/document memberships on disk; only one document and one final posting bitmap are held at a time.
+/// What a row of `Entries` is of, its value's first byte: an entity among a term's, with its counts after it; one
+/// among a word as written's; or an entity's lengths, each a little-endian u32, for the block its key is
+const TERM: u8 = 0;
+const WORD: u8 = 1;
+const LENGTHS: u8 = 2;
+
+/// What an index's keys hold, from its entities in any order: each entity's part in a key is a row sorted on disk
+/// under the key and its place, so one document and one key's rows are held at a time, a term's no more than a
+/// block's worth
 pub(super) struct Entries<'a> {
     entity_type: &'a str,
     index: &'a TextIndex,
-    memberships: super::derive::sorted::Scratch,
+    rows: super::derive::sorted::Scratch,
     stats: Stats,
+}
+
+/// The rows of one key, as they are taken in
+enum Rows {
+    Term(postings::Filing),
+    Word(u64),
+    Lengths(Vec<(u64, Vec<u32>)>),
 }
 
 impl<'a> Entries<'a> {
@@ -462,7 +502,7 @@ impl<'a> Entries<'a> {
         Ok(Self {
             entity_type,
             index,
-            memberships: super::derive::sorted::Scratch::new()?,
+            rows: super::derive::sorted::Scratch::new()?,
             stats: Stats { documents: 0, lengths: vec![0; index.fields.len()] },
         })
     }
@@ -479,53 +519,79 @@ impl<'a> Entries<'a> {
             return Ok(());
         }
         let name = self.index.name.as_str();
-        let mut membership = |key| {
-            // Escaped byte parts keep groups contiguous, including embedded NULs and full-width u64 sequences.
+        let fields = self.index.fields.len();
+        let mut row = |key: Vec<u8>, kind: u8, rest: &[u8]| {
+            // Escaped byte parts keep a key's rows together, whatever bytes the key and the place hold
             let order = crate::format::key::encode(&[
                 crate::format::key::Part::Bytes(key),
                 crate::format::key::Part::Bytes(seq.to_be_bytes().to_vec()),
             ]);
-            self.memberships.push(order, Vec::new())
+            let mut value = Vec::with_capacity(1 + rest.len());
+            value.push(kind);
+            value.extend_from_slice(rest);
+            self.rows.push(order, value)
         };
         for (term, places) in &doc.terms {
-            membership(keys::text_term(self.entity_type, name, term))?;
-            emit(keys::text_positions(self.entity_type, name, term, seq), encode_places(places))?;
+            row(keys::text_term(self.entity_type, name, term), TERM, &postings::counts(places, fields))?;
         }
         for word in &doc.words {
-            membership(keys::text_word(self.entity_type, name, word))?;
+            row(keys::text_word(self.entity_type, name, word), WORD, &[])?;
         }
+        let lengths: Vec<u8> = doc.lengths.iter().flat_map(|length| length.to_le_bytes()).collect();
+        row(keys::text_lengths(self.entity_type, name, lengths::block_of(seq)), LENGTHS, &lengths)?;
         self.stats.documents += 1;
         for (total, length) in self.stats.lengths.iter_mut().zip(&doc.lengths) {
             *total += u64::from(*length);
         }
-        emit(keys::text_document(self.entity_type, name, seq), encode_document(id, &doc))
+        emit(keys::text_document(self.entity_type, name, seq), encode_document(&doc))
     }
 
     pub(super) fn finish(self, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>) -> Result<()> {
         use crate::format::key::{Part, decode};
-        let mut sorted = self.memberships.finish()?;
-        let mut previous: Option<Vec<u8>> = None;
-        let mut bitmap = RoaringTreemap::new();
-        while let Some((key, _)) = sorted.next()? {
-            let mut parts = decode(&key)?.into_iter();
+        let unread = || Error::new(ErrorCode::Corrupted, "A sorted text index row doesn't read");
+        let name = self.index.name.as_str();
+        let fields = self.index.fields.len();
+        let mut sorted = self.rows.finish()?;
+        let mut held: Option<(Vec<u8>, Rows)> = None;
+        let close = |held: Option<(Vec<u8>, Rows)>, emit: &mut dyn FnMut(Vec<u8>, Vec<u8>) -> Result<()>| match held {
+            Some((_, Rows::Term(filing))) => filing.finish(&mut |key, value| emit(key, value)),
+            Some((key, Rows::Word(entities))) => emit(key, values::encode(&entities.into())),
+            Some((key, Rows::Lengths(places))) => match lengths::block(&places, fields) {
+                Some(block) => emit(key, block),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        };
+        while let Some((order, value)) = sorted.next()? {
+            let mut parts = decode(&order)?.into_iter();
             let (Some(Part::Bytes(key)), Some(Part::Bytes(seq))) = (parts.next(), parts.next()) else {
-                return Err(Error::new(ErrorCode::Corrupted, "A sorted text membership doesn't read"));
+                return Err(unread());
             };
-            let seq = u64::from_be_bytes(
-                seq.as_slice()
-                    .try_into()
-                    .map_err(|_| Error::new(ErrorCode::Corrupted, "A sorted text sequence doesn't read"))?,
-            );
-            if previous.as_ref().is_some_and(|previous| *previous != key) {
-                emit(previous.take().expect("a previous posting exists"), encode_postings(&bitmap))?;
-                bitmap = RoaringTreemap::new();
+            let seq = u64::from_be_bytes(seq.as_slice().try_into().map_err(|_| unread())?);
+            let (&kind, rest) = value.split_first().ok_or_else(unread)?;
+            if held.as_ref().is_none_or(|(of, _)| *of != key) {
+                close(held.take(), &mut emit)?;
+                let rows = match kind {
+                    TERM => {
+                        let Some(Part::String(term)) = decode(&key)?.pop() else { return Err(unread()) };
+                        Rows::Term(postings::Filing::new(postings::Term::new(self.entity_type, name, fields, &term)))
+                    }
+                    WORD => Rows::Word(0),
+                    _ => Rows::Lengths(Vec::new()),
+                };
+                held = Some((key, rows));
             }
-            previous = Some(key);
-            bitmap.insert(seq);
+            match held.as_mut().map(|(_, rows)| rows) {
+                Some(Rows::Term(filing)) => filing.entry(seq, rest.to_vec(), &mut |key, value| emit(key, value))?,
+                Some(Rows::Word(entities)) => *entities += 1,
+                Some(Rows::Lengths(places)) => {
+                    let lengths = rest.chunks(4).map(|l| l.try_into().map(u32::from_le_bytes).map_err(|_| unread()));
+                    places.push((seq, lengths.collect::<Result<_>>()?));
+                }
+                None => {}
+            }
         }
-        if let Some(key) = previous {
-            emit(key, encode_postings(&bitmap))?;
-        }
+        close(held, &mut emit)?;
         if self.stats.documents > 0 {
             emit(keys::text_stats(self.entity_type, &self.index.name), encode_stats(&self.stats))?;
         }

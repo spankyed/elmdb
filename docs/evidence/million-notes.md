@@ -103,5 +103,72 @@ writes are how far the file grew with a reader holding the pages before it. Load
 - **A scan of one bit a value**, keeping the nearest 200, no recall read: 384 values, 0.39 ms over 100,000 vectors and
   3.6 ms over a million; 1,536 values, 0.8 ms and 7.5 ms.
 
-What these don't show: the engine with any of it built, pages of 4 KB, text with a natural spread of terms, or more
-than one text field.
+What these don't show: the engine, which the next section reads with what of this is built; pages of 4 KB; text with
+a natural spread of terms; or more than one text field.
+
+## With a term's places in blocks
+
+The same readings once a term's places are in blocks with their counts, lengths are kept by place and a search is
+ranked from the two (`../architecture/search.md`, Text search as built), on `session/text-blocks-and-ranking` at
+`82bf5f8`, the same machine and day.
+
+**Against SQLite**, the benchmark as above. Load 11.6 as it began, minutes after the machine started, and 3.2 as it ended. SQLite's readings are
+its own of this run.
+
+| | Before | Now | SQLite |
+|---|---:|---:|---:|
+| Load | 132.5 s | 56.6 s | 32.9 s |
+| Bytes a note, as loaded | 1,812 | 1,174 | 151 |
+| Bytes a note, compacted | 1,738 | 1,186 | 145 |
+| A create of three terms every note holds, at 50,000 notes | 0.116 ms, 133 µs of CPU | 0.116 ms, 131 µs | 0.036 ms, 75 µs |
+| The same at a million | 0.374 ms, 404 µs | 0.172 ms, 186 µs | 0.057 ms, 61 µs |
+| A create of thirty terms, fifteen widely held, at 50,000 notes | 0.332 ms, 372 µs | 0.228 ms, 266 µs | 0.038 ms, 49 µs |
+| The same at a million | 1.544 ms, 1,601 µs | 0.425 ms, 464 µs | 0.061 ms, 74 µs |
+| The best ten for a word every note holds | 3,630 ms | 20.6 ms | 556 ms |
+| Its count | 3,642 ms | 0.35 ms | 25.2 ms |
+| The best ten for a word a twelfth hold | 311 ms | 4.5 ms | 50.5 ms |
+| Its count | 311 ms | 1.9 ms | 2.1 ms |
+| A misspelled word | ten found, 630 ms | ten found, 18.1 ms | none found, 0.018 ms |
+| The ten lowest of the indexed number | 769 ms | 750 ms | 0.006 ms |
+| The last 500 of it | 1,017 ms | 983 ms | 0.005 ms |
+| A page of 50 near the end of creation order | 191 ms | 191 ms | 0.017 ms |
+| A check | 41.5 s | 34.3 s | 2.0 s |
+| A rebuild | 85.3 s | 36.4 s | 2.0 s |
+
+The best ten of the word every note holds visited ten entities, where they visited 1,000,082. The ten lowest of the
+number, which this changed nothing of, still visit every note.
+
+**By what a create holds**, the script as above, in a database of the text index alone. Load 2.4.
+
+| The create holds | Before | Now |
+|---|---:|---:|
+| a title, in a type with no index | 0.060 ms | 0.057 ms |
+| 1 term no note holds | 0.080 ms | 0.073 ms |
+| 1 term every note holds | 0.137 ms | 0.067 ms |
+| 30 terms no note holds | 0.190 ms | 0.119 ms |
+| 30 terms that exist, rare and scattered | 0.417 ms | 0.195 ms |
+| 30 terms: 15 no note holds, 12 a twelfth hold, 3 every note holds | 1.057 ms | 0.198 ms |
+| 30 terms that exist: 15 widely held, 15 rare and scattered | 1.309 ms | 0.272 ms |
+
+**Where the bytes are**, that database's keys and values summed as above, read before the branch's last changes, none of
+which is to what is stored: 644 MB of file where there were 1,330, for 322 MB of keys and values where there were 526.
+Its leaves are still half full.
+
+| Keys | Entries | Keys | Values |
+|---|---:|---:|---:|
+| `d/fd`, an entity's document, its positions in it | 1,000,328 | 25.8 MB | 65.5 MB |
+| `p/v`, a field's value | 3,001,107 | 82.1 MB | 51.6 MB |
+| `d/ft`, a term, and its places while 256 or fewer hold it | 1,002,024 | 24.7 MB | 4.8 MB |
+| `d/e`, a type's entities in creation order | 1,000,369 | 19.1 MB | 12.4 MB |
+| `p/i`, that an entity exists | 1,000,369 | 18.1 MB | 7.5 MB |
+| `d/fb`, a block of a term's places | 20,517 | 0.7 MB | 8.6 MB |
+| `d/fl`, the lengths in a block of places | 1,954 | 0.1 MB | 1.0 MB |
+
+The text index's own keys and values are 131 MB where they were 336 MB: the documents grew by the positions they now
+hold, 18 MB, and the 204 MB of a key per term and entity are gone.
+
+**Where a ranked search's time goes now**, sampled over the best ten of the word every note holds, 200,000 notes
+(`cargo run --profile profiling -p elmdb --example search-cost -- 200000 3000`, macOS `sample`): about two fifths in
+the loop that joins a query's clauses around each match, a sixth reading the term's entries in place order, a sixth
+walking the set of matches, a seventh keeping the best ten, and a twentieth weighing counts. It comes to about 20 ns
+a match, 3.9 ms for the 200,000, where the layouts' reading above scored one term's entries in a loop of its own at 3.

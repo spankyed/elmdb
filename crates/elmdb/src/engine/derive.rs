@@ -181,7 +181,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 18] = [
+const COMPARED: [Prefix; 19] = [
     Prefix::Live,
     Prefix::Changed,
     Prefix::Trashed,
@@ -193,8 +193,9 @@ const COMPARED: [Prefix; 18] = [
     Prefix::In,
     Prefix::Between,
     Prefix::TextTerm,
-    Prefix::TextPositions,
+    Prefix::TextBlock,
     Prefix::TextDocument,
+    Prefix::TextLengths,
     Prefix::TextStats,
     Prefix::TextWord,
     Prefix::Trigram,
@@ -203,11 +204,12 @@ const COMPARED: [Prefix; 18] = [
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 9] = [
+const PER_INDEX: [Prefix; 10] = [
     Prefix::Index,
     Prefix::TextTerm,
-    Prefix::TextPositions,
+    Prefix::TextBlock,
     Prefix::TextDocument,
+    Prefix::TextLengths,
     Prefix::TextStats,
     Prefix::TextWord,
     Prefix::Trigram,
@@ -468,6 +470,10 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
         None => {
             for prefix in COMPARED {
                 t.clear_prefix(&prefix.key().to_vec())?;
+            }
+            // What an earlier layout left under a tag nothing reads now
+            for retired in Prefix::retired() {
+                t.clear_prefix(&retired)?;
             }
             // Every declared index of every type with entities is built by a full rebuild, but a value index a build
             // couldn't finish, which keeps the entries that fit unmarked, as writes keep an unbuilt index's

@@ -1317,6 +1317,97 @@ fn a_removed_type_takes_its_indexes_data_with_it_and_keeps_its_rows() {
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
 
+#[test]
+fn a_rebuild_clears_what_a_retired_tag_left_and_a_document_naming_no_field_of_its_index_is_refused() {
+    let schema = json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": { "Doc": {
+        "fields": { "body": { "type": "string" } },
+        "indexes": { "words": { "kind": "text", "fields": { "body": {} } } }
+    } } });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    let body = |text: &str| json!({ "op": "set", "id": "Doc-1", "fields": { "body": text } });
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "body": "the error text" } })])
+        .unwrap();
+    // A key as the layout before this one kept a term's positions under, which nothing reads now
+    let retired = Prefix::retired().next().unwrap();
+    let left = crate::format::key::with_number(&retired, 7.0);
+    damage(&db, |txn, d| Ok(d.put(txn, &left, &[1])?));
+    // A commit of the database's own, after which a snapshot is of the store as the damage left it
+    write(&db, vec![body("the error text")]).unwrap();
+    let under = |db: &Database| db.snapshot(|r| Ok(Read::scan(r, &retired)?.len())).unwrap();
+    assert_eq!(under(&db), 1);
+    db.rebuild(Some(("Doc", "words"))).unwrap();
+    assert_eq!(under(&db), 1, "one index's rebuild clears that index's keys alone");
+    db.rebuild(None).unwrap();
+    assert_eq!(under(&db), 0);
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+
+    // The entity's document saying it holds a term in a tenth field of an index of one
+    let document = db.snapshot(|r| Read::scan(r, &keys::text_index_ranges("Doc", "words")[2])).unwrap();
+    let (key, _) = &document[0];
+    let places = |field: u64| {
+        let term = rmpv::Value::Array(vec![
+            "error".into(),
+            rmpv::Value::Array(vec![rmpv::Value::Array(vec![field.into(), rmpv::Value::Array(vec![1.into()])])]),
+        ]);
+        crate::engine::values::encode(&rmpv::Value::Array(vec![
+            rmpv::Value::Array(vec![term]),
+            rmpv::Value::Array(vec![]),
+        ]))
+    };
+    damage(&db, |txn, d| Ok(d.put(txn, key, &places(9))?));
+    let refused = write(&db, vec![body("another text")]).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Corrupted);
+    assert!(refused.message.contains("rebuild()"), "{}", refused.message);
+    // Its only field is one it may name, and the rebuild the message asks for makes the index whole
+    damage(&db, |txn, d| Ok(d.put(txn, key, &places(0))?));
+    write(&db, vec![body("another text")]).unwrap();
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
+#[test]
+fn statistics_and_a_words_count_that_say_less_than_a_text_index_holds_are_refused_not_counted_down_from() {
+    let schema = json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": { "Doc": {
+        "fields": { "body": { "type": "string" } },
+        "indexes": { "words": { "kind": "text", "fields": { "body": {} }, "stem": "en" } }
+    } } });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    let body = |text: &str| json!({ "op": "set", "id": "Doc-1", "fields": { "body": text } });
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "body": "the error text" } })])
+        .unwrap();
+    let stats = keys::text_stats("Doc", "words");
+    let counting = |documents: u64, length: u64| {
+        crate::engine::values::encode(&rmpv::Value::Array(vec![
+            documents.into(),
+            rmpv::Value::Array(vec![length.into()]),
+        ]))
+    };
+    let held = db.snapshot(|r| Read::get(r, &stats)).unwrap().unwrap();
+    assert_eq!(held, counting(1, 3));
+    // No document where the index holds one, and a field shorter in all than the entity's is: a write that refiles
+    // the entity has less to take it from than it holds
+    for damaged in [counting(0, 3), counting(1, 2)] {
+        damage(&db, |txn, d| Ok(d.put(txn, &stats, &damaged)?));
+        let refused = write(&db, vec![body("another text")]).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Corrupted);
+        assert!(refused.message.contains("statistics"), "{}", refused.message);
+    }
+    damage(&db, |txn, d| Ok(d.put(txn, &stats, &held)?));
+    // A word as written the entity holds and no entity is counted under
+    let word = keys::text_word("Doc", "words", "error");
+    let counted = db.snapshot(|r| Read::get(r, &word)).unwrap().unwrap();
+    damage(&db, |txn, d| Ok(d.delete(txn, &word).map(|_| ())?));
+    let refused = write(&db, vec![body("another text")]).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Corrupted);
+    assert!(refused.message.contains("word"), "{}", refused.message);
+    // As they were, the write goes through
+    damage(&db, |txn, d| Ok(d.put(txn, &word, &counted)?));
+    write(&db, vec![body("another text")]).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
 /// The ids a plan over Notes with one step answers
 fn note_ids(db: &Database, step: Json) -> Json {
     let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {

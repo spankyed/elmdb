@@ -44,7 +44,7 @@ This document is what every "should elmdb do X?" is checked against. The others:
   nested read transactions inside a write transaction), reported to OpenLDAP and listed in `format.md`. heed's
   `heed3` variant, on stock `mdb.master3` (LMDB 1.0), is the path to LMDB 1.0 once it is released and the crates below
   support it.
-- **roaring** bitmaps for posting lists and sets of entities, **charabia** for tokenizing, **levenshtein_automata**
+- **roaring** bitmaps for sets of entities, as a search joins them and a trigram index keeps them, **charabia** for tokenizing, **levenshtein_automata**
   for fuzzy terms, **hannoy** for approximate nearest neighbours on LMDB, **zstd** for stored values and **leiden-rs**
   for communities.
 - **rmp** for values in Rust, under the value spec in `format.md`; callers encode with any msgpack implementation that

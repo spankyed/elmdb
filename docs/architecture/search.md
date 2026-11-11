@@ -41,8 +41,8 @@ Text and vector indexes are named indexes on a type, beside its value indexes (`
 
 | Method | How |
 |---|---|
-| Ranked full text | BM25 over postings (roaring bitmaps of entities per term, positions beside them), per-field weights, AND, OR, NOT, a field named in the query (`sender:`) |
-| Phrases | positions |
+| Ranked full text | BM25 over each term's places (the entities holding it, each with its count in each field) and each entity's lengths, per-field weights, AND, OR, NOT, a field named in the query (`sender:`) |
+| Phrases | each entity's positions, in its document |
 | Prefix | a range over the sorted term dictionary, for search as you type |
 | Fuzzy terms | a Levenshtein automaton intersected with the term dictionary |
 | Substring and regex | a trigram index narrowing candidates, then a check of each, for error text, ids and code in messages |
@@ -76,13 +76,23 @@ snapshot as a search when it needs to say that search is incomplete.
 
 ## Text search as built
 
-- **Keys** (`format.md`, Keys): per type and index, a term's posting list (`d/ft`, a roaring bitmap of the
-  entities' places), its positions in each entity (`d/fp`), each entity's document — id, each field's length, its
-  terms and words as written — (`d/fd`), the index's statistics (`d/fs`: documents, each field's total length), and,
-  in a stemming index, each word as written and the entities holding it (`d/fw`). Every write that changes an indexed
-  field refiles the entity from its stored document, in the same unit; an index declared over existing data is built
-  in the background as a value index is, a read of it refused until it is (`INDEX_BUILDING`), and `check()` and
-  `rebuild()` cover it.
+- **Keys** (`format.md`, Keys): per type and index, a term's places (`d/ft`: the entities holding it, each with the
+  term's count in each field), each entity's document — its terms, each with its positions in each field, and its
+  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key: every
+  place's lengths, or a bit a place and the lengths of those holding any, whichever is fewer bytes, since a type's
+  entities may be few of the store's places), the
+  index's statistics (`d/fs`: documents, each field's total length), and, in a stemming index, each word as written
+  and how many entities hold it (`d/fw`). Every write that changes an indexed field refiles the entity from its stored
+  document, in the same unit: a term the entity holds as often in each field as it did is left as filed. An index
+  declared over existing data is built in the background as a value index is, a read of it refused until it is
+  (`INDEX_BUILDING`), and `check()` and `rebuild()` cover it.
+- **A term's places** are in its own key while no more than 256 entities hold it. Past that they are in blocks
+  (`d/fb term start`), and the term's key says only so. A block covers a range of places whose size is a power of two
+  and whose start is a multiple of its size: the largest such range that holds no more than 256 of the term's
+  entities, where the range twice its size holds more. A term's keys therefore follow from the entities holding it
+  and from nothing else, in whatever order they were filed, so `check()` derives the bytes the writes left; and a
+  write that files or unfiles an entity rewrites one block, at times splitting one or joining two, however many
+  entities hold the term (`docs/evidence/million-notes.md`).
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
 - **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves
@@ -96,11 +106,18 @@ snapshot as a search when it needs to say that search is incomplete.
   paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
   when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
-  order.
-- **As a plan step**: `search` after a type start reads the posting lists; after other steps it searches among the
-  entities they reached, in which a type with no text index holds no match. `hits` answers each entity's score,
+  order. A match's frequencies are read from its terms' places and its lengths from the lengths by place, so scoring
+  it reads no key of its own; a phrase's candidates read their documents for positions, and a recency decay reads
+  its field of every match.
+- **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
+  other steps it searches among the entities they reached, in which a type with no text index holds no match. Every
+  match is scored, and an entity is read only as the step hands it on, best first: a `limit` straight after the step
+  keeps its best matches as they are scored and reads that many entities, and a `count` straight after it counts the
+  matches as the index holds them, scoring and reading none. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
-  `counts` is a facet; `after` pages by the last id of the page before.
+  `counts` is a facet; `after` pages by the last id of the page before. A hit is of an entity the search handed on:
+  a match a `limit` left out, reached again by a step after it, is answered with no score and no terms, as an entity
+  the search never matched is.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).

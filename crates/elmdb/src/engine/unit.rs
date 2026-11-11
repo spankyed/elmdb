@@ -334,6 +334,15 @@ impl Txn<'_, '_> {
         self.state.reads.set(self.state.reads.get() + 1);
     }
 
+    /// The last entry under `prefix` whose key is `upto`, a key under `prefix`, or before it: what holds a place among
+    /// entries kept by where each starts
+    pub(crate) fn last_upto(&self, prefix: &[u8], upto: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.counted();
+        let (low, _) = prefix_range(prefix);
+        let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Included(upto));
+        Ok(self.db.rev_range(self.txn, &range)?.next().transpose()?.map(|(key, value)| (key.to_vec(), value.to_vec())))
+    }
+
     fn record(&mut self, key: &[u8]) -> Result<()> {
         let Some(level) = self.state.levels.last_mut() else { return Ok(()) };
         if level.recorded.contains(key) {

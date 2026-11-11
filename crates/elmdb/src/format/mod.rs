@@ -59,15 +59,20 @@ pub enum Prefix {
     In,
     /// `d/b source kind target seq` → the edges between two entities
     Between,
-    /// `d/ft type index term` → a text index's posting list: the places of the entities holding the term
+    /// `d/ft type index term` → a text index's term: the places of the entities holding it, each with the term's count
+    /// in each of its fields, or that they are too many for one key and are in blocks
     TextTerm,
-    /// `d/fp type index term seq` → where in the entity's fields the term is
-    TextPositions,
-    /// `d/fd type index seq` → what a text index holds of one entity: its id, each field's length and its terms
+    /// `d/fb type index term start` → a block of the places of the entities holding a term held by too many for its own
+    /// key, from `start` on
+    TextBlock,
+    /// `d/fd type index seq` → what a text index holds of one entity: its terms, each with its positions in each field,
+    /// and its words as written
     TextDocument,
+    /// `d/fl type index block` → each field's length in the entities of one block of places
+    TextLengths,
     /// `d/fs type index` → a text index's statistics: its entities and each field's total length
     TextStats,
-    /// `d/fw type index word` → a stemming text index's words as written: the places of the entities holding the word
+    /// `d/fw type index word` → a stemming text index's word as written: how many entities hold it
     TextWord,
     /// `d/g type index trigram block` → the places of the entities holding the trigram, case folded, in one block of places
     Trigram,
@@ -102,7 +107,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 35] = [
+    pub const ALL: [Prefix; 36] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -119,8 +124,9 @@ impl Prefix {
         Prefix::In,
         Prefix::Between,
         Prefix::TextTerm,
-        Prefix::TextPositions,
+        Prefix::TextBlock,
         Prefix::TextDocument,
+        Prefix::TextLengths,
         Prefix::TextStats,
         Prefix::TextWord,
         Prefix::Trigram,
@@ -159,8 +165,9 @@ impl Prefix {
             Prefix::In => "d/n",
             Prefix::Between => "d/b",
             Prefix::TextTerm => "d/ft",
-            Prefix::TextPositions => "d/fp",
+            Prefix::TextBlock => "d/fb",
             Prefix::TextDocument => "d/fd",
+            Prefix::TextLengths => "d/fl",
             Prefix::TextStats => "d/fs",
             Prefix::TextWord => "d/fw",
             Prefix::Trigram => "d/g",
@@ -189,6 +196,19 @@ impl Prefix {
             Prefix::Meta | Prefix::Destroyed | Prefix::Checkpoint => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
+    }
+
+    /// The derived tags an earlier layout wrote under and none writes under now: `d/fp`, a term's positions in an
+    /// entity. No prefix takes one again, and a rebuild of everything clears what a database written then still holds
+    pub const RETIRED: [&'static str; 1] = ["d/fp"];
+
+    /// The start of every key under a retired tag
+    pub fn retired() -> impl Iterator<Item = Vec<u8>> {
+        Self::RETIRED.into_iter().map(|tag| {
+            let mut w = key::KeyWriter::new();
+            w.string(tag);
+            w.to_vec()
+        })
     }
 
     /// The prefix a tag names, if any
@@ -222,10 +242,16 @@ mod tests {
 
     #[test]
     fn tags_are_distinct_and_name_their_kind() {
-        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).collect();
+        // A retired tag is no prefix's, or what a database kept under it would be read as that prefix's
+        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).chain(Prefix::RETIRED).collect();
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), Prefix::ALL.len());
+        assert_eq!(tags.len(), Prefix::ALL.len() + Prefix::RETIRED.len());
+        assert!(Prefix::RETIRED.iter().all(|tag| tag.starts_with("d/")), "only derived data is left to a rebuild");
+        // What a rebuild clears is each retired tag's keys, as a key starts with its tag
+        let mut positions = key::KeyWriter::new();
+        positions.string("d/fp");
+        assert_eq!(Prefix::retired().collect::<Vec<_>>(), [positions.to_vec()]);
         for p in Prefix::ALL {
             assert_eq!(Prefix::from_tag(p.tag()), Some(p));
             let expected = match p.tag().split('/').next() {

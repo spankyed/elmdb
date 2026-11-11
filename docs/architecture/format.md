@@ -25,11 +25,12 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/x` type index values seq | a value index | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
-| `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
-| `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
-| `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |
+| `d/ft` type index term | a text index's term: the places of the entities holding it, each with the term's count in each field, when they are no more than 256; that they are in blocks, when more | derived |
+| `d/fb` type index term start | a block of the places of the entities holding a term more than 256 hold, each with the term's count in each field: those of a range of places that starts at `start`, the largest range of a power of two places starting at a multiple of its size that holds no more than 256 | derived |
+| `d/fd` type index seq | the entity's document: its terms, each with its positions in each field, and its words as written | derived |
+| `d/fl` type index block | each field's length in the entities of one block of 512 places: every place's, or those of the places a bit each names | derived |
 | `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
-| `d/fw` type index word | a stemming text index's word as written: the places of the entities holding it | derived |
+| `d/fw` type index word | a stemming text index's word as written: how many entities hold it | derived |
 | `d/g` type index trigram block | a trigram index: the places of the entities holding the three characters, case folded, in one block of 2^16 places, as a roaring bitmap | derived |
 | `d/qc`, `d/qp` type index id chunk | a vector index's chunk: its hash and text; and that it waits for an embedding | derived |
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
@@ -81,7 +82,9 @@ one says to update elmdb, an older one that it is from before the format was fix
 
 **The format is 1 until a release has users** (apack's `docs/archive/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
-needs nothing, `rebuild()` building it from primary data. The databases that exist are their developers', reset or
+needs nothing, `rebuild()` building it from primary data. A derived tag a layout stops writing under is retired
+(`Prefix::RETIRED`, `d/fp` so far): no prefix takes it again, and a `rebuild()` of everything clears what a database
+still holds under it. The databases that exist are their developers', reset or
 converted once on a copy (Dumps, below). The accepted cost is that a build may misread a database from before an
 in-place change rather than refuse it; the answer is the same reset, or a dump made before the change.
 
