@@ -8,6 +8,9 @@ name: mutants
 # A job can't be run again while the run it is in goes on, so one share whose runner was lost waits for the other three.
 # Dispatched by hand on a branch, with the ref the branch merges into and a share, the workflow runs that share alone:
 #   gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
+#
+# Each job has a time limit, so one whose mutant never ends stops there and not at GitHub's six hours: about twice the
+# slowest successful run among the 400 workflow runs of 2026-11-03 to 2026-11-11, rounded up to five minutes.
 on:
   pull_request:
   workflow_dispatch:
@@ -35,6 +38,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-24.04
+    timeout-minutes: 230
     env:
       # A pull request's merge commit has the base it merges into as its first parent; a dispatch names its base
       BASE: ${{ inputs.base || 'HEAD^1' }}
@@ -72,6 +76,7 @@ jobs:
     # A dispatch is for one of Linux's shares
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
+    timeout-minutes: 215
     defaults:
       run:
         shell: bash

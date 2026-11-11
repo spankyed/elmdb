@@ -6,6 +6,9 @@ name: CI
 # A change to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch
 # cancels the run before it. `ci-pass` is the one check a merge waits on. Mutants of a pull request's change run beside
 # this in mutants.yml, which a surviving mutant fails.
+#
+# Every job has a time limit, so one that hangs ends there and not at GitHub's six hours: about twice the job's slowest
+# successful run among the 400 workflow runs of 2026-11-03 to 2026-11-11, rounded up to five minutes.
 on:
   push:
     branches: [main]
@@ -24,6 +27,7 @@ jobs:
   # Whether the change holds anything but documentation, which no check reads, and which tier it runs
   changes:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
       full: ${{ steps.tier.outputs.full }}
@@ -47,13 +51,14 @@ jobs:
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
-      # A draft pull request's platforms are the fast tier's; everything else that runs platforms runs all of them
+      # A draft pull request's platforms are the fast tier's; everything else that runs platforms runs all of them.
+      # Each carries its own time limit in minutes, the Intel Mac's suites taking over twice the others'
       - id: tier
         env:
           DRAFT: ${{ github.event.pull_request.draft }}
         run: |
-          fast='{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}'
-          rest='{"runner":"macos-15-intel","target":"x86_64-apple-darwin"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}'
+          fast='{"runner":"macos-15","target":"aarch64-apple-darwin","timeout":30},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc","timeout":30}'
+          rest='{"runner":"macos-15-intel","target":"x86_64-apple-darwin","timeout":60},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","timeout":20},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","timeout":20}'
           if [ "$DRAFT" = true ]; then
             echo "full=false" >> "$GITHUB_OUTPUT"
             echo "platforms=[$fast]" >> "$GITHUB_OUTPUT"
@@ -69,6 +74,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -93,6 +99,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -110,6 +117,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -168,6 +176,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg loom
       LOOM_MAX_PREEMPTIONS: 3
@@ -184,6 +193,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg shuttle
       CARGO_TARGET_DIR: target/shuttle
@@ -200,6 +210,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 55
     steps:
       # The merge commit and its first parent, the base it merges into
       - uses: actions/checkout@v4
@@ -231,6 +242,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 65
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -262,6 +274,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.changes.outputs.platforms) }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -331,6 +344,7 @@ jobs:
             target: aarch64-unknown-linux-musl
             nextest-sha256: 94676506ceaed01746d78cfe9ed124ee841b2932fd18d9d10f438a347bd9ba5e
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/cache@v4
@@ -378,6 +392,7 @@ jobs:
     if: always()
     needs: [changes, checks, heap, repo, loom, shuttle, instructions, diagnostics, platforms, musl]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
