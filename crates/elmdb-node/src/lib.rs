@@ -46,8 +46,8 @@ fn copied<'env>(env: &Env, bytes: &[u8]) -> napi::Result<BufferSlice<'env>> {
     BufferSlice::copy_from(env, bytes)
 }
 
-/// `copied`, for an export whose failures are elmdb's: N-API failing to make the Buffer is no failure of elmdb's, and
-/// throws with N-API's own code for a failure it doesn't name, and its message
+/// `copied`, for an export whose failures are elmdb's. N-API failing to make the Buffer is none of elmdb's: where Node
+/// left an exception of its own pending, that one is thrown, and otherwise an error with N-API's `GenericFailure`
 fn answer<'env>(env: &Env, bytes: &[u8]) -> Result<BufferSlice<'env>, Code> {
     copied(env, bytes).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
 }

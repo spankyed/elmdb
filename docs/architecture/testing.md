@@ -281,8 +281,11 @@ An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmd
 over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
 the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on
 Windows, whose libuv checks, aborts there (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`).
-`answers.test.mjs` holds each export that answers bytes to it, by Node's count of the bytes V8 allocated, and
-`exit.test.mjs` ends a process while V8 frees twenty thousand answers it dropped.
+`answers.test.mjs` holds each export the generated declarations say answers bytes to it, by the mark Node puts on an
+external buffer's memory so that it is never transferred to another thread. `exit.test.mjs` ends twenty processes while
+V8 is still freeing answers they dropped, which only Windows can fail: with external buffers 24 of 200 such processes
+and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
+`windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
 ## Platforms
 
