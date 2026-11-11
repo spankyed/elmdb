@@ -1713,7 +1713,10 @@ impl<R: Read> Query<'_, R> {
         // step is read only once it is counted to its end, so that a read stopping at its first match reads no
         // more entries for it than the count's bound. It goes after the others, the first of which is read when
         // the count tells none apart
-        let whole_first = |access: &Access| matches!(access, Access::Filter(at) if *at > 0 && matches!(self.plan.steps[*at], Step::Range { .. }));
+        let whole_first = |access: &Access| match access {
+            Access::Filter(at) => *at > 0 && matches!(self.plan.steps[*at], Step::Range { .. }),
+            Access::Together(_) => false,
+        };
         readable.sort_by_key(|(access, _)| whole_first(access));
         let fewest = match readable.as_slice() {
             [(only, _)] if !whole_first(only) => Some(*only),
@@ -1765,36 +1768,46 @@ impl<R: Read> Query<'_, R> {
 
     /// Which of several indexes holds the fewest entries for the filters it reads, each given with those entries:
     /// counted as probes, which a tracked read records nothing of, and which are no entity's and not among a plan's
-    /// visits. Every index's entries are counted no further than the first of `COUNTED`, and then no further than
-    /// the next while none is counted to its end: an index counted to its end holds fewer than any that isn't, so
-    /// the first round one ends in has the fewest among those that did, the first given of equals. So the counting
-    /// reads from each index no more than the bound the fewest are under, and never more than the last of
-    /// `COUNTED`, however many the indexes hold: a read that stops at its first match waits on no more than that.
-    /// None when every index holds that many or more
+    /// visits. Every index's entries are counted no further than the first of `COUNTED` in each start type, and
+    /// then no further than the next. An index is counted to its end when each type's entries were, and of those
+    /// that are, the one holding the fewest over all the types is read, the first given of equals: once no index
+    /// still being counted could hold fewer, which one whose count so far has reached that fewest can't, and at
+    /// the last of `COUNTED` whatever the others may hold. So the counting reads from each index, in each type, no
+    /// more than the last of `COUNTED`, however many the indexes hold: a read that stops at its first match waits
+    /// on no more than that. None when no index is counted to its end by then
     fn fewest(&self, readable: &[(Access, Vec<Entries>)]) -> Result<Option<Access>> {
-        for upto in COUNTED {
+        let rounds = COUNTED.len();
+        for (round, upto) in COUNTED.into_iter().enumerate() {
             let mut fewest: Option<(u64, Access)> = None;
+            // The least any index not counted to its end is known to hold: it holds more
+            let mut open = u64::MAX;
             for (access, entries) in readable {
-                let held = self.held(entries, upto)?;
-                if held < upto && fewest.is_none_or(|(least, _)| held < least) {
-                    fewest = Some((held, *access));
+                match self.held(entries, upto)? {
+                    (held, true) if fewest.is_none_or(|(least, _)| held < least) => fewest = Some((held, *access)),
+                    (_, true) => {}
+                    (held, false) => open = open.min(held),
                 }
             }
-            if let Some((_, access)) = fewest {
+            if let Some((least, access)) = fewest
+                && (open >= least || round + 1 == rounds)
+            {
                 return Ok(Some(access));
             }
         }
         Ok(None)
     }
 
-    /// How many entries `entries` are, each start type's counted no further than `upto` and on from where this
-    /// read's last count of them stopped: fewer than `upto` only when every one was counted to its end
-    fn held(&self, entries: &[Entries], upto: u64) -> Result<u64> {
-        let mut held = 0;
+    /// How many entries `entries` are over the start types, each type's counted no further than `upto` and on from
+    /// where this read's last count of them stopped, and whether every type's were counted to their end: the count
+    /// is all of them then, and at least as many as it says otherwise
+    fn held(&self, entries: &[Entries], upto: u64) -> Result<(u64, bool)> {
+        let (mut held, mut ended) = (0, true);
         for (from, to) in entries {
-            held += self.counted_within(from, to, upto)?;
+            let counted = self.counted_within(from, to, upto)?;
+            held += counted;
+            ended &= counted < upto;
         }
-        Ok(held)
+        Ok((held, ended))
     }
 
     /// Refuses what a stage of the first `upto` steps, filters, would refuse as it runs: a `withRole` naming no
@@ -2372,7 +2385,7 @@ impl<R: Read> Query<'_, R> {
         if let Some(access) = self.access(0)?
             && let Some(entries) = self.entries(access)?
         {
-            return Ok(self.held(&entries, than)? < than);
+            return Ok(self.held(&entries, than)?.0 < than);
         }
         let live = match self.r.probe(&keys::count(entity_type))? {
             Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),

@@ -220,27 +220,30 @@ an answer:
   With one it is read; with several, the choice is made once a read, in one place (`reads.rs`, `Query::access`), by
   counting, a `range`'s own index past the plan's first step being read only as the third point below says:
   - Each index's entries for its filter are counted, keys alone, no further than 16 in each start type, then 128,
-    then 1,024, until one is counted to its end. The one holding the fewest is read; of equals, the index on several
-    steps, then the first written, a `range` past the plan's first step after the others. So where the fewest are
-    `n`, under 1,024, that index is read, and the count has read no more than 16 keys of each index or eight times
-    `n`, whichever is more.
-  - When every index holds 1,024 entries or more they are not told apart, and the first of them is read: the index
-    on several steps, then the filters' own in the order written. Such a read may read more entries than the best
-    index holds, by as many as the first holds over it; it reads no more than 1,024 keys of each index, in each
-    start type, to learn so.
+    then 1,024. An index is counted to its end when its entries in every start type were. Of those that are, the
+    one holding the fewest over all the types is read; of equals, the index on several steps, then the first
+    written, a `range` past the plan's first step after the others. It is read as soon as no index still being
+    counted could hold fewer, which one already counted that far can't; after the count to 1,024 it is read
+    whatever the others may hold. So over one start type, where the fewest are `n`, under 1,024, that index is
+    read, and the count has read no more than 16 keys of each index or eight times `n`, whichever is more.
+  - When no index is counted to its end, each holding 1,024 entries or more in some start type, they are not told
+    apart, and the first of them is read: the index on several steps, then the filters' own in the order written.
+    Such a read may read more entries than the best index holds, by as many as the first holds over it; it reads
+    no more than 1,024 keys of each index, in each start type, to learn so.
   - An equality's entries are handed on as they are read. A range's are in its numbers' order, so all of them are
     read and put in creation order before the first is handed on, from its own index or from one on several
     steps. A `range` the plan starts with, and an index on several steps, are read so whatever they hold, when
     they are all there is to read or the first of those not told apart. A `range`'s own index past the first step
-    is read only when it is counted to its end, alone or not: holding 1,024 entries or more it is a filter of
-    what else is read, or of the walk.
+    is read only when it is counted to its end, alone or not: holding 1,024 entries or more in a start type it is
+    a filter of what else is read, or of the walk.
   - A `first`, `exists` or `limit` after the filters therefore waits on at most 1,024 counted keys of each index
     in each start type, whatever the store holds. What it then reads before its first entity is nothing for an
-    equality's index, fewer than 1,024 entities for a range's own past the first step, and every entry between
-    the bounds for a range the plan starts with or an index on several steps, however many those are. What is
-    counted decides only what is read: the keys are no entity's and not among a plan's visits, and a tracked
-    read records none of them. It depends on the index it read and the fields it tested, and on whether each
-    index that could have read the filters is built and orders every entity, which is asked of them all.
+    equality's index, fewer than 1,024 entities of each start type for a range's own past the first step, and
+    every entry between the bounds for a range the plan starts with or an index on several steps, however many
+    those are. What is counted decides only what is read: the keys are no entity's and not among a plan's
+    visits, and a tracked read records none of them. It depends on the index it read and the fields it tested,
+    and on whether each index the choice was among is built and orders every entity, which is asked of each of
+    those.
 
   A filter no stage would take, a `withRole` of an undeclared role or a `range` with bounds it can't take, is
   refused before anything is read, the last written first, as when every stage runs. A page's cursor straight
