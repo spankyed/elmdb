@@ -246,20 +246,24 @@ an answer:
   answer the same. Which costs less is the entities', not the plan's: filters that keep half the type are met within
   a few entities of the walk, and filters that keep a thousandth cost the sort a thousandth of the type. So the walk
   is tried when reading the filters would read 128 entities or more, the entries of the index they are read from or
-  the type's entities with none, and given up once the walk has read half as many as that reading would, which it
-  asks at 128 entities and each time it has read twice as many. The two together cost a small multiple of the cheaper
+  the type's entities with none, and given up once the walk has read half as many entries as that reading would,
+  which it asks at 128 entries and each time it has read twice as many: every entry it reads counts, one of an
+  entity in the trash as one it hands on. The two together cost a small multiple of the cheaper
   (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
   the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
-  between the cursor and the page's last, and one given up is sorted whole. Only an index on both reads a page at
-  the cost of what it holds.
+  between the cursor and the page's last. One given up, like any page of a sorted order, is sorted as a first page
+  is, holding only what the `limit` takes: the entities ordered past the cursor, those of its own value that come
+  after it among them. Only an index on both reads a page at the cost of what it holds.
 - **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
   reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's
   as a search leaves them out, and reads no entity. Among equalities alone, a range is read from the index on their
   fields and then its own, as an order is, by whichever of them is written last: the range may stand before them,
-  between them or after. A range of strings, one among any other steps, and one over a type without such an index
-  filter what reaches them.
+  between them or after. With no index on them all, an equality's own index is read whichever of them comes first,
+  and the range filters its matches. A plan of the trash that starts with a range reads as it is written, the range
+  walking the trash, which is the smaller where an index's entries are of every entity. A range of strings, one
+  among any other steps, and one over a type without such an index filter what reaches them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own
   left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters

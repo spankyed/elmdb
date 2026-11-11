@@ -4,7 +4,7 @@
 //! A type start's leading filters are read from a value index where one covers a `where` or `withRole` among them, its
 //! matches visited as they are read; `orderBy` followed by `limit` holds only the first `limit`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
@@ -430,6 +430,8 @@ struct Query<'r, R: Read> {
     sought: Cell<Option<usize>>,
     /// What the plan's last rank or ranked step says of its scores, for the `hits` terminal
     ranked: RefCell<Option<Scored>>,
+    /// The ids each `within` of the plan keeps, by the step's place (`kept_within`)
+    within: OnceCell<Vec<HashSet<String>>>,
 }
 
 /// What a `hits` answer says of a rank's scores
@@ -441,6 +443,10 @@ enum Scored {
 }
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
+
+/// What an index's entries are handed to as they are read: the id each holds, encoded as the entry holds it, and
+/// false to stop the read
+type Entry<'a> = dyn FnMut(&[u8]) -> Result<bool> + 'a;
 
 /// A search's match as it is ranked: its score; what breaks a tie, its place in the set searched among, or its
 /// type's among the types searched and then its own in creation order; and which of the indexes searched it is of
@@ -727,6 +733,15 @@ impl<R: Read> Query<'_, R> {
                 {
                     return self.holding(upto, types, name, &part, value, cursor, visit);
                 }
+                // A range of numbers among the equalities up to this one is read with them, from an index on them
+                // all: fewer entries than any one of the equalities has. A plan of the trash reads a range it
+                // starts with as that range does, by walking the trash, the smaller, where an index's entries are
+                // of every entity
+                if self.plan.scope != Scope::Trashed
+                    && let Some(ended) = self.range_under(upto, visit)?
+                {
+                    return Ok(ended);
+                }
                 if self.driver() == Some(before)
                     && let Some(types) = self.start_types()
                     && let Some(part) = indexable(name, value)
@@ -742,10 +757,6 @@ impl<R: Read> Query<'_, R> {
                         self.past_filters(before, id, visit)
                     });
                 }
-                // A range of numbers among the equalities up to this one is read with them
-                if let Some(ended) = self.range_under(upto, visit)? {
-                    return Ok(ended);
-                }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
             }
             Step::Range { field: name, at_least, above, at_most, below } => {
@@ -756,7 +767,7 @@ impl<R: Read> Query<'_, R> {
                 {
                     return self.in_range(types, name, &bounds, limits, visit);
                 }
-                // After equalities alone, an index that reads the field under them reads the range
+                // Among equalities alone, an index that reads the field under them reads the range
                 if let Some(ended) = self.range_under(upto, visit)? {
                     return Ok(ended);
                 }
@@ -1041,7 +1052,7 @@ impl<R: Read> Query<'_, R> {
                         }
                         None => Begin::First,
                     };
-                    return self.in_order(&ordered, *descending, begin, visit);
+                    return self.in_order(&ordered, *descending, begin, &mut |id| self.hand(id, visit));
                 }
                 self.note_wanted(upto, before, name)?;
                 let ids = self.collect(before)?;
@@ -1110,8 +1121,8 @@ impl<R: Read> Query<'_, R> {
                     _ => None,
                 };
                 // An order read from an index comes in it, and the walk below stops it at what this takes. Any other
-                // is walked while that is the cheaper way, or sorted with only what this takes held; a page of a
-                // sorted order is sorted whole, by the order's own stage
+                // is walked while that is the cheaper way, or sorted with only what this takes held, a page's as
+                // the first's
                 if let Some((under, name, descending, cursor)) = ordering
                     && self.ordered(under, name)?.is_none()
                 {
@@ -1122,22 +1133,19 @@ impl<R: Read> Query<'_, R> {
                         let _order = self.stages.map(|stages| stages.enter(order));
                         self.walked_first(under, name, descending, take as usize, cursor)?
                     };
-                    let first = match (walked, cursor) {
-                        (Some(first), _) => Some(first),
-                        (None, None) => Some(self.first_ordered(under, name, descending, take as usize)?),
-                        (None, Some(_)) => None,
+                    let first = match walked {
+                        Some(first) => first,
+                        None => self.first_ordered(under, name, descending, take as usize, cursor)?,
                     };
-                    if let Some(first) = first {
-                        // The stages this read for, the order's and its cursor's, kept what they hand on
-                        if let Some(stages) = self.stages {
-                            for stage in order..=before {
-                                for _ in &first {
-                                    stages.kept(stage);
-                                }
+                    // The stages this read for, the order's and its cursor's, kept what they hand on
+                    if let Some(stages) = self.stages {
+                        for stage in order..=before {
+                            for _ in &first {
+                                stages.kept(stage);
                             }
                         }
-                        return each(first, visit);
                     }
+                    return each(first, visit);
                 }
                 // A search straight before keeps no more of its matches than this takes
                 if matches!(self.plan.steps[..before].last(), Some(Step::Search { .. })) {
@@ -1611,9 +1619,9 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The step a type start's leading filters are read from: the first `where` or `withRole` among the filters the
-    /// plan starts with that every start type has a built index for, when no step before it is one. The filters
-    /// before it keep the same set in any order, so the index's matches are read and the earlier filters checked
-    /// against each, in the creation order a walk of the type would have visited them
+    /// plan starts with, a `range` among them but in a plan of the trash, that every start type has a built index
+    /// for, when no step before it is one. The filters before it keep the same set in any order, so the index's matches are read and the earlier
+    /// filters checked against each, in the creation order a walk of the type would have visited them
     fn driver(&self) -> Option<usize> {
         let types = self.start_types()?;
         for (at, step) in self.plan.steps.iter().enumerate() {
@@ -1621,6 +1629,8 @@ impl<R: Read> Query<'_, R> {
                 Step::Where { field: name, value } => indexable(name, value).map(|_| name.as_str()),
                 Step::WithRole { .. } => Some(field::ROLE),
                 Step::OfType { .. } | Step::Within { .. } | Step::Has { .. } | Step::Lacks { .. } => None,
+                // A plan of the trash reads a range it starts with by walking the trash, and what follows filters
+                Step::Range { .. } if self.plan.scope != Scope::Trashed => None,
                 _ => return None,
             };
             if let Some(name) = field
@@ -1653,14 +1663,27 @@ impl<R: Read> Query<'_, R> {
         if self.passes(upto, id)? { visit(id) } else { Ok(true) }
     }
 
+    /// The ids the `within` at step `at` keeps, as a set made once a read: a filter tested against each entity an
+    /// index hands on (`passes`) costs a lookup, where looking through the step's ids costs their number each time
+    fn kept_within(&self, at: usize) -> &HashSet<String> {
+        let kept = self.within.get_or_init(|| {
+            let ids = |step: &Step| match step {
+                Step::Within { ids } => ids.iter().cloned().collect(),
+                _ => HashSet::new(),
+            };
+            self.plan.steps.iter().map(ids).collect()
+        });
+        &kept[at]
+    }
+
     /// Whether every one of the first `upto` steps, the filters before a driving index, keeps `id`
     fn passes(&self, upto: usize, id: &str) -> Result<bool> {
-        for step in &self.plan.steps[..upto] {
+        for (at, step) in self.plan.steps[..upto].iter().enumerate() {
             let kept = match step {
                 Step::OfType { entity_type } => {
                     id.strip_prefix(entity_type.as_str()).is_some_and(|rest| rest.starts_with('-'))
                 }
-                Step::Within { ids } => ids.iter().any(|kept| kept == id),
+                Step::Within { .. } => self.kept_within(at).contains(id),
                 Step::Where { field: name, value } => self.matches(id, name, value)?,
                 Step::Has { field: name } => get(self.r, id, name)?.is_some(),
                 Step::Lacks { field: name } => get(self.r, id, name)?.is_none(),
@@ -1855,30 +1878,31 @@ impl<R: Read> Query<'_, R> {
         }))
     }
 
-    /// A type's entities in a field's order, read from its index as `ordered` found they can be: each as its entry is
-    /// read, so a step stopping the walk leaves the rest unread. Ascending, the entries from the least, then the
+    /// A type's entities in a field's order, read from its index as `ordered` found they can be: `each` is handed
+    /// the id every entry holds as the entry is read, of whatever entity, so one stopping the walk leaves the rest
+    /// unread, and what it is handed is what was read (`hand` keeps those the scope reaches). Ascending, the entries from the least, then the
     /// entities without a value; descending, those first, then the values from the greatest, each value's entities
     /// in place order, as a sort that keeps ties does. A page begins past its cursor, sought and not walked to
-    fn in_order(&self, ordered: &Ordered<'_>, descending: bool, begin: Begin, visit: &mut Visit<'_>) -> Result<bool> {
+    fn in_order(&self, ordered: &Ordered<'_>, descending: bool, begin: Begin, each: &mut Entry<'_>) -> Result<bool> {
         if let Some(stages) = self.stages {
             stages.reads_index(&ordered.index);
         }
         if !descending {
             let from = match begin {
-                Begin::PastWithout(place) => return self.without_value(ordered, Some(place), visit),
+                Begin::PastWithout(place) => return self.without_value(ordered, Some(place), each),
                 Begin::PastEntry(entry) => past(entry),
                 Begin::First => ordered.from.clone(),
             };
-            if !self.entries_up(ordered, &from, visit)? {
+            if !self.entries_up(ordered, &from, each)? {
                 return Ok(false);
             }
-            return self.without_value(ordered, None, visit);
+            return self.without_value(ordered, None, each);
         }
         let before = if let Begin::PastEntry(entry) = begin {
             // The rest of the cursor's value, then the values below it
             let value = value_of(&entry).to_vec();
             let from = past(entry);
-            if !walk(|each| self.r.visit_from(&value, &from, each), |_, id| self.hand(id, visit))? {
+            if !walk(|entry| self.r.visit_from(&value, &from, entry), |_, id| each(id))? {
                 return Ok(false);
             }
             prefix_range(&value).0
@@ -1887,40 +1911,40 @@ impl<R: Read> Query<'_, R> {
                 Begin::PastWithout(place) => Some(place),
                 _ => None,
             };
-            if !self.without_value(ordered, after, visit)? {
+            if !self.without_value(ordered, after, each)? {
                 return Ok(false);
             }
             ordered.to.clone()
         };
-        self.entries_down(ordered, before, visit)
+        self.entries_down(ordered, before, each)
     }
 
     /// The entities an ordered read's entries name, from the key `from` up to where the read ends, in key order: by
-    /// value, and one value's in place order; false when `visit` stopped the walk
-    fn entries_up(&self, ordered: &Ordered<'_>, from: &[u8], visit: &mut Visit<'_>) -> Result<bool> {
-        walk(|each| self.r.visit_within(from, &ordered.to, each), |_, id| self.hand(id, visit))
+    /// value, and one value's in place order; false when `each` stopped the walk
+    fn entries_up(&self, ordered: &Ordered<'_>, from: &[u8], each: &mut Entry<'_>) -> Result<bool> {
+        walk(|entry| self.r.visit_within(from, &ordered.to, entry), |_, id| each(id))
     }
 
     /// The entities an ordered read's entries name, from the last entry before the key `before` down to where the
     /// read begins: by value from the greatest, and one value's in place order, as an order that keeps ties has
     /// them. The entries are read backwards, each handed on once the entry before it shows its value is its alone;
     /// a value several entities hold is read forwards from its first entry, and the walk back goes on from there.
-    /// False when `visit` stopped the walk
-    fn entries_down(&self, ordered: &Ordered<'_>, mut before: Vec<u8>, visit: &mut Visit<'_>) -> Result<bool> {
+    /// False when `each` stopped the walk
+    fn entries_down(&self, ordered: &Ordered<'_>, mut before: Vec<u8>, each: &mut Entry<'_>) -> Result<bool> {
         loop {
             // The entry read last, which the next says whether to hand on
             let mut held: Option<(Vec<u8>, Vec<u8>)> = None;
             let mut shared = false;
             let mut go = true;
             walk(
-                |each| self.r.visit_back_within(&ordered.from, &before, each),
+                |entry| self.r.visit_back_within(&ordered.from, &before, entry),
                 |key, id| {
                     if let Some((above, entity)) = &held {
                         if value_of(above) == value_of(key) {
                             shared = true;
                             return Ok(false);
                         }
-                        go = self.hand(entity, visit)?;
+                        go = each(entity)?;
                         if !go {
                             return Ok(false);
                         }
@@ -1935,10 +1959,10 @@ impl<R: Read> Query<'_, R> {
             let Some((key, id)) = held else { return Ok(true) };
             if !shared {
                 // The read's first entry, with none before it
-                return self.hand(&id, visit);
+                return each(&id);
             }
             let value = value_of(&key).to_vec();
-            if !walk(|each| self.r.visit(&value, each), |_, id| self.hand(id, visit))? {
+            if !walk(|entry| self.r.visit(&value, entry), |_, id| each(id))? {
                 return Ok(false);
             }
             before = prefix_range(&value).0;
@@ -1946,14 +1970,14 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The entities without a value in an ordered read's field, in place order, all of them or those past the place
-    /// `after`: none for a read a `range` keeps, which holds none of them. False when `visit` stopped the walk
-    fn without_value(&self, ordered: &Ordered<'_>, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
+    /// `after`: none for a read a `range` keeps, which holds none of them. False when `each` stopped the walk
+    fn without_value(&self, ordered: &Ordered<'_>, after: Option<u64>, each: &mut Entry<'_>) -> Result<bool> {
         if !ordered.without {
             return Ok(true);
         }
         let without = keys::index_others(Prefix::IndexWithout, ordered.entity_type, &ordered.index, &ordered.leading);
         let from = after.map(|after| past(keys::place_under(&without, after))).unwrap_or_default();
-        walk(|each| self.r.visit_from(&without, &from, each), |_, id| self.hand(id, visit))
+        walk(|entry| self.r.visit_from(&without, &from, entry), |_, id| each(id))
     }
 
     /// How many ids the first `upto` steps hand on
@@ -2116,19 +2140,24 @@ impl<R: Read> Query<'_, R> {
         let mut read = 0u64;
         let mut ask_at = WALK_BEFORE_ASKING;
         let mut given_up = false;
-        self.in_order(&ordered, descending, begin, &mut |id| {
+        self.in_order(&ordered, descending, begin, &mut |entry| {
+            // Every entry read is counted, one of an entity the scope doesn't reach too: it cost the same
             read += 1;
             if read == ask_at {
                 if self.filters_read_fewer(entity_type, read * WALK_FOR_EACH_READ)? {
+                    // The entry it is given up at was read
+                    self.count_visit();
                     given_up = true;
                     return Ok(false);
                 }
                 ask_at *= 2;
             }
-            if self.passes(upto, id)? {
-                found.push(id.to_owned());
-            }
-            Ok(found.len() < take)
+            self.hand(entry, &mut |id| {
+                if self.passes(upto, id)? {
+                    found.push(id.to_owned());
+                }
+                Ok(found.len() < take)
+            })
         })?;
         Ok((!given_up).then_some(found))
     }
@@ -2187,8 +2216,17 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The first `take` ids after the first `upto` steps in `name`'s order, as sorting them all and taking the first
-    /// would answer, equal values in the order they came: only `take` are held at once
-    fn first_ordered(&self, upto: usize, name: &str, descending: bool, take: usize) -> Result<Vec<String>> {
+    /// would answer, equal values in the order they came: only `take` are held at once. A page's are the first past
+    /// its `cursor` in that order: the ids ordered after the cursor's value, and those of its value that came after
+    /// it, which is where a sort that keeps ties has them; none when the cursor never comes
+    fn first_ordered(
+        &self,
+        upto: usize,
+        name: &str,
+        descending: bool,
+        take: usize,
+        cursor: Option<&str>,
+    ) -> Result<Vec<String>> {
         let collator = collator(&self.r.schema().collation)?;
         let order = |a: &SortKey, b: &SortKey| {
             let o = compare(&collator, a, b);
@@ -2204,13 +2242,32 @@ impl<R: Read> Query<'_, R> {
             kept.sort_by(|(a, _), (b, _)| order(a, b));
             kept.truncate(take);
         };
+        // What the cursor is ordered by, and whether it has come: until it has, an id of its value is before it
+        let after = match cursor {
+            Some(cursor) => Some((cursor, sort_key(get_value(self.r, cursor, name)?.as_ref()))),
+            None => None,
+        };
+        let mut come = false;
         self.pull(upto, &mut |id| {
             let key = sort_key(get_value(self.r, id, name)?.as_ref());
+            if let Some((cursor, at)) = &after {
+                match order(&key, at) {
+                    Ordering::Less => return Ok(true),
+                    Ordering::Equal if !come => {
+                        come = id == *cursor;
+                        return Ok(true);
+                    }
+                    _ => {}
+                }
+            }
             if bound.as_ref().is_some_and(|last| order(last, &key) != Ordering::Greater) {
                 return Ok(true);
             }
             kept.push((key, id.to_owned()));
-            // mutant-skip: replace >= with < in Query<'_, R>::first_ordered (as above)
+            // mutant-skip: replace >= with < in Query<'_, R>::first_ordered
+            // The first of an order through this, or the full sort and its first: the same ids in the same order
+            // whenever the ids held are cut, and EXPLAIN's counts the same; when they are cut, and the bound a cut
+            // leaves, are only what it costs
             if kept.len() >= take.saturating_mul(2).max(1) {
                 cut(&mut kept);
                 // mutant-skip: replace == with != in Query<'_, R>::first_ordered (as above)
@@ -2218,6 +2275,9 @@ impl<R: Read> Query<'_, R> {
             }
             Ok(true)
         })?;
+        if after.is_some() && !come {
+            return Ok(Vec::new());
+        }
         cut(&mut kept);
         Ok(kept.into_iter().map(|(_, id)| id).collect())
     }
@@ -2353,6 +2413,7 @@ impl<R: Read> Query<'_, R> {
             best: Cell::new(None),
             sought: Cell::new(None),
             ranked: RefCell::default(),
+            within: OnceCell::new(),
         };
         query.pull(1, &mut |_| Ok(true))?;
         self.visited.set(self.visited.get() + query.visited.get());
@@ -3488,6 +3549,7 @@ fn query_with(
         best: Cell::new(None),
         sought: Cell::new(None),
         ranked: RefCell::new(None),
+        within: OnceCell::new(),
     };
     let last = plan.steps.len();
     let mut w = W(out);

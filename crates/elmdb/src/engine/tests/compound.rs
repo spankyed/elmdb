@@ -349,6 +349,13 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
         });
         assert_eq!((owned, visits), (vec![id(6), id(12)], 2), "the range at {at}");
     }
+    // With no index on the two, the equality's own is read whichever of them comes first, and the range filters
+    for range_first in [false, true] {
+        let (owned, visits) = same(&db, "live", N, |field| {
+            if range_first { json!([between(field), first_owner]) } else { json!([first_owner, between(field)]) }
+        });
+        assert_eq!((owned, visits), (vec![id(6), id(9), id(12)], 8), "the range first: {range_first}");
+    }
     // The stage that ends them names the index, and the ones before it read nothing
     let explained =
         read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", json!([between("n"), open])) }));
@@ -375,7 +382,8 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
     assert_eq!(same(&db, "live", N, |field| json!([open, between(field)])).0.len(), 5);
     assert_eq!(same(&db, "withTrashed", N, |field| json!([open, between(field)])), (found.clone(), 6));
     assert_eq!(same(&db, "trashed", N, |field| json!([open, between(field)])), (vec![id(6)], 6));
-    assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 6));
+    // A plan of the trash that starts with the range walks the trash, which is one task
+    assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 1));
 }
 
 #[test]
@@ -743,6 +751,10 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // asking, at five hundred and twelve, and at neither before it
     let noted = json!({ "step": "has", "field": "note" });
     assert_eq!(first(vec![noted.clone()], false, 2), (vec![id(597), id(598)], 512 + 600));
+    // Ids to keep are a filter with no index too: the greater of these two is three hundred in from the greatest
+    let two = json!({ "step": "within", "ids": [id(5), id(300)] });
+    assert_eq!(first(vec![two.clone()], true, 1), (vec![id(300)], 300));
+    assert_eq!(first(vec![two, is("status", json!("done"))], true, 1), (vec![id(5)], 100));
     // A filter of null is no equality an index reads: the tasks with no owner are the first four hundred and fifty,
     // met a hundred and fifty in from the greatest
     assert_eq!(first(vec![is("owner", json!(null))], true, 2), (vec![id(449), id(448)], 152));
@@ -796,9 +808,13 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // The walk is given up as a first page's is: none with this owner is below its cursor, which the hundred and
     // twenty-eight read before asking don't show, and its hundred and forty-seven are then sorted
     assert_eq!(page(vec![is("owner", json!(9))], true, 450, 2), (vec![], 128 + 147));
+    // One is below this cursor: the page given up on is sorted for as a first page is, holding only what it takes
+    assert_eq!(page(vec![is("owner", json!(9))], true, 451, 2), (vec![id(450)], 128 + 147));
     assert_eq!(page(vec![is("owner", json!(9))], false, 450, 2), (vec![id(451), id(452)], 2));
     // And it isn't tried for filters that read few, nor without a limit straight after the cursor
     assert_eq!(page(vec![is("owner", json!(7))], false, 597, 2), (vec![id(598), id(599)], 3));
+    assert_eq!(page(vec![is("owner", json!(7))], true, 598, 2), (vec![id(597)], 3));
+    assert_eq!(page(vec![is("owner", json!(7))], false, 100, 2), (vec![], 3), "a cursor the sorted set doesn't hold");
     let unlimited = same(&db, "live", K, |field| json!([open, order(field, true), after(&id(102))]));
     assert_eq!(unlimited, (vec![id(101), id(100)], 500));
     // The order's stage and its cursor's kept what the limit read for them
@@ -824,9 +840,23 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     };
     assert_eq!(with_role("star", false), (vec![id(0)], 1));
     assert_eq!(with_role("star", true), (vec![id(199)], 128 + 200));
+    // A page under a role is walked from its cursor, and one given up on is sorted
+    let role_page = |descending: bool, cursor: usize| {
+        let steps =
+            json!([{ "step": "withRole", "role": "star" }, order("k", descending), after(&id(cursor)), limit(2)]);
+        visited(&db, plan("live", steps))
+    };
+    assert_eq!(role_page(false, 0), (vec![id(1), id(2)], 2));
+    assert_eq!(role_page(true, 199), (vec![id(198), id(197)], 2));
+    assert_eq!(role_page(true, 599), (vec![], 0), "no holder");
     // Three hold this one: so few are read from the role's index and sorted
     write(&db, [10, 300, 599].iter().map(|at| json!({ "op": "grant", "id": id(*at), "role": "lead" })).collect());
     assert_eq!(with_role("lead", true), (vec![id(599)], 3));
+    // An entry of a task in the trash is read as any is, and counted: with the least three hundred there, the walk
+    // asks at its hundred and twenty-eighth entry and gives up at its two hundred and fifty-sixth, the three hundred
+    // live being fewer than twice that, having handed on none
+    write(&db, (0..300).map(|at| json!({ "op": "trash", "id": id(at) })).collect());
+    assert_eq!(first(vec![json!({ "step": "has", "field": "note" })], false, 1), (vec![id(597)], 256 + 300));
     // A role the schema no longer declares is refused though tasks still hold it, as its filter refuses it
     let mut fewer = schema_json();
     fewer["roles"].as_object_mut().unwrap().remove("star");
