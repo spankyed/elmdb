@@ -1,7 +1,7 @@
 //! A type start's leading filters against a model of them: however the plan reads them (`reads.rs`,
 //! `Query::filtered`), in whatever order they are written, the answer is the entities the filters keep in creation
-//! order, a tracked read is touched by the write that changes it, and no more entities are read than the places the
-//! filters' lists hold in common.
+//! order, and a tracked read is touched by the write that changes it. Three tests of fixed data hold the entities
+//! read to the places the filters' lists hold in common.
 
 use std::collections::BTreeSet;
 
