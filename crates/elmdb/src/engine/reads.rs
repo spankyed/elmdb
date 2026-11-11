@@ -727,6 +727,15 @@ impl<R: Read> Query<'_, R> {
                 {
                     return self.holding(upto, types, name, &part, value, cursor, visit);
                 }
+                // A range of numbers among the equalities up to this one is read with them, from an index on them
+                // all: fewer entries than any one of the equalities has. A plan of the trash reads a range it
+                // starts with as that range does, by walking the trash, the smaller, where an index's entries are
+                // of every entity
+                if self.plan.scope != Scope::Trashed
+                    && let Some(ended) = self.range_under(upto, visit)?
+                {
+                    return Ok(ended);
+                }
                 if self.driver() == Some(before)
                     && let Some(types) = self.start_types()
                     && let Some(part) = indexable(name, value)
@@ -742,10 +751,6 @@ impl<R: Read> Query<'_, R> {
                         self.past_filters(before, id, visit)
                     });
                 }
-                // A range of numbers among the equalities up to this one is read with them
-                if let Some(ended) = self.range_under(upto, visit)? {
-                    return Ok(ended);
-                }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
             }
             Step::Range { field: name, at_least, above, at_most, below } => {
@@ -756,7 +761,7 @@ impl<R: Read> Query<'_, R> {
                 {
                     return self.in_range(types, name, &bounds, limits, visit);
                 }
-                // After equalities alone, an index that reads the field under them reads the range
+                // Among equalities alone, an index that reads the field under them reads the range
                 if let Some(ended) = self.range_under(upto, visit)? {
                     return Ok(ended);
                 }
@@ -1611,9 +1616,9 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The step a type start's leading filters are read from: the first `where` or `withRole` among the filters the
-    /// plan starts with that every start type has a built index for, when no step before it is one. The filters
-    /// before it keep the same set in any order, so the index's matches are read and the earlier filters checked
-    /// against each, in the creation order a walk of the type would have visited them
+    /// plan starts with, a `range` among them but in a plan of the trash, that every start type has a built index
+    /// for, when no step before it is one. The filters before it keep the same set in any order, so the index's matches are read and the earlier
+    /// filters checked against each, in the creation order a walk of the type would have visited them
     fn driver(&self) -> Option<usize> {
         let types = self.start_types()?;
         for (at, step) in self.plan.steps.iter().enumerate() {
@@ -1621,6 +1626,8 @@ impl<R: Read> Query<'_, R> {
                 Step::Where { field: name, value } => indexable(name, value).map(|_| name.as_str()),
                 Step::WithRole { .. } => Some(field::ROLE),
                 Step::OfType { .. } | Step::Within { .. } | Step::Has { .. } | Step::Lacks { .. } => None,
+                // A plan of the trash reads a range it starts with by walking the trash, and what follows filters
+                Step::Range { .. } if self.plan.scope != Scope::Trashed => None,
                 _ => return None,
             };
             if let Some(name) = field

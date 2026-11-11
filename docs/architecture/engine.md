@@ -256,8 +256,10 @@ an answer:
   reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's
   as a search leaves them out, and reads no entity. Among equalities alone, a range is read from the index on their
   fields and then its own, as an order is, by whichever of them is written last: the range may stand before them,
-  between them or after. A range of strings, one among any other steps, and one over a type without such an index
-  filter what reaches them.
+  between them or after. With no index on them all, an equality's own index is read whichever of them comes first,
+  and the range filters its matches. A plan of the trash that starts with a range reads as it is written, the range
+  walking the trash, which is the smaller where an index's entries are of every entity. A range of strings, one
+  among any other steps, and one over a type without such an index filter what reaches them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own
   left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters

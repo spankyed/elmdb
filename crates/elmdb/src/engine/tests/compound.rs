@@ -333,6 +333,13 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
         });
         assert_eq!((owned, visits), (vec![id(6), id(12)], 2), "the range at {at}");
     }
+    // With no index on the two, the equality's own is read whichever of them comes first, and the range filters
+    for range_first in [false, true] {
+        let (owned, visits) = same(&db, "live", N, |field| {
+            if range_first { json!([between(field), first_owner]) } else { json!([first_owner, between(field)]) }
+        });
+        assert_eq!((owned, visits), (vec![id(6), id(9), id(12)], 8), "the range first: {range_first}");
+    }
     // The stage that ends them names the index, and the ones before it read nothing
     let explained =
         read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", json!([between("n"), open])) }));
@@ -359,7 +366,8 @@ fn a_range_under_an_equality_is_read_from_the_index_on_both() {
     assert_eq!(same(&db, "live", N, |field| json!([open, between(field)])).0.len(), 5);
     assert_eq!(same(&db, "withTrashed", N, |field| json!([open, between(field)])), (found.clone(), 6));
     assert_eq!(same(&db, "trashed", N, |field| json!([open, between(field)])), (vec![id(6)], 6));
-    assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 6));
+    // A plan of the trash that starts with the range walks the trash, which is one task
+    assert_eq!(same(&db, "trashed", N, |field| json!([between(field), open])), (vec![id(6)], 1));
 }
 
 #[test]
