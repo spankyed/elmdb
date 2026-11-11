@@ -2044,6 +2044,8 @@ impl<R: Read> Query<'_, R> {
         if let Some(together) = self.together.get() {
             return Ok(*together);
         }
+        // Asking after a range's index reads its bounds: the filter refused is the one its stage would have
+        self.filters_taken(self.filters)?;
         let mut together = false;
         for entity_type in types {
             if !self.listed(self.filters, entity_type)?.is_empty()
