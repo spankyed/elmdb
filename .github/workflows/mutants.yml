@@ -5,9 +5,13 @@ name: mutants
 # over four runners, leaving out code compiled only on another platform; Windows mutates only the code that compiles on
 # Windows alone, and does nothing when the change has none.
 #
+# `mutants-pass` is the check a merge waits on: every job passed, which a change with nothing to mutate does at once.
+#
 # A job can't be run again while the run it is in goes on, so one share whose runner was lost waits for the other three.
 # Dispatched by hand on a branch, with the ref the branch merges into and a share, the workflow runs that share alone:
 #   gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
+# A dispatch is a reading and reports no `mutants-pass`: the pull request's own run does, once its failed jobs are run
+# again and pass.
 on:
   pull_request:
   workflow_dispatch:
@@ -104,3 +108,19 @@ jobs:
           name: mutants-in-diff-windows
           path: target/mutants-in-diff
           if-no-files-found: ignore
+
+  # The check a merge waits on: every job above passed, or was skipped. A change of documentation alone, or one with no
+  # Windows-only code, passes its jobs without mutating anything, so every pull request reports this. A dispatch
+  # reports under another name: it runs on the same commit as the pull request's run, and one share passing there
+  # would otherwise stand for all five jobs until that run reported its own
+  mutants-pass:
+    name: ${{ github.event_name == 'pull_request' && 'mutants-pass' || 'mutants (dispatched, not a merge gate)' }}
+    if: always()
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          case " $RESULTS " in *" failure "*|*" cancelled "*) exit 1 ;; esac
