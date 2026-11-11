@@ -1176,6 +1176,19 @@ fn derived_reads() -> Vec<(String, Json)> {
                 format!("{t} role {role}"),
                 ids(start.clone(), json!([{ "step": "withRole", "role": role }]), "live"),
             ));
+            // A role's holders that hold a value in `a`, or one in a range of it, whichever of the two filters is
+            // asked first: a task has an index for each, and the one holding the fewer entries is read
+            let held = json!({ "step": "withRole", "role": role });
+            let filters = [
+                ("3", json!({ "step": "where", "field": "a", "value": 3 })),
+                ("5", json!({ "step": "where", "field": "a", "value": 5 })),
+                ("range", json!({ "step": "range", "field": "a", "atLeast": 2, "below": 6 })),
+            ];
+            for (asked, filter) in filters {
+                for (way, steps) in [("after", json!([filter, held])), ("before", json!([held, filter]))] {
+                    out.push((format!("{t} paired {way} {role} {asked}"), ids(start.clone(), steps, "live")));
+                }
+            }
         }
     }
     for id in IDS {
@@ -1338,6 +1351,19 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                         .map(|(id, _)| id)
                         .collect::<Vec<_>>()
                 ),
+                ["paired", _, role, asked] => {
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let kept = |e: &Entity| match asked.parse::<i64>() {
+                        Ok(probe) => holds(e.fields.get("a"), &Json::from(probe)),
+                        Err(_) => in_range(e.fields.get("a"), &within),
+                    };
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && e.roles.iter().any(|r| r == role) && kept(e))
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
                 ["order", field, direction, limit] => {
                     let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();
                     ordered.sort_by(|(_, x), (_, y)| {
