@@ -63,7 +63,8 @@ impl<B: AsRef<[u8]>> Lengths<B> {
             let held: usize = bits.iter().map(|byte| byte.count_ones() as usize).sum();
             lengths.len() == held * width * fields
         } else {
-            rest.len() % (width * fields) == 0
+            // Whole places, and no more of them than a block covers
+            rest.len() % (width * fields) == 0 && rest.len() / (width * fields) <= PLACES as usize
         };
         if !whole {
             return Err(corrupt());
@@ -335,5 +336,10 @@ mod tests {
         assert!(Lengths::read(&[1], 2).is_ok());
         assert!(Lengths::read(&[4, 0, 0, 0, 0, 1, 0, 0, 0], 2).is_ok());
         assert_eq!(Lengths::read(&[1, 9], 0).err().map(|e| e.code), Some(ErrorCode::Corrupted));
+        // Every place of a block is as many as one holds: a place more is no block's
+        let mut every = vec![1; 1 + PLACES as usize];
+        assert!(Lengths::read(&every, 1).is_ok());
+        every.push(1);
+        assert_eq!(Lengths::read(&every, 1).err().map(|e| e.code), Some(ErrorCode::Corrupted));
     }
 }

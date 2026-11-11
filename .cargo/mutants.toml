@@ -147,7 +147,7 @@ exclude_re = [
     "crates/elmdb/src/engine/reads.rs:1521:.*replace \\+ with \\* in Query<'_, R>::nearest",
     "crates/elmdb/src/engine/reads.rs:2388:.*replace >= with < in Query<'_, R>::first_ordered",
     "crates/elmdb/src/engine/reads.rs:2391:.*replace == with != in Query<'_, R>::first_ordered",
-    "crates/elmdb/src/engine/text/postings.rs:639:.*replace match guard self.fields == 1 && \\*count < 0x80 with false in Entries<'a>::read",
+    "crates/elmdb/src/engine/text/postings.rs:669:.*replace match guard self.fields == 1 && \\*count < 0x80 with false in Entries<'a>::read",
     "crates/elmdb/src/engine/text/search.rs:71:.*replace > with >= in parse",
     "crates/elmdb/src/engine/text/search.rs:336:.*replace > with >= in expand",
     "crates/elmdb/src/engine/text/search.rs:344:.*replace > with >= in expand",
