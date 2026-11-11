@@ -489,6 +489,30 @@ pub(crate) fn untrashed(r: &impl Read, entity_type: &str, mut places: RoaringTre
     Ok(places)
 }
 
+/// What clauses' candidates come to, joined: every group's, or with `any` one group's, and no negated clause's. A
+/// clause not `settled` is a phrase not yet checked, whose candidates are its matches and more: a negated one leaves
+/// nothing out, so the answer holds every match of the search
+fn joined(clauses: &[Clause], candidates: &[RoaringTreemap], settled: &[bool], any: bool) -> RoaringTreemap {
+    let mut groups: BTreeMap<usize, RoaringTreemap> = BTreeMap::new();
+    let mut excluded = RoaringTreemap::new();
+    for (at, clause) in clauses.iter().enumerate() {
+        if !clause.negated {
+            *groups.entry(clause.group).or_default() |= &candidates[at];
+        } else if settled[at] {
+            excluded |= &candidates[at];
+        }
+    }
+    let mut found: Option<RoaringTreemap> = None;
+    for group in groups.into_values() {
+        found = Some(match found {
+            None => group,
+            Some(found) if any => found | group,
+            Some(found) => found & group,
+        });
+    }
+    found.unwrap_or_default() - excluded
+}
+
 /// The entities of a type the query matches in one of its text indexes: within `among` when given, and with `live`
 /// none of the type's trash
 pub fn matches<'a>(
@@ -502,7 +526,10 @@ pub fn matches<'a>(
 ) -> Result<Matches<'a>> {
     let name = index.name.as_str();
     let clauses = clauses(index, query, options);
-    let mut matched = Vec::with_capacity(clauses.len());
+    let mut words_of = Vec::with_capacity(clauses.len());
+    let mut held_of = Vec::with_capacity(clauses.len());
+    // Each clause's candidates: the entities holding its every word, which are its matches unless it is a phrase
+    let mut candidates = Vec::with_capacity(clauses.len());
     for clause in &clauses {
         // A negation leaves out what holds the word as typed: a term an edit away is another word, which the query
         // didn't name, as a term the word only starts is (`clauses`)
@@ -519,56 +546,57 @@ pub fn matches<'a>(
             None => holders,
         };
         let mut holders = holders.into_iter();
-        let mut candidates = holders.next().unwrap_or_default();
+        let mut holding = holders.next().unwrap_or_default();
         for word in holders {
             // mutant-skip: replace &= with \|= in matches
             // A clause of several words is a phrase, checked by holds, which needs every word at consecutive places:
             // the union of the words' places keeps what their intersection keeps
-            candidates &= word;
+            holding &= word;
         }
         if let Some(among) = among {
-            candidates &= among;
+            holding &= among;
         }
-        // mutant-skip: replace > with >= in matches
-        // One word is at consecutive places wherever it is, and candidates are already those holding it in the
-        // clause's fields: holds answers true for each
-        if words.len() > 1 {
-            // A phrase is checked in each candidate's document, so the trash is left out before, not after
-            if live {
-                candidates = untrashed(r, entity_type, candidates)?;
+        words_of.push(words);
+        held_of.push(held);
+        candidates.push(holding);
+    }
+    // mutant-skip: replace > with >= in matches
+    // One word is at consecutive places wherever it is, and candidates are already those holding it in the clause's
+    // fields: holds answers true for each
+    let phrase = |words: &Vec<Expansions>| words.len() > 1;
+    let mut settled: Vec<bool> = words_of.iter().map(|words| !phrase(words)).collect();
+    // A phrase is checked in each candidate's document, so only in those the other clauses leave a match among, the
+    // phrase fewest hold all the words of first: each one checked leaves the next fewer
+    let mut phrases: Vec<usize> = (0..clauses.len()).filter(|at| !settled[*at]).collect();
+    phrases.sort_by_key(|at| candidates[*at].len());
+    for at in phrases {
+        // mutant-skip: replace & with \| in matches
+        // Checked wherever a match may be or beyond, a phrase's matches among the search's are the same: what is
+        // left out is what the check costs
+        let mut possible = joined(&clauses, &candidates, &settled, options.any) & &candidates[at];
+        // The trash is left out before the documents are read, not after
+        if live {
+            possible = untrashed(r, entity_type, possible)?;
+        }
+        let mut kept = RoaringTreemap::new();
+        for seq in &possible {
+            if holds(r, entity_type, name, &clauses[at], &words_of[at], seq)? {
+                kept.insert(seq);
             }
-            let mut kept = RoaringTreemap::new();
-            for seq in &candidates {
-                if holds(r, entity_type, name, clause, &words, seq)? {
-                    kept.insert(seq);
-                }
-            }
-            candidates = kept;
         }
-        matched.push(Matched { words, held, candidates });
+        candidates[at] = kept;
+        settled[at] = true;
     }
-    // The groups' matches, joined: every group, or with `any` one of them, and no negated clause
-    let mut groups: BTreeMap<usize, RoaringTreemap> = BTreeMap::new();
-    let mut excluded = RoaringTreemap::new();
-    for (clause, m) in clauses.iter().zip(&matched) {
-        if clause.negated {
-            excluded |= &m.candidates;
-        } else {
-            *groups.entry(clause.group).or_default() |= &m.candidates;
-        }
-    }
-    let mut found: Option<RoaringTreemap> = None;
-    for g in groups.into_values() {
-        found = Some(match found {
-            None => g,
-            Some(f) if options.any => f | g,
-            Some(f) => f & g,
-        });
-    }
-    let mut found = found.unwrap_or_default() - excluded;
+    let mut found = joined(&clauses, &candidates, &settled, options.any);
     if live {
         found = untrashed(r, entity_type, found)?;
     }
+    let matched = words_of
+        .into_iter()
+        .zip(held_of)
+        .zip(candidates)
+        .map(|((words, held), candidates)| Matched { words, held, candidates })
+        .collect();
     let allowed: Vec<u32> = match &options.fields {
         Some(names) => {
             names.iter().filter_map(|f| index.fields.iter().position(|(n, _)| n == f).map(|i| i as u32)).collect()
@@ -595,8 +623,30 @@ impl Matches<'_> {
 
     /// Hands `each` every match's place and score, in place order: BM25F over the fields searched, then the recency
     /// the options ask for. `now` measures a recency option's ages
-    pub fn scored(&self, r: &impl Read, now: f64, mut each: impl FnMut(u64, f64)) -> Result<()> {
-        if self.found.is_empty() {
+    pub fn scored(&self, r: &impl Read, now: f64, each: impl FnMut(u64, f64)) -> Result<()> {
+        self.scored_at(r, now, &self.found, each)
+    }
+
+    /// The score `scored` hands the match at a place, or none for a place that is no match's. It is read as `scored`
+    /// reads it, so it is that number to the bit: what a page's cursor is ranked by among the matches it is one of
+    pub fn score_of(&self, r: &impl Read, now: f64, seq: u64) -> Result<Option<f64>> {
+        if !self.found.contains(seq) {
+            return Ok(None);
+        }
+        let mut score = None;
+        self.scored_at(r, now, &RoaringTreemap::from_iter([seq]), |_, own| score = Some(own))?;
+        Ok(score)
+    }
+
+    /// Hands `each` the place and score of each of `places`, which are matches', in place order
+    fn scored_at(
+        &self,
+        r: &impl Read,
+        now: f64,
+        places: &RoaringTreemap,
+        mut each: impl FnMut(u64, f64),
+    ) -> Result<()> {
+        if places.is_empty() {
             return Ok(());
         }
         let name = self.index.name.as_str();
@@ -625,7 +675,7 @@ impl Matches<'_> {
             read.push((in_clause.collect(), words.collect()));
         }
         let mut lengths: Option<(u64, Option<Lengths<Vec<u8>>>)> = None;
-        for seq in &self.found {
+        for seq in places {
             let block = lengths::block_of(seq);
             if lengths.as_ref().is_none_or(|(held, _)| *held != block) {
                 let stored = r.get(&keys::text_lengths(self.entity_type, name, block))?;
@@ -818,7 +868,8 @@ pub fn places(r: &impl Read, ids: &[String]) -> Result<HashMap<u64, String>> {
 
 #[cfg(test)]
 mod seeking {
-    //! The fuzzy walk against the dictionary read whole: what it finds, and how little of it it reads
+    //! What a search reads to find what it finds: the fuzzy walk against the dictionary read whole, and a phrase's
+    //! check against every document holding its words
 
     use super::*;
     use crate::schema::Schema;
@@ -827,13 +878,18 @@ mod seeking {
     use serde_json::json;
     use std::cell::Cell;
 
-    /// A read that counts the entries it hands over
+    /// A read that counts the entries it hands over, and the keys under `under` it is asked for
     struct Counting<'a, R> {
         inner: &'a R,
         entries: Cell<usize>,
+        under: Vec<u8>,
+        gets: Cell<usize>,
     }
     impl<R: Read> Read for Counting<'_, R> {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            if key.starts_with(&self.under) {
+                self.gets.set(self.gets.get() + 1);
+            }
             self.inner.get(key)
         }
         fn visit(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
@@ -932,7 +988,8 @@ mod seeking {
                         _ => None,
                     })
                     .collect();
-                let counting = Counting { inner: r, entries: Cell::new(0) };
+                let counting =
+                    Counting { inner: r, entries: Cell::new(0), under: dictionary.clone(), gets: Cell::new(0) };
                 let found: Vec<(String, u8)> = within(&counting, &dictionary, &dfa, edits, |_, _| Ok(()))?
                     .into_iter()
                     .map(|(term, d, ())| (term, d))
@@ -942,6 +999,62 @@ mod seeking {
             }
             // The walk reads an entry where a match could start: a small part of every query reading the whole dictionary
             assert!(read * 10 < whole.len() * 200, "read {read} entries for 200 walks of {}", whole.len());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_phrase_is_checked_in_the_documents_the_other_clauses_leave_a_match_among() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Message": {
+                "fields": { "text": { "type": "string", "optional": true } },
+                "indexes": { "text": { "kind": "text", "fields": { "text": {} } } }
+            } }
+        }))
+        .unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+            .unwrap();
+        // 300 hold the phrase, three of them beside a zebra; ten hold its words the other way round, and a zebra; four
+        // hold it after a zebra crossing
+        let text = |i: usize| match i {
+            0..3 => "a note number here zebra",
+            3..300 => "a note number here",
+            300..310 => "zebra number note",
+            _ => "zebra crossing note number",
+        };
+        let ops: Vec<_> = (0..314)
+            .map(|i| json!({ "op": "create", "type": "Message", "id": format!("Message-{i}"), "fields": { "text": text(i) } }))
+            .collect();
+        crate::engine::tests::write(&db, ops).unwrap();
+        let index = &super::super::text_indexes(&db.schema().unwrap(), "Message")[0];
+        let options: SearchOptions = serde_json::from_value(json!({ "fuzzy": false })).unwrap();
+        let ids = |range: std::ops::Range<usize>| range.map(|i| format!("Message-{i}")).collect::<BTreeSet<_>>();
+        db.snapshot(|r| {
+            // The ids a query finds, and how many documents it read to check its phrases
+            let search = |query: &str| -> Result<(BTreeSet<String>, usize)> {
+                let documents = keys::text_index_ranges("Message", "text")[2].clone();
+                let counting = Counting { inner: r, entries: Cell::new(0), under: documents, gets: Cell::new(0) };
+                let matches = matches(&counting, "Message", index, &parse(query), &options, None, false)?;
+                let found = matches.found.iter().map(|seq| id_at(r, "Message", seq).map(Option::unwrap));
+                Ok((found.collect::<Result<_>>()?, counting.gets.get()))
+            };
+            // Seventeen hold a zebra and the phrase's words: theirs are the documents read, not the 314 holding the
+            // words, whether the phrase is asked for or left out
+            let both: BTreeSet<String> = ids(0..3).into_iter().chain(ids(310..314)).collect();
+            assert_eq!(search("zebra \"note number\"")?, (both, 17));
+            assert_eq!(search("zebra -\"note number\"")?, (ids(300..310), 17));
+            // Of two phrases the one fewer hold the words of is checked first, and the other in what it leaves
+            assert_eq!(search("\"note number\" \"zebra crossing\"")?, (ids(310..314), 8));
+            assert_eq!(search("\"zebra crossing\" \"note number\"")?, (ids(310..314), 8));
+            // A phrase alone, or beside a word either of which is enough, is checked wherever its words are
+            let phrase: BTreeSet<String> = ids(0..300).into_iter().chain(ids(310..314)).collect();
+            assert_eq!(search("\"note number\"")?, (phrase, 314));
+            assert_eq!(search("zebra OR \"note number\"")?, (ids(0..314), 314));
+            // A phrase left out of nothing is checked nowhere
+            assert_eq!(search("-\"note number\"")?, (BTreeSet::new(), 0));
             Ok(())
         })
         .unwrap();
