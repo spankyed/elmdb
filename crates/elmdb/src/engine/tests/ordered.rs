@@ -172,7 +172,7 @@ fn after(id: &str) -> Json {
 /// The ids an index that accounts for every entity files under `prefix`, in place order
 fn filed(db: &Database, prefix: Prefix, entity_type: &str, index: &str) -> Vec<String> {
     db.snapshot(|s| {
-        Ok(s.scan(&keys::index_others(prefix, entity_type, index))?
+        Ok(s.scan(&keys::index_others(prefix, entity_type, index, &[]))?
             .into_iter()
             .map(|(_, id)| rmpv::decode::read_value(&mut &id[..]).unwrap().as_str().unwrap().to_owned())
             .collect())
@@ -684,16 +684,17 @@ fn an_order_of_a_range_is_read_between_its_bounds() {
     let by_other =
         |field: &str| json!([{ "step": "range", "field": "k", "atLeast": 40 }, order(field, false), limit(1)]);
     assert_eq!(same(&db, "live", by_other), (of(&all, &[8]), 18));
-    // Two ranges are one read and one filter, which the order sorts
+    // Two ranges are one read and one filter, which the order sorts: the first's bound is kept, and not the second's
+    // alone
     let twice = |field: &str| {
         json!([
             { "step": "range", "field": field, "atLeast": 0 },
             { "step": "range", "field": field, "below": 3 },
-            order(field, true),
+            order(field, false),
             limit(2)
         ])
     };
-    assert_eq!(same(&db, "live", twice).0, of(&all, &[4, 1]));
+    assert_eq!(same(&db, "live", twice).0, of(&all, &[9, 1]));
 }
 
 #[test]

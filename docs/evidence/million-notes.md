@@ -206,3 +206,62 @@ each entity's value once more for each index that accounts for it, which these l
 
 The number and the status are fields every note holds, so an index's accounting for every entity of its type
 (`../architecture/schema.md`, Indexes) added no key, and the bytes are what they were.
+
+## A filter before an order
+
+What `where`, then `orderBy`, then `limit 10` costs, by what the filter keeps: a disposable script through the
+binding, a million notes of a number that is a permutation of their places, a status half of them hold, an owner a
+thousandth hold, and a tier the top hundredth by the number hold, each in an index of its own; the first ten by the
+number, ascending, medians of three and then of five. The same machine and day, load 3 to 5.
+
+On `session/ordered-reads` at `e781d4d`, the two ways a plan had to it, which answer the same. The planner read the
+filter first; the order first was a caller's to write.
+
+| The filter keeps | The filter read, its matches sorted | The order walked, each entity tested |
+|---|---:|---:|
+| Half the notes | 676 ms, 500,000 visited | 0.070 ms, 20 visited |
+| A thousandth | 2.3 ms, 1,000 visited | 30.1 ms, 9,434 visited |
+| The top hundredth by the number itself | 24.7 ms, 10,000 visited | 3,239 ms, 990,010 visited |
+
+Neither is the cheaper for every filter, and which is depends on the notes, not on the plan. An entity the walk
+tests costs about 3.3 µs, its record and the filter's field (30.1 ms for 9,434; 3,239 ms for 990,010), and a match
+the sort reads 1.4 to 2.5 µs, its own field (676 ms for 500,000; 24.7 ms for 10,000): the walk's entity costs about
+twice the sort's, which is what `WALK_FOR_EACH_READ` in `crates/elmdb/src/engine/reads.rs` says.
+
+On `session/compound-reads` at `bfadcd0`, the plan as written, filter first: with no index on the filter's field and the number
+together the planner walks the order while that is the cheaper way (`../architecture/engine.md`, Reads: plans), and
+with one it reads it.
+
+| The filter keeps | No index on both | An index on both |
+|---|---:|---:|
+| Half the notes | 0.081 ms, 20 visited | 0.053 ms, 10 visited |
+| A thousandth | 3.4 ms, 1,512 visited | 0.032 ms, 10 visited |
+| The top hundredth by the number itself | 51.0 ms, 18,192 visited | 0.024 ms, 10 visited |
+
+With no index on both it is within about twice the cheaper of the two ways in each row, where the dearer was up to
+ten thousand times it: the thousandth's 1,512 are the 512 the walk read before it was given up and the filter's
+1,000, and the hundredth's 18,192 are 8,192 and 10,000. An index on both reads ten entries whatever the filter keeps.
+
+**Against SQLite**, the benchmark as above with the ten lowest of the open half added, on `session/compound-reads`
+at `bfadcd0`, the machine quiet: load 3.6 as it began and 2.5 as it ended. Each engine has an index on the status and
+one on the number, and none on both; the benchmark runs no `ANALYZE`, so SQLite's planner chooses without statistics.
+
+| | With a term's places in blocks | Now | SQLite |
+|---|---:|---:|---:|
+| Load | 56.6 s | 57.7 s | 33.1 s |
+| Bytes a note, compacted | 1,186 | 1,186 | 145 |
+| A create of three terms every note holds, at a million | 0.172 ms | 0.167 ms | 0.056 ms |
+| A create of thirty terms, fifteen widely held, at a million | 0.425 ms | 0.415 ms | 0.060 ms |
+| The ten lowest of the indexed number | 750 ms | 0.030 ms | 0.006 ms |
+| The ten highest of it | | 0.037 ms | 0.006 ms |
+| The ten lowest of the half that are open | | 0.041 ms | 100 ms |
+| The count of the last 500 of it | 983 ms | 0.025 ms | 0.008 ms |
+| A page of 50 near the end of creation order | 191 ms | 0.025 ms | 0.028 ms |
+| A page of 50 near the end of the number's order | | 0.060 ms | 0.033 ms |
+| A check | 34.3 s | 34.9 s | 2.3 s |
+| A rebuild | 36.4 s | 36.6 s | 2.1 s |
+
+The ten lowest of the open half visited ten entities: the notes the benchmark's commits made hold the least numbers
+and are open, so the walk meets its ten at once. On a quiet machine the load, the creates, the check and the rebuild
+are what they were before an index accounted for its entities, which the reading under load two sections above
+couldn't say.

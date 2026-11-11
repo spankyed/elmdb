@@ -2,9 +2,9 @@
 // otherwise: `node crates/elmdb-node/bench/against-sqlite.mjs [--json] [--notes N] [--dir PATH]` after `npm run build`
 // (`docs/architecture/testing.md`, Against SQLite). Each note has a title in a text index and a number and a status in
 // value indexes. It reads what a note costs in bytes, what a create's commit costs at a twentieth of the notes and at
-// all of them, and what a search, an ordered read, a range, a page in the order the notes were made and one in their
-// number's, a check and a rebuild cost at all of them. Neither engine syncs. The two answer each read alike before any
-// is timed.
+// all of them, and what a search, an ordered read, one of the notes a filter keeps, a range, a page in the order the
+// notes were made and one in their number's, a check and a rebuild cost at all of them. Neither engine syncs. The two
+// answer each read alike before any is timed.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -93,6 +93,9 @@ const root = mkdtempSync(join(parent, 'elmdb-against-sqlite-'));
 // The plans of the ordered reads, the range and the pages
 const LOWEST = [{ step: 'orderBy', field: 'n' }, { step: 'limit', n: 10 }];
 const HIGHEST = [{ step: 'orderBy', field: 'n', descending: true }, { step: 'limit', n: 10 }];
+// The ten lowest of the half that are open: each engine has an index on the status and one on the number, and none on
+// both
+const OPEN_LOWEST = [{ step: 'where', field: 'status', value: 'open' }, ...LOWEST];
 // The notes' own numbers from `least` on: below the ranked notes', which are past them
 const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: NOTES }];
 const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
@@ -133,6 +136,7 @@ function elmdb() {
     count: (text) => query([search(text, false)], { answer: 'count' }).n,
     lowest: () => query(LOWEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
     highest: () => query(HIGHEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
+    openLowest: () => query(OPEN_LOWEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
     atLeast: (least) => query(atLeast(least), { answer: 'count' }).n,
     pageAfter: (cursor) => query(pageAfter(cursor), { answer: 'ids' }).ids,
     pageByNumberAfter: (cursor) => query(pageByNumberAfter(cursor), { answer: 'ids' }).ids,
@@ -142,6 +146,7 @@ function elmdb() {
       return {
         lowestTenVisited: visited(LOWEST),
         highestTenVisited: visited(HIGHEST),
+        openLowestTenVisited: visited(OPEN_LOWEST),
         last500Visited: visited(atLeast(NOTES - 500)),
         pageNearEndVisited: visited(pageAfter(id(NOTES - 200))),
         pageByNumberNearEndVisited: visited(pageByNumberAfter(NEAR_END_BY_NUMBER)),
@@ -190,6 +195,7 @@ function sqlite() {
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
   const lowest = db.prepare('SELECT n FROM notes ORDER BY n LIMIT 10');
   const highest = db.prepare('SELECT n FROM notes ORDER BY n DESC LIMIT 10');
+  const openLowest = db.prepare("SELECT n FROM notes WHERE status = 'open' ORDER BY n LIMIT 10");
   const atLeast = db.prepare('SELECT count(*) AS n FROM notes WHERE n >= ? AND n < ?');
   const pageAfter = db.prepare('SELECT id FROM notes WHERE rowid > (SELECT rowid FROM notes WHERE id = ?) ORDER BY rowid LIMIT 50');
   const pageByNumberAfter = db.prepare(
@@ -209,6 +215,7 @@ function sqlite() {
     count: (text) => count.get(text).n,
     lowest: () => lowest.all().map((row) => row.n),
     highest: () => highest.all().map((row) => row.n),
+    openLowest: () => openLowest.all().map((row) => row.n),
     atLeast: (least) => atLeast.get(least, NOTES).n,
     pageAfter: (cursor) => pageAfter.all(cursor).map((row) => row.id),
     pageByNumberAfter: (cursor) => pageByNumberAfter.all(cursor).map((row) => row.id),
@@ -283,6 +290,7 @@ function measure(name, engine) {
   const answers = {
     lowest: engine.lowest(),
     highest: engine.highest(),
+    openLowest: engine.openLowest(),
     atLeast: engine.atLeast(NOTES - 500),
     page: engine.pageAfter(id(NOTES - 200)),
     pageByNumber: engine.pageByNumberAfter(NEAR_END_BY_NUMBER),
@@ -302,6 +310,7 @@ function measure(name, engine) {
   out.reads = {
     lowestTenMs: timed(5, () => engine.lowest()).ms,
     highestTenMs: timed(5, () => engine.highest()).ms,
+    openLowestTenMs: timed(5, () => engine.openLowest()).ms,
     last500Ms: timed(5, () => engine.atLeast(NOTES - 500)).ms,
     pageNearEndMs: timed(5, () => engine.pageAfter(id(NOTES - 200))).ms,
     pageByNumberNearEndMs: timed(5, () => engine.pageByNumberAfter(NEAR_END_BY_NUMBER)).ms,

@@ -456,7 +456,7 @@ of 5,000 with neither engine syncing. It reads what the road to 1.0 tracks per r
 as loaded and compacted; a create's commit at a twentieth of the notes and at all of them, for a note of three terms
 and a message of thirty, as a median of wall time and as the process's CPU per commit; the best ten and the count for
 a word every note holds and one a twelfth hold; a misspelled word; the ten lowest and the ten highest of an indexed
-number, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the end of
+number, the ten lowest of the half of the notes a status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the end of
 the number's order; a check, a rebuild and a compaction. For elmdb it also reads how many entities each of those
 plans visited (`visits`, `explain`), which is a count and so the same on any machine.
 

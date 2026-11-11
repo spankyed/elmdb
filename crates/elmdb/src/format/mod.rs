@@ -53,11 +53,11 @@ pub enum Prefix {
     Index,
     /// `d/xb type index` → that a value index is built
     IndexBuilt,
-    /// `d/xw type index seq` → an entity of the type without a value in the field of a value index on one field: the
-    /// field is missing, or null
+    /// `d/xw type index values seq` → an entity of the type without a value in a value index's last field, which is
+    /// missing or null, under what its fields before that one hold
     IndexWithout,
-    /// `d/xu type index seq` → an entity of the type whose value a value index on one field holds no one place for: a
-    /// list, or a value the index can't file
+    /// `d/xu type index seq` → an entity of the type holding, in a field of a value index, a value the index holds no
+    /// one place for: a list, or a value it can't file
     IndexUnordered,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
