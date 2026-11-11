@@ -227,7 +227,9 @@ an answer:
     one whose places have been furthest apart, one from the next, where the read has seen them: where each list's
     first place is says so to begin with, and a list whose places come to be twice as far apart is walked in its
     place. An entry walked is the next one read, where a place sought is found from the root, so walking the
-    shortest reads the fewest; the order the filters are written in can change the cost only until it is.
+    shortest reads the fewest. Of lists whose places are less than twice as far apart as each other's the first
+    written stays the one walked, so the order written can change what is read by as much as one such list holds
+    over another.
   - **A range's index is read once the read has paid for it.** A `range` of numbers has an index to read where
     the type has one on its field alone that accounts for every entity, or, over one type, where the plan's first
     steps are equalities and the range and an index is on their fields and then its own, whichever way round they
@@ -238,7 +240,8 @@ an answer:
     the one holding the fewest of several. Until then the range is tested against each entity. So a read that
     stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
     of the cheaper way. A read that takes every entity the filters keep, and has no list, reads a range whatever
-    it holds, the one holding the fewest, each counted to twice as far until one is known to. An index on several fields is not read for equalities on some of its fields alone.
+    it holds, the one holding the fewest, each counted to twice as far until one is known to. An index on several
+    fields is not read for equalities on some of its fields alone.
   - **A plan of the trash** reads the type's trash, its rows keyed by place, as a list among the others, where an
     index's entries are of every entity: only entities in the trash are read. It reads a range's index only once
     it has read as many entries, never at the start.
@@ -291,8 +294,8 @@ an answer:
   trash's entities among what the sort would read. What it asks is counted in keys, each once over all its
   askings, and decides only how the order is read: the keys are no entity's and not among a plan's visits, and a
   tracked read depends on none of them. The two together cost a small multiple of the cheaper, what the filters
-would read being taken as what the shortest of their lists holds
-  (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
+  would read being taken as what the shortest of their lists holds (`docs/evidence/million-notes.md`, A filter
+  before an order). A page of it, an `after` between the `orderBy` and
   the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
   between the cursor and the page's last. One given up, like any page of a sorted order, is sorted as a first page
   is, holding only what the `limit` takes: the entities ordered past the cursor, those of its own value that come
