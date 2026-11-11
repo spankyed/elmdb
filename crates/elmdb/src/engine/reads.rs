@@ -1352,9 +1352,34 @@ impl<R: Read> Query<'_, R> {
             }
             return Ok(true);
         }
+        // A page's cursor as these searches rank it: in the first index searched of its type, at its own place. One
+        // of a type not searched, or that is no entity, has no page, and no index is read to say so
+        let at = match cursor {
+            None => None,
+            Some(cursor) => {
+                let Some(slot) = indexes.iter().position(|(t, _)| t.as_str() == ids::type_of(cursor)) else {
+                    return Ok(true);
+                };
+                let Some(seq) = entities::record(self.r, cursor)?.map(|rec| rec.seq) else { return Ok(true) };
+                Some((slot, seq))
+            }
+        };
+        // Its own index is searched first: a cursor that is no match has no page, whatever the others hold
+        let mut own = None;
+        if let Some((slot, seq)) = at {
+            let (entity_type, text_index) = &indexes[slot];
+            let held = self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?;
+            if !held.0.found.contains(seq) {
+                return Ok(true);
+            }
+            own = Some((slot, held));
+        }
         let mut searched = Vec::with_capacity(indexes.len());
-        for (entity_type, text_index) in &indexes {
-            searched.push(self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?);
+        for (slot, (entity_type, text_index)) in indexes.iter().enumerate() {
+            searched.push(match own.take_if(|(of, _)| *of == slot) {
+                Some((_, held)) => held,
+                None => self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?,
+            });
         }
         // A tie is broken by the set's own order, or by the types' and then by creation's
         let first = |slot: usize, seq: u64| match (&order, &searched[slot].1) {
@@ -1363,15 +1388,10 @@ impl<R: Read> Query<'_, R> {
             }
             _ => slot as u64,
         };
-        // A page's cursor as these searches rank it: in the first index searched of its type, at its own place.
-        // The page is the matches ranked past it, and a cursor that is no match has none past it
-        let last = match cursor {
+        // The page is the matches ranked past the cursor's own score
+        let last = match at {
             None => None,
-            Some(cursor) => {
-                let Some(slot) = indexes.iter().position(|(t, _)| t.as_str() == ids::type_of(cursor)) else {
-                    return Ok(true);
-                };
-                let Some(seq) = entities::record(self.r, cursor)?.map(|rec| rec.seq) else { return Ok(true) };
+            Some((slot, seq)) => {
                 let Some(score) = searched[slot].0.score_of(self.r, now, seq)? else { return Ok(true) };
                 Some(Ranked { score, first: first(slot, seq), seq, slot })
             }
