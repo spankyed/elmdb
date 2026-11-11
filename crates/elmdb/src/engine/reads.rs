@@ -442,6 +442,10 @@ enum Scored {
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
 
+/// What an index's entries are handed to as they are read: the id each holds, encoded as the entry holds it, and
+/// false to stop the read
+type Entry<'a> = dyn FnMut(&[u8]) -> Result<bool> + 'a;
+
 /// A search's match as it is ranked: its score; what breaks a tie, its place in the set searched among, or its
 /// type's among the types searched and then its own in creation order; and which of the indexes searched it is of
 #[derive(PartialEq)]
@@ -1046,7 +1050,7 @@ impl<R: Read> Query<'_, R> {
                         }
                         None => Begin::First,
                     };
-                    return self.in_order(&ordered, *descending, begin, visit);
+                    return self.in_order(&ordered, *descending, begin, &mut |id| self.hand(id, visit));
                 }
                 self.note_wanted(upto, before, name)?;
                 let ids = self.collect(before)?;
@@ -1858,30 +1862,31 @@ impl<R: Read> Query<'_, R> {
         }))
     }
 
-    /// A type's entities in a field's order, read from its index as `ordered` found they can be: each as its entry is
-    /// read, so a step stopping the walk leaves the rest unread. Ascending, the entries from the least, then the
+    /// A type's entities in a field's order, read from its index as `ordered` found they can be: `each` is handed
+    /// the id every entry holds as the entry is read, of whatever entity, so one stopping the walk leaves the rest
+    /// unread, and what it is handed is what was read (`hand` keeps those the scope reaches). Ascending, the entries from the least, then the
     /// entities without a value; descending, those first, then the values from the greatest, each value's entities
     /// in place order, as a sort that keeps ties does. A page begins past its cursor, sought and not walked to
-    fn in_order(&self, ordered: &Ordered<'_>, descending: bool, begin: Begin, visit: &mut Visit<'_>) -> Result<bool> {
+    fn in_order(&self, ordered: &Ordered<'_>, descending: bool, begin: Begin, each: &mut Entry<'_>) -> Result<bool> {
         if let Some(stages) = self.stages {
             stages.reads_index(&ordered.index);
         }
         if !descending {
             let from = match begin {
-                Begin::PastWithout(place) => return self.without_value(ordered, Some(place), visit),
+                Begin::PastWithout(place) => return self.without_value(ordered, Some(place), each),
                 Begin::PastEntry(entry) => past(entry),
                 Begin::First => ordered.from.clone(),
             };
-            if !self.entries_up(ordered, &from, visit)? {
+            if !self.entries_up(ordered, &from, each)? {
                 return Ok(false);
             }
-            return self.without_value(ordered, None, visit);
+            return self.without_value(ordered, None, each);
         }
         let before = if let Begin::PastEntry(entry) = begin {
             // The rest of the cursor's value, then the values below it
             let value = value_of(&entry).to_vec();
             let from = past(entry);
-            if !walk(|each| self.r.visit_from(&value, &from, each), |_, id| self.hand(id, visit))? {
+            if !walk(|entry| self.r.visit_from(&value, &from, entry), |_, id| each(id))? {
                 return Ok(false);
             }
             prefix_range(&value).0
@@ -1890,40 +1895,40 @@ impl<R: Read> Query<'_, R> {
                 Begin::PastWithout(place) => Some(place),
                 _ => None,
             };
-            if !self.without_value(ordered, after, visit)? {
+            if !self.without_value(ordered, after, each)? {
                 return Ok(false);
             }
             ordered.to.clone()
         };
-        self.entries_down(ordered, before, visit)
+        self.entries_down(ordered, before, each)
     }
 
     /// The entities an ordered read's entries name, from the key `from` up to where the read ends, in key order: by
-    /// value, and one value's in place order; false when `visit` stopped the walk
-    fn entries_up(&self, ordered: &Ordered<'_>, from: &[u8], visit: &mut Visit<'_>) -> Result<bool> {
-        walk(|each| self.r.visit_within(from, &ordered.to, each), |_, id| self.hand(id, visit))
+    /// value, and one value's in place order; false when `each` stopped the walk
+    fn entries_up(&self, ordered: &Ordered<'_>, from: &[u8], each: &mut Entry<'_>) -> Result<bool> {
+        walk(|entry| self.r.visit_within(from, &ordered.to, entry), |_, id| each(id))
     }
 
     /// The entities an ordered read's entries name, from the last entry before the key `before` down to where the
     /// read begins: by value from the greatest, and one value's in place order, as an order that keeps ties has
     /// them. The entries are read backwards, each handed on once the entry before it shows its value is its alone;
     /// a value several entities hold is read forwards from its first entry, and the walk back goes on from there.
-    /// False when `visit` stopped the walk
-    fn entries_down(&self, ordered: &Ordered<'_>, mut before: Vec<u8>, visit: &mut Visit<'_>) -> Result<bool> {
+    /// False when `each` stopped the walk
+    fn entries_down(&self, ordered: &Ordered<'_>, mut before: Vec<u8>, each: &mut Entry<'_>) -> Result<bool> {
         loop {
             // The entry read last, which the next says whether to hand on
             let mut held: Option<(Vec<u8>, Vec<u8>)> = None;
             let mut shared = false;
             let mut go = true;
             walk(
-                |each| self.r.visit_back_within(&ordered.from, &before, each),
+                |entry| self.r.visit_back_within(&ordered.from, &before, entry),
                 |key, id| {
                     if let Some((above, entity)) = &held {
                         if value_of(above) == value_of(key) {
                             shared = true;
                             return Ok(false);
                         }
-                        go = self.hand(entity, visit)?;
+                        go = each(entity)?;
                         if !go {
                             return Ok(false);
                         }
@@ -1938,10 +1943,10 @@ impl<R: Read> Query<'_, R> {
             let Some((key, id)) = held else { return Ok(true) };
             if !shared {
                 // The read's first entry, with none before it
-                return self.hand(&id, visit);
+                return each(&id);
             }
             let value = value_of(&key).to_vec();
-            if !walk(|each| self.r.visit(&value, each), |_, id| self.hand(id, visit))? {
+            if !walk(|entry| self.r.visit(&value, entry), |_, id| each(id))? {
                 return Ok(false);
             }
             before = prefix_range(&value).0;
@@ -1949,14 +1954,14 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The entities without a value in an ordered read's field, in place order, all of them or those past the place
-    /// `after`: none for a read a `range` keeps, which holds none of them. False when `visit` stopped the walk
-    fn without_value(&self, ordered: &Ordered<'_>, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
+    /// `after`: none for a read a `range` keeps, which holds none of them. False when `each` stopped the walk
+    fn without_value(&self, ordered: &Ordered<'_>, after: Option<u64>, each: &mut Entry<'_>) -> Result<bool> {
         if !ordered.without {
             return Ok(true);
         }
         let without = keys::index_others(Prefix::IndexWithout, ordered.entity_type, &ordered.index, &ordered.leading);
         let from = after.map(|after| past(keys::place_under(&without, after))).unwrap_or_default();
-        walk(|each| self.r.visit_from(&without, &from, each), |_, id| self.hand(id, visit))
+        walk(|entry| self.r.visit_from(&without, &from, entry), |_, id| each(id))
     }
 
     /// How many ids the first `upto` steps hand on
@@ -2119,19 +2124,24 @@ impl<R: Read> Query<'_, R> {
         let mut read = 0u64;
         let mut ask_at = WALK_BEFORE_ASKING;
         let mut given_up = false;
-        self.in_order(&ordered, descending, begin, &mut |id| {
+        self.in_order(&ordered, descending, begin, &mut |entry| {
+            // Every entry read is counted, one of an entity the scope doesn't reach too: it cost the same
             read += 1;
             if read == ask_at {
                 if self.filters_read_fewer(entity_type, read * WALK_FOR_EACH_READ)? {
+                    // The entry it is given up at was read
+                    self.count_visit();
                     given_up = true;
                     return Ok(false);
                 }
                 ask_at *= 2;
             }
-            if self.passes(upto, id)? {
-                found.push(id.to_owned());
-            }
-            Ok(found.len() < take)
+            self.hand(entry, &mut |id| {
+                if self.passes(upto, id)? {
+                    found.push(id.to_owned());
+                }
+                Ok(found.len() < take)
+            })
         })?;
         Ok((!given_up).then_some(found))
     }

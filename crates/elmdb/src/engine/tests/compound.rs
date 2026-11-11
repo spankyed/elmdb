@@ -651,6 +651,11 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // Three hold this one: so few are read from the role's index and sorted
     write(&db, [10, 300, 599].iter().map(|at| json!({ "op": "grant", "id": id(*at), "role": "lead" })).collect());
     assert_eq!(with_role("lead", true), (vec![id(599)], 3));
+    // An entry of a task in the trash is read as any is, and counted: with the least three hundred there, the walk
+    // asks at its hundred and twenty-eighth entry and gives up at its two hundred and fifty-sixth, the three hundred
+    // live being fewer than twice that, having handed on none
+    write(&db, (0..300).map(|at| json!({ "op": "trash", "id": id(at) })).collect());
+    assert_eq!(first(vec![json!({ "step": "has", "field": "note" })], false, 1), (vec![id(597)], 256 + 300));
     // A role the schema no longer declares is refused though tasks still hold it, as its filter refuses it
     let mut fewer = schema_json();
     fewer["roles"].as_object_mut().unwrap().remove("star");
