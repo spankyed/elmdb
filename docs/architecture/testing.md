@@ -283,13 +283,22 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 
 ## Platforms
 
-CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux. A draft pull request runs the fast
-tier, those and macOS arm64 and Windows x64; a pull request ready for review, and a dispatch, run the full matrix —
+CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
+Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
+pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
-every suite, the model and crash harnesses included, on it; a pull request ready for review also runs the instruction
-counts and the diagnostics overhead.
-`ci-pass` passes when every job passed or was skipped, and is the check `main`'s branch protection requires; a change
-to documentation alone skips everything else.
+every suite, the model and crash harnesses included, on it, and adds the instruction counts and the diagnostics
+overhead. A dispatch of either workflow runs its platforms on a branch.
+
+A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
+and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
+it passes when every job before it passed or was skipped, as a change to documentation alone skips them, and fails
+when one was cancelled, so a run a newer push replaced never stands for the one that replaced it. The full tier is a
+workflow of its own so that marking a pull request ready starts its jobs and leaves the fast tier's run of the same
+commit alone, neither cancelled nor repeated. Only a pull request ready for review reports `full-pass`. A draft's
+push reports the full tier's last job under another name, because a check on a draft's head still stands when the
+pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
+that is ready therefore merges only after the full tier passed on its head.
 
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
