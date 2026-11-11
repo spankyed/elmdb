@@ -118,6 +118,29 @@ pub trait Read {
         result
     }
 
+    /// What `key` holds, read as a probe: a read that decides how a plan is read and never what it answers, so one
+    /// a tracked read makes is not among what its answer depends on (`tracking::Recording`)
+    fn probe(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.get(key)
+    }
+    /// How many entries have a key that is `from` or after it and before `to`, counted no further than `upto`, and
+    /// the key a count of the rest goes on from, past the last one counted: a probe, as `probe` is
+    fn probe_within(&self, from: &[u8], to: &[u8], upto: u64) -> Result<(u64, Vec<u8>)> {
+        let mut counted = 0;
+        let mut next = from.to_vec();
+        self.visit_within(from, to, |key, _| {
+            if counted == upto {
+                return false;
+            }
+            counted += 1;
+            next.clear();
+            next.extend_from_slice(key);
+            next.push(0);
+            true
+        })?;
+        Ok((counted, next))
+    }
+
     fn schema(&self) -> &Schema;
     /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);

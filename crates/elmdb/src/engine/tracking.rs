@@ -131,6 +131,15 @@ impl<R: Read> Read for Recording<'_, R> {
         outcome
     }
 
+    // A probe decides how a plan is read, not what it answers: nothing of it is recorded
+    fn probe(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.inner.probe(key)
+    }
+
+    fn probe_within(&self, from: &[u8], to: &[u8], upto: u64) -> Result<(u64, Vec<u8>)> {
+        self.inner.probe_within(from, to, upto)
+    }
+
     fn schema(&self) -> &Schema {
         self.inner.schema()
     }

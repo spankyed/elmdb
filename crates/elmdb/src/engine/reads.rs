@@ -410,6 +410,9 @@ enum RankScores {
 /// The most rounds `rank` runs for an index not built yet, which its tolerance stops long before
 const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
 
+/// How many keys under a prefix a read has counted, and the key its count of the rest goes on from
+type Counted = (u64, Vec<u8>);
+
 struct Query<'r, R: Read> {
     r: &'r R,
     plan: &'r Plan,
@@ -430,8 +433,26 @@ struct Query<'r, R: Read> {
     sought: Cell<Option<usize>>,
     /// What the plan's last rank or ranked step says of its scores, for the `hits` terminal
     ranked: RefCell<Option<Scored>>,
-    /// The ids each `within` of the plan keeps, by the step's place (`kept_within`)
-    within: OnceCell<Vec<HashSet<String>>>,
+    /// The ids each `within` of the plan keeps, by the step's place, made when one is first asked for (`kept_within`)
+    within: Vec<OnceCell<HashSet<&'r str>>>,
+    /// The bounds of each `range` of the plan, by the step's place, read when first asked for (`bounds_at`)
+    bounds: Vec<OnceCell<Bounds>>,
+    /// The keys under each prefix the walk's asking has counted, this far (`counted_upto`)
+    counted: RefCell<HashMap<Vec<u8>, Counted>>,
+}
+
+impl<'r, R: Read> Query<'r, R> {
+    /// The ids the `within` at step `at` keeps, as a set made once a read: a filter tested against each entity an
+    /// index hands on (`passes`) costs a lookup, where looking through the step's ids costs their number each time
+    fn kept_within(&self, at: usize) -> &HashSet<&'r str> {
+        self.within[at].get_or_init(|| {
+            let plan: &'r Plan = self.plan;
+            match &plan.steps[at] {
+                Step::Within { ids } => ids.iter().map(String::as_str).collect(),
+                _ => HashSet::new(),
+            }
+        })
+    }
 }
 
 /// What a `hits` answer says of a rank's scores
@@ -734,19 +755,16 @@ impl<R: Read> Query<'_, R> {
                     return self.holding(upto, types, name, &part, value, cursor, visit);
                 }
                 // A range of numbers among the equalities up to this one is read with them, from an index on them
-                // all: fewer entries than any one of the equalities has. A plan of the trash reads a range it
-                // starts with as that range does, by walking the trash, the smaller, where an index's entries are
-                // of every entity
-                if self.plan.scope != Scope::Trashed
-                    && let Some(ended) = self.range_under(upto, visit)?
-                {
+                // all: fewer entries than any one of the equalities has
+                if let Some(ended) = self.range_under(upto, visit)? {
                     return Ok(ended);
                 }
-                if self.driver() == Some(before)
+                if self.driver()? == Some(before)
                     && let Some(types) = self.start_types()
                     && let Some(part) = indexable(name, value)
                 {
                     self.roles_declared(before)?;
+                    self.ranges_bounded(before)?;
                     // A page's cursor the filters before don't keep is of another set, and its page holds nothing
                     if let Some(cursor) = cursor
                         && !self.passes(before, cursor)?
@@ -759,19 +777,19 @@ impl<R: Read> Query<'_, R> {
                 }
                 self.pull(before, &mut |id| if self.matches(id, name, value)? { visit(id) } else { Ok(true) })
             }
-            Step::Range { field: name, at_least, above, at_most, below } => {
-                let bounds = Bounds::of(&self.r.schema().collation, at_least, above, at_most, below)?;
+            Step::Range { field: name, .. } => {
+                let bounds = self.bounds_at(before)?;
                 if before == 0
-                    && let Bounds::Numbers(limits) = &bounds
+                    && let Bounds::Numbers(limits) = bounds
                     && let Some(types) = self.start_types()
                 {
-                    return self.in_range(types, name, &bounds, limits, visit);
+                    return self.in_range(types, name, bounds, limits, visit);
                 }
                 // Among equalities alone, an index that reads the field under them reads the range
                 if let Some(ended) = self.range_under(upto, visit)? {
                     return Ok(ended);
                 }
-                self.pull(before, &mut |id| if self.within(id, name, &bounds)? { visit(id) } else { Ok(true) })
+                self.pull(before, &mut |id| if self.within(id, name, bounds)? { visit(id) } else { Ok(true) })
             }
             Step::Has { field: name } => {
                 self.pull(before, &mut |id| if get(self.r, id, name)?.is_some() { visit(id) } else { Ok(true) })
@@ -793,10 +811,11 @@ impl<R: Read> Query<'_, R> {
                     let part = Part::String(role.clone());
                     return self.holding(upto, types, field::ROLE, &part, &probe, cursor, visit);
                 }
-                if self.driver() == Some(before)
+                if self.driver()? == Some(before)
                     && let Some(types) = self.start_types()
                 {
                     self.roles_declared(before)?;
+                    self.ranges_bounded(before)?;
                     // A page's cursor the filters before don't keep is of another set, and its page holds nothing
                     if let Some(cursor) = cursor
                         && !self.passes(before, cursor)?
@@ -1619,27 +1638,45 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The step a type start's leading filters are read from: the first `where` or `withRole` among the filters the
-    /// plan starts with, a `range` among them but in a plan of the trash, that every start type has a built index
-    /// for, when no step before it is one. The filters before it keep the same set in any order, so the index's matches are read and the earlier
-    /// filters checked against each, in the creation order a walk of the type would have visited them
-    fn driver(&self) -> Option<usize> {
-        let types = self.start_types()?;
+    /// plan starts with, a `range` among them, that every start type has a built index for, when no step before it
+    /// is one. The filters before it keep the same set in any order, so the index's matches are read and the earlier
+    /// filters checked against each, in the creation order a walk of the type would have visited them.
+    ///
+    /// None when a range reads an index of its own first, which holds fewer entries than the index the plan asked
+    /// for next would be known to: a range the plan starts with, each start type having an index on its field
+    /// (`in_range`), or one read with the equalities up to some step from an index on them all (`range_index`),
+    /// which the stage that ends them reads
+    fn driver(&self) -> Result<Option<usize>> {
+        let Some(types) = self.start_types() else { return Ok(None) };
         for (at, step) in self.plan.steps.iter().enumerate() {
             let field = match step {
                 Step::Where { field: name, value } => indexable(name, value).map(|_| name.as_str()),
                 Step::WithRole { .. } => Some(field::ROLE),
                 Step::OfType { .. } | Step::Within { .. } | Step::Has { .. } | Step::Lacks { .. } => None,
-                // A plan of the trash reads a range it starts with by walking the trash, and what follows filters
-                Step::Range { .. } if self.plan.scope != Scope::Trashed => None,
-                _ => return None,
+                Step::Range { field: name, .. } => {
+                    let own = at == 0 && matches!(self.bounds_at(at)?, Bounds::Numbers(_));
+                    if own
+                        && types
+                            .iter()
+                            .map(|t| self.order_index(t, &[], name))
+                            .all(|index| matches!(index, Ok(Some(_))))
+                    {
+                        return Ok(None);
+                    }
+                    None
+                }
+                _ => return Ok(None),
             };
+            if matches!(step, Step::Where { .. } | Step::Range { .. }) && self.range_index(at + 1)?.is_some() {
+                return Ok(None);
+            }
             if let Some(name) = field
                 && types.iter().all(|t| index_on(self.r, t, name).is_some())
             {
-                return Some(at);
+                return Ok(Some(at));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Refuses a `withRole` among the filters before a driving index that names no declared role, as the step itself
@@ -1663,17 +1700,29 @@ impl<R: Read> Query<'_, R> {
         if self.passes(upto, id)? { visit(id) } else { Ok(true) }
     }
 
-    /// The ids the `within` at step `at` keeps, as a set made once a read: a filter tested against each entity an
-    /// index hands on (`passes`) costs a lookup, where looking through the step's ids costs their number each time
-    fn kept_within(&self, at: usize) -> &HashSet<String> {
-        let kept = self.within.get_or_init(|| {
-            let ids = |step: &Step| match step {
-                Step::Within { ids } => ids.iter().cloned().collect(),
-                _ => HashSet::new(),
-            };
-            self.plan.steps.iter().map(ids).collect()
-        });
-        &kept[at]
+    /// The bounds of the `range` at step `at`, read from the step once a read: a filter tested against each entity
+    /// an index hands on (`passes`) reads no bounds again, nor makes a collator for strings each time. Refuses bounds
+    /// that are none a range takes (`BATCH_INVALID`)
+    fn bounds_at(&self, at: usize) -> Result<&Bounds> {
+        if let Some(bounds) = self.bounds[at].get() {
+            return Ok(bounds);
+        }
+        let Step::Range { at_least, above, at_most, below, .. } = &self.plan.steps[at] else {
+            unreachable!("bounds are a range's")
+        };
+        let bounds = Bounds::of(&self.r.schema().collation, at_least, above, at_most, below)?;
+        Ok(self.bounds[at].get_or_init(|| bounds))
+    }
+
+    /// Refuses a `range` among the filters before a driving index whose bounds are none a range takes, as the step
+    /// itself does when it runs: tested against the index's matches, it would be refused only once one reached it
+    fn ranges_bounded(&self, upto: usize) -> Result<()> {
+        for (at, step) in self.plan.steps[..upto].iter().enumerate() {
+            if matches!(step, Step::Range { .. }) {
+                self.bounds_at(at)?;
+            }
+        }
+        Ok(())
     }
 
     /// Whether every one of the first `upto` steps, the filters before a driving index, keeps `id`
@@ -1688,10 +1737,7 @@ impl<R: Read> Query<'_, R> {
                 Step::Has { field: name } => get(self.r, id, name)?.is_some(),
                 Step::Lacks { field: name } => get(self.r, id, name)?.is_none(),
                 Step::WithRole { role } => self.matches(id, field::ROLE, &Value::from(role.as_str()))?,
-                Step::Range { field: name, at_least, above, at_most, below } => {
-                    let bounds = Bounds::of(&self.r.schema().collation, at_least, above, at_most, below)?;
-                    self.within(id, name, &bounds)?
-                }
+                Step::Range { field: name, .. } => self.within(id, name, self.bounds_at(at)?)?,
                 _ => unreachable!("an index is read under filters alone"),
             };
             if !kept {
@@ -1761,6 +1807,22 @@ impl<R: Read> Query<'_, R> {
     /// equalities' values, their entities by place. None, with nothing read, when the steps are any others or no
     /// such index is built; false when `visit` stopped it
     fn range_under(&self, upto: usize, visit: &mut Visit<'_>) -> Result<Option<bool>> {
+        let Some((entity_type, index, leading, limits)) = self.range_index(upto)? else { return Ok(None) };
+        let (from, to) = limits.keys(entity_type, &index, &leading);
+        if self.trash_is_fewer(entity_type, &from, &to)? {
+            return Ok(None);
+        }
+        if let Some(stages) = self.stages {
+            stages.reads_index(&index);
+        }
+        self.between(entity_type, &index, &leading, &limits, visit).map(Some)
+    }
+
+    /// The index `range_under` reads what the first `upto` steps keep from, with the type, what its entries for them
+    /// start with, and the range's bounds; none when the steps are no equalities and one range of numbers over a
+    /// start of one type, or no such index is built
+    #[allow(clippy::type_complexity)]
+    fn range_index(&self, upto: usize) -> Result<Option<(&String, String, Vec<Part>, Limits<f64>)>> {
         let Some([entity_type]) = self.start_types() else { return Ok(None) };
         let ranged = self.plan.steps[..upto].iter().find_map(|step| match step {
             Step::Range { field, .. } => Some(field),
@@ -1769,10 +1831,23 @@ impl<R: Read> Query<'_, R> {
         let Some(name) = ranged else { return Ok(None) };
         let Some((equals, Some(limits))) = self.asked(upto, name)? else { return Ok(None) };
         let Some((index, leading)) = self.order_index(entity_type, &equals, name)? else { return Ok(None) };
-        if let Some(stages) = self.stages {
-            stages.reads_index(&index);
+        Ok(Some((entity_type, index, leading, limits)))
+    }
+
+    /// Whether a plan of the trash reads less by walking a type's trash than by reading an index's entries from
+    /// `from` to `to`: an index's entries are of every entity, the live among them, and each is read to learn it is
+    /// no entity of the trash. So the trash is walked when it holds fewer rows than `TRASH_WALKED` and fewer than
+    /// those entries, each counted no further than that and as a probe, which a tracked read records nothing of
+    fn trash_is_fewer(&self, entity_type: &str, from: &[u8], to: &[u8]) -> Result<bool> {
+        if self.plan.scope != Scope::Trashed {
+            return Ok(false);
         }
-        self.between(entity_type, &index, &leading, &limits, visit).map(Some)
+        let (low, high) = prefix_range(&keys::type_range(true, entity_type));
+        let (trashed, _) = self.r.probe_within(&low, &high, TRASH_WALKED)?;
+        if trashed >= TRASH_WALKED {
+            return Ok(false);
+        }
+        Ok(self.r.probe_within(from, to, trashed + 1)?.0 > trashed)
     }
 
     /// The built index of a type that reads the entities `equals` names in `name`'s order, with what its entries for
@@ -2038,7 +2113,14 @@ impl<R: Read> Query<'_, R> {
         visit: &mut Visit<'_>,
     ) -> Result<bool> {
         for t in types {
-            let index = self.order_index(t, &[], name)?.map(|(index, _)| index);
+            // A plan of the trash walks the trash where that reads less than the entries between the bounds
+            let index = match self.order_index(t, &[], name)? {
+                Some((index, _)) => {
+                    let (from, to) = limits.keys(t, &index, &[]);
+                    (!self.trash_is_fewer(t, &from, &to)?).then_some(index)
+                }
+                None => None,
+            };
             if let Some(stages) = self.stages {
                 stages.reads_index(index.as_deref().unwrap_or("none: walks the type"));
             }
@@ -2122,9 +2204,17 @@ impl<R: Read> Query<'_, R> {
             return Ok(None);
         }
         let Some(entity_type) = self.ordered_type() else { return Ok(None) };
-        let Some(ordered) = self.ordered_under(entity_type, &[], None, name)? else { return Ok(None) };
         // A role the schema doesn't declare is refused as its filter refuses it, which the walk never runs
         self.roles_declared(upto)?;
+        // A page's cursor that is no entity of the set has no page, whichever way the set would be read, and
+        // nothing is read to say so: one of another type, one the scope doesn't reach, one the filters don't keep
+        if let Some(cursor) = cursor
+            && (self.cursor_among(std::slice::from_ref(entity_type), cursor)?.is_none()
+                || !self.passes(upto, cursor)?)
+        {
+            return Ok(Some(Vec::new()));
+        }
+        let Some(ordered) = self.ordered_under(entity_type, &[], None, name)? else { return Ok(None) };
         if self.filters_read_fewer(entity_type, WALK_BEFORE_ASKING)? {
             return Ok(None);
         }
@@ -2142,29 +2232,31 @@ impl<R: Read> Query<'_, R> {
         self.in_order(&ordered, descending, begin, &mut |entry| {
             // Every entry read is counted, one of an entity the scope doesn't reach too: it cost the same
             read += 1;
-            if read == ask_at {
+            let wanted = self.hand(entry, &mut |id| {
+                if self.passes(upto, id)? {
+                    found.push(id.to_owned());
+                }
+                Ok(found.len() < take)
+            })?;
+            // Asked once the entry is tested: a walk that has all it takes as it comes to ask is done, not given up
+            if wanted && read == ask_at {
                 if self.filters_read_fewer(entity_type, read * WALK_FOR_EACH_READ)? {
-                    // The entry it is given up at was read
-                    self.count_visit();
                     given_up = true;
                     return Ok(false);
                 }
                 ask_at *= 2;
             }
-            self.hand(entry, &mut |id| {
-                if self.passes(upto, id)? {
-                    found.push(id.to_owned());
-                }
-                Ok(found.len() < take)
-            })
+            Ok(wanted)
         })?;
         Ok((!given_up).then_some(found))
     }
 
     /// Whether reading a type start's leading filters reads fewer than `than` entities from the store: the entries of
-    /// the index they are read from (`driver`), counted no further than that, or with none, the type's entities
+    /// the index they are read from (`driver`), or with none the type's entities, the trash's among them for a plan
+    /// of both. It is asked as a probe: it decides how the order is read and not what is answered, so a tracked
+    /// read records nothing of it, and the keys it counts, which are no entity's, are not among a plan's visits
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
-        let read_from = match self.driver().map(|at| &self.plan.steps[at]) {
+        let read_from = match self.driver()?.map(|at| &self.plan.steps[at]) {
             Some(Step::Where { field, value }) => indexable(field, value).map(|part| (field.as_str(), part)),
             Some(Step::WithRole { role }) => Some((field::ROLE, Part::String(role.clone()))),
             _ => None,
@@ -2172,13 +2264,32 @@ impl<R: Read> Query<'_, R> {
         let entries = read_from.and_then(|(name, part)| {
             index_on(self.r, entity_type, name).map(|index| keys::index_range(entity_type, &index, &[part]))
         });
-        let Some(entries) = entries else { return Ok(entities::count(self.r, entity_type)? < than) };
-        let mut left = than;
-        self.r.visit(&entries, |_, _| {
-            left -= 1;
-            left > 0
-        })?;
-        Ok(left > 0)
+        if let Some(entries) = entries {
+            return Ok(self.counted_upto(&entries, than)? < than);
+        }
+        let live = match self.r.probe(&keys::count(entity_type))? {
+            Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),
+            None => 0,
+        };
+        if self.plan.scope != Scope::WithTrashed {
+            return Ok(live < than);
+        }
+        // A walk of both reads the trash's rows too
+        let trashed = self.counted_upto(&keys::type_range(true, entity_type), than.saturating_sub(live))?;
+        Ok(live.saturating_add(trashed) < than)
+    }
+
+    /// How many keys start with `prefix`, counted no further than `upto` and on from where this read's last count of
+    /// them stopped: the walk asks again each time it has read twice what it had, and all its askings together
+    /// count each key once
+    fn counted_upto(&self, prefix: &[u8], upto: u64) -> Result<u64> {
+        let (low, high) = prefix_range(prefix);
+        let mut counted = self.counted.borrow_mut();
+        let (so_far, from) = counted.entry(prefix.to_vec()).or_insert((0, low));
+        let (more, next) = self.r.probe_within(from, &high, upto.saturating_sub(*so_far))?;
+        *so_far += more;
+        *from = next;
+        Ok(*so_far)
     }
 
     /// Tells a read asked to explain itself which value index would have read the order of `name` that stage `stage`
@@ -2208,7 +2319,14 @@ impl<R: Read> Query<'_, R> {
         let fields: Vec<&str> = equals.iter().map(|(field, _)| *field).chain([name]).collect();
         // An index names a field once
         let once = fields.iter().enumerate().all(|(at, field)| !fields[..at].contains(field));
-        if in_order && !held && once {
+        // And only a field the schema lets a value index name: a declared one of a type an index holds, or a time
+        // the engine writes
+        let named = equals.iter().all(|(field, _)| {
+            *field == field::CREATED_AT
+                || *field == field::UPDATED_AT
+                || declared.fields.get(*field).is_some_and(|declared| declared.value.is_value_indexable())
+        });
+        if in_order && !held && once && named {
             stages.wants(stage, fields.join(", "));
         }
         Ok(())
@@ -2412,7 +2530,9 @@ impl<R: Read> Query<'_, R> {
             best: Cell::new(None),
             sought: Cell::new(None),
             ranked: RefCell::default(),
-            within: OnceCell::new(),
+            within: plan.steps.iter().map(|_| OnceCell::new()).collect(),
+            bounds: plan.steps.iter().map(|_| OnceCell::new()).collect(),
+            counted: RefCell::default(),
         };
         query.pull(1, &mut |_| Ok(true))?;
         self.visited.set(self.visited.get() + query.visited.get());
@@ -2531,7 +2651,14 @@ impl<R: Read> Query<'_, R> {
         };
         for (at, t) in types.iter().enumerate() {
             let Some(after) = starts_past(from, at) else { continue };
-            let index = index_on(self.r, t, name);
+            // A plan of the trash walks the trash where that reads less than the value's entries
+            let index = match index_on(self.r, t, name) {
+                Some(index) => {
+                    let (low, high) = prefix_range(&keys::index_range(t, &index, std::slice::from_ref(part)));
+                    (!self.trash_is_fewer(t, &low, &high)?).then_some(index)
+                }
+                None => None,
+            };
             if let Some(stages) = self.stages {
                 stages.reads_index(index.as_deref().unwrap_or("none: walks the type"));
             }
@@ -3217,6 +3344,10 @@ const WALK_BEFORE_ASKING: u64 = 128;
 /// alone (`docs/evidence/million-notes.md`, A filter before an order)
 const WALK_FOR_EACH_READ: u64 = 2;
 
+/// How many rows of a type's trash a plan of the trash counts before it reads an index in their place
+/// (`Query::trash_is_fewer`): a trash this small is counted in less time than a few of an index's entries are read
+const TRASH_WALKED: u64 = 1024;
+
 /// A type's entities as a plan reads them in a field's order from a value index (`Query::ordered`)
 struct Ordered<'q> {
     entity_type: &'q String,
@@ -3548,7 +3679,9 @@ fn query_with(
         best: Cell::new(None),
         sought: Cell::new(None),
         ranked: RefCell::new(None),
-        within: OnceCell::new(),
+        within: plan.steps.iter().map(|_| OnceCell::new()).collect(),
+        bounds: plan.steps.iter().map(|_| OnceCell::new()).collect(),
+        counted: RefCell::default(),
     };
     let last = plan.steps.len();
     let mut w = W(out);
