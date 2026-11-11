@@ -410,6 +410,31 @@ fn places_that_dont_read_are_refused_as_corrupt() {
     // A block whose range is no power of two a place can be in
     let filed = raw(&IN_BLOCKS, Some((0, &[70, 1, 0, 1])));
     assert_eq!(filed.write(false, |t| remove(t, &filed.term(), 0)).unwrap_err().code, ErrorCode::Corrupted);
+    // A key that counts more entries than it holds, and one that counts fewer: read by a search, or by a write
+    for own in [&[2, 5, 1][..], &[1, 5, 1, 1, 1]] {
+        let filed = raw(own, None);
+        assert_eq!(reading(&filed), ErrorCode::Corrupted, "{own:?}");
+        assert_eq!(filed.write(false, |t| put(t, &filed.term(), 9, &one)).unwrap_err().code, ErrorCode::Corrupted);
+        assert_eq!(filed.write(false, |t| remove(t, &filed.term(), 5)).unwrap_err().code, ErrorCode::Corrupted);
+    }
+    let filed = raw(&IN_BLOCKS, Some((4, &[2, 2, 0, 1])));
+    assert_eq!(reading(&filed), ErrorCode::Corrupted, "a block of four places and one entry that counts two");
+    assert_eq!(filed.write(false, |t| put(t, &filed.term(), 5, &one)).unwrap_err().code, ErrorCode::Corrupted);
+    // A block of the places 4 and 5 with an entry at 6, which is the next block's: no write files beside it. The same
+    // block with its entry at 5, its last place, reads and is written to
+    let filed = raw(&IN_BLOCKS, Some((4, &[1, 1, 2, 1])));
+    assert_eq!(reading(&filed), ErrorCode::Corrupted);
+    assert_eq!(filed.write(false, |t| put(t, &filed.term(), 4, &one)).unwrap_err().code, ErrorCode::Corrupted);
+    assert_eq!(filed.write(false, |t| remove(t, &filed.term(), 5)).unwrap_err().code, ErrorCode::Corrupted);
+    let filed = raw(&IN_BLOCKS, Some((4, &[1, 1, 1, 1])));
+    assert!(filed.snapshot(|r| read(r, &filed.term())).is_ok());
+    filed.write(false, |t| put(t, &filed.term(), 4, &one)).unwrap();
+    assert_eq!(filed.blocks(), vec![(4, 1, vec![4, 5])]);
+    // A write that meets a block at no multiple of its range's size leaves it as it is
+    let filed = raw(&IN_BLOCKS, Some((3, &[1, 1, 0, 1])));
+    let before = filed.stored();
+    assert_eq!(filed.write(false, |t| put(t, &filed.term(), 3, &one)).unwrap_err().code, ErrorCode::Corrupted);
+    assert_eq!(filed.stored(), before);
 }
 
 #[test]
