@@ -9,6 +9,7 @@ mod compound;
 mod compression;
 mod derived;
 mod field_writes;
+mod filters;
 mod graph;
 mod lifecycle;
 mod maintenance;
