@@ -84,7 +84,8 @@ pub struct EntityChange {
     pub entity_type: String,
     pub created: bool,
     /// The entity is gone as the commit ends: one destroyed and made again under its id in the commit is `created`
-    /// alone, and one made and destroyed in it is both
+    /// alone, with only what the commit did to the one made; one made and destroyed in it is both; and one the
+    /// commit found and left destroyed is this alone, though it was made again between
     pub destroyed: bool,
     pub trashed: bool,
     pub restored: bool,
@@ -118,6 +119,8 @@ impl ChangeSet {
     pub fn of(events: &[Event]) -> Self {
         let mut set = ChangeSet::default();
         let type_of = |id: &str| super::ids::type_of(id).to_owned();
+        // The entities the commit found and destroyed before it made them again
+        let mut remade: std::collections::HashSet<String> = std::collections::HashSet::new();
         for event in events {
             match event {
                 Event::Created { id }
@@ -132,16 +135,29 @@ impl ChangeSet {
                     match event {
                         Event::Created { .. } => {
                             // Made again after the commit destroyed it: a reader that drops what `destroyed` names
-                            // would drop an entity that exists
+                            // would drop an entity that exists, and what the commit did to the one that went, its
+                            // fields and the trash, is nothing of the one made
+                            if entry.destroyed {
+                                if !entry.created {
+                                    remade.insert(id.clone());
+                                }
+                                *entry = EntityChange { entity_type: type_of(id), ..Default::default() };
+                            }
                             entry.created = true;
-                            entry.destroyed = false;
                         }
                         Event::Field { field, .. } => {
                             entry.fields.insert(field.clone());
                         }
                         Event::Trashed { .. } => entry.trashed = true,
                         Event::Restored { .. } => entry.restored = true,
-                        Event::Destroyed { .. } => entry.destroyed = true,
+                        Event::Destroyed { .. } => {
+                            entry.destroyed = true;
+                            // One the commit found, destroyed, made again and destroyed is gone and no more: made
+                            // and destroyed both would say the commit left nothing of it to drop
+                            if remade.contains(id) {
+                                entry.created = false;
+                            }
+                        }
                         _ => unreachable!(),
                     }
                     set.types.insert(type_of(id));
@@ -196,5 +212,33 @@ mod tests {
         assert_eq!(of(&[created(), destroyed()]), (true, true));
         assert_eq!(of(&[destroyed()]), (false, true));
         assert_eq!(of(&[created(), destroyed(), created()]), (true, false));
+        // One the commit found is gone when it ends destroyed, however often it was made again between; one the
+        // commit made is both
+        assert_eq!(of(&[destroyed(), created(), destroyed()]), (false, true));
+        assert_eq!(of(&[destroyed(), created(), destroyed(), created(), destroyed()]), (false, true));
+        assert_eq!(of(&[created(), destroyed(), created(), destroyed()]), (true, true));
+    }
+
+    #[test]
+    fn what_a_commit_did_to_an_entity_it_destroyed_is_nothing_of_the_one_made_under_its_id() {
+        let id = || "Task-1".to_owned();
+        let field = |field: &str| Event::Field { id: id(), field: field.into() };
+        let events = [
+            field("title"),
+            Event::Trashed { id: id() },
+            Event::Restored { id: id() },
+            Event::Trashed { id: id() },
+            Event::Destroyed { id: id() },
+            Event::Created { id: id() },
+            field("body"),
+        ];
+        let change = ChangeSet::of(&events).entities["Task-1"].clone();
+        let made = EntityChange {
+            entity_type: "Task".into(),
+            created: true,
+            fields: ["body".to_owned()].into(),
+            ..Default::default()
+        };
+        assert_eq!(change, made, "live, with the one field it was given");
     }
 }

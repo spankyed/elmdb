@@ -3,7 +3,8 @@
 export type EntityChange = { type: string, created: boolean, 
 /**
  * The entity is gone as the commit ends: one destroyed and made again under its id in the commit is `created`
- * alone, and one made and destroyed in it is both
+ * alone, with only what the commit did to the one made; one made and destroyed in it is both; and one the
+ * commit found and left destroyed is this alone, though it was made again between
  */
 destroyed: boolean, trashed: boolean, restored: boolean, 
 /**
