@@ -1784,3 +1784,33 @@ fn paged_hits_and_a_page_among_a_set_a_step_reached_are_the_whole_search_s() {
         }
     }
 }
+
+#[test]
+fn a_tracked_page_past_a_cursor_that_is_no_match_is_touched_by_its_cursor_matching_and_not_by_another_type_s_matches() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            create("Doc", "Doc-1", json!({ "title": "alpha", "body": "alpha" })),
+            create("Message", "Message-1", json!({ "text": "alpha" })),
+            create("Message", "Message-2", json!({ "text": "other" })),
+        ],
+    );
+    let search = json!({ "step": "search", "query": "alpha", "index": "text", "options": { "fuzzy": false } });
+    let page = json!({ "read": "query", "plan": {
+        "start": { "from": "types", "types": ["Doc", "Message"] },
+        "steps": [search, after("Message-2"), limit(2)],
+        "terminal": { "answer": "ids" } } });
+    let track = |token: u32| {
+        let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(page.clone()).unwrap()], track: Some(token) };
+        decode(&db.read(&reads).unwrap())[0]["ids"].clone()
+    };
+    let touched = |ops: Vec<Json>| db.write(&crate::engine::tests::batch(ops), false).unwrap().1.touched;
+    // The cursor is no match, so it has no page: the documents' index was not read to say so, and a match more
+    // there is none of the page's
+    assert_eq!(track(1), json!([]));
+    assert_eq!(touched(vec![create("Doc", "Doc-2", json!({ "title": "alpha", "body": "alpha" }))]), Vec::<u32>::new());
+    // The cursor matching is: it then has the matches ranked past it
+    assert_eq!(touched(vec![json!({ "op": "set", "id": "Message-2", "fields": { "text": "alpha alpha" } })]), vec![1]);
+}
