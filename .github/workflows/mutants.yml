@@ -12,6 +12,11 @@ name: mutants
 #   gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # A dispatch is a reading and reports no `mutants-pass`: the pull request's own run does, once its failed jobs are run
 # again and pass.
+#
+# A job's time grows with the change: a Linux share of 154 mutants took 115 minutes and the Windows job's 63 took 107
+# (runs 42873741269 and 42193421810, 2026-11-10 and 2026-11-06). A limit of twice that would refuse a change of twice
+# the mutants, which a share cut off part way starts again from none. So the two jobs that run mutants end ten minutes
+# short of GitHub's six hours, and what ends a mutant that hangs its test is cargo-mutants' own timeout for each.
 on:
   pull_request:
   workflow_dispatch:
@@ -39,6 +44,7 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     runs-on: ubuntu-24.04
+    timeout-minutes: 350
     env:
       # A pull request's merge commit has the base it merges into as its first parent; a dispatch names its base
       BASE: ${{ inputs.base || 'HEAD^1' }}
@@ -76,6 +82,7 @@ jobs:
     # A dispatch is for one of Linux's shares
     if: github.event_name == 'pull_request'
     runs-on: windows-latest
+    timeout-minutes: 350
     defaults:
       run:
         shell: bash
@@ -118,6 +125,7 @@ jobs:
     if: always()
     needs: [linux, windows]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}

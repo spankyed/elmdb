@@ -1,6 +1,7 @@
 # Whether an instruction count depends on the machine: benches/instructions.rs on several runners, compared. Dispatched
 # after a change of the benchmark's allocator, the toolchain, Valgrind or the runner image, since which CPUs a run gets is
-# luck and so can't gate a pull request (docs/architecture/testing.md, Instruction counts).
+# luck and so can't gate a pull request (docs/architecture/testing.md, Instruction counts). Each job has a time limit,
+# about twice its slowest successful run among the four runs of 2026-11-03, rounded up to five minutes.
 name: instruction determinism
 on:
   workflow_dispatch:
@@ -13,6 +14,7 @@ jobs:
       matrix:
         machine: [1, 2, 3, 4, 5, 6, 7, 8]
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -31,6 +33,7 @@ jobs:
   compare:
     needs: count
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
