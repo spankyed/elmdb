@@ -1281,7 +1281,7 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
         assert_eq!(probed(&db, json!(filters), "first"), (json!(id(597)), 1, 0), "{filters:?}");
         // The five hundred are asked where the three are, and at their own first place: a handful of entries
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 3 && entries <= 8, "{filters:?}: {entries}");
+        assert_eq!((found, entries), (3, 8), "{filters:?}");
     }
     let (_, visits, counted) = probed(&db, json!([open, owned(9)]), "ids");
     assert_eq!((visits, counted), (147, 0));
@@ -1325,8 +1325,8 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
         assert_eq!(probed(&db, json!(two), "ids"), (json!([id(0), id(1)]), 2, 0), "{filters:?}");
         // One list is walked and the other sought: an entry of each for each task, and no more
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 1024 && entries <= 2 * 1024 + 8, "{filters:?}: {entries}");
-        assert!(walked(&db, json!(filters), "first").1 <= 4, "{filters:?}");
+        assert!(found == 1024 && matches!(entries, 2049 | 2050), "{filters:?}: {entries}");
+        assert_eq!(walked(&db, json!(filters), "first"), (1, 3), "{filters:?}");
     }
     for filters in orders(&[open.clone(), owned(2)]) {
         assert_eq!(read(json!(filters)), (1023, 1023, 0), "{filters:?}");
@@ -1352,6 +1352,20 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
     let late = json!({ "step": "range", "field": "k", "atLeast": 2000, "below": 2020 });
     assert_eq!(probed(&db, json!([noted, late]), "first"), (json!(id(2000)), 32 + 20, 20));
     assert_eq!(probed(&db, json!([noted, late, limit(30)]), "ids").0, json!((2000..2020).map(id).collect::<Vec<_>>()));
+    // A range read part-way hands on no task the walk already had: this one holds forty tasks from the thirtieth,
+    // thirty-four of them walked before sixty-four tasks had been, more than it holds
+    let early = json!({ "step": "range", "field": "k", "atLeast": 30, "below": 70 });
+    let found = probed(&db, json!([noted, early, limit(100)]), "ids");
+    assert_eq!(found, (json!((30..70).map(id).collect::<Vec<_>>()), 64 + 40, 40));
+    // One list alone is walked, an entry for the first task and none sought
+    assert_eq!(walked(&db, json!([open]), "first"), (1, 1));
+    // What a range's entries cost to read is among what the read has read. A range of seven is read at the
+    // start, and each of its tasks is asked of the open tasks' list: by the fifth, seventeen entries, more than
+    // the sixteen a second range holds, which is read then, where it would not be had the seven not counted
+    let seven = json!({ "step": "range", "field": "k", "atLeast": 100, "below": 107 });
+    let sixteen = json!({ "step": "range", "field": "k", "atLeast": 100, "below": 116 });
+    let (found, visits, _) = probed(&db, json!([open, seven, sixteen]), "ids");
+    assert_eq!((found, visits), (json!((100..107).map(id).collect::<Vec<_>>()), 7 + 16));
     // Of two ranges and no list, a read that takes every task reads the one holding the fewest, whichever is
     // written first: each is counted to twice as far until one is known to
     for filters in orders(&[every.clone(), late.clone()]) {
@@ -1408,6 +1422,20 @@ fn equalities_on_every_field_of_an_index_on_several_are_read_from_it_as_one_list
 }
 
 #[test]
+fn a_walk_of_a_type_with_its_trash_hands_on_the_trashed_entities_past_its_last_live_one() {
+    let (_dir, db) = open_with(schema_json());
+    write(&db, (0..6).map(|at| task(at, json!({ "k": at }))).collect());
+    write(&db, [1, 4, 5].iter().map(|at| json!({ "op": "trash", "id": id(*at) })).collect());
+    let all: Vec<String> = (0..6).map(id).collect();
+    // The start's own walk, and the walk of a filter no index reads
+    assert_eq!(visited(&db, plan("withTrashed", json!([]))), (all.clone(), 6));
+    assert_eq!(visited(&db, plan("withTrashed", json!([{ "step": "has", "field": "k" }]))), (all, 6));
+    // Stopped at one of them, it hands on no more
+    let two = json!([{ "step": "has", "field": "k" }, after(&id(3)), limit(1)]);
+    assert_eq!(visited(&db, plan("withTrashed", two)).0, vec![id(4)]);
+}
+
+#[test]
 fn lists_that_share_no_place_are_read_no_further_than_the_shortest_of_them_holds() {
     // Two thousand tasks, the odd ones open and the even ones of one owner: two lists of a thousand places with
     // none in common. One odd task holds a role, a third list of the one place
@@ -1431,18 +1459,18 @@ fn lists_that_share_no_place_are_read_no_further_than_the_shortest_of_them_holds
     // entries, where the two lists alone are read to their ends, an entry of each for each place of the other
     for filters in orders(&[open.clone(), owned.clone(), role("lead")]) {
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 0 && entries <= 12, "{filters:?}: {entries}");
+        assert!(found == 0 && matches!(entries, 5 | 6), "{filters:?}: {entries}");
     }
     for filters in orders(&[open.clone(), owned.clone()]) {
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 0 && (2000..=2 * 2000 + 8).contains(&entries), "{filters:?}: {entries}");
+        assert_eq!((found, entries), (0, 2001), "{filters:?}");
     }
     // A third list that holds every place the others begin with, and so is not the one walked: each list is
     // asked in its turn, whichever the filters are written in, so the read still ends where the third does
     write(&db, (0..10).map(|at| grant(at, "lead")).collect());
     for filters in orders(&[open, owned, role("lead")]) {
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 0 && entries <= 60, "{filters:?}: {entries}");
+        assert!(found == 0 && matches!(entries, 21 | 25), "{filters:?}: {entries}");
     }
 }
 
@@ -1467,7 +1495,7 @@ fn a_list_walked_is_sought_past_what_the_others_rule_out_and_gives_way_to_one_th
         let both: Vec<String> = led[1..].iter().map(|at| id(*at)).collect();
         assert_eq!(visited(&db, plan("live", steps.clone())), (both, 10), "{filters:?}");
         let (found, entries) = walked(&db, steps, "ids");
-        assert!(found == 10 && entries <= 50, "{filters:?}: {entries}");
+        assert_eq!((found, entries), (10, 32), "{filters:?}");
     }
 
     // All but the first two tasks are open, and every fifth holds the role: too near each other for the open
@@ -1485,7 +1513,7 @@ fn a_list_walked_is_sought_past_what_the_others_rule_out_and_gives_way_to_one_th
     }
     for filters in orders(&[is("status", json!("open")), role("lead")]) {
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 399 && entries <= 1000, "{filters:?}: {entries}");
+        assert_eq!((found, entries), (399, 805), "{filters:?}");
     }
 }
 
@@ -1507,7 +1535,7 @@ fn a_list_whose_places_come_in_runs_gives_way_to_one_that_holds_a_place_for_each
     for filters in orders(&[open.clone(), role("lead")]) {
         for terminal in ["ids", "first"] {
             let (found, entries) = walked(&db, json!(filters), terminal);
-            assert!(found == 0 && entries <= 220, "{filters:?} {terminal}: {entries}");
+            assert_eq!((found, entries), (0, 210), "{filters:?} {terminal}");
         }
     }
     // And with a third list between the role's places, held by half as many: three entries for each of its
