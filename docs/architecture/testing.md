@@ -194,7 +194,8 @@ writes is committed. A comment can hide a mutant of the same kind that moves ont
 diff above shows what each exclusion hides. `cargo xtask check-mutant-exclusions`, a CI step, fails when a comment's
 pattern matches no mutant cargo-mutants lists on the line under it, as after code went in between the two or the
 mutant's name changed; when an exclusion in `.cargo/mutants.toml` matches none; and when one there names a line, which
-every edit above that line would have to rewrite.
+every edit above that line would have to rewrite. `cargo xtask mutant-exclusions` writes no configuration from a file
+that holds one either, so a mutation run stops at it as the check does.
 A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`, `check-idle-reader-mutation.py`,
 `check-reader-recovery.py`) make changes cargo-mutants doesn't: one expression swapped for another, and heap, timing and

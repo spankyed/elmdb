@@ -13,7 +13,8 @@
 //! - `mutant-exclusions`: writes `target/mutants.toml`, the configuration a mutation run reads with `--config`, and
 //!   prints its path: `.cargo/mutants.toml` with an `exclude_re` for each `// mutant-skip:` comment in the source, which
 //!   sits above the line it excuses and holds the reason. Nothing it writes is committed, so the comment is the one
-//!   place a line's exclusion lives, and no merge has one to reconcile.
+//!   place a line's exclusion lives, and no merge has one to reconcile. It writes nothing from a `.cargo/mutants.toml`
+//!   whose `exclude_re` names a line, so no run reads one.
 //! - `check-mutant-exclusions`: fails when a `// mutant-skip:` comment, or an `exclude_re` of `.cargo/mutants.toml`,
 //!   matches none of the mutants cargo-mutants lists, so the mutant it was written for is reported again; and when an
 //!   `exclude_re` there names a line, which only a comment may.
@@ -227,11 +228,32 @@ fn exclude_re_list(text: &str) -> Result<(usize, usize), String> {
     Ok((start, start + end + 1))
 }
 
-/// The configuration a run reads: the committed one's text with each comment's exclusion at the end of `exclude_re`
+/// Whether a committed `exclude_re` names a line, as `file.rs:12:` or `file.rs:(12|34):`: a line's number in a
+/// committed file is rewritten by every edit above the line, and two branches that each make one conflict in it
+fn names_a_line(pattern: &str) -> bool {
+    pattern.match_indices(".rs:").any(|(at, found)| {
+        pattern[at + found.len()..].trim_start_matches('(').starts_with(|c: char| c.is_ascii_digit())
+    })
+}
+
+/// What a committed `exclude_re` that names a line is refused with
+fn line_named(pattern: &str) -> String {
+    format!(
+        "{CONFIG}: the exclude_re {pattern:?} names a line, which every edit above that line would move; remove it, \
+         and excuse the mutant with a `// mutant-skip:` comment above its line"
+    )
+}
+
+/// The configuration a run reads: the committed one's text with each comment's exclusion at the end of `exclude_re`.
+/// A committed pattern that names a line is refused here too, so a run never reads one: a list of them kept through
+/// a merge would excuse whatever sits on its lines now
 fn with_skips(text: &str, skips: &[Skip]) -> Result<String, String> {
     let (start, close) = exclude_re_list(text)?;
+    if let Some(pattern) = exclude_res(text)?.iter().find(|pattern| names_a_line(pattern)) {
+        return Err(line_named(pattern));
+    }
     let last = text[start..close].lines().map(str::trim).rfind(|line| !line.is_empty() && !line.starts_with('#'));
-    if last.is_some_and(|line| !line.ends_with(',') && !line.ends_with('[')) {
+    if last.is_some_and(|line| !line.ends_with(',')) {
         return Err(format!(
             "exclude_re's last pattern in {CONFIG} has no comma after it, which the patterns written after it need"
         ));
@@ -280,10 +302,12 @@ fn check_mutant_exclusions(root: &Path) -> Result<(), String> {
         return Err("cargo mutants --list listed no mutants, so no exclusion could be tried".to_owned());
     }
     let skips = skips(root)?;
-    // What a run reads has to be writable from this text, which no run in this job would otherwise find out
-    with_skips(&text, &skips)?;
     let stale = stale_exclusions(&exclude_res(&text)?, &skips, &mutants)?;
-    if stale.is_empty() { Ok(()) } else { Err(stale.join("\n")) }
+    if !stale.is_empty() {
+        return Err(stale.join("\n"));
+    }
+    // What a run reads has to be writable from this text, which no run in this job would otherwise find out
+    with_skips(&text, &skips).map(|_| ())
 }
 
 /// What is wrong with the exclusions, given every mutant cargo-mutants lists: a committed `exclude_re` that names a
@@ -294,16 +318,10 @@ fn stale_exclusions(committed: &[String], skips: &[Skip], mutants: &[&str]) -> R
         let pattern = regex::Regex::new(pattern).map_err(|e| format!("exclusion {pattern:?}: {e}"))?;
         Ok(!mutants.iter().any(|mutant| pattern.is_match(mutant)))
     };
-    // `file.rs:12:` and `file.rs:(12|34):`: a line's number in a committed file is rewritten by every edit above the
-    // line, and two branches that each make one conflict in it
-    let names_a_line = regex::Regex::new(r"\.rs:\(?[0-9]").expect("a valid pattern");
     let mut stale = Vec::new();
     for pattern in committed {
-        if names_a_line.is_match(pattern) {
-            stale.push(format!(
-                "{CONFIG}: the exclude_re {pattern:?} names a line, which every edit above that line would move; \
-                 remove it, and excuse the mutant with a `// mutant-skip:` comment above its line"
-            ));
+        if names_a_line(pattern) {
+            stale.push(line_named(pattern));
         } else if matches_none(pattern)? {
             stale.push(format!(
                 "{CONFIG}: the exclude_re {pattern:?} matches none of the {} mutants listed; name the mutant as \
@@ -573,11 +591,12 @@ fn a() {
         // A last pattern without its comma would run into the first one added
         let refused = with_skips("a = 1\nexclude_re = [\n    \"kept\"\n    # why\n]\n", &[]).unwrap_err();
         assert!(refused.contains("no comma"), "{refused}");
-        assert!(
-            with_skips("a = 1\nexclude_re = [\n]\n", &[skip(2, "a")])
-                .unwrap()
-                .ends_with("exclude_re = [\n    \"a\",\n]\n")
-        );
+        // A committed pattern that names a line makes no configuration, whatever the comments are
+        for named in ["crates/x/src/a.rs:6:.*replace > with >= in a", "a.rs:(6|9):.*replace"] {
+            let kept = format!("a = 1\nexclude_re = [\n    \"kept.rs:.*replace 1\",\n    \"{named}\",\n]\n");
+            let refused = with_skips(&kept, &[skip(2, "a.rs:6:x")]).unwrap_err();
+            assert!(refused.contains("names a line") && refused.contains(named), "{refused}");
+        }
     }
 
     #[test]
