@@ -1503,6 +1503,37 @@ fn ids_of(db: &Database, scope: &str, start: Json, steps: Json) -> Vec<String> {
         .collect()
 }
 
+fn paged(read_ids: &dyn Fn(Json) -> Vec<String>, search: &Json, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut page = read_ids(json!([search, limit(n)]));
+    let mut rounds = 0;
+    while !page.is_empty() {
+        out.extend(page.iter().cloned());
+        let last = page.last().unwrap().clone();
+        page = read_ids(json!([search, after(&last), limit(n)]));
+        rounds += 1;
+        assert!(rounds < 2000, "a pager that never ends");
+    }
+    out
+}
+
+/// `count` Docs and as many Messages, of one to five of six words each, some of them in a title or tags too
+fn mixed_notes(count: usize) -> Vec<Json> {
+    let words = ["alpha", "beta", "gamma", "delta", "alphas", "betas"];
+    let mut ops = Vec::new();
+    for i in 0..count {
+        let title: Vec<&str> = (0..(i % 3)).map(|k| words[(i + k * 2) % words.len()]).collect();
+        let body: Vec<&str> = (0..(i % 5 + 1)).map(|k| words[(i * 3 + k) % words.len()]).collect();
+        ops.push(create("Doc", &format!("Doc-{i:02}"), json!({ "title": title.join(" "), "body": body.join(" ") })));
+        ops.push(create(
+            "Message",
+            &format!("Message-{i:02}"),
+            json!({ "text": body.join(" "), "tags": title, "at": ((i * 37) % 48) as f64 }),
+        ));
+    }
+    ops
+}
+
 #[test]
 fn a_page_of_a_search_is_cut_past_its_own_cursor_when_a_step_below_it_sought_one_too() {
     let dir = tempfile::tempdir().unwrap();
@@ -1529,4 +1560,227 @@ fn a_page_of_a_search_is_cut_past_its_own_cursor_when_a_step_below_it_sought_one
     assert_eq!(under, (4..6).map(id).collect::<Vec<_>>());
     assert_eq!(paged, (4..8).map(id).collect::<Vec<_>>());
     assert_eq!(paged_limit, (4..6).map(id).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_search_paged_by_any_size_hands_on_each_match_once_in_the_whole_search_s_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, mixed_notes(20));
+    write(&db, (0..20).step_by(7).map(|i| json!({ "op": "trash", "id": format!("Doc-{i:02}") })).collect());
+    write(&db, (0..20).step_by(5).map(|i| json!({ "op": "trash", "id": format!("Message-{i:02}") })).collect());
+    let queries = [
+        ("alpha", json!({})),
+        ("alpha", json!({ "fuzzy": false })),
+        ("alpah", json!({})),
+        ("alp", json!({})),
+        ("alpha beta", json!({})),
+        ("alpha beta", json!({ "any": true })),
+        ("alpha OR gamma", json!({})),
+        ("\"alpha beta\"", json!({})),
+        ("\"beta gamma\" delta", json!({ "any": true })),
+        ("alpha -gamma", json!({})),
+        ("title:alpha", json!({})),
+        ("tags:alpha", json!({})),
+        ("alpha", json!({ "fields": ["body"] })),
+        ("alpha", json!({ "fields": ["text"] })),
+        ("alpha", json!({ "recency": { "field": "at", "halfLife": 10, "now": 48 } })),
+        ("alpha", json!({ "recency": { "field": "at", "halfLife": 10 } })),
+        ("alpha beta", json!({ "any": true, "recency": { "field": "createdAt", "halfLife": 1000 } })),
+    ];
+    let starts = [
+        json!({ "from": "types", "types": ["Message"] }),
+        json!({ "from": "types", "types": ["Doc"] }),
+        json!({ "from": "types", "types": ["Doc", "Message"] }),
+        json!({ "from": "ids", "ids": (0..20).rev().flat_map(|i| [format!("Message-{i:02}"), format!("Doc-{i:02}")]).collect::<Vec<_>>() }),
+    ];
+    let mut checked = 0;
+    for (query, options) in &queries {
+        for start in &starts {
+            for scope in ["live", "trashed", "withTrashed"] {
+                let search = json!({ "step": "search", "query": query, "index": "text", "options": options });
+                let plan =
+                    json!({ "scope": scope, "start": start, "steps": [search], "terminal": { "answer": "ids" } });
+                // a field the type's index lacks may refuse the read: then skip it
+                let Ok(all) = read(&db, json!({ "read": "query", "plan": plan })) else { continue };
+                let all: Vec<String> =
+                    all["ids"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect();
+                let read_ids = |steps: Json| ids_of(&db, scope, start.clone(), steps);
+                for n in [1, 3, 100] {
+                    let paged = paged(&read_ids, &search, n);
+                    assert_eq!(paged, all, "{query} {options} {start} {scope} by {n}");
+                }
+                // first / exists agree with the whole
+                let ask = |steps: Json, terminal: &str| {
+                    let plan =
+                        json!({ "scope": scope, "start": start, "steps": steps, "terminal": { "answer": terminal } });
+                    read(&db, json!({ "read": "query", "plan": plan })).unwrap()
+                };
+                assert_eq!(ask(json!([search]), "first")["id"], all.first().map_or(Json::Null, |id| json!(id)));
+                assert_eq!(ask(json!([search]), "exists")["value"], json!(!all.is_empty()));
+                for (at, cursor) in all.iter().enumerate() {
+                    let next = all.get(at + 1).map_or(Json::Null, |id| json!(id));
+                    assert_eq!(ask(json!([search, after(cursor)]), "first")["id"], next, "{query} {start} {scope}");
+                    assert_eq!(ask(json!([search, after(cursor)]), "exists")["value"], json!(at + 1 < all.len()));
+                }
+                checked += all.len();
+            }
+        }
+    }
+    assert!(checked > 500, "{checked}");
+}
+
+#[test]
+fn a_search_paged_inside_a_unit_ranks_what_the_unit_wrote() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, mixed_notes(48));
+    let mut unit = db.begin().unwrap();
+    unit.write(&crate::engine::tests::batch(vec![
+        create("Message", "Message-new1", json!({ "text": "alpha" })),
+        create("Message", "Message-new2", json!({ "text": "alpha alpha beta" })),
+        json!({ "op": "set", "id": "Message-03", "fields": { "text": "alpha" } }),
+        json!({ "op": "trash", "id": "Message-06" }),
+        json!({ "op": "set", "id": "Message-12", "fields": { "text": "nothing" } }),
+    ]))
+    .unwrap();
+    let unit = std::cell::RefCell::new(unit);
+    let search = json!({ "step": "search", "query": "alpha", "options": { "fuzzy": false } });
+    let read_ids = |steps: Json| {
+        let plan = json!({ "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": { "answer": "ids" } });
+        let op = json!({ "read": "query", "plan": plan });
+        let bytes = unit
+            .borrow_mut()
+            .read(&Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None })
+            .unwrap();
+        decode(&bytes)[0]["ids"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_owned()).collect::<Vec<_>>()
+    };
+    let all = read_ids(json!([search]));
+    assert!(all.contains(&"Message-new1".to_owned()) && !all.contains(&"Message-06".to_owned()), "{all:?}");
+    assert!(!all.contains(&"Message-12".to_owned()));
+    for n in [1, 2, 5] {
+        assert_eq!(paged(&read_ids, &search, n), all, "by {n}");
+    }
+    // cursors the unit took out of the answer
+    for cursor in ["Message-06", "Message-12"] {
+        assert_eq!(read_ids(json!([search, after(cursor), limit(3)])), Vec::<String>::new());
+    }
+    unit.into_inner().abort();
+}
+
+#[test]
+fn a_tracked_exists_first_and_page_of_a_search_are_touched_by_the_writes_that_change_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let id = |i: usize| format!("Message-{i}");
+    write(
+        &db,
+        (0..6)
+            .map(|i| create("Message", &id(i), json!({ "text": format!("lmdb{}", " filler".repeat(5 - i)) })))
+            .collect(),
+    );
+    let plan = |steps: Json, terminal: &str| {
+        json!({ "read": "query", "plan": {
+            "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": { "answer": terminal } } })
+    };
+    let word = |w: &str| json!({ "step": "search", "query": w, "options": { "fuzzy": false } });
+    let track = |op: Json, token: u32| {
+        let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: Some(token) };
+        decode(&db.read(&reads).unwrap())[0].clone()
+    };
+    let touched = |ops: Vec<Json>| db.write(&crate::engine::tests::batch(ops), false).unwrap().1.touched;
+    // exists true: 1; exists false: 2; first: 3; page after 4 limit 2: 4
+    assert_eq!(track(plan(json!([word("lmdb")]), "exists"), 1)["value"], true);
+    assert_eq!(track(plan(json!([word("absent")]), "exists"), 2)["value"], false);
+    assert_eq!(track(plan(json!([word("lmdb")]), "first"), 3)["id"], json!(id(5)));
+    assert_eq!(track(plan(json!([word("lmdb"), after(&id(4)), limit(2)]), "ids"), 4)["ids"], json!([id(3), id(2)]));
+    // an unrelated type's write touches none
+    let t = touched(vec![create("Plain", "Plain-1", json!({ "title": "x" }))]);
+    assert_eq!(t, Vec::<u32>::new());
+    // a write making "absent" match
+    let t = touched(vec![create(
+        "Message",
+        "Message-a",
+        json!({ "text": "absent word here and more filler filler filler filler filler filler filler" }),
+    )]);
+    assert!(t.contains(&2), "{t:?}");
+    // retrack all
+    for token in 1..=4 {
+        db.untrack(token);
+    }
+    assert_eq!(track(plan(json!([word("lmdb")]), "exists"), 1)["value"], true);
+    assert_eq!(track(plan(json!([word("lmdb")]), "first"), 3)["id"], json!(id(5)));
+    assert_eq!(track(plan(json!([word("lmdb"), after(&id(4)), limit(2)]), "ids"), 4)["ids"], json!([id(3), id(2)]));
+    // trash every match but the last in place order, one write: exists stays true but the first changes
+    let t = touched(vec![json!({ "op": "trash", "id": id(5) })]);
+    assert!(t.contains(&3), "{t:?}");
+    for token in 1..=4 {
+        db.untrack(token);
+    }
+    assert_eq!(track(plan(json!([word("lmdb")]), "exists"), 1)["value"], true);
+    assert_eq!(track(plan(json!([word("lmdb"), after(&id(4)), limit(2)]), "ids"), 4)["ids"], json!([id(3), id(2)]));
+    // trash the cursor: the page becomes empty
+    let t = touched(vec![json!({ "op": "trash", "id": id(4) })]);
+    assert!(t.contains(&4), "{t:?}");
+    for token in 1..=4 {
+        db.untrack(token);
+    }
+    // exists: trash all matches one at a time, exists must hear the one that makes it false
+    assert_eq!(track(plan(json!([word("lmdb")]), "exists"), 1)["value"], true);
+    let mut heard = Vec::new();
+    for i in 0..4 {
+        let t = touched(vec![json!({ "op": "trash", "id": id(i) })]);
+        heard.push(t.contains(&1));
+        if t.contains(&1) {
+            db.untrack(1);
+            track(plan(json!([word("lmdb")]), "exists"), 1);
+        }
+    }
+    let plain = read(&db, plan(json!([word("lmdb")]), "exists")).unwrap();
+    assert_eq!(plain["value"], false);
+    assert!(heard[3], "the write that made it false was heard: {heard:?}");
+}
+
+#[test]
+fn paged_hits_and_a_page_among_a_set_a_step_reached_are_the_whole_search_s() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, mixed_notes(48));
+    let hits = |start: Json, steps: Json| {
+        let plan = json!({ "start": start, "steps": steps, "terminal": { "answer": "hits", "highlights": true } });
+        read(&db, json!({ "read": "query", "plan": plan })).unwrap()["hits"].as_array().unwrap().clone()
+    };
+    for (t, query) in
+        [("Doc", "alpha beta"), ("Doc", "alpah"), ("Message", "\"alpha beta\""), ("Message", "tags:alpha OR beta")]
+    {
+        let start = json!({ "from": "types", "types": [t] });
+        let search = json!({ "step": "search", "query": query, "index": "text", "options": { "any": true } });
+        let all = hits(start.clone(), json!([search]));
+        assert!(all.len() > 6, "{t} {query}: {}", all.len());
+        let mut paged = Vec::new();
+        let mut page = hits(start.clone(), json!([search, limit(4)]));
+        while !page.is_empty() {
+            paged.extend(page.iter().cloned());
+            let last = page.last().unwrap()["id"].as_str().unwrap().to_owned();
+            page = hits(start.clone(), json!([search, after(&last), limit(4)]));
+        }
+        assert_eq!(paged, all, "{t} {query}");
+        // limit 0 past a cursor, and before it
+        assert!(hits(start.clone(), json!([search, after(all[1]["id"].as_str().unwrap()), limit(0)])).is_empty());
+        // among a set a step reached: the odd ones, in the type's order
+        let odd: Vec<String> = (0..48).filter(|i| i % 2 == 1).map(|i| format!("{t}-{i:02}")).collect();
+        let within = json!({ "step": "within", "ids": odd });
+        let ids = |steps: Json| ids_of(&db, "live", start.clone(), steps);
+        let among = ids(json!([within, search]));
+        assert!(among.len() > 3);
+        for n in [1, 2, 5] {
+            let mut out = Vec::new();
+            let mut page = ids(json!([within, search, limit(n)]));
+            while !page.is_empty() {
+                out.extend(page.iter().cloned());
+                page = ids(json!([within, search, after(page.last().unwrap()), limit(n)]));
+            }
+            assert_eq!(out, among, "{t} {query} among by {n}");
+        }
+    }
 }
