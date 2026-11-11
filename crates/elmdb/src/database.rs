@@ -417,9 +417,13 @@ impl Database {
                         synced?;
                         // The database stays open with its builder stopped: what is left to build is queued again,
                         // as an open queues it, or a read of an unbuilt index would be told to wait for no one
-                        if !at_exit && let Some(builders) = self.builders()? {
-                            let store = self.store()?;
-                            let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read())?;
+                        // A close that gave up answers that it did: what keeps the builds from being queued, another
+                        // process's schema or a close beside this one, is the next operation's to say
+                        if !at_exit
+                            && let Ok(Some(builders)) = self.builders()
+                            && let Ok(store) = self.store()
+                            && let Ok(owed) = crate::engine::remaining_indexes(&store, &self.engine_schema.read())
+                        {
                             builders.queue(owed);
                         }
                         return Ok(false);
