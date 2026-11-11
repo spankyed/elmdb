@@ -128,27 +128,50 @@ pub fn weighted(counts: &[u8], weights: &[f64]) -> Result<f64> {
 /// An entry as a block is read: its place, and its counts as stored
 type Entry<'a> = (u64, &'a [u8]);
 
-/// Each entry `bytes` holds as it reads, the first's place counted from `start`, and each after it at a later place
-/// than the one before, which is what every reader and every layout of them takes them to be. An entry is a byte at
-/// least, so there are no more of them than bytes, and the reading ends there whatever the bytes hold
-fn each_entry(bytes: &[u8], start: u64, fields: usize) -> impl Iterator<Item = Result<Entry<'_>>> {
-    let mut entries = Entries { place: start, rest: bytes, fields };
+/// The entries of one key as the key says they are: how many, the place the first is counted from, and the last
+/// place one of them may be at
+#[derive(Clone, Copy)]
+struct Held {
+    count: u64,
+    start: u64,
+    end: u64,
+}
+
+impl Held {
+    /// A term's own key's, which may be at any place
+    fn own(count: u64) -> Self {
+        Held { count, start: 0, end: u64::MAX }
+    }
+}
+
+/// Each entry `bytes` holds as it reads, and as `held` says: each at a later place than the one before and none past
+/// the last it may be at, as many as it counts. That is what every reader and every layout of them takes them to be,
+/// and what is refused here is rewritten by no write. An entry is a byte at least, so there are no more of them than
+/// bytes, and the reading ends there whatever the bytes hold
+fn each_entry(bytes: &[u8], held: Held, fields: usize) -> impl Iterator<Item = Result<Entry<'_>>> {
+    let mut entries = Entries { place: held.start, rest: bytes, fields };
     let mut last = None;
-    (0..bytes.len()).map_while(move |_| {
-        (!entries.rest.is_empty()).then(|| {
+    let mut left = held.count;
+    (0..=bytes.len()).map_while(move |_| {
+        if entries.rest.is_empty() {
+            // Fewer than counted is refused once, where they end
+            return (std::mem::take(&mut left) > 0).then(|| Err(corrupt()));
+        }
+        Some((|| {
             let entry = entries.read()?;
-            if last.is_some_and(|last| entry.0 <= last) {
+            if last.is_some_and(|last| entry.0 <= last) || entry.0 > held.end {
                 return Err(corrupt());
             }
+            left = left.checked_sub(1).ok_or_else(corrupt)?;
             last = Some(entry.0);
             Ok(entry)
-        })
+        })())
     })
 }
 
-/// The entries `bytes` holds, the first's place counted from `start`
-fn entries(bytes: &[u8], start: u64, fields: usize) -> Result<Vec<Entry<'_>>> {
-    each_entry(bytes, start, fields).collect()
+/// The entries `bytes` holds, as `held` says they are
+fn entries(bytes: &[u8], held: Held, fields: usize) -> Result<Vec<Entry<'_>>> {
+    each_entry(bytes, held, fields).collect()
 }
 
 fn write_entries<C: AsRef<[u8]>>(out: &mut Vec<u8>, start: u64, list: &[(u64, C)]) {
@@ -179,13 +202,19 @@ fn block_value<C: AsRef<[u8]>>(level: u32, start: u64, list: &[(u64, C)]) -> Vec
     out
 }
 
-/// The entries a term's own key holds, or none for a term in blocks
-fn own_entries(stored: &[u8]) -> Result<Option<&[u8]>> {
+/// The entries a term's own key holds and what it says of them, or none for a term in blocks
+fn own_entries(stored: &[u8]) -> Result<Option<(Held, &[u8])>> {
     let mut rest = stored;
     Ok(match varint(&mut rest)? {
         0 => None,
-        _ => Some(rest),
+        count => Some((Held::own(count), rest)),
     })
+}
+
+/// How many places the range of a block at `start` covers, two to the `level`: one a place can be in, that starts at
+/// a multiple of its size
+fn range(start: u64, level: u32) -> Result<u64> {
+    1u64.checked_shl(level).filter(|size| start.is_multiple_of(*size)).ok_or_else(corrupt)
 }
 
 /// The power of two the smallest range holding two different places is the size of, among ranges that start at a
@@ -275,13 +304,16 @@ struct Block {
     stored: Vec<u8>,
     start: u64,
     level: u32,
+    /// How many places its range covers
+    size: u64,
 }
 
 impl Block {
     fn read(key: &[u8], stored: &[u8]) -> Result<Block> {
         let start = keys::place_of(key).ok_or_else(corrupt)?;
         let level = u32::from(*stored.first().ok_or_else(corrupt)?);
-        Ok(Block { key: key.to_vec(), stored: stored.to_vec(), start, level })
+        let size = range(start, level)?;
+        Ok(Block { key: key.to_vec(), stored: stored.to_vec(), start, level, size })
     }
 
     fn holds(&self, place: u64) -> bool {
@@ -290,8 +322,9 @@ impl Block {
 
     fn entries(&self, fields: usize) -> Result<Vec<Entry<'_>>> {
         let mut rest = &self.stored[1..];
-        varint(&mut rest)?;
-        entries(rest, self.start, fields)
+        let count = varint(&mut rest)?;
+        // A range starts at a multiple of its size, so its last place is no more than a u64 holds
+        entries(rest, Held { count, start: self.start, end: self.start + (self.size - 1) }, fields)
     }
 }
 
@@ -323,8 +356,8 @@ pub fn put(t: &mut Txn<'_, '_>, term: &Term, place: u64, counts: &[u8]) -> Resul
     let Some(stored) = t.get(&term.own)? else {
         return t.put_over(&term.own, &own(&[(place, counts)]), None);
     };
-    if let Some(held) = own_entries(&stored)? {
-        let mut list = entries(held, 0, term.fields)?;
+    if let Some((held, stored_entries)) = own_entries(&stored)? {
+        let mut list = entries(stored_entries, held, term.fields)?;
         set(&mut list, place, counts);
         if list.len() <= term.capacity {
             return t.put_over(&term.own, &own(&list), Some(&stored));
@@ -364,8 +397,8 @@ pub fn put(t: &mut Txn<'_, '_>, term: &Term, place: u64, counts: &[u8]) -> Resul
 /// Takes the entity at `place` out of the term's
 pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<()> {
     let Some(stored) = t.get(&term.own)? else { return Ok(()) };
-    if let Some(held) = own_entries(&stored)? {
-        let mut list = entries(held, 0, term.fields)?;
+    if let Some((held, stored_entries)) = own_entries(&stored)? {
+        let mut list = entries(stored_entries, held, term.fields)?;
         let Ok(at) = list.binary_search_by_key(&place, |(at, _)| *at) else { return Ok(()) };
         list.remove(at);
         return if list.is_empty() {
@@ -380,7 +413,7 @@ pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<()> {
     list.remove(at);
     // The other half of the range twice this block's size: one block, when it and what is left here are no more
     // than a block holds, and then the two are one block of the whole range
-    let size = 1u64.checked_shl(block.level).ok_or_else(corrupt)?;
+    let size = block.size;
     let beside_start = block.start ^ size;
     let beside = block_from(t, term, beside_start)?.filter(|other| together(beside_start, other.start, block.level));
     let beside_list = match &beside {
@@ -516,8 +549,8 @@ pub fn read(r: &impl Read, term: &Term) -> Result<Option<Postings>> {
 /// The entities holding a term, from what its own key holds
 pub fn read_stored(r: &impl Read, term: &Term, stored: &[u8]) -> Result<Postings> {
     let mut reading = Reading { parts: Vec::new(), runs: Vec::new(), bytes: Vec::new(), fields: term.fields };
-    if let Some(held) = own_entries(stored)? {
-        reading.run(0, None, held)?;
+    if let Some((held, stored)) = own_entries(stored)? {
+        reading.run(held, false, stored)?;
         return Ok(reading.done());
     }
     let mut failed = None;
@@ -528,10 +561,9 @@ pub fn read_stored(r: &impl Read, term: &Term, stored: &[u8]) -> Result<Postings
             let mut rest = &stored[1..];
             let count = varint(&mut rest)?;
             // A block starts at a multiple of its range's size, which is what lets its places be read as a range
-            let size = 1u64.checked_shl(level).filter(|size| start % size == 0).ok_or_else(corrupt)?;
+            let size = range(start, level)?;
             // A block whose every place is held needs no entry read to say which
-            let full = Some(size).filter(|size| *size == count);
-            reading.run(start, full, rest)
+            reading.run(Held { count, start, end: start + (size - 1) }, size == count, rest)
         })();
         failed = run.err();
         failed.is_none()
@@ -563,21 +595,19 @@ impl Reading {
         Ok(&mut self.parts.last_mut().expect("a part was found or added").1)
     }
 
-    /// Takes in a run of entries as stored, its first counted from `start`; `full` is how many they are when they are
-    /// every place from `start` on
-    fn run(&mut self, start: u64, full: Option<u64>, stored: &[u8]) -> Result<()> {
-        match full {
-            Some(size) => {
-                // The places of one part: a range that reaches past it is no block's
-                let from = start as u32;
-                let last = u32::try_from(size - 1).ok().and_then(|span| from.checked_add(span)).ok_or_else(corrupt)?;
-                self.part(start)?.insert_range(from..=last);
-            }
-            None => {
-                for entry in each_entry(stored, start, self.fields) {
-                    let (place, _) = entry?;
-                    self.part(place)?.try_push(place as u32).map_err(|_| corrupt())?;
-                }
+    /// Takes in a run of entries as stored, which are what `held` says; `full` when they are every place it may hold
+    fn run(&mut self, held: Held, full: bool, stored: &[u8]) -> Result<()> {
+        let start = held.start;
+        if full {
+            // The places of one part: a range that reaches past it is no block's
+            let from = start as u32;
+            let span = u32::try_from(held.end - start).map_err(|_| corrupt())?;
+            let last = from.checked_add(span).ok_or_else(corrupt)?;
+            self.part(start)?.insert_range(from..=last);
+        } else {
+            for entry in each_entry(stored, held, self.fields) {
+                let (place, _) = entry?;
+                self.part(place)?.try_push(place as u32).map_err(|_| corrupt())?;
             }
         }
         self.runs.push((start, self.bytes.len()));

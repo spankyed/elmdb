@@ -1375,6 +1375,40 @@ fn a_rebuild_clears_what_a_retired_tag_left_and_a_document_naming_no_field_of_it
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
 
+#[test]
+fn statistics_that_count_less_than_a_text_index_holds_are_refused_rather_than_counted_down_from() {
+    let schema = json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": { "Doc": {
+        "fields": { "body": { "type": "string" } },
+        "indexes": { "words": { "kind": "text", "fields": { "body": {} } } }
+    } } });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    let body = |text: &str| json!({ "op": "set", "id": "Doc-1", "fields": { "body": text } });
+    write(&db, vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "body": "the error text" } })])
+        .unwrap();
+    let stats = keys::text_stats("Doc", "words");
+    let counting = |documents: u64, length: u64| {
+        crate::engine::values::encode(&rmpv::Value::Array(vec![
+            documents.into(),
+            rmpv::Value::Array(vec![length.into()]),
+        ]))
+    };
+    let held = db.snapshot(|r| Read::get(r, &stats)).unwrap().unwrap();
+    assert_eq!(held, counting(1, 3));
+    // No document where the index holds one, and a field shorter in all than the entity's is: a write that refiles
+    // the entity has less to take it from than it holds
+    for damaged in [counting(0, 3), counting(1, 2)] {
+        damage(&db, |txn, d| Ok(d.put(txn, &stats, &damaged)?));
+        let refused = write(&db, vec![body("another text")]).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::Corrupted);
+        assert!(refused.message.contains("statistics"), "{}", refused.message);
+    }
+    // As they were, the write goes through
+    damage(&db, |txn, d| Ok(d.put(txn, &stats, &held)?));
+    write(&db, vec![body("another text")]).unwrap();
+    assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
+}
+
 /// The ids a plan over Notes with one step answers
 fn note_ids(db: &Database, step: Json) -> Json {
     let reads: crate::engine::plan::Reads = serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": {
