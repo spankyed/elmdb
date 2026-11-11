@@ -1347,6 +1347,38 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
 }
 
 #[test]
+fn lists_that_share_no_place_are_read_no_further_than_the_shortest_of_them_holds() {
+    // Two thousand tasks, the odd ones open and the even ones of one owner: two lists of a thousand places with
+    // none in common. One odd task holds a role, a third list of the one place
+    let (_dir, db) = open_with(schema_json());
+    let tasks: Vec<Json> = (0..2000)
+        .map(|at| {
+            let mut fields = json!({ "k": at, "status": if at % 2 == 1 { "open" } else { "done" } });
+            if at % 2 == 0 {
+                fields["owner"] = json!(5);
+            }
+            task(at, fields)
+        })
+        .collect();
+    for some in tasks.chunks(500) {
+        write(&db, some.to_vec());
+    }
+    write(&db, vec![grant(1001, "lead")]);
+    let open = is("status", json!("open"));
+    let owned = is("owner", json!(5));
+    // With the third among them the read ends where it ends, in whichever order they are written: a dozen
+    // entries, where the two lists alone are read to their ends, an entry of each for each place of the other
+    for filters in orders(&[open.clone(), owned.clone(), role("lead")]) {
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 0 && entries <= 12, "{filters:?}: {entries}");
+    }
+    for filters in orders(&[open, owned]) {
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 0 && (2000..=2 * 2000 + 8).contains(&entries), "{filters:?}: {entries}");
+    }
+}
+
+#[test]
 fn a_tracked_read_depends_on_the_list_it_walked_and_on_the_others_only_at_its_places() {
     let (_dir, db) = open();
     held(&db);
