@@ -4,7 +4,8 @@
 // and libuv on Windows aborts the process on the wake (`exit.test.mjs` ends a process that way). Node marks the
 // memory of an external buffer as never to be transferred to another thread, since its finalizer belongs to this one,
 // and marks no memory V8 allocated: `isMarkedAsUntransferable` reads the mark. Which exports answer bytes is read
-// from the generated declarations, so one added later is held to this or fails here until it is.
+// from the generated declarations, so a method added later that answers a Buffer is held to this or fails here until
+// it is. Bytes handed over any other way, inside an object or to a listener, the declarations don't tell apart.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -17,11 +18,11 @@ import { Packr } from 'msgpackr';
 const { Database } = createRequire(import.meta.url)('../index.js');
 const packr = new Packr({ useRecords: false, mapsAsObjects: true });
 
-/** Every method the declarations say answers a Buffer, as `Class.method` */
+/** Every method the declarations say answers a Buffer, as `Class.method`. A checkout on Windows ends lines in CRLF */
 function answeringBytes() {
   const found = [];
   let within = null;
-  for (const line of readFileSync(new URL('../index.d.ts', import.meta.url), 'utf8').split('\n')) {
+  for (const line of readFileSync(new URL('../index.d.ts', import.meta.url), 'utf8').split(/\r?\n/)) {
     within = line.match(/^export declare class (\w+)/)?.[1] ?? (line.startsWith('}') ? null : within);
     const method = line.match(/^\s+(\w+)\(.*\): (?:Buffer|Buffer \| null|Promise<Buffer>)$/)?.[1];
     if (within && method) found.push(`${within}.${method}`);
