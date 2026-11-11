@@ -3,7 +3,7 @@ name: platforms
 # A glibc Linux, macOS or Windows target's suites: the workspace's, then the binding built once on the Node floor and
 # loaded unchanged by Node 24 and Electron (docs/architecture/testing.md, Platforms). Called with the targets to run:
 # by ci.yml with the fast tier's two, by full.yml with the rest. A job that calls a workflow can set no time limit, so
-# each target brings its own, in minutes.
+# each target brings its own, in minutes; one that brings none gets the longest any target has.
 on:
   workflow_call:
     inputs:
@@ -23,7 +23,7 @@ jobs:
       matrix:
         include: ${{ fromJSON(inputs.targets) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: ${{ matrix.timeout }}
+    timeout-minutes: ${{ matrix.timeout || 60 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
