@@ -18,7 +18,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [The JavaScript boundary](javascript-boundary.md) | Designed: lazy rows that decode a field when read, and optimistic units that can span an `await` |
 | [One plan algebra](plan-algebra.md) | The planner's three fixes and EXPLAIN built; designed: the smaller filter first, then value indexes as bitmaps and filters as operations on them |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
-| [The text index at scale](text-index-at-scale.md) | Posting lists in blocks on LMDB's B-tree, fuzzy terms by seeking, each when a reading calls for it |
+| [The text index at scale](text-index-at-scale.md) | Fuzzy terms by seeking built; designed from readings at a million notes: a commit notes the place it changed, the builder files it into blocks of a term's places with their counts, and ranking reads those and lengths held by place |
 
 ## Development improvements
 

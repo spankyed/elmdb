@@ -29,6 +29,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -53,6 +54,13 @@ diff = out / "branch.diff"
 change = subprocess.check_output(["git", "diff", f"{args.base}...HEAD"])
 # What an earlier run caught holds only for the diff it was caught in
 same_change = diff.exists() and diff.read_bytes() == change
+if not same_change:
+    # Forgotten before the diff is written: a run of the new diff that is stopped before it has kept anything would
+    # otherwise find the diff its own on a resume, and the last diff's catches beside it
+    for kept in out.glob("*/caught.txt"):
+        kept.unlink()
+    for results in out.glob("*/mutants.out"):
+        shutil.rmtree(results, ignore_errors=True)
 diff.write_bytes(change)
 changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}...HEAD"], text=True).split()
 
@@ -195,6 +203,9 @@ for name, path, features in crates:
         if not left:
             continue
         chosen = [arg for mutant in left for arg in ("--re", f"^{re.escape(mutant)}$")]
+    # A change that holds no mutant of the crate has cargo-mutants write no results, and those an earlier run left
+    # would be read as this one's: what that run caught is already taken, above
+    shutil.rmtree(results, ignore_errors=True)
     run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), *selection, *chosen,
                           "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])],
                          env=env)
