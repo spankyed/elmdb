@@ -168,19 +168,19 @@ proptest! {
                 return Ok(());
             };
             assert_eq!(postings.places.iter().collect::<Vec<_>>(), model.keys().copied().collect::<Vec<_>>());
-            let read: Vec<(u64, &[u8])> = postings.entries().collect();
+            let read: Vec<(u64, &[u8])> = postings.entries().collect::<Result<_>>()?;
             assert_eq!(read, model.iter().map(|(place, counts)| (*place, counts.as_slice())).collect::<Vec<_>>());
             let own = r.get(&filed.term().own)?.unwrap();
             assert_eq!(held(r, &filed.term(), &own)?, model.len() as u64);
             let mut walk = postings.walk();
             for place in 0..45 {
-                assert_eq!(postings.at(place), model.get(&place).map(Vec::as_slice), "at {place}");
-                assert_eq!(walk.to(place), model.get(&place).map(Vec::as_slice), "walking to {place}");
+                assert_eq!(postings.at(place)?, model.get(&place).map(Vec::as_slice), "at {place}");
+                assert_eq!(walk.to(place)?, model.get(&place).map(Vec::as_slice), "walking to {place}");
             }
             for (place, counts) in model.range(45..) {
-                assert_eq!(postings.at(*place), Some(counts.as_slice()));
-                assert_eq!(postings.at(place + 1), model.get(&(place + 1)).map(Vec::as_slice));
-                assert_eq!(walk.to(*place), Some(counts.as_slice()));
+                assert_eq!(postings.at(*place)?, Some(counts.as_slice()));
+                assert_eq!(postings.at(place + 1)?, model.get(&(place + 1)).map(Vec::as_slice));
+                assert_eq!(walk.to(*place)?, Some(counts.as_slice()));
             }
             Ok(())
         }).unwrap();
@@ -453,8 +453,29 @@ fn a_block_whose_every_place_is_held_is_read_as_its_range() {
             assert_eq!(postings.places.iter().collect::<Vec<_>>(), places);
             assert_eq!(held(r, &filed.term(), &IN_BLOCKS)?, 9);
             // A place of such a block still has its counts where a search asks for them
-            assert_eq!(postings.at(5), Some(&one[..]));
-            assert_eq!(postings.walk().to(6), Some(&one[..]));
+            assert_eq!(postings.at(5)?, Some(&one[..]));
+            assert_eq!(postings.walk().to(6)?, Some(&one[..]));
+            Ok(())
+        })
+        .unwrap();
+    // Such a block's entries are first read where a search asks for one: those that don't read are refused there, not
+    // taken for a place the term doesn't hold
+    let filed = Filed::new(1, 4);
+    filed
+        .write(false, |t| {
+            t.put(&filed.term().own, &IN_BLOCKS)?;
+            t.put(&filed.term().block(0), &[1, 2, 0xff])
+        })
+        .unwrap();
+    filed
+        .snapshot(|r| {
+            let postings = read(r, &filed.term())?.unwrap();
+            assert_eq!(postings.places.iter().collect::<Vec<_>>(), [0, 1]);
+            assert_eq!(postings.at(1).unwrap_err().code, ErrorCode::Corrupted);
+            assert_eq!(postings.walk().to(0).unwrap_err().code, ErrorCode::Corrupted);
+            let entries: Vec<_> = postings.entries().collect();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].as_ref().unwrap_err().code, ErrorCode::Corrupted);
             Ok(())
         })
         .unwrap();

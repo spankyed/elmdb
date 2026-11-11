@@ -1355,10 +1355,10 @@ fn a_rebuild_clears_what_a_retired_tag_left_and_a_document_naming_no_field_of_it
 }
 
 #[test]
-fn statistics_that_count_less_than_a_text_index_holds_are_refused_rather_than_counted_down_from() {
+fn statistics_and_a_words_count_that_say_less_than_a_text_index_holds_are_refused_not_counted_down_from() {
     let schema = json!({ "$schema": crate::schema::SCHEMA_LANGUAGE, "types": { "Doc": {
         "fields": { "body": { "type": "string" } },
-        "indexes": { "words": { "kind": "text", "fields": { "body": {} } } }
+        "indexes": { "words": { "kind": "text", "fields": { "body": {} }, "stem": "en" } }
     } } });
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, schema).unwrap();
@@ -1382,8 +1382,16 @@ fn statistics_that_count_less_than_a_text_index_holds_are_refused_rather_than_co
         assert_eq!(refused.code, ErrorCode::Corrupted);
         assert!(refused.message.contains("statistics"), "{}", refused.message);
     }
-    // As they were, the write goes through
     damage(&db, |txn, d| Ok(d.put(txn, &stats, &held)?));
+    // A word as written the entity holds and no entity is counted under
+    let word = keys::text_word("Doc", "words", "error");
+    let counted = db.snapshot(|r| Read::get(r, &word)).unwrap().unwrap();
+    damage(&db, |txn, d| Ok(d.delete(txn, &word).map(|_| ())?));
+    let refused = write(&db, vec![body("another text")]).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::Corrupted);
+    assert!(refused.message.contains("word"), "{}", refused.message);
+    // As they were, the write goes through
+    damage(&db, |txn, d| Ok(d.put(txn, &word, &counted)?));
     write(&db, vec![body("another text")]).unwrap();
     assert!(db.check().unwrap().is_clean(), "{:?}", db.check().unwrap());
 }
