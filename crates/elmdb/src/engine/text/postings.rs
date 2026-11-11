@@ -634,9 +634,17 @@ impl Postings {
     }
 
     /// The counts of the entity at `place`, which the term may not hold
-    pub fn at(&self, place: u64) -> Option<&[u8]> {
-        let run = self.runs.partition_point(|(start, _)| *start <= place).checked_sub(1)?;
-        self.run_at(run).find(|(at, _)| *at >= place).filter(|(at, _)| *at == place).map(|(_, counts)| counts)
+    pub fn at(&self, place: u64) -> Result<Option<&[u8]>> {
+        let Some(run) = self.runs.partition_point(|(start, _)| *start <= place).checked_sub(1) else {
+            return Ok(None);
+        };
+        for entry in self.run_at(run) {
+            let (at, counts) = entry?;
+            if at >= place {
+                return Ok((at == place).then_some(counts));
+            }
+        }
+        Ok(None)
     }
 
     /// The term's entities from the first, for a reader that asks for places in order
@@ -644,9 +652,9 @@ impl Postings {
         Walk { postings: self, run: 0, entries: Entries { place: 0, rest: &[], fields: self.fields }, next: None }
     }
 
-    /// Every entity holding the term, with its counts, in place order. An entry is a byte at least, so there are no
-    /// more of them than bytes, and they end there whatever a run reads as
-    pub fn entries(&self) -> impl Iterator<Item = (u64, &[u8])> {
+    /// Every entity holding the term, with its counts, in place order, a run ending at an entry that doesn't read. An
+    /// entry is a byte at least, so there are no more of them than bytes, and they end there whatever a run reads as
+    pub fn entries(&self) -> impl Iterator<Item = Result<(u64, &[u8])>> {
         (0..self.runs.len()).flat_map(|at| self.run_at(at)).take(self.bytes.len())
     }
 }
@@ -676,15 +684,19 @@ impl<'a> Entries<'a> {
 }
 
 impl<'a> Iterator for Entries<'a> {
-    type Item = Entry<'a>;
+    type Item = Result<Entry<'a>>;
 
-    /// The next entry, the run ending where its bytes stop reading as entries: `read_stored` read each as it took the
-    /// run in, but for a block that says its every place is held, whose entries it leaves unread
-    fn next(&mut self) -> Option<Entry<'a>> {
+    /// The next entry, or that it doesn't read, which ends the run: `read_stored` read each as it took the run in,
+    /// but for a block that says its every place is held, whose entries are first read here
+    fn next(&mut self) -> Option<Result<Entry<'a>>> {
         if self.rest.is_empty() {
             return None;
         }
-        self.read().ok()
+        let entry = self.read();
+        if entry.is_err() {
+            self.rest = &[];
+        }
+        Some(entry)
     }
 }
 
@@ -700,7 +712,7 @@ pub struct Walk<'a> {
 impl<'a> Walk<'a> {
     /// The counts of the entity at `place`, when the term holds it. Each place asked for is after the last
     #[inline]
-    pub fn to(&mut self, place: u64) -> Option<&'a [u8]> {
+    pub fn to(&mut self, place: u64) -> Result<Option<&'a [u8]>> {
         // A run starting at the place or before it is where the place is if the term holds it: the last such run is
         // found among those not yet read, and the runs before it are passed unread
         let ahead = self.postings.runs[self.run..].partition_point(|(start, _)| *start <= place);
@@ -714,9 +726,12 @@ impl<'a> Walk<'a> {
             if let Some((at, counts)) = self.next
                 && at >= place
             {
-                return (at == place).then_some(counts);
+                return Ok((at == place).then_some(counts));
             }
-            self.next = Some(self.entries.next()?);
+            match self.entries.next() {
+                Some(entry) => self.next = Some(entry?),
+                None => return Ok(None),
+            }
         }
     }
 }

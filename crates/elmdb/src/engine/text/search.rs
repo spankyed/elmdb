@@ -391,7 +391,8 @@ fn union(postings: &Expansions) -> RoaringTreemap {
 fn union_in(postings: &Expansions, fields: &[u32], of: usize) -> Result<RoaringTreemap> {
     let mut out = RoaringTreemap::new();
     for (_, p) in postings.values() {
-        for (place, counts) in p.entries() {
+        for entry in p.entries() {
+            let (place, counts) = entry?;
             let mut held = false;
             postings::counted(counts, of, |field, _| held |= fields.contains(&field))?;
             if held {
@@ -647,7 +648,7 @@ impl Matches<'_> {
                 for word in words {
                     let mut best: f64 = 0.0;
                     for (w, walk) in &mut word.terms {
-                        let Some(counts) = walk.to(seq) else { continue };
+                        let Some(counts) = walk.to(seq)? else { continue };
                         // Each field's count at its weight, and none for a field the clause isn't held to
                         let frequency = postings::weighted(counts, in_clause)?;
                         if frequency == 0.0 {
@@ -688,7 +689,7 @@ impl Matches<'_> {
                 if !postings.places.contains(seq) {
                     continue;
                 }
-                let Some(counts) = postings.at(seq) else { continue };
+                let Some(counts) = postings.at(seq)? else { continue };
                 postings::counted(counts, self.index.fields.len(), |field, _| {
                     if in_clause.contains(&field) {
                         terms.insert(term);

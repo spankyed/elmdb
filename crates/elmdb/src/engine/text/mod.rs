@@ -347,7 +347,8 @@ pub fn word_held(stored: &[u8]) -> Result<u64> {
 fn count_word(t: &mut Txn<'_, '_>, key: &[u8], more: bool) -> Result<()> {
     let stored = t.get(key)?;
     let held = stored.as_deref().map(word_held).transpose()?.unwrap_or(0);
-    let now = if more { held + 1 } else { held.saturating_sub(1) };
+    // A word no entity is counted as holding is held by the one that now gives it up: the count is no record of them
+    let now = if more { held + 1 } else { held.checked_sub(1).ok_or_else(|| corrupt("word"))? };
     if now == 0 {
         t.del_over(key, stored.as_deref())
     } else {
