@@ -7,6 +7,7 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
 use crate::schema::ValueType;
 
+use super::changes::Event;
 use super::entities::{self, field};
 use super::keys;
 use super::unit::{Read, Txn};
@@ -227,6 +228,15 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             };
             let bytes = rmp_serde::to_vec_named(&next).expect("a relation row serializes");
             t.put(&keys::relation(&id), &bytes)?;
+            // Its other end may be of a type the rename leaves alone, whose readers are told as a write would tell
+            // them: the edge they hold names an id that is gone
+            t.event(Event::RelationChanged {
+                relation: id,
+                kind: next.kind,
+                source: next.source,
+                target: next.target,
+                moved_from: None,
+            });
         }
     }
     // The declared `ref` fields that may name an entity of the type
@@ -259,6 +269,8 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             };
             if next != value {
                 t.put(&keys::value(&id, &name), &values::stored(&next))?;
+                // A field of another type's entity, written as any write of it is
+                t.event(Event::Field { id, field: name.clone() });
             }
         }
     }

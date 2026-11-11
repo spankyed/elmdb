@@ -383,7 +383,7 @@ fn a_removed_type_keeps_its_entities_until_purged() {
 #[test]
 fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_again() {
     let dir = tempfile::tempdir().unwrap();
-    let between_tasks = {
+    let (from_doc, between_tasks) = {
         let db = open(&dir);
         let made = write(
             &db,
@@ -395,14 +395,16 @@ fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_ag
                 json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
                 json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-1" }),
                 json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+                json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" }),
             ],
         )
         .unwrap();
         db.close().unwrap();
-        match &made[6] {
+        let relation = |made: &crate::OpResult| match made {
             crate::OpResult::Relation { id, .. } => id.clone(),
             other => panic!("not a relation: {other:?}"),
-        }
+        };
+        (relation(&made[5]), relation(&made[6]))
     };
     let mut schema = serde_json::to_value(super::schema()).unwrap();
     schema["types"].as_object_mut().unwrap().remove("Doc");
@@ -423,6 +425,16 @@ fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_ag
         ("link from it", json!({ "op": "link", "source": "Doc-1", "kind": "refs", "target": "Task-2" })),
         ("link to it", json!({ "op": "link", "source": "Task-2", "kind": "refs", "target": "Doc-1" })),
         ("unlink", json!({ "op": "unlink", "source": "Doc-1" })),
+        ("unlink to it", json!({ "op": "unlink", "source": "Task-1", "target": "Doc-1" })),
+        ("unlink every edge of one linked to it", json!({ "op": "unlink", "source": "Task-2" })),
+        ("unlink a kind's edges of one linked to it", json!({ "op": "unlink", "source": "Task-2", "kind": "refs" })),
+        (
+            "its role taken for another",
+            json!({ "op": "grantExclusive", "id": "Task-1", "role": "r1", "among": ["Doc-1"] }),
+        ),
+        ("its relation removed", json!({ "op": "removeRelation", "relation": from_doc })),
+        ("its relation changed", json!({ "op": "updateRelation", "relation": from_doc, "info": { "k": 1 } })),
+        ("its relation moved off it", json!({ "op": "updateRelation", "relation": from_doc, "source": "Task-2" })),
         ("a relation moved from it", json!({ "op": "updateRelation", "relation": between_tasks, "source": "Doc-2" })),
         ("a relation moved to it", json!({ "op": "updateRelation", "relation": between_tasks, "target": "Doc-2" })),
         ("destroy", json!({ "op": "destroy", "id": "Doc-1" })),

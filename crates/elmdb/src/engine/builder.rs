@@ -241,12 +241,23 @@ impl Builder {
         self.store.wake_unit_waiters();
     }
 
+    /// Whether the caller is on this builder's thread: a listener one of its commits delivered to, calling the
+    /// database from there. False once the builder is stopped, which lets go of its thread: what must know of a
+    /// listener on a builder no longer the database's asks `watch::in_callback`
+    pub fn on_its_thread(&self) -> bool {
+        self.thread.as_ref().is_some_and(|thread| thread.thread().id() == std::thread::current().id())
+    }
+
     /// Stops the thread, leaving an index part built for the next open to finish. Its caller holds nothing the thread
     /// may wait for: a chunk's commit delivers to the watches it wrote into, and a watch's read, and whatever its
-    /// listener calls of the database, takes the schema's lock
+    /// listener calls of the database, takes the schema's lock. Called on the thread itself, by such a listener, it
+    /// waits for nothing: the thread can't see itself end, and told to stop it ends once the listener returns
     pub fn stop(&mut self) {
+        let waits = !self.on_its_thread();
         self.tell_to_stop();
-        if let Some(thread) = self.thread.take() {
+        if let Some(thread) = self.thread.take()
+            && waits
+        {
             thread.join().expect("the index thread doesn't panic");
         }
     }

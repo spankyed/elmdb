@@ -111,7 +111,8 @@ pub enum ErrorCode {
     CallbackPanicked,
     /// The initial watch read panicked; its registration was removed
     WatchPanicked,
-    /// Closing a database from its own watch callback would wait on the callback's operation
+    /// A call that waits for what a listener of the database is called from was made by that listener: a close,
+    /// or on the index builder's thread a wait for its builds
     CallbackActive,
 }
 

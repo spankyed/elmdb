@@ -44,6 +44,15 @@ impl Drop for CallbackScope {
     }
 }
 
+/// Runs `run` as a callback of this database on this thread, as a watch's listener is run: while it runs, what it
+/// calls of the database knows it is called from one (`in_callback`), and refuses to wait for what the callback's
+/// own thread holds
+pub(crate) fn as_callback<R>(tracks: &SharedTracks, run: impl FnOnce() -> R) -> R {
+    CallbackScope::run(tracks, run)
+}
+
+/// Whether a callback of this database is running on this thread: a watch's listener, or the listener of the
+/// builder's commits
 pub(crate) fn in_callback(tracks: &SharedTracks) -> bool {
     let identity = Arc::as_ptr(tracks) as usize;
     let mut node = CALLBACKS.with(Cell::get);
@@ -236,7 +245,7 @@ pub enum Unwatched {
 
 /// Ends a watch: once this returns, its listener isn't called again. A delivery running its listener on another thread
 /// is waited for, and the answer is `Ended`: the listener has returned and been dropped. Called from inside a listener of
-/// this database's watches, its own or another's, it doesn't wait — a delivery running on this thread can't end while it
+/// this database, a watch's, its own or another's, or the builder's commits', it doesn't wait — a delivery running on this thread can't end while it
 /// does, and two listeners ending each other's watch would wait on each other — so it answers `Ending` while a delivery
 /// holds the watch's listener, and `Ended` when none does. Nor may the caller hold anything the listener needs, which
 /// the wait would never get

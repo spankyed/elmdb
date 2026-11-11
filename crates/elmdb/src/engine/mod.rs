@@ -96,7 +96,19 @@ pub(crate) fn builder_commits(
         if !changes.touched.is_empty() {
             let listener = tracks.lock().builder_commit_listener();
             if let Some(listener) = listener {
-                listener(changes.sequence, changes.touched);
+                // A callback of the database, on the builder's own thread: a close it asks for is refused as one
+                // asked for by a watch's listener is, whichever builder is the database's by then. It is let go of
+                // inside the callback too, as a watch's listener is: what it holds may be the last of the database,
+                // whose close would wait for this thread
+                let (sequence, touched) = (changes.sequence, changes.touched);
+                let heard = watch::as_callback(&tracks, move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener(sequence, touched)))
+                });
+                // One that panics is heard no more, as a watch whose listener panics is ended: the builder goes on,
+                // where the panic would have ended its thread with builds left that nothing waits out
+                if heard.is_err() {
+                    tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+                }
             }
         }
         Ok(done)
@@ -540,10 +552,25 @@ impl Database {
     }
 
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
-    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would
+    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would. Refused
+    /// on the thread of the builder it would wait for (`CALLBACK_ACTIVE`), by a listener one of its commits
+    /// delivered to: those builds go on once the listener returns. A listener that changed the schema waits for
+    /// the builder started for it, which is another thread's
     pub fn wait_for_index_builds(&self) -> Result<()> {
         // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
-        let Some(waiter) = self.builder().as_ref().map(Builder::waiter) else { return Ok(()) };
+        let Some((waiter, here)) = self.builder().as_ref().map(|builder| (builder.waiter(), builder.on_its_thread()))
+        else {
+            return Ok(());
+        };
+        // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
+        // listener to return: the wait would be for itself
+        if here {
+            return Err(Error::new(
+                ErrorCode::CallbackActive,
+                "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
+                 after it has",
+            ));
+        }
         if self.store()?.unit_is_open() {
             return Err(Error::new(
                 ErrorCode::UnitOpen,

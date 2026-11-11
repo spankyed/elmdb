@@ -106,6 +106,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             declared_role(t, role)?;
             for other in among.iter().filter(|o| *o != id) {
                 if entities::record(t, other)?.is_some() {
+                    declared_type(t, other)?;
                     revoke(t, other, role)?;
                 }
             }
@@ -120,6 +121,16 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         }
         Op::Unlink { source, kind, target } => {
             existing(t, source)?;
+            match target {
+                Some(target) => declared_end(t, target)?,
+                // With no target named, every edge of the kind goes, or of every kind: each one's far end is
+                // written as a named one is
+                None => {
+                    for (_, far) in relations::edges(t, source, true, kind.as_deref())? {
+                        declared_end(t, &far)?;
+                    }
+                }
+            }
             relations::unlink(t, source, kind.as_deref(), target.as_deref())?;
             Ok(OpResult::Done)
         }
@@ -127,16 +138,23 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             for end in [source, target].into_iter().flatten() {
                 declared_end(t, end)?;
             }
+            // The ends it has are written too: each is stamped, and loses the edge when it moves
+            if let Some(stored) = relations::get(t, relation)? {
+                declared_end(t, &stored.source)?;
+                declared_end(t, &stored.target)?;
+            }
             relations::update(t, relation, source.as_deref(), target.as_deref(), info.clone(), *weight)?;
             Ok(OpResult::Done)
         }
         Op::RemoveRelation { relation } => {
-            if relations::get(t, relation)?.is_none() {
+            let Some(stored) = relations::get(t, relation)? else {
                 return Err(Error::new(
                     ErrorCode::NoSuchRelation,
                     format!("removeRelation(\"{relation}\"): no relation has this id"),
                 ));
-            }
+            };
+            declared_end(t, &stored.source)?;
+            declared_end(t, &stored.target)?;
             relations::remove(t, relation)?;
             Ok(OpResult::Done)
         }

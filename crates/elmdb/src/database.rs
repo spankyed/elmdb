@@ -287,7 +287,8 @@ impl Database {
 
     /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a unit
     /// is open (`UNIT_OPEN`): the unit holds the environment's write transaction, so commit or abort it first.
-    /// Refused from this database's watch callback (`CALLBACK_ACTIVE`); close after the callback returns
+    /// Refused from a listener of this database, a watch's or the builder's commits' (`CALLBACK_ACTIVE`); close
+    /// after it returns
     pub fn close(&self) -> Result<()> {
         if self.close_within(None)? {
             return Ok(());
@@ -358,10 +359,12 @@ impl Database {
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
+        // A watch's listener, or the listener of the builder's commits, which runs on the builder's thread: a close
+        // waits for the operation the listener is called from, and for the store that thread holds
         if crate::engine::watch::in_callback(&self.tracks) {
             return Err(Error::new(
                 ErrorCode::CallbackActive,
-                "A watch listener is running on this thread: close the database after the listener returns",
+                "A listener of this database is running on this thread: close the database after it returns",
             ));
         }
         // A build in progress stops between chunks, for the next open to finish. A builder is waited for with nothing
@@ -411,7 +414,19 @@ impl Database {
                     if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
                         let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
-                        return synced.map(|()| false);
+                        synced?;
+                        // The database stays open with its builder stopped: what is left to build is queued again,
+                        // as an open queues it, or a read of an unbuilt index would be told to wait for no one
+                        // A close that gave up answers that it did: what keeps the builds from being queued, another
+                        // process's schema or a close beside this one, is the next operation's to say
+                        if !at_exit
+                            && let Ok(Some(builders)) = self.builders()
+                            && let Ok(store) = self.store()
+                            && let Ok(owed) = crate::engine::remaining_indexes(&store, &self.engine_schema.read())
+                        {
+                            builders.queue(owed);
+                        }
+                        return Ok(false);
                     }
                     store = shared;
                     // An operation that took the store before the close, a commit or another process's wake, may queue

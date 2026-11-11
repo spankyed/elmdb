@@ -600,6 +600,29 @@ fn a_read_of_a_text_index_still_being_built_is_refused_and_answered_once_it_is_b
 }
 
 #[test]
+fn a_close_that_gives_up_leaves_an_unbuilt_index_being_built() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    corpus(&db);
+    db.wait_for_index_builds().unwrap();
+    // As a build leaves it part way, with no builder running
+    let held = db.store().unwrap();
+    held.write(
+        |txn, main| {
+            main.delete(txn, &crate::engine::keys::index_built("Message", "text"))?;
+            Ok(())
+        },
+        false,
+    )
+    .unwrap();
+    // Given up on while an operation holds the store: the database is open, and builds what is left
+    assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
+    drop(held);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(search(&db, "Message", "lmdb", json!({})), json!(["Message-3", "Message-1"]));
+}
+
+#[test]
 fn a_reader_refused_while_a_text_index_is_built_hears_of_the_commit_that_ends_the_build() {
     use std::sync::{Arc, Mutex};
     let dir = tempfile::tempdir().unwrap();
