@@ -1420,9 +1420,59 @@ fn lists_that_share_no_place_are_read_no_further_than_the_shortest_of_them_holds
         let (found, entries) = walked(&db, json!(filters), "ids");
         assert!(found == 0 && entries <= 12, "{filters:?}: {entries}");
     }
-    for filters in orders(&[open, owned]) {
+    for filters in orders(&[open.clone(), owned.clone()]) {
         let (found, entries) = walked(&db, json!(filters), "ids");
         assert!(found == 0 && (2000..=2 * 2000 + 8).contains(&entries), "{filters:?}: {entries}");
+    }
+    // A third list that holds every place the others begin with, and so is not the one walked: each list is
+    // asked in its turn, whichever the filters are written in, so the read still ends where the third does
+    write(&db, (0..10).map(|at| grant(at, "lead")).collect());
+    for filters in orders(&[open, owned, role("lead")]) {
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 0 && entries <= 60, "{filters:?}: {entries}");
+    }
+}
+
+#[test]
+fn a_list_walked_is_sought_past_what_the_others_rule_out_and_gives_way_to_one_that_leaps_further() {
+    // The last thousand of two thousand tasks are open, a list that begins far in and then holds every place.
+    // Eleven hold a role: the first task, and every hundredth of the open
+    let (_dir, db) = open_with(schema_json());
+    let tasks: Vec<Json> =
+        (0..2000).map(|at| task(at, json!({ "k": at, "status": if at < 1000 { "done" } else { "open" } }))).collect();
+    for some in tasks.chunks(500) {
+        write(&db, some.to_vec());
+    }
+    let led: Vec<usize> = std::iter::once(0).chain((1000..2000).step_by(100)).collect();
+    write(&db, led.iter().map(|at| grant(*at, "lead")).collect());
+    // The open tasks' list, whose first place is the further in, is the one walked to begin with. The role's
+    // rules out the hundred places up to its next: a few of them are passed over and the rest sought past, a
+    // dozen entries for each place the role's holds. By its third leap the role's list is the one walked, and the
+    // open tasks' asked only where it holds a place, two entries for each
+    for filters in orders(&[is("status", json!("open")), role("lead")]) {
+        let steps = json!(filters);
+        let both: Vec<String> = led[1..].iter().map(|at| id(*at)).collect();
+        assert_eq!(visited(&db, plan("live", steps.clone())), (both, 10), "{filters:?}");
+        let (found, entries) = walked(&db, steps, "ids");
+        assert!(found == 10 && entries <= 50, "{filters:?}: {entries}");
+    }
+
+    // All but the first two tasks are open, and every fifth holds the role: too near each other for the open
+    // tasks' list to be sought past, each of its entries between them passed over, five for a place of the
+    // role's. The role's list, which leaps further, is walked in its place within a few of its places: two
+    // entries for each, where the open tasks' walked to its end is seven
+    let (_dir, db) = open_with(schema_json());
+    let tasks: Vec<Json> =
+        (0..2000).map(|at| task(at, json!({ "k": at, "status": if at < 2 { "done" } else { "open" } }))).collect();
+    for some in tasks.chunks(500) {
+        write(&db, some.to_vec());
+    }
+    for some in (0..2000).step_by(5).map(|at| grant(at, "lead")).collect::<Vec<_>>().chunks(200) {
+        write(&db, some.to_vec());
+    }
+    for filters in orders(&[is("status", json!("open")), role("lead")]) {
+        let (found, entries) = walked(&db, json!(filters), "ids");
+        assert!(found == 399 && entries <= 1000, "{filters:?}: {entries}");
     }
 }
 
