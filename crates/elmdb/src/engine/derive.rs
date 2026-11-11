@@ -17,7 +17,7 @@ use crate::format::Prefix;
 use crate::format::key::{Part, decode as decode_key};
 use crate::schema::Schema;
 
-use super::entities::{self, ValueIndex, entries_of, value_indexes};
+use super::entities::{self, ValueIndex, value_indexes};
 use super::keys;
 use super::unit::{Read, Txn};
 use super::{ids, relations, text, trigram, values, vector};
@@ -60,7 +60,7 @@ fn index_entries_into(
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        for parts in entries_of(&fields, index.lists()) {
+        for parts in index.files(&fields).entries {
             emit(keys::index_entry(entity_type, &index.name, &parts, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
@@ -68,7 +68,7 @@ fn index_entries_into(
 }
 
 /// What an index that accounts for its entities holds besides its entries: each of these entities it files among
-/// those without a value in its last field, or among those holding a value it doesn't order (`entities::others_of`)
+/// those without a value in its last field, or among those holding a value it doesn't order (`ValueIndex::files`)
 fn index_others_into(
     r: &impl Read,
     entity_type: &str,
@@ -82,7 +82,7 @@ fn index_others_into(
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        for other in entities::others_of(&fields, index.lists()) {
+        for other in index.files(&fields).others {
             emit(other.key(entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
         }
     }
@@ -643,10 +643,11 @@ pub fn build_chunk(
     };
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
-        for parts in entries_of(&fields, index.lists()) {
+        let filed = index.files(&fields);
+        for parts in &filed.entries {
             if index.unique {
                 let mut holder = None;
-                t.visit(&keys::index_range(entity_type, name, &parts), |_, v| {
+                t.visit(&keys::index_range(entity_type, name, parts), |_, v| {
                     holder = values::decode(v).ok().and_then(|v| v.as_str().map(str::to_owned));
                     // mutant-skip: replace == with != in build_chunk
                     // build_chunk's unique check skips the entity's own entry: a write checks a unique value against
@@ -658,14 +659,12 @@ pub fn build_chunk(
                     return Err(unbuildable(entity_type, name, &other, id));
                 }
             }
-            let key = keys::index_entry(entity_type, name, &parts, *seq);
+            let key = keys::index_entry(entity_type, name, parts, *seq);
             entities::key_fits(&key, id, entity_type, name)?;
             t.put(&key, &values::encode(&id.as_str().into()))?;
         }
-        if index.accounts() {
-            for other in entities::others_of(&fields, index.lists()) {
-                t.put(&other.key(entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
-            }
+        for key in filed.other_keys(entity_type, name, *seq) {
+            t.put(&key, &values::encode(&id.as_str().into()))?;
         }
         last = *seq;
     }

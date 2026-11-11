@@ -1755,8 +1755,9 @@ impl<R: Read> Query<'_, R> {
     /// The built index of a type that reads the entities `equals` names in `name`'s order, with what its entries for
     /// them start with: a declared index whose last field is `name` and whose fields before it are the equalities',
     /// whichever order they were asked in, the values in the index's (`entities::ValueIndex::accounts`). It is read
-    /// only while it holds no entity whose value it doesn't order: a list, or one it can't file. With no equality it
-    /// is an index on `name` alone, which accounts for every entity of the type
+    /// only while it holds, under those values, no entity it doesn't order (`entities::Other::Unordered`): what an
+    /// entity under other values holds leaves this read alone. With no equality it is an index on `name` alone,
+    /// which accounts for every entity of the type
     fn order_index(
         &self,
         entity_type: &str,
@@ -1779,7 +1780,7 @@ impl<R: Read> Query<'_, R> {
                 continue;
             }
             let mut unordered = false;
-            self.r.visit(&keys::index_others(Prefix::IndexUnordered, entity_type, index, &[]), |_, _| {
+            self.r.visit(&keys::index_others(Prefix::IndexUnordered, entity_type, index, &leading), |_, _| {
                 unordered = true;
                 false
             })?;
