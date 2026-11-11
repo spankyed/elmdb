@@ -225,11 +225,9 @@ an answer:
     walked up to eight passed over and one sought. A `first`, `exists` or `limit` reads an entry or two of each
     list for each place tried, which is each entity it takes where the lists mostly agree. The list walked is the
     one whose places have been furthest apart, one from the next, where the read has seen them: where each list's
-    first place is says so to begin with, and a list whose places come to be twice as far apart is walked in its
+    first place is says so to begin with, and a list whose places come to be further apart is walked in its
     place. An entry walked is the next one read, where a place sought is found from the root, so walking the
-    shortest reads the fewest. Of lists whose places are less than twice as far apart as each other's the first
-    written stays the one walked, so the order written can change what is read by as much as one such list holds
-    over another.
+    shortest reads the fewest. Of lists whose places are as far apart the first written is the one walked.
   - **A range's index is read once the read has paid for it.** A `range` of numbers has an index to read where
     the type has one on its field alone that accounts for every entity, or, over one type, where the plan's first
     steps are equalities and the range and an index is on their fields and then its own, whichever way round they
