@@ -1982,11 +1982,7 @@ impl<R: Read> Query<'_, R> {
                 self.read_ranges(&mut lists, &mut ranged, &mut read, upto)?;
             }
             if lists.is_empty() && !ranged.is_empty() {
-                let whole = self.read_range(ranged.remove(0))?;
-                if let Places::Held { places, .. } = &whole.places {
-                    read += places.len() as u64;
-                }
-                lists.push(whole);
+                lists.push(self.read_range(ranged.remove(0))?);
             }
         }
         loop {
@@ -2209,8 +2205,9 @@ impl<R: Read> Query<'_, R> {
     /// be twice as far apart as the walked one's is walked in its place. Walking the list with the fewest places
     /// reads the fewest entries, an entry walked being the next one where a place sought is found from the root.
     /// So for each place the shortest list holds, the read costs each other list an entry sought, and the walked
-    /// one as many as `PASSED_OVER` passed over and one sought: a bound by the shortest list, whose factor the
-    /// order the filters are written in can change while a list not the shortest is the one walked.
+    /// one as many as `PASSED_OVER` passed over and one sought: a bound by the shortest list. Of lists whose
+    /// places are less than twice as far apart as each other's, the first written stays the one walked, so the
+    /// order the filters are written in can change what is read by as much as one such list holds over another.
     ///
     /// A tracked read depends on every entry it read: those of the walked list up to where the read stopped,
     /// and of each other list the entry at each place sought, with whatever lies between a place sought and the
@@ -2259,7 +2256,7 @@ impl<R: Read> Query<'_, R> {
                 spread.saw(from, place);
                 if place < *next {
                     passed += 1;
-                    return Ok(passed <= PASSED_OVER);
+                    return Ok(passed < PASSED_OVER);
                 }
                 passed = 0;
                 for nth in 0..others.len() {
