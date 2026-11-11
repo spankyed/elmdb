@@ -405,6 +405,10 @@ fn a_range_read_with_an_equality_is_read_before_an_index_a_later_equality_has() 
     // And with the range first, which has no index of its own
     let ranked = json!([between, is("note", json!("x")), is("owner", json!(1))]);
     assert_eq!(visited(&db, plan("live", ranked)), (vec![id(0), id(3)], 2));
+    // A role after them is a filter of those two too, though its own index holds the one task
+    write(&db, vec![json!({ "op": "grant", "id": id(0), "role": "lead" })]);
+    let led = json!([is("note", json!("x")), between, { "step": "withRole", "role": "lead" }]);
+    assert_eq!(visited(&db, plan("live", led)), (vec![id(0)], 2));
 }
 
 #[test]
@@ -598,6 +602,10 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // A range the plan starts with reads its own index though an equality after it has one too: the ten tasks in it
     let from = |field: &str| json!([{ "step": "range", "field": field, "atLeast": 590 }, is("status", json!("open"))]);
     assert_eq!(same(&db, "live", K, from).1, 10);
+    // A range that isn't the plan's first step is a filter of the index a later equality has, though its own field
+    // has one: the five hundred open tasks, where no index would walk the six hundred
+    let later = json!([{ "step": "has", "field": "note" }, { "step": "range", "field": "k", "atLeast": 590 }, is("status", json!("open"))]);
+    assert_eq!(visited(&db, plan("live", later)), (vec![id(597), id(598), id(599)], 500));
     // From the other end the walk meets them after the last three, and is done before it asks
     assert_eq!(first(vec![is("owner", json!(9))], true, 2), (vec![id(596), id(595)], 5));
     // A filter with no index reads the type, six hundred: fewer than twice what the walk has read at its third
@@ -780,6 +788,11 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     // Sorted, with or without a limit, and with a range of the field
     assert_eq!(ordering(json!([open, order("rank", false), limit(3)])).1, "status, rank");
     // No index is named that the schema would refuse: one on the short code, or on a field the type doesn't declare
+    // A time the engine writes is one an index may name
+    for time in ["createdAt", "updatedAt"] {
+        let wanted = ordering(json!([is(time, json!(5)), order("rank", false), limit(3)])).1;
+        assert_eq!(wanted, json!(format!("{time}, rank")));
+    }
     for refused in ["shortCode", "nowhere"] {
         let wanted = ordering(json!([is(refused, json!("x")), order("rank", false), limit(3)])).1;
         assert_eq!(wanted, Json::Null, "{refused}");
