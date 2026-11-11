@@ -125,7 +125,8 @@ snapshot as a search when it needs to say that search is incomplete.
   page reads its own entities and holds no more matches than it answers, wherever its cursor is; scoring every
   match is what it still costs. The ranking is the index's as the read finds it, not as the page before found it: a
   cursor that has stopped matching, or has left the plan's scope, has no page after it, and a write between two
-  pages can move a match across their boundary.
+  pages can move a match across their boundary. So can the clock, for a `recency` option given no `now`: each page
+  is ranked by its own read's time, and a caller paging such a search gives every page the first one's `now`.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).

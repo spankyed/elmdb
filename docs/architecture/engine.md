@@ -284,8 +284,8 @@ an answer:
   `after` passes over the ids up to the cursor as they come.
 - **A search is asked for no more than its answer takes.** A `limit` straight after a `search`, or after the `after`
   straight after it, asks it for its best that many, which it keeps as it scores and no others; `first` and
-  `firstRow` ask for the best one, and `exists` for any one, which it answers from the indexes with no match
-  scored. With any other step between, the search ranks every match and the step after stops the walk.
+  `firstRow` ask for the best one, and `exists` for any one, which straight after the search it answers from the
+  indexes with no match scored; past an `after` it is the best one of the page. With any other step between, the search ranks every match and the step after stops the walk.
 - **`orderBy` then `limit` holds the first `limit`** where the order is sorted, in order with ties kept as they came,
   rather than sorting the whole set: the set is still read, and the memory is the limit's.
 
