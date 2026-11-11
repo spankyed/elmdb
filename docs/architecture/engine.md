@@ -223,7 +223,7 @@ an answer:
     then 1,024. An index is counted to its end when its entries in every start type were. Of those that are, the
     one holding the fewest over all the types is read; of equals, the index on several steps, then the first
     written, a `range` past the plan's first step after the others. It is read as soon as no index still being
-    counted could hold fewer, which one already counted that far can't; after the count to 1,024 it is read
+    counted could hold as few, which one already counted past that can't; after the count to 1,024 it is read
     whatever the others may hold. So over one start type, where the fewest are `n`, under 1,024, that index is
     read, and the count has read no more than 16 keys of each index or eight times `n`, whichever is more.
   - When no index is counted to its end, each holding 1,024 entries or more in some start type, they are not told
@@ -242,8 +242,8 @@ an answer:
     every entry between the bounds for a range the plan starts with or an index on several steps, however many
     those are. What is counted decides only what is read: the keys are no entity's and not among a plan's
     visits, and a tracked read records none of them. It depends on the index it read and the fields it tested,
-    and on whether each index the choice was among is built and orders every entity, which is asked of each of
-    those.
+    and on whether each index it asked after is built and orders every entity, one found not built among
+    them.
 
   A filter no stage would take, a `withRole` of an undeclared role or a `range` with bounds it can't take, is
   refused before anything is read, the last written first, as when every stage runs. A page's cursor straight

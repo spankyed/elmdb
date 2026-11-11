@@ -692,3 +692,40 @@ fn an_index_counted_to_its_end_is_read_after_the_last_count_whatever_one_still_b
         assert_eq!(visits(&db, plan(&["A", "B"], "live", steps.clone(), "ids")), (1000, 2000), "{steps:?}");
     }
 }
+
+#[test]
+fn indexes_holding_as_many_over_the_start_types_are_told_apart_by_which_is_written_first() {
+    // Sixteen entries each: the value's all in `A`, as many as the first count goes to there, so not yet known to
+    // be all of them when the role's, eight in each type, are
+    let (_dir, db) = open();
+    let mut ops = Vec::new();
+    for at in 0..60 {
+        let ty = if at < 40 { "A" } else { "B" };
+        let id = format!("{ty}-{at:05}");
+        ops.push(json!({ "op": "create", "type": ty, "id": id, "fields": { "a": if at < 16 { 1 } else { 0 } } }));
+        if at < 8 || (40..48).contains(&at) {
+            ops.push(json!({ "op": "grant", "id": id, "role": "r1" }));
+        }
+    }
+    super::write(&db, ops).unwrap();
+    let role = json!({ "step": "withRole", "role": "r1" });
+    let one = json!({ "step": "where", "field": "a", "value": 1 });
+    // The stage of an explained read that read an index
+    let reading = |steps: Vec<Json>| {
+        let op = json!({ "read": "query", "explain": true, "plan": plan(&["A", "B"], "live", steps, "ids") });
+        let reads = Reads { reads: vec![serde_json::from_value::<ReadOp>(op).unwrap()], track: None };
+        let answers = serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&reads).unwrap()[..]).unwrap());
+        let explained = answers.unwrap()[0].take();
+        let stages: Vec<Json> = explained["stages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|stage| stage.get("index").is_some())
+            .cloned()
+            .collect();
+        assert_eq!(stages.len(), 1, "one stage reads an index: {explained}");
+        (stages[0]["stage"].clone(), stages[0]["visited"].clone())
+    };
+    assert_eq!(reading(vec![one.clone(), role.clone()]), (json!("where"), json!(16)));
+    assert_eq!(reading(vec![role, one]), (json!("withRole"), json!(16)));
+}

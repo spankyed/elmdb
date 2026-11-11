@@ -1771,7 +1771,7 @@ impl<R: Read> Query<'_, R> {
     /// visits. Every index's entries are counted no further than the first of `COUNTED` in each start type, and
     /// then no further than the next. An index is counted to its end when each type's entries were, and of those
     /// that are, the one holding the fewest over all the types is read, the first given of equals: once no index
-    /// still being counted could hold fewer, which one whose count so far has reached that fewest can't, and at
+    /// still being counted could hold as few, which one whose count so far has passed that fewest can't, and at
     /// the last of `COUNTED` whatever the others may hold. So the counting reads from each index, in each type, no
     /// more than the last of `COUNTED`, however many the indexes hold: a read that stops at its first match waits
     /// on no more than that. None when no index is counted to its end by then
@@ -1779,7 +1779,7 @@ impl<R: Read> Query<'_, R> {
         let rounds = COUNTED.len();
         for (round, upto) in COUNTED.into_iter().enumerate() {
             let mut fewest: Option<(u64, Access)> = None;
-            // The least any index not counted to its end is known to hold: it holds more
+            // The least any index not counted to its end is known to hold: it holds that many or more
             let mut open = u64::MAX;
             for (access, entries) in readable {
                 match self.held(entries, upto)? {
@@ -1789,7 +1789,7 @@ impl<R: Read> Query<'_, R> {
                 }
             }
             if let Some((least, access)) = fewest
-                && (open >= least || round + 1 == rounds)
+                && (open > least || round + 1 == rounds)
             {
                 return Ok(Some(access));
             }
