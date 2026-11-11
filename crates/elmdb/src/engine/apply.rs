@@ -425,7 +425,7 @@ fn create(
         }
         None => ids::new_entity_id(entity_type, t.now),
     };
-    entities::insert(t, &id)?;
+    let made = entities::insert(t, &id)?;
     let short_code = match (brought, &prefix) {
         (Some(code), _) => Some(code.to_owned()),
         (None, Some(prefix)) => Some(numbering::next_short_code(t, entity_type, prefix)?),
@@ -441,6 +441,10 @@ fn create(
     for (name, value) in fields {
         entities::put_field(t, &id, name, value)?;
     }
+    // The times are written above for every entity, and the rest are the fields given
+    entities::file_without(t, &id, made.seq, |name| {
+        name == field::CREATED_AT || name == field::UPDATED_AT || fields.get(name).is_some_and(|value| !value.is_nil())
+    })?;
     Ok(OpResult::Entity { id, short_code, created: true })
 }
 

@@ -138,7 +138,12 @@ A plan is a scope, a start, steps and a terminal:
 - **Starts:** types (in creation order), ids (in the order given), or every entity. A type the schema doesn't declare is
   refused (`UNKNOWN_TYPE`), as a kind or role a read names is.
 - **Filters:** `ofType`, `within`, `where` (a value, or a list holding it; a `null` matches a field that is null or
-  missing), `has`, `lacks`, `withRole`, `linkedWith`, `linkedTo`, `linkedFrom`, `unlinkedTo`, `unlinkedFrom`.
+  missing), `range` (a value within bounds, or a list holding one: `atLeast` or `above`, and `atMost` or `below`, on one
+  side or both), `has`, `lacks`, `withRole`, `linkedWith`, `linkedTo`, `linkedFrom`, `unlinkedTo`, `unlinkedFrom`. A
+  `range`'s bounds are all numbers or all strings. Number bounds hold numbers and timestamps, a timestamp counting as
+  its milliseconds whether it is a bound or a value; string bounds hold strings, in the order of the schema's
+  collation. A value of the other kind is outside every range, as a missing or null one is. A step with no bound, with
+  two on one side, or with bounds of two kinds is refused (`BATCH_INVALID`).
 - **Walks:** `out`, `in` and `both` (each far end once, of the types when given), `descendants` and `ancestors`
   (nearest first, each entity once, so a cycle ends the walk; with `depth`, at most that many edges away), and `pathTo`
   (a shortest path from an entity of the set to `to`, following edges `out`, `in` or `both` ways and at most `depth`
@@ -177,9 +182,9 @@ A plan is a scope, a start, steps and a terminal:
   nothing. Each score is a hit's, as a rank's is. It reads from `to` two edges out, not the whole set: straight after a type start an entity's membership is its type and the scope, read per candidate, so it costs what `to`'s neighbourhood holds; after other steps it collects the set. Adamic–Adar's logarithm is libm's, so its scores are the same bits on every platform. Unlike `like`,
   which ranks by embedding, it ranks by links.
 - **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
-  then a missing or null value; ties keep the query's order), `reverse`, `limit`, `distinct`, `after` (the entities
-  after an id, a page's cursor; an id no longer in the answer answers nothing, so a caller pages again from the
-  start).
+  then a missing or null value; ties keep the query's order, and `descending` reverses the values and not the ties),
+  `reverse`, `limit`, `distinct`, `after` (the entities after an id, a page's cursor; an id no longer in the answer
+  answers nothing, so a caller pages again from the start).
 - **Search:** `search` (a text index's matches, most relevant first; `search.md`, Text search as built); `containing`
   and `matching` (a trigram index's substring and pattern matches, in the set's order; `search.md`, Substrings and
   patterns as built), a pattern the syntax doesn't hold refused (`PATTERN_INVALID`); `near`, `like` and `hybrid` (a vector
@@ -198,7 +203,7 @@ A plan is a scope, a start, steps and a terminal:
   counts by its weight unless `weights` is false; a negative resolution or no iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search, a rank or a `similar` found in each entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
-their answer, and a live type's `count` is read off its counter. The planner makes four choices, none of which changes
+their answer, and a live type's `count` is read off its counter. The planner makes these choices, none of which changes
 an answer:
 
 - **A type start's filters are read from an index.** A `where` or `withRole` straight after a type start reads a built
@@ -215,8 +220,31 @@ an answer:
   edges from the last instead of collecting the walk, an end joined by several edges of a keyed kind
   coming at its first edge's place as in the walk, so the last `limit` edges cost the limit and not the list. From
   several entities or kinds, the `reverse` collects the walk.
-- **`orderBy` then `limit` holds the first `limit`**, in order with ties kept as they came, rather than sorting the whole
-  set: the set is still read, and the memory is the limit's.
+- **An order is read from an index.** An `orderBy` straight after the start of one type, live or with the trash,
+  reads the type's entities in the field's order from a built value index on that one field, when every value the
+  index holds is a boolean or a number: false, true and the numbers as its entries have them, each value's entities
+  in place order, then the entities without a value; `descending`, those first and the values from the greatest. Such
+  an index accounts for every entity of its type (`schema.md`, Indexes), which is what lets the walk leave none out.
+  Each entity is handed on as its entry is read, so a `limit`, `first` or `exists` after it reads no further than its
+  answer: the first ten of a million read ten. A field holding a string, whose order is the collation's and not its
+  entry's bytes', or a list or another value the index doesn't order, is sorted as before, as are several types, a
+  start of ids, and the trash alone.
+- **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
+  bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
+  creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
+  reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's as a
+  search leaves them out, and reads no entity. A range of strings, one after another step, and one over a type
+  without such an index filter what reaches them.
+- **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
+  seek in: a type start (the cursor's place in its type's creation order, the types before its own
+  left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters
+  are read from (the cursor's entry among the value's, or its place in the walk of a type with no index), and an
+  `orderBy` read from an index (the cursor's entry, or its place among the entities without a value). The page then
+  costs what it holds wherever the cursor is. A cursor that isn't in the set (another type's entity, one the scope
+  doesn't reach, one a filter leaves out, one without the value) answers nothing and reads nothing. After any other
+  stage, `after` passes over the ids up to the cursor as they come.
+- **`orderBy` then `limit` holds the first `limit`** where the order is sorted, in order with ties kept as they came,
+  rather than sorting the whole set: the set is still read, and the memory is the limit's.
 
 A query asked for its `visits` answers how many entities its start and walks read from the store, index entries
 included, which is what says whether a filter walked rows an index could have answered.
@@ -231,7 +259,8 @@ its `index`, the bound on its scores as its `error` and, while the index isn't b
 is what the stage before handed it plus what it read from the store itself; `kept` what it handed on (a terminal's is
 what it answers); and `ms` the time spent in the stage's own code, not in the stages it pulled from or handed to, so
 the stages' times add up to at most the whole. A stage a driving index answered, a filter before it, visits and keeps
-nothing of its own: the stage reading the index does its filtering. EXPLAIN times each crossing between stages, so its
+nothing of its own: the stage reading the index does its filtering. So does a `range` the `orderBy` after it reads
+between. EXPLAIN times each crossing between stages, so its
 `ms` is the explained read's, a little above the plain one's.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last

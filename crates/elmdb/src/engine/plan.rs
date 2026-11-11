@@ -192,6 +192,26 @@ pub enum Step {
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: rmpv::Value,
     },
+    /// The entities whose field holds a value within the bounds, or a list holding one: at or above `atLeast` or above
+    /// `above`, and at or below `atMost` or below `below`. A step gives a bound on one side or on both, and its bounds
+    /// are all numbers or all strings. Number bounds hold numbers and timestamps, a timestamp counting as its
+    /// milliseconds whether it is a bound or a value; string bounds hold strings, in the order of the schema's
+    /// collation. A value of the other kind is outside every range, as a missing or null one is
+    Range {
+        field: String,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
+        at_least: Option<rmpv::Value>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
+        above: Option<rmpv::Value>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
+        at_most: Option<rmpv::Value>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(type = "unknown", optional))]
+        below: Option<rmpv::Value>,
+    },
     Has {
         field: String,
     },
@@ -349,7 +369,8 @@ pub enum Step {
         measure: Similarity,
     },
     /// By the field's value: booleans, numbers, timestamps, strings (by the schema's collation), anything else by its
-    /// JSON, then a missing or null value; ties keep the query's order
+    /// JSON, then a missing or null value; ties keep the query's order. `descending` reverses the values' order and
+    /// not the ties'
     OrderBy {
         field: String,
         #[serde(default)]
@@ -366,7 +387,8 @@ pub enum Step {
         #[cfg_attr(feature = "codegen", ts(optional))]
         field: Option<String>,
     },
-    /// The entities after `id` in the order so far: a page's cursor, the last id of the page before
+    /// The entities after `id` in the order so far: a page's cursor, the last id of the page before. An id that isn't
+    /// in the set answers nothing
     After {
         id: String,
     },

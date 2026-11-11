@@ -68,6 +68,65 @@ fn a_scan_a_read_stopped_is_tracked_as_far_as_it_went() {
 }
 
 #[test]
+fn a_walk_between_two_keys_reads_and_records_nothing_outside_them() {
+    use crate::engine::keys;
+    use crate::engine::tracking::Recording;
+    use crate::engine::unit::Read;
+    use crate::format::key::Part;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let tasks =
+        (1..=5).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}"), "fields": { "a": n } }));
+    write(&db, tasks.collect()).unwrap();
+    let at = |n: f64| keys::index_range("Task", "a", &[Part::Number(n)]);
+    // The numbers of the entries a walk hands over, and the ranges it is recorded as having read
+    let walked = |back: bool, from: f64, to: f64, stop_at: Option<f64>| {
+        db.snapshot(|s| {
+            let recording = Recording::new(s);
+            let mut seen = Vec::new();
+            let each = |key: &[u8], _: &[u8]| {
+                let Some(Part::Number(n)) = crate::format::key::decode(key).unwrap().into_iter().nth(3) else {
+                    panic!("an entry of a number")
+                };
+                seen.push(n);
+                stop_at != Some(n)
+            };
+            if back {
+                recording.visit_back_within(&at(from), &at(to), each)?;
+            } else {
+                recording.visit_within(&at(from), &at(to), each)?;
+            }
+            Ok((seen, recording.into_reads().ranges))
+        })
+        .unwrap()
+    };
+    let whole = |from: f64, to: f64| vec![(at(from), Some(at(to)))];
+    assert_eq!(walked(false, 2.0, 4.0, None), (vec![2.0, 3.0], whole(2.0, 4.0)));
+    assert_eq!(walked(true, 2.0, 4.0, None), (vec![3.0, 2.0], whole(2.0, 4.0)));
+    assert_eq!(walked(false, 0.0, 9.0, None).0, [1.0, 2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(walked(true, 0.0, 9.0, None).0, [5.0, 4.0, 3.0, 2.0, 1.0]);
+    // A walk stopped is recorded as far as it went: up to just past its last entry, or down to it
+    let (seen, ranges) = walked(false, 1.0, 5.0, Some(2.0));
+    assert_eq!(seen, [1.0, 2.0]);
+    assert_eq!(ranges.len(), 1);
+    let (low, high) = (&ranges[0].0, ranges[0].1.as_ref().unwrap());
+    assert_eq!(low, &at(1.0));
+    assert!(high > &at(2.0) && high < &at(2.5), "it ends past the entry of 2 and before any of a greater number");
+    let (seen, ranges) = walked(true, 1.0, 5.0, Some(3.0));
+    assert_eq!(seen, [4.0, 3.0]);
+    assert_eq!(ranges.len(), 1);
+    let (low, high) = (&ranges[0].0, ranges[0].1.as_ref().unwrap());
+    assert!(low > &at(3.0) && low < &at(3.5), "it starts at the entry of 3");
+    assert_eq!(high, &at(5.0));
+    // Nothing lies from a key up to itself, or up to one before it
+    for back in [false, true] {
+        assert!(walked(back, 3.0, 3.0, None).0.is_empty(), "back {back}");
+        assert!(walked(back, 4.0, 2.0, None).0.is_empty(), "back {back}");
+    }
+}
+
+#[test]
 fn a_unit_names_its_tokens_when_it_commits_and_a_refused_batch_commits_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

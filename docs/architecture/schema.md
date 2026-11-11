@@ -188,10 +188,11 @@ An entity's edges keep the order they were linked in.
 ## Indexes
 
 Indexes are declared on the type, named, and separate from the fields, since one index can cover several fields and one
-field several indexes. A plan never names a value index: the engine reads a built one for a `where` or `withRole` it can. A
-search step names its text, trigram or vector index only when the type has more than one.
+field several indexes. A plan never names a value index: the engine reads a built one for a `where`, a `withRole`, a
+`range` or an `orderBy` it can (`engine.md`, Reads: plans). A search step names its text, trigram or vector index only
+when the type has more than one.
 
-**Value**: equality lookups, and what `unique` enforces.
+**Value**: equality lookups, ranges and order, and what `unique` enforces.
 
 ```json
 "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"], "unique": false }
@@ -205,6 +206,12 @@ search step names its text, trigram or vector index only when the type has more 
   type's rows.
 - A `list` field is indexed per element. A string longer than 256 bytes (UTF-8) isn't indexed: the type's rows are walked
   for it instead.
+- An index on one field accounts for every entity of its type: besides its entries, it holds which entities are without
+  a value (the field missing or null) and which hold a value it doesn't order (a list, a map, bytes, a timestamp, a
+  string past 256 bytes). That is what lets a plan read the type in the field's order, or a range of it, from the
+  index alone and leave no entity out. Numbers and booleans are read in order; strings are held, and sorted by the
+  schema's collation when a plan orders by them. A number field that every entity holds costs nothing more for it; an
+  optional one costs a key for each entity without it.
 - Every type has a unique value index on `shortCode` and one on `role`, without declaring them.
 
 **Text**: ranked full-text search (`search.md`).

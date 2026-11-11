@@ -2,8 +2,9 @@
 // otherwise: `node crates/elmdb-node/bench/against-sqlite.mjs [--json] [--notes N] [--dir PATH]` after `npm run build`
 // (`docs/architecture/testing.md`, Against SQLite). Each note has a title in a text index and a number and a status in
 // value indexes. It reads what a note costs in bytes, what a create's commit costs at a twentieth of the notes and at
-// all of them, and what a search, an ordered read, a range, a page, a check and a rebuild cost at all of them. Neither
-// engine syncs. The two answer each read alike before any is timed.
+// all of them, and what a search, an ordered read, a range, a page in the order the notes were made and one in their
+// number's, a check and a rebuild cost at all of them. Neither engine syncs. The two answer each read alike before any
+// is timed.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -41,16 +42,23 @@ const WORDS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 
 const UNIT = 5000;
 const COMMITS = 41;
 const id = (i) => `Note-${String(i).padStart(7, '0')}`;
+const numberOf = (i) => (i * 7919) % NOTES;
 // Six terms a note: three every note holds, two a twelfth hold, and its own number, which no other holds
 const note = (i) => ({
   id: id(i),
   title: `the ${WORDS[i % 12]} ${WORDS[(i * 7) % 12]} note number ${i}`,
-  n: (i * 7919) % NOTES,
+  n: numberOf(i),
   status: i % 2 ? 'open' : 'done',
 });
 
+// The note 200 from the last in the order of the notes' numbers, those of one number in the order they were made: the
+// cursor of a page near that order's end
+const numbered = Uint32Array.from({ length: NOTES }, (_, i) => i).sort((a, b) => numberOf(a) - numberOf(b) || a - b);
+const NEAR_END_BY_NUMBER = id(numbered[NOTES - 200]);
+
 // Ten more notes, of ten words each, holding a word no other does from once to ten times: equally long, so either
-// engine's ranking puts the one holding it most first, whatever its formula's constants
+// engine's ranking puts the one holding it most first, whatever its formula's constants. Their numbers are past every
+// other note's, so they are the ten highest
 const RANKED = Array.from({ length: 10 }, (_, k) => ({
   id: `Note-r${k}`,
   title: [...Array(k + 1).fill('quokka'), ...Array(9 - k).fill('wombat')].join(' '),
@@ -81,6 +89,14 @@ function timed(runs, work) {
 const progress = (text) => process.stderr.write(`${text}\n`);
 
 const root = mkdtempSync(join(parent, 'elmdb-against-sqlite-'));
+
+// The plans of the ordered reads, the range and the pages
+const LOWEST = [{ step: 'orderBy', field: 'n' }, { step: 'limit', n: 10 }];
+const HIGHEST = [{ step: 'orderBy', field: 'n', descending: true }, { step: 'limit', n: 10 }];
+// The notes' own numbers from `least` on: below the ranked notes', which are past them
+const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: NOTES }];
+const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
+const pageByNumberAfter = (cursor) => [{ step: 'orderBy', field: 'n' }, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 
 // elmdb through the binding, as a program calls it
 function elmdb() {
@@ -115,11 +131,22 @@ function elmdb() {
     // How many entities the plan visited to answer the best ten
     visited: (text) => query([search(text, false), { step: 'limit', n: 10 }], { answer: 'ids' }, { explain: true }).visited,
     count: (text) => query([search(text, false)], { answer: 'count' }).n,
-    lowest: () => query([{ step: 'orderBy', field: 'n' }, { step: 'limit', n: 10 }], { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
-    lowestVisited: () => query([{ step: 'orderBy', field: 'n' }, { step: 'limit', n: 10 }], { answer: 'ids' }, { explain: true }).visited,
-    // A plan has no range step, so a caller reads the field of every note and keeps what is in the range
-    atLeast: (least) => query([], { answer: 'rows', fields: ['n'] }).rows.filter((row) => row.n >= least).length,
-    pageAfter: (cursor) => query([{ step: 'after', id: cursor }, { step: 'limit', n: 50 }], { answer: 'ids' }).ids,
+    lowest: () => query(LOWEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
+    highest: () => query(HIGHEST, { answer: 'rows', fields: ['n'] }).rows.map((row) => row.n),
+    atLeast: (least) => query(atLeast(least), { answer: 'count' }).n,
+    pageAfter: (cursor) => query(pageAfter(cursor), { answer: 'ids' }).ids,
+    pageByNumberAfter: (cursor) => query(pageByNumberAfter(cursor), { answer: 'ids' }).ids,
+    // How many entities each of those plans visited
+    visits: () => {
+      const visited = (steps) => query(steps, { answer: 'ids' }, { visits: true }).visited;
+      return {
+        lowestTenVisited: visited(LOWEST),
+        highestTenVisited: visited(HIGHEST),
+        last500Visited: visited(atLeast(NOTES - 500)),
+        pageNearEndVisited: visited(pageAfter(id(NOTES - 200))),
+        pageByNumberNearEndVisited: visited(pageByNumberAfter(NEAR_END_BY_NUMBER)),
+      };
+    },
     check: () => {
       const report = db.check();
       assert.deepEqual([report.differences.length, report.violations.length], [0, 0], 'elmdb: check() found a difference');
@@ -162,8 +189,12 @@ function sqlite() {
   const best = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10');
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
   const lowest = db.prepare('SELECT n FROM notes ORDER BY n LIMIT 10');
-  const atLeast = db.prepare('SELECT count(*) AS n FROM notes WHERE n >= ?');
+  const highest = db.prepare('SELECT n FROM notes ORDER BY n DESC LIMIT 10');
+  const atLeast = db.prepare('SELECT count(*) AS n FROM notes WHERE n >= ? AND n < ?');
   const pageAfter = db.prepare('SELECT id FROM notes WHERE rowid > (SELECT rowid FROM notes WHERE id = ?) ORDER BY rowid LIMIT 50');
+  const pageByNumberAfter = db.prepare(
+    'SELECT id FROM notes WHERE (n, rowid) > (SELECT n, rowid FROM notes WHERE id = ?) ORDER BY n, rowid LIMIT 50',
+  );
   return {
     version: db.prepare('SELECT sqlite_version() AS v').get().v,
     text,
@@ -177,8 +208,10 @@ function sqlite() {
     best: (text) => best.all(text).map((row) => row.id),
     count: (text) => count.get(text).n,
     lowest: () => lowest.all().map((row) => row.n),
-    atLeast: (least) => atLeast.get(least).n,
+    highest: () => highest.all().map((row) => row.n),
+    atLeast: (least) => atLeast.get(least, NOTES).n,
     pageAfter: (cursor) => pageAfter.all(cursor).map((row) => row.id),
+    pageByNumberAfter: (cursor) => pageByNumberAfter.all(cursor).map((row) => row.id),
     check: () => assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok', 'sqlite: integrity_check'),
     rebuild: () => db.exec(`${text ? "INSERT INTO notes_fts(notes_fts) VALUES ('rebuild');" : ''} REINDEX;`),
     bytes: () => {
@@ -247,7 +280,13 @@ function measure(name, engine) {
   progress(`${name}: ${NOTES} notes loaded in ${out.loadSeconds} s`);
   out.bytesPerNote = Math.round(engine.bytes() / (NOTES + extra));
 
-  const answers = { lowest: engine.lowest(), atLeast: engine.atLeast(NOTES - 500), page: engine.pageAfter(id(NOTES - 200)) };
+  const answers = {
+    lowest: engine.lowest(),
+    highest: engine.highest(),
+    atLeast: engine.atLeast(NOTES - 500),
+    page: engine.pageAfter(id(NOTES - 200)),
+    pageByNumber: engine.pageByNumberAfter(NEAR_END_BY_NUMBER),
+  };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
     Object.assign(answers, { everyCount: engine.count('the'), twelfthCount: engine.count('alpha'), twelfthBest: engine.best('alpha').length, ranked: engine.best('quokka') });
@@ -262,12 +301,14 @@ function measure(name, engine) {
   }
   out.reads = {
     lowestTenMs: timed(5, () => engine.lowest()).ms,
-    last500Ms: timed(3, () => engine.atLeast(NOTES - 500)).ms,
+    highestTenMs: timed(5, () => engine.highest()).ms,
+    last500Ms: timed(5, () => engine.atLeast(NOTES - 500)).ms,
     pageNearEndMs: timed(5, () => engine.pageAfter(id(NOTES - 200))).ms,
+    pageByNumberNearEndMs: timed(5, () => engine.pageByNumberAfter(NEAR_END_BY_NUMBER)).ms,
   };
   if (engine.visited) {
     out.searches.everyBestTenVisited = engine.visited('the');
-    out.reads.lowestTenVisited = engine.lowestVisited();
+    Object.assign(out.reads, engine.visits());
   }
   progress(`${name}: read`);
   commits();

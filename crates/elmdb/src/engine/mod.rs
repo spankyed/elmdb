@@ -194,12 +194,14 @@ pub(crate) fn drop_index_data(
             continue;
         }
         if let ["types", entity_type, "indexes", index] = parts.as_slice() {
-            let (low, high) = crate::format::key::prefix_range(&keys::index_range(entity_type, index, &[]));
-            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
-            let doomed: Vec<Vec<u8>> =
-                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
-            for key in doomed {
-                db.delete(txn, &key)?;
+            for range in keys::value_index_ranges(entity_type, index) {
+                let (low, high) = crate::format::key::prefix_range(&range);
+                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                let doomed: Vec<Vec<u8>> =
+                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                for key in doomed {
+                    db.delete(txn, &key)?;
+                }
             }
             for range in keys::text_index_ranges(entity_type, index) {
                 let (low, high) = crate::format::key::prefix_range(&range);

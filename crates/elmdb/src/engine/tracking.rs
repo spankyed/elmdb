@@ -99,38 +99,35 @@ impl<R: Read> Read for Recording<'_, R> {
         outcome
     }
 
-    fn visit_from(&self, prefix: &[u8], from: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_within(&self, from: &[u8], to: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         let mut stopped_at = None;
-        let outcome = self.inner.visit_from(prefix, from, |k, v| {
+        let outcome = self.inner.visit_within(from, to, |k, v| {
             let go = visit(k, v);
             if !go {
                 stopped_at = Some(k.to_vec());
             }
             go
         });
-        let (low, high) = prefix_range(prefix);
-        // What was read starts where the visit did: a seek past a part of the range read none of it
-        let start = if from > low.as_slice() { from.to_vec() } else { low };
-        self.scanned(start, Some(high), if outcome.is_ok() { stopped_at } else { None });
+        // What was read is what lies between the two keys, as far as the visit went
+        self.scanned(from.to_vec(), Some(to.to_vec()), if outcome.is_ok() { stopped_at } else { None });
         outcome
     }
 
-    fn visit_back(&self, prefix: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_back_within(&self, from: &[u8], to: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         let mut stopped_at = None;
-        let outcome = self.inner.visit_back(prefix, |k, v| {
+        let outcome = self.inner.visit_back_within(from, to, |k, v| {
             let go = visit(k, v);
             if !go {
                 stopped_at = Some(k.to_vec());
             }
             go
         });
-        let (low, high) = prefix_range(prefix);
-        // A walk from the last read from where it stopped to the range's end; one that failed is recorded whole
+        // A walk from the last read from where it stopped up to `to`; one that failed is recorded whole
         let low = match (outcome.is_ok(), stopped_at) {
             (true, Some(at)) => at,
-            _ => low,
+            _ => from.to_vec(),
         };
-        self.reads.borrow_mut().ranges.push((low, Some(high)));
+        self.reads.borrow_mut().ranges.push((low, Some(to.to_vec())));
         outcome
     }
 

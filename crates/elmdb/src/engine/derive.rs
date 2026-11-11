@@ -67,6 +67,27 @@ fn index_entries_into(
     Ok(())
 }
 
+/// What an index that accounts for every entity of its type holds besides its entries: each of these entities it
+/// files among those without a value, or among those whose value it doesn't order (`entities::other_of`)
+fn index_others_into(
+    r: &impl Read,
+    entity_type: &str,
+    index: &ValueIndex,
+    of: &[&Entity],
+    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    if !index.accounts() {
+        return Ok(());
+    }
+    for e in of {
+        let value = entities::get(r, &e.id, &index.fields[0])?;
+        if let Some(prefix) = entities::other_of(value.as_ref()) {
+            emit(entities::other_key(prefix, entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuses what would keep a build of a value index from finishing: an entry whose key LMDB can't store
 /// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`)
 fn buildable_entry(
@@ -131,6 +152,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
         for index in value_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
                 index_entries_into(r, t, &index, of, &mut emit)?;
+                index_others_into(r, t, &index, of, &mut emit)?;
             }
         }
         let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
@@ -181,7 +203,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 19] = [
+const COMPARED: [Prefix; 21] = [
     Prefix::Live,
     Prefix::Changed,
     Prefix::Trashed,
@@ -189,6 +211,8 @@ const COMPARED: [Prefix; 19] = [
     Prefix::RelationCount,
     Prefix::FieldName,
     Prefix::Index,
+    Prefix::IndexWithout,
+    Prefix::IndexUnordered,
     Prefix::Out,
     Prefix::In,
     Prefix::Between,
@@ -204,8 +228,10 @@ const COMPARED: [Prefix; 19] = [
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 10] = [
+const PER_INDEX: [Prefix; 12] = [
     Prefix::Index,
+    Prefix::IndexWithout,
+    Prefix::IndexUnordered,
     Prefix::TextTerm,
     Prefix::TextBlock,
     Prefix::TextDocument,
@@ -373,10 +399,12 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             // replacement atomic, including a late uniqueness, scratch or graph failure.
             let mut scratch = sorted::Scratch::new()?;
             if let Some(found) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
+                let mut others = sorted::Scratch::new()?;
                 visit_entities(t, |e| {
                     if ids::type_of(&e.id) != entity_type {
                         return Ok(());
                     }
+                    index_others_into(t, entity_type, &found, &[&e], |key, value| others.push(key, value))?;
                     index_entries_into(t, entity_type, &found, &[&e], |key, value| {
                         entities::key_fits(&key, &e.id, entity_type, name)?;
                         if found.unique {
@@ -392,8 +420,14 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     })
                 })?;
                 let mut entries = scratch.finish()?;
-                t.clear_prefix(&keys::index_range(entity_type, name, &[]))?;
+                let mut others = others.finish()?;
+                for range in keys::value_index_ranges(entity_type, name) {
+                    t.clear_prefix(&range)?;
+                }
                 text::clear(t, entity_type, name)?;
+                while let Some((key, value)) = others.next()? {
+                    t.put(&key, &value)?;
+                }
                 let mut holder: Option<(Vec<u8>, String)> = None;
                 while let Some((order, value)) = entries.next()? {
                     if found.unique {
@@ -626,6 +660,11 @@ pub fn build_chunk(
             let key = keys::index_entry(entity_type, name, &parts, *seq);
             entities::key_fits(&key, id, entity_type, name)?;
             t.put(&key, &values::encode(&id.as_str().into()))?;
+        }
+        if index.accounts()
+            && let Some(prefix) = entities::other_of(fields[0].as_ref())
+        {
+            t.put(&entities::other_key(prefix, entity_type, name, *seq), &values::encode(&id.as_str().into()))?;
         }
         last = *seq;
     }

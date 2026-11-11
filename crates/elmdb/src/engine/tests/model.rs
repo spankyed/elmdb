@@ -1110,6 +1110,33 @@ fn derived_reads() -> Vec<(String, Json)> {
                 let steps = json!([{ "step": "where", "field": field, "value": probe }, { "step": "limit", "n": 2 }]);
                 out.push((format!("{t} first 2 where {field} {probe}"), ids(start.clone(), steps, "live")));
             }
+            // A range of numbers, with both bounds and with one; and one put in order, its first two
+            let between = json!({ "step": "range", "field": field, "atLeast": 2, "below": 6 });
+            out.push((format!("{t} range {field} 2 6"), ids(start.clone(), json!([between]), "live")));
+            let above = json!({ "step": "range", "field": field, "above": 4 });
+            out.push((format!("{t} range {field} 4 up"), ids(start.clone(), json!([above]), "live")));
+            for descending in [false, true] {
+                let order = json!({ "step": "orderBy", "field": field, "descending": descending });
+                let direction = if descending { "desc" } else { "asc" };
+                let steps = json!([between, order, { "step": "limit", "n": 2 }]);
+                out.push((format!("{t} ranged {field} {direction}"), ids(start.clone(), steps, "live")));
+                // A page of two after each of the type's ids, and after one of the other type's, in the field's order
+                for cursor in IDS {
+                    let steps = json!([order, { "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+                    out.push((format!("{t} page {field} {direction} {cursor}"), ids(start.clone(), steps, "live")));
+                }
+            }
+        }
+        // A page of two after each id in the order the type was created in, and among the holders of a value
+        for cursor in IDS {
+            let steps = json!([{ "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+            out.push((format!("{t} after {cursor}"), ids(start.clone(), steps, "live")));
+            let steps = json!([
+                { "step": "where", "field": "a", "value": 3 },
+                { "step": "after", "id": cursor },
+                { "step": "limit", "n": 2 }
+            ]);
+            out.push((format!("{t} holders after {cursor}"), ids(start.clone(), steps, "live")));
         }
         if t == "Note" {
             for n in 0..GREPS.len() {
@@ -1194,6 +1221,20 @@ fn ordered_as(
         (Some(x), Some(y)) if class(a) == 3 => collator.compare(&x.to_string(), &y.to_string()),
         _ => std::cmp::Ordering::Equal,
     })
+}
+
+/// Whether a `range` holds a value: a number `within` it, or a list holding one
+fn in_range(value: Option<&Json>, within: &impl Fn(f64) -> bool) -> bool {
+    match value {
+        Some(Json::Array(items)) => items.iter().filter_map(Json::as_f64).any(within),
+        Some(value) => value.as_f64().is_some_and(within),
+        None => false,
+    }
+}
+
+/// The two ids after `cursor` among `ids`, or none when it isn't one of them
+fn page_after<'a>(ids: impl Iterator<Item = &'a String>, cursor: &str) -> Vec<&'a String> {
+    ids.skip_while(|id| *id != cursor).skip(1).take(2).collect()
 }
 
 /// What the derived reads should answer, from the model
@@ -1291,6 +1332,46 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                     let take = limit.parse().unwrap_or(usize::MAX);
                     json!(ordered.into_iter().take(take).map(|(id, _)| id).collect::<Vec<_>>())
                 }
+                ["range", field, low, high] => {
+                    let low: f64 = low.parse().unwrap();
+                    let within = |n: f64| match high.parse::<f64>() {
+                        Ok(high) => low <= n && n < high,
+                        Err(_) => low < n,
+                    };
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && in_range(e.fields.get(*field), &within))
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
+                ["ranged", field, direction] => {
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let mut ordered: Vec<(&String, &Entity)> = of_type()
+                        .filter(|(_, e)| !e.trashed && in_range(e.fields.get(*field), &within))
+                        .copied()
+                        .collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(ordered.into_iter().take(2).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["page", field, direction, cursor] => {
+                    let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(page_after(ordered.into_iter().map(|(id, _)| id), cursor))
+                }
+                ["after", cursor] => {
+                    json!(page_after(of_type().filter(|(_, e)| !e.trashed).map(|(id, _)| *id), cursor))
+                }
+                ["holders", "after", cursor] => json!(page_after(
+                    of_type().filter(|(_, e)| !e.trashed && holds(e.fields.get("a"), &json!(3))).map(|(id, _)| *id),
+                    cursor
+                )),
                 ["first", n, "where", field, probe] => {
                     let probe = Json::from(probe.parse::<i64>().unwrap());
                     json!(

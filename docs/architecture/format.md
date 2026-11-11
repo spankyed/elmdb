@@ -23,6 +23,8 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |
 | `d/x` type index values seq | a value index | derived |
+| `d/xw` type index seq | an entity of the type without a value in the field of a value index on one field: the field is missing or null | derived |
+| `d/xu` type index seq | an entity of the type whose value a value index on one field doesn't order: a list, or a value it can't file | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's term: the places of the entities holding it, each with the term's count in each field, when they are no more than 256; that they are in blocks, when more | derived |

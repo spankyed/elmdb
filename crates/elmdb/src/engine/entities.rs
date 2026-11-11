@@ -8,6 +8,9 @@
 //! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
 //!   goes, as a property key is in a graph database, and pruned only by `rebuild`
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
+//! - `d/xw type index seq` → id, `d/xu type index seq` → id: the entities a value index on one field files no one value
+//!   of, those without a value and those whose value it doesn't order, so that the index accounts for every entity of
+//!   its type (`ValueIndex::accounts`)
 //!
 //! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
 //! among them.
@@ -15,6 +18,7 @@
 use rmpv::Value;
 
 use crate::error::{Error, ErrorCode, Result};
+use crate::format::Prefix;
 use crate::format::key::{Part, decode as decode_key};
 use crate::schema::IndexDef;
 
@@ -178,7 +182,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     if stored.is_none() {
         register_field(t, id, field)?;
     }
-    reindex(t, id, field, before.as_ref(), Some(value), seq)?;
+    reindex(t, id, field, before.as_ref(), Some(value), seq, false)?;
     t.put_over(&key, &values::stored(value), stored.as_deref())?;
     super::text::refile(t, id, field, seq, Some(value))?;
     super::vector::refile(t, id, field, seq, Some(value))?;
@@ -237,7 +241,7 @@ pub fn delete_field(t: &mut Txn<'_, '_>, id: &str, field: &str) -> Result<()> {
     let Some(stored) = t.get(&key)? else { return Ok(()) };
     let before = values::decode_stored(&stored)?;
     let seq = place_for(t, id, field)?;
-    reindex(t, id, field, Some(&before), None, seq)?;
+    reindex(t, id, field, Some(&before), None, seq, false)?;
     t.del_over(&key, Some(&stored))?;
     super::text::refile(t, id, field, seq, None)?;
     super::vector::refile(t, id, field, seq, None)?;
@@ -256,13 +260,20 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
     super::vector::remove(t, id)?;
     super::trigram::remove(t, id)?;
     let seq = record(t, id)?.map(|r| r.seq);
-    for (field, bytes) in fields_stored(t, id)? {
-        let before = values::decode_stored(&bytes)?;
-        reindex(t, id, &field, Some(&before), None, seq)?;
-        t.del_over(&keys::value(id, &field), Some(&bytes))?;
+    let held = fields_stored(t, id)?;
+    for (field, bytes) in &held {
+        let before = values::decode_stored(bytes)?;
+        reindex(t, id, field, Some(&before), None, seq, true)?;
+        t.del_over(&keys::value(id, field), Some(bytes))?;
     }
     if let Some(record) = record(t, id)? {
         let entity_type = ids::type_of(id).to_owned();
+        // A field it never held left it among those without a value, which no field's removal above reached
+        for index in value_indexes(t.schema(), &entity_type).iter().filter(|index| index.accounts()) {
+            if !held.iter().any(|(field, _)| *field == index.fields[0]) {
+                t.del(&other_key(Prefix::IndexWithout, &entity_type, &index.name, record.seq))?;
+            }
+        }
         t.del(&keys::of_type(record.trashed, &entity_type, record.seq))?;
         t.del(&keys::changed(&entity_type, record.changed, record.seq))?;
         if !record.trashed {
@@ -280,6 +291,49 @@ pub struct ValueIndex {
     pub name: String,
     pub fields: Vec<String>,
     pub unique: bool,
+}
+
+impl ValueIndex {
+    /// Whether the index accounts for every entity of its type, as a declared index on one field does: an entity is in
+    /// its entries under the boolean, the number or the string its field holds, or among those without a value, or
+    /// among those whose value it doesn't order (`other_of`). A plan reads the type in the field's order from such an
+    /// index, which leaves no entity out. The short code's and the roles' indexes hold only what their lookups read
+    pub fn accounts(&self) -> bool {
+        matches!(self.fields.as_slice(), [only] if only != field::SHORT_CODE && only != field::ROLE)
+    }
+}
+
+/// Where an index that accounts for every entity files one whose field holds `value`, besides its entries: among those
+/// without a value when it is missing or null, among those it doesn't order when it is a list or a value it can't
+/// hold (a map, bytes, a timestamp, a string past `MAX_INDEXED_STRING`), and nowhere when it is a boolean, a number or
+/// a string it holds, which its entry orders
+pub fn other_of(value: Option<&Value>) -> Option<Prefix> {
+    match value {
+        None | Some(Value::Nil) => Some(Prefix::IndexWithout),
+        // A list is no scalar an index holds, though its elements are entries
+        Some(held) => match values::index_part(held) {
+            Some(_) => None,
+            None => Some(Prefix::IndexUnordered),
+        },
+    }
+}
+
+/// The key an index that accounts for every entity files the entity at `seq` under, among those `prefix` holds
+pub fn other_key(prefix: Prefix, entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
+    keys::place_under(&keys::index_others(prefix, entity_type, index), seq)
+}
+
+/// Files an entity just made, at `seq`, among those without a value in each index of its type that accounts for every
+/// entity and whose field it was given no value of, `valued` saying which it was. The writes of its fields found it
+/// filed nowhere, so one that gave it no value, or null, left this to do
+pub fn file_without(t: &mut Txn<'_, '_>, id: &str, seq: u64, valued: impl Fn(&str) -> bool) -> Result<()> {
+    let entity_type = ids::type_of(id).to_owned();
+    for index in value_indexes(t.schema(), &entity_type).iter().filter(|index| index.accounts()) {
+        if !valued(&index.fields[0]) {
+            t.put(&other_key(Prefix::IndexWithout, &entity_type, &index.name, seq), &values::encode(&id.into()))?;
+        }
+    }
+    Ok(())
 }
 
 /// The type's value indexes: its declared ones, and the short code's and the roles' every type has
@@ -434,10 +488,10 @@ fn check_unique(
     Err(Error::new(code, format!("{holder} already holds this value of the {what}, so {id} can't")))
 }
 
-/// Refiles the entity in each of its type's value indexes that covers `field`, as its value goes from `before` to
-/// `after`, refusing a value a unique index holds for another entity (`UNIQUE`, `SHORT_CODE_IN_USE`)
-/// Keeps the value indexes covering `field` of the entity at `seq` (none for one not stored) as it goes from `before`
-/// to `after`
+/// Refiles the entity at `seq` (none for one not stored) in each of its type's value indexes that covers `field`, as
+/// its value goes from `before` to `after`, refusing a value a unique index holds for another entity (`UNIQUE`,
+/// `SHORT_CODE_IN_USE`). An entity that is `going`, each of its fields removed as it is destroyed, is filed nowhere
+/// after
 fn reindex(
     t: &mut Txn<'_, '_>,
     id: &str,
@@ -445,6 +499,7 @@ fn reindex(
     before: Option<&Value>,
     after: Option<&Value>,
     seq: Option<u64>,
+    going: bool,
 ) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
     let indexes: Vec<ValueIndex> =
@@ -478,6 +533,23 @@ fn reindex(
             let key = keys::index_entry(&entity_type, &index.name, parts, seq);
             key_fits(&key, id, &entity_type, &index.name)?;
             t.put(&key, &values::encode(&id.into()))?;
+        }
+        if index.accounts() {
+            let was = other_of(before);
+            let now = if going { None } else { other_of(after) };
+            if was != now {
+                if let Some(prefix) = was {
+                    // An entity just made is filed nowhere until its fields are written (`file_without`), so its
+                    // first values find nothing to remove
+                    let key = other_key(prefix, &entity_type, &index.name, seq);
+                    if t.contains(&key)? {
+                        t.del(&key)?;
+                    }
+                }
+                if let Some(prefix) = now {
+                    t.put(&other_key(prefix, &entity_type, &index.name, seq), &values::encode(&id.into()))?;
+                }
+            }
         }
     }
     Ok(())

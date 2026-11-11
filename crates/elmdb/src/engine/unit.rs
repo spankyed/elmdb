@@ -90,12 +90,24 @@ pub trait Read {
     /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries whose key is `from` or after it and before `to`, in key order until `visit` answers false: a
+    /// walk between two places reads nothing outside them
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries whose key is `from` or after it and before `to`, from the last of them, in reverse key
+    /// order, until `visit` answers false
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     /// Visits the entries under `prefix` whose key is `from` or after it, in key order until `visit` answers false: a
     /// walk that skips what it knows can't match seeks with it, rather than reading every entry
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let (low, high) = prefix_range(prefix);
+        self.visit_within(from.max(&low), &high, visit)
+    }
     /// Visits the entries under `prefix` from the last, in reverse key order, until `visit` answers false: a walk that
     /// wants a range's last entries reads none before them
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let (low, high) = prefix_range(prefix);
+        self.visit_back_within(&low, &high, visit)
+    }
     /// Fallible streaming visit: stop at the first consumer error without collecting the range.
     fn try_visit(&self, prefix: &[u8], mut each: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
         let mut result = Ok(());
@@ -145,20 +157,15 @@ fn visit_in(
     Ok(())
 }
 
-/// The entries under `prefix` from `from` on: the later of the two to the prefix's end
-fn visit_from_in(
+/// The entries from `from` up to `to`, in key order
+fn visit_within_in(
     db: Db,
     txn: &heed::RoTxn<'_, heed::WithoutTls>,
-    prefix: &[u8],
     from: &[u8],
+    to: &[u8],
     mut visit: impl FnMut(&[u8], &[u8]) -> bool,
 ) -> Result<()> {
-    let (low, high) = prefix_range(prefix);
-    let start = if from > low.as_slice() { from } else { low.as_slice() };
-    if start >= high.as_slice() {
-        return Ok(());
-    }
-    let range = (std::ops::Bound::Included(start), std::ops::Bound::Excluded(high.as_slice()));
+    let range = (std::ops::Bound::Included(from), std::ops::Bound::Excluded(to));
     for entry in db.range(txn, &range)? {
         let (k, v) = entry?;
         if !visit(k, v) {
@@ -168,15 +175,15 @@ fn visit_from_in(
     Ok(())
 }
 
-/// The entries under `prefix`, from the last
-fn visit_back_in(
+/// The entries from `from` up to `to`, from the last
+fn visit_back_within_in(
     db: Db,
     txn: &heed::RoTxn<'_, heed::WithoutTls>,
-    prefix: &[u8],
+    from: &[u8],
+    to: &[u8],
     mut visit: impl FnMut(&[u8], &[u8]) -> bool,
 ) -> Result<()> {
-    let (low, high) = prefix_range(prefix);
-    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+    let range = (std::ops::Bound::Included(from), std::ops::Bound::Excluded(to));
     for entry in db.rev_range(txn, &range)? {
         let (k, v) = entry?;
         if !visit(k, v) {
@@ -232,12 +239,12 @@ impl Read for Snapshot<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-        visit_from_in(self.db, self.txn, prefix, from, visit)
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_within_in(self.db, self.txn, from, to, visit)
     }
 
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-        visit_back_in(self.db, self.txn, prefix, visit)
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_back_within_in(self.db, self.txn, from, to, visit)
     }
 
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
@@ -265,14 +272,14 @@ impl Read for Txn<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         self.counted();
-        visit_from_in(self.db, self.txn, prefix, from, visit)
+        visit_within_in(self.db, self.txn, from, to, visit)
     }
 
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         self.counted();
-        visit_back_in(self.db, self.txn, prefix, visit)
+        visit_back_within_in(self.db, self.txn, from, to, visit)
     }
 
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {

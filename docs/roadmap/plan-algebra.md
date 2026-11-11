@@ -12,9 +12,14 @@ checked per match, an index lookup visits its matches in place order and stops a
 holds only the first `limit`, and EXPLAIN answers each stage's index, visits, kept ids and time. A search, a vector
 query and a trigram search each answer a set the steps after them filter.
 
+Since the road to 1.0's fifth change (`../roadmap.md`), an `orderBy` of one type reads a value index on the field in
+order, a `range` of numbers reads the entries between its bounds, and an `after` has the stage before it seek to its
+cursor: each index on one field accounts for every entity of its type, so an order read from it leaves none out
+(`../architecture/engine.md`, Reads: plans).
+
 What the planner still does not do: choose which of two indexed filters drives (the first wins, whichever is smaller),
-intersect two indexes rather than check one per match, or run a search inside a filter's set when the filter comes
-first.
+intersect two indexes rather than check one per match, run a search inside a filter's set when the filter comes
+first, or read an order from an index after a filter of another field, which a compound index would answer.
 
 ## The measurements
 

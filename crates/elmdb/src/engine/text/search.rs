@@ -465,7 +465,7 @@ pub struct Matches<'a> {
 const PROBED: u64 = 256;
 
 /// `places` of a type, less those in its trash
-fn untrashed(r: &impl Read, entity_type: &str, mut places: RoaringTreemap) -> Result<RoaringTreemap> {
+pub(crate) fn untrashed(r: &impl Read, entity_type: &str, mut places: RoaringTreemap) -> Result<RoaringTreemap> {
     // mutant-skip: replace <= with > in untrashed
     // Either way leaves the places out of the trash: asking for each, or reading the trash, is what it costs
     if places.len() <= PROBED {
@@ -848,14 +848,14 @@ mod seeking {
                 f(k, v)
             })
         }
-        fn visit_from(&self, prefix: &[u8], from: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_from(prefix, from, |k, v| {
+        fn visit_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
         }
-        fn visit_back(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_back(prefix, |k, v| {
+        fn visit_back_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_back_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
