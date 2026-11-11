@@ -238,9 +238,11 @@ an answer:
   from a built index whose last field is the ordered one and whose fields before it are the equalities', whichever
   way round they were asked: its entries for those values, in the last field's order. `where status = open`, then
   `orderBy n`, then `limit 10` reads ten entries of an index on `[status, n]`, and a page after a cursor is sought
-  in it as in any order read from an index. It is read while no entity holds, in a field of the index, a value the
-  index doesn't order, and while its entries under those values hold no string; otherwise the equalities are
-  filtered and their matches sorted.
+  in it as in any order read from an index. A list in an equality's field is under each of its elements
+  (`schema.md`, Indexes), so `where tags = x`, then `orderBy updatedAt`, reads an index on `[tags, updatedAt]`.
+  The index is read while, under those values, it holds no entity it doesn't order and no entry of a string;
+  otherwise the equalities are filtered and their matches sorted. What an entity under other values holds leaves
+  the read alone: one task with a list for its number has its own status sorted, and no other.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,
   after the filters a type start begins with, has two ways to its first entities: read the filters and sort what
   they keep, or walk the order from an index on its field alone and test each entity against the filters, which
@@ -548,7 +550,8 @@ retaining their values. Every replacement remains one atomic transaction, includ
 
 These bounds concern intermediate collections. One decoded entity and its index expansion, a block of a term's places,
 hannoy's graph builder, and LMDB's dirty/resident pages have separate workload-dependent costs. A list-valued field
-can emit an entry per indexable element; compound value indexes take scalar fields. Full check/rebuild also retain
+can emit an entry per indexable element, and in a compound value index one per tuple of the elements its fields
+before the last hold. Full check/rebuild also retain
 entity/graph inventories, primary constraint/uniqueness auditing and output reports; the complete operation does not
 have an 8 MiB or constant-RSS bound. What it adds per entity is bounded instead: the heap test holds a full rebuild and
 a full check to 1 KiB of heap an entity beyond the sorters, and a selected vector rebuild to 768 bytes a vector

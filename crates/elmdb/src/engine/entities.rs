@@ -8,14 +8,16 @@
 //! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
 //!   goes, as a property key is in a graph database, and pruned only by `rebuild`
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
-//! - `d/xw type index leading… seq` → id, `d/xu type index seq` → id: the entities a value index files besides its
-//!   entries, those without a value in its last field and those holding a value it doesn't order, so that the index
-//!   accounts for every entity an equality on its other fields can name (`ValueIndex::accounts`)
+//! - `d/xw type index leading… seq` → id, `d/xu type index leading… seq` → id: the entities a value index files
+//!   besides its entries, those without a value in its last field and those it doesn't order, each under what its
+//!   fields before the last hold, so that the index accounts for every entity an equality on its other fields can
+//!   name (`ValueIndex::accounts`)
 //!
 //! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
 //! among them.
 
 use rmpv::Value;
+use std::collections::BTreeSet;
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::Prefix;
@@ -300,12 +302,100 @@ impl ValueIndex {
     /// Whether the index accounts for every entity an equality on each of its fields but the last can name, as a
     /// declared index does: such an entity is in its entries, under what those fields hold and then the boolean, the
     /// number or the string its last field holds, or among those without a value there, or among those holding a
-    /// value it doesn't order (`other_of`). A plan reads those entities in the last field's order from such an index,
+    /// value it doesn't order (`files`). A plan reads those entities in the last field's order from such an index,
     /// which leaves none out; for an index on one field they are every entity of its type. The short code's and the
     /// roles' indexes hold only what their lookups read
     pub fn accounts(&self) -> bool {
         !self.fields.iter().any(|name| name == field::SHORT_CODE || name == field::ROLE)
     }
+
+    /// Where the index files an entity whose fields hold `values`, one for each of the index's fields.
+    ///
+    /// An index on one field has an entry for the field's value, or for each distinct element of its list; an
+    /// index that accounts for its entities also files the entity among those without a value when the field is
+    /// missing or null, and among those it doesn't order when it holds a list or a value no index holds.
+    ///
+    /// An index on several fields files the entity under each tuple its fields before the last name
+    /// (`leading_of`), which is each tuple of values that equalities on those fields can ask for: an entry there
+    /// when the last field holds a boolean, a number or a string the index holds; among those without a value
+    /// when the last is missing or null; among those it doesn't order when the last holds anything else. Under a
+    /// tuple it files the entity in one of those places, so what one entity holds decides only how its own tuples are
+    /// read.
+    ///
+    /// A unique index on several fields holds an entity to one tuple of values (`unique_keys`), and that tuple is
+    /// its one entry, a null among its parts: so a list before the last, which is no one tuple, leaves the entity
+    /// among those the index doesn't order under each tuple the list's elements name
+    pub fn files(&self, values: &[Option<Value>]) -> Filed {
+        let Some((last, before)) = values.split_last() else { return Filed::default() };
+        let mut filed = Filed::default();
+        let place = |held: &Option<Value>| match held {
+            None | Some(Value::Nil) => Place::Without,
+            Some(held) => values::index_part(held).map_or(Place::Unordered, Place::Entry),
+        };
+        if before.is_empty() {
+            filed.entries = values::index_parts(last.as_ref()).into_iter().map(|part| vec![part]).collect();
+            match place(last) {
+                Place::Without => filed.others.push(Other::Without(Vec::new())),
+                Place::Unordered => filed.others.push(Other::Unordered(Vec::new())),
+                Place::Entry(_) => {}
+            }
+        } else {
+            if self.unique {
+                let held = unique_keys(values).into_iter();
+                filed.entries = held.filter_map(|key| key.iter().map(values::index_part).collect()).collect();
+            }
+            let listed = before.iter().any(|held| matches!(held, Some(Value::Array(_))));
+            for mut tuple in leading_of(before) {
+                match place(last) {
+                    _ if self.unique && listed => filed.others.push(Other::Unordered(tuple)),
+                    Place::Without => filed.others.push(Other::Without(tuple)),
+                    Place::Unordered => filed.others.push(Other::Unordered(tuple)),
+                    // A unique index's one entry is its tuple, filed above
+                    Place::Entry(part) => {
+                        if !self.unique {
+                            tuple.push(part);
+                            filed.entries.push(tuple);
+                        }
+                    }
+                }
+            }
+        }
+        if !self.accounts() {
+            filed.others.clear();
+        }
+        filed
+    }
+}
+
+/// Where an index files an entity (`ValueIndex::files`)
+#[derive(Debug, Default, PartialEq)]
+pub struct Filed {
+    /// The parts of each of its entries, which the entity's place follows in the entry's key
+    pub entries: Vec<Vec<Part>>,
+    /// Where an index that accounts for its entities files it besides
+    pub others: Vec<Other>,
+}
+
+impl Filed {
+    /// The keys of the entries, for the entity at `seq`
+    pub fn entry_keys(&self, entity_type: &str, index: &str, seq: u64) -> BTreeSet<Vec<u8>> {
+        self.entries.iter().map(|parts| keys::index_entry(entity_type, index, parts, seq)).collect()
+    }
+
+    /// The keys the entity at `seq` is filed under besides its entries
+    pub fn other_keys(&self, entity_type: &str, index: &str, seq: u64) -> BTreeSet<Vec<u8>> {
+        self.others.iter().map(|other| other.key(entity_type, index, seq)).collect()
+    }
+}
+
+/// Where an index's last field puts an entity under a tuple of the fields before it
+enum Place {
+    /// In an entry, under the part the index files the field's value as
+    Entry(Part),
+    /// Among those without a value: the field is missing or null
+    Without,
+    /// Among those the index doesn't order: the field holds a list or a value no index holds
+    Unordered,
 }
 
 /// Where an index that accounts for its entities files one besides its entries
@@ -313,8 +403,9 @@ impl ValueIndex {
 pub enum Other {
     /// Among those without a value in the index's last field, under the parts its fields before that one hold
     Without(Vec<Part>),
-    /// Among those holding, in one of the index's fields, a value it doesn't order
-    Unordered,
+    /// Among those the index doesn't order, under the parts its fields before the last hold: its last field holds
+    /// a list or a value no index holds, or it is a unique index and a field before the last holds a list
+    Unordered(Vec<Part>),
 }
 
 impl Other {
@@ -322,36 +413,39 @@ impl Other {
     pub fn key(&self, entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
         let under = match self {
             Other::Without(leading) => keys::index_others(Prefix::IndexWithout, entity_type, index, leading),
-            Other::Unordered => keys::index_others(Prefix::IndexUnordered, entity_type, index, &[]),
+            Other::Unordered(leading) => keys::index_others(Prefix::IndexUnordered, entity_type, index, leading),
         };
         keys::place_under(&under, seq)
     }
 }
 
-/// Where an index that accounts for its entities files one, besides its entries, given what each of the index's
-/// fields holds: among those it doesn't order when a field holds a list or a value it can't hold (a map, bytes, a
-/// timestamp, a string past `MAX_INDEXED_STRING`); among those without a value when the last field is missing or
-/// null and each field before it holds a scalar, which an equality can ask for; and nowhere when the last field
-/// holds a boolean, a number or a string the index holds, which its entry orders, or when a field before it is
-/// missing or null, which no equality names
-pub fn other_of(fields: &[Option<Value>]) -> Option<Other> {
-    let (last, before) = fields.split_last()?;
-    let mut leading = Vec::with_capacity(before.len());
-    let mut named = true;
-    for value in before {
-        match value {
-            None | Some(Value::Nil) => named = false,
-            Some(held) => match values::index_part(held) {
-                Some(part) => leading.push(part),
-                None => return Some(Other::Unordered),
-            },
+/// What an index's fields before its last hold, as the tuples of parts that equalities on them can name: one for
+/// each combination of their values, a list standing for each of its distinct elements, as it does in an index on
+/// one field. A value no equality an index answers can ask for names nothing: a missing field, a null, and a value
+/// no index holds (a map, bytes, a timestamp, a string past `MAX_INDEXED_STRING`, a list in a list). So there is no
+/// tuple when one of the fields names nothing, an empty list among them
+fn leading_of(before: &[Option<Value>]) -> Vec<Vec<Part>> {
+    let named = |held: &Value| values::index_part(held).filter(|part| *part != Part::Null);
+    let mut tuples: Vec<Vec<Part>> = vec![Vec::new()];
+    for held in before {
+        let mut parts: Vec<Part> = Vec::new();
+        match held {
+            None => {}
+            Some(Value::Array(items)) => {
+                for part in items.iter().filter_map(named) {
+                    if !parts.contains(&part) {
+                        parts.push(part);
+                    }
+                }
+            }
+            Some(held) => parts.extend(named(held)),
         }
+        tuples = tuples
+            .iter()
+            .flat_map(|tuple| parts.iter().map(move |part| tuple.iter().chain([part]).cloned().collect()))
+            .collect();
     }
-    match last {
-        None | Some(Value::Nil) => named.then_some(Other::Without(leading)),
-        // A list is no scalar an index holds, though its elements are entries
-        Some(held) => values::index_part(held).is_none().then_some(Other::Unordered),
-    }
+    tuples
 }
 
 /// Files an entity just made, at `seq`, among those without a value in each index on one field that accounts for its
@@ -386,22 +480,6 @@ pub fn value_indexes(schema: &crate::schema::Schema, entity_type: &str) -> Vec<V
     out
 }
 
-/// The parts tuples an index files an entity under, given each of the index's fields' values: a single field's value or
-/// each element of its list; a compound index's fields, each a scalar, together, or nothing when any is missing
-pub fn entries_of(fields: &[Option<Value>]) -> Vec<Vec<Part>> {
-    if let [only] = fields {
-        return values::index_parts(only.as_ref()).into_iter().map(|p| vec![p]).collect();
-    }
-    let mut tuple = Vec::new();
-    for value in fields {
-        match value.as_ref().and_then(values::index_part) {
-            Some(part) => tuple.push(part),
-            None => return Vec::new(),
-        }
-    }
-    vec![tuple]
-}
-
 /// Refuses an index entry whose key is longer than LMDB stores (`VALUE_INVALID`), naming the entity and the index
 pub fn key_fits(key: &[u8], id: &str, entity_type: &str, index: &str) -> Result<()> {
     if key.len() <= values::MAX_KEY_BYTES {
@@ -418,9 +496,9 @@ pub fn key_fits(key: &[u8], id: &str, entity_type: &str, index: &str) -> Result<
     ))
 }
 
-/// What a unique index holds an entity to, given each of the index's fields' values: what `entries_of` files, as values,
-/// and with it what the index can't file (a string past `MAX_INDEXED_STRING`, a map, a timestamp), which only a walk of
-/// the type's rows finds. A single field's value or each element of its list; a compound index's fields together, when
+/// What a unique index holds an entity to, given each of the index's fields' values: what its entries file
+/// (`ValueIndex::files`), as values, and with it what the index can't file (a string past `MAX_INDEXED_STRING`, a
+/// map, a timestamp), which only a walk of the type's rows finds. A single field's value or each element of its list; a compound index's fields together, when
 /// each is present and none is a list
 pub(super) fn unique_keys(fields: &[Option<Value>]) -> Vec<Vec<Value>> {
     let mut keys: Vec<Vec<Value>> = Vec::new();
@@ -558,33 +636,40 @@ fn reindex(
         if index.unique && !t.state.unchecked && !t.state.unique_deferred.contains(&index.name) {
             check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
         }
-        let was = entries_of(&values_before);
-        let now = entries_of(&values_after);
-        for parts in was.iter().filter(|p| !now.contains(p)) {
-            t.del(&keys::index_entry(&entity_type, &index.name, parts, seq))?;
+        let was = index.files(&values_before);
+        let mut now = index.files(&values_after);
+        // An entity that is going is filed nowhere besides its entries, which its fields take with them
+        if going {
+            now.others.clear();
         }
-        for parts in now.iter().filter(|p| !was.contains(p)) {
-            let key = keys::index_entry(&entity_type, &index.name, parts, seq);
-            key_fits(&key, id, &entity_type, &index.name)?;
-            t.put(&key, &values::encode(&id.into()))?;
+        // Filed as it was: a field written with what it held, or one that changes nothing the index files
+        if was == now {
+            continue;
         }
-        if index.accounts() {
-            let was = other_of(&values_before);
-            let now = if going { None } else { other_of(&values_after) };
-            if was != now {
-                if let Some(was) = was {
-                    // An entity just made is filed nowhere until its fields are written (`file_without`), and one
-                    // being destroyed is taken out as the first of an index's fields goes, so there may be nothing
-                    // to remove
-                    let key = was.key(&entity_type, &index.name, seq);
-                    if t.contains(&key)? {
-                        t.del(&key)?;
-                    }
-                }
-                if let Some(now) = now {
-                    t.put(&now.key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
-                }
+        let filed = values::encode(&id.into());
+        // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square
+        let (had, has) =
+            (was.entry_keys(&entity_type, &index.name, seq), now.entry_keys(&entity_type, &index.name, seq));
+        for key in had.difference(&has) {
+            t.del(key)?;
+        }
+        for key in has.difference(&had) {
+            key_fits(key, id, &entity_type, &index.name)?;
+            t.put(key, &filed)?;
+        }
+        let had = was.other_keys(&entity_type, &index.name, seq);
+        let has = now.other_keys(&entity_type, &index.name, seq);
+        for key in had.difference(&has) {
+            // An entity just made is filed nowhere until its fields are written (`file_without`), and one being
+            // destroyed is taken out as the first of an index's fields goes, so there may be nothing to remove
+            if t.contains(key)? {
+                t.del(key)?;
             }
+        }
+        for key in has.difference(&had) {
+            // A key as an entry's is, and refused as one: what makes it too long is a value the index holds
+            key_fits(key, id, &entity_type, &index.name)?;
+            t.put(key, &filed)?;
         }
     }
     Ok(())

@@ -257,9 +257,12 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
     fields["other"] = json!({ "type": "string", "optional": true });
+    fields["more"] = json!({ "type": "string", "optional": true });
     let indexes = json!({
         "one": { "kind": "value", "fields": ["kind"], "unique": true },
-        "pair": { "kind": "value", "fields": ["title", "other"] }
+        "pair": { "kind": "value", "fields": ["title", "other"] },
+        // Its first note holds no `more`: where the index files it among those without is the key too long
+        "trio": { "kind": "value", "fields": ["title", "other", "more"] }
     });
     let db = with_schema(&dir, notes(fields.clone(), json!({}))).unwrap();
     // Each value within what an index holds, the pair past LMDB's key, and a value two rows hold
@@ -269,6 +272,7 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
         vec![
             json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "same", "title": long, "other": long } }),
             json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "kind": "same" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-3", "fields": { "title": "t", "other": "o" } }),
         ],
     )
     .unwrap();
@@ -284,10 +288,27 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     assert_eq!(one.code, ErrorCode::Unique, "{}", one.message);
     let pair = db.rebuild(Some(("Note", "pair"))).unwrap_err();
     assert_eq!(pair.code, ErrorCode::ValueInvalid, "{}", pair.message);
-    // A rebuild of everything, which a rename or a replace runs, goes on and leaves both unbuilt
+    let trio = status.iter().find(|s| s.index == "trio").unwrap();
+    assert!(!trio.built && trio.failure.as_deref().is_some_and(|f| f.contains("Note.trio")), "{trio:?}");
+    let trio = db.rebuild(Some(("Note", "trio"))).unwrap_err();
+    assert_eq!(trio.code, ErrorCode::ValueInvalid, "{}", trio.message);
+    // A rebuild of everything, which a rename or a replace runs, goes on and leaves the three unbuilt
     db.rebuild(None).unwrap();
     let status = db.index_status().unwrap();
-    assert!(status.iter().filter(|s| s.index == "one" || s.index == "pair").all(|s| !s.built), "{status:?}");
+    let unbuilt = ["one", "pair", "trio"];
+    assert!(status.iter().filter(|s| unbuilt.contains(&s.index.as_str())).all(|s| !s.built), "{status:?}");
+    // Unbuilt, the index keeps what it files that fits, as a build that failed part way does: the third note,
+    // among those without a `more`
+    let without = crate::engine::keys::index_others(crate::format::Prefix::IndexWithout, "Note", "trio", &[]);
+    let filed: Vec<String> = db
+        .snapshot(|s| {
+            let ids = s.scan(&without)?.into_iter();
+            Ok(ids
+                .map(|(_, id)| rmpv::decode::read_value(&mut &id[..]).unwrap().as_str().unwrap().to_owned())
+                .collect())
+        })
+        .unwrap();
+    assert_eq!(filed, ["Note-3"]);
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");
     assert!(report.violations.iter().any(|v| v.subject == "Note-1, Note-2"), "the duplicates are reported: {report:?}");

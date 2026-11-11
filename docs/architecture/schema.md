@@ -209,6 +209,16 @@ when the type has more than one.
   type's rows.
 - A `list` field is indexed per element. A string longer than 256 bytes (UTF-8) isn't indexed: the type's rows are walked
   for it instead.
+- In an index on several fields that isn't `unique`, a list in a field before the last is filed per element too: the
+  entity has an entry under each element, and with lists in two of those fields under each pair, so `["tags", "updatedAt"]` reads
+  the entities tagged `x` in `updatedAt`'s order. An entity is refiled under each of those when its last field
+  changes, so one holding a hundred tags costs a hundred entries each time its `updatedAt` moves, and lists in two
+  fields their product. What no equality the index answers can ask for names nothing: a missing value, a null, an
+  empty list, and a value the index can't hold, in itself or in a list. A list in the last field has no place in
+  its order, and a list in a `unique` index is no one tuple of values to hold an entity to: the index doesn't order
+  the entity under the tuples it would be read under (below), and orders every other as before.
+- A `unique` index on several fields holds an entity to its tuple of values once each field has one, a null among
+  them: two entities with the same values and a null in the same field are refused as any two are.
 - An index on one field accounts for every entity of its type: besides its entries, it holds which entities are without
   a value (the field missing or null) and which hold a value it doesn't order (a list, a map, bytes, a timestamp, a
   string past 256 bytes). That is what lets a plan read the type in the field's order, or a range of it, from the
