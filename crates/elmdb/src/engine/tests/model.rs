@@ -1120,11 +1120,21 @@ fn derived_reads() -> Vec<(String, Json)> {
                 let direction = if descending { "desc" } else { "asc" };
                 let steps = json!([between, order, { "step": "limit", "n": 2 }]);
                 out.push((format!("{t} ranged {field} {direction}"), ids(start.clone(), steps, "live")));
-                // The first two in the field's order of those the other field's value keeps: sorted, or walked
+                // The first two in the field's order of those the other field's value keeps: a task's `a` under
+                // its `b` is read from the index on the two, and the rest are sorted
                 let other = if field == "a" { "b" } else { "a" };
-                let steps =
-                    json!([{ "step": "where", "field": other, "value": 3 }, order, { "step": "limit", "n": 2 }]);
+                let kept = json!({ "step": "where", "field": other, "value": 3 });
+                let steps = json!([kept, order, { "step": "limit", "n": 2 }]);
                 out.push((format!("{t} filtered {field} {direction}"), ids(start.clone(), steps, "live")));
+                // And of those, the ones in the range, whichever of the two is asked first, and a page after each id
+                for (way, steps) in [("after", json!([kept, between])), ("before", json!([between, kept]))] {
+                    out.push((format!("{t} filtered range {field} {way}"), ids(start.clone(), steps, "live")));
+                }
+                for cursor in IDS {
+                    let steps = json!([kept, order, { "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+                    let label = format!("{t} filtered page {field} {direction} {cursor}");
+                    out.push((label, ids(start.clone(), steps, "live")));
+                }
                 // A page of two after each of the type's ids, and after one of the other type's, in the field's order
                 for cursor in IDS {
                     let steps = json!([order, { "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
@@ -1373,6 +1383,25 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                         if *direction == "desc" { o.reverse() } else { o }
                     });
                     json!(ordered.into_iter().take(2).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["filtered", "range", field, _] => {
+                    let other = if *field == "a" { "b" } else { "a" };
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let kept =
+                        |e: &Entity| holds(e.fields.get(other), &json!(3)) && in_range(e.fields.get(*field), &within);
+                    json!(of_type().filter(|(_, e)| !e.trashed && kept(e)).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["filtered", "page", field, direction, cursor] => {
+                    let other = if *field == "a" { "b" } else { "a" };
+                    let mut ordered: Vec<(&String, &Entity)> = of_type()
+                        .filter(|(_, e)| !e.trashed && holds(e.fields.get(other), &json!(3)))
+                        .copied()
+                        .collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(page_after(ordered.into_iter().map(|(id, _)| id), cursor))
                 }
                 ["page", field, direction, cursor] => {
                     let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();

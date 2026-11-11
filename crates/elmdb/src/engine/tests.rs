@@ -68,6 +68,7 @@ pub(super) fn schema_json() -> Json {
                 },
                 "indexes": {
                     "a": { "kind": "value", "fields": ["a"] },
+                    "ba": { "kind": "value", "fields": ["b", "a"] },
                     "slug": { "kind": "value", "fields": ["slug"], "unique": true }
                 }
             },
