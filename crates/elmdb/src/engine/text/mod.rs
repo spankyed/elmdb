@@ -437,9 +437,10 @@ fn file(t: &mut Txn<'_, '_>, entity_type: &str, index: &TextIndex, seq: u64, now
     let stored_stats = t.get(&stats_key)?;
     let mut stats = stats_from(stored_stats.as_deref(), index)?;
     if before.is_some() {
-        stats.documents -= 1;
+        // Statistics that count fewer than the index holds are no record of it
+        stats.documents = stats.documents.checked_sub(1).ok_or_else(|| corrupt("statistics"))?;
         for (total, l) in stats.lengths.iter_mut().zip(&held_lengths) {
-            *total -= u64::from(*l);
+            *total = total.checked_sub(u64::from(*l)).ok_or_else(|| corrupt("statistics"))?;
         }
     }
     if !now.is_empty() {
