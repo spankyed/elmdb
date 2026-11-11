@@ -176,8 +176,10 @@ assert crates, "the workspace names no crate"
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
 # The committed configuration with the exclusions the source's `// mutant-skip:` comments make, which are in no file
-# cargo-mutants reads by itself; the task prints where it wrote it
-configuration = ["--config", subprocess.check_output(["cargo", "xtask", "mutant-exclusions"], text=True).strip()]
+# cargo-mutants reads by itself; the task prints where it wrote it. A change with nothing in scope runs nothing below,
+# and doesn't build the task to find that out
+configuration = [] if scope == [] else [
+    "--config", subprocess.check_output(["cargo", "xtask", "mutant-exclusions"], text=True).strip()]
 sharding = ["--shard", args.shard] if args.shard else []
 # What a build's log says when a file of the tree it was built in is missing or doesn't read
 DAMAGED = re.compile(r"could not parse .* \(manifest\)|failed to (read|load) |No such file or directory")

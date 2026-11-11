@@ -189,8 +189,8 @@ on the first line of code under it, so it moves with its line through any edit a
 branches that each add, move or remove one, or shift the lines above one, have no list of line numbers to reconcile:
 `.cargo/mutants.toml` holds only the exclusions that name no line. `cargo xtask mutant-exclusions` writes the
 configuration a run reads, `target/mutants.toml`, which is that file with a pattern for each comment, carrying the
-line the comment is above when it is written; `scripts/mutants-in-diff.py` asks it for one at every run, and nothing it
-writes is committed. A comment can hide a mutant of the same kind that moves onto its line; the `--list --no-config`
+line the comment is above when it is written; `scripts/mutants-in-diff.py` asks it for one at every run that has
+something to mutate, and nothing it writes is committed. A comment can hide a mutant of the same kind that moves onto its line; the `--list --no-config`
 diff above shows what each exclusion hides. `cargo xtask check-mutant-exclusions`, a CI step, fails when a comment's
 pattern matches no mutant cargo-mutants lists on the line under it, as after code went in between the two or the
 mutant's name changed; when an exclusion in `.cargo/mutants.toml` matches none; and when one there names a line, which
