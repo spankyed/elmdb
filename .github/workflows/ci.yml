@@ -7,6 +7,10 @@ name: CI
 # A change to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch
 # cancels the run before it. `ci-pass` is the check a merge waits on, beside full.yml's `full-pass` and mutants.yml's
 # `mutants-pass`, for the mutants of a pull request's change.
+#
+# Every job has a time limit, so one that hangs ends there and not at GitHub's six hours: about twice the job's slowest
+# successful run among the 400 workflow runs of 2026-11-03 to 2026-11-11, rounded up to five minutes. A
+# platform carries its own among its target's fields, which platforms.yml reads.
 on:
   push:
     branches: [main]
@@ -24,6 +28,7 @@ jobs:
   # Whether the change holds anything but documentation, which no check reads
   changes:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
     steps:
@@ -53,6 +58,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -77,6 +83,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -94,6 +101,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -152,6 +160,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg loom
       LOOM_MAX_PREEMPTIONS: 3
@@ -168,6 +177,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg shuttle
       CARGO_TARGET_DIR: target/shuttle
@@ -183,8 +193,8 @@ jobs:
     uses: ./.github/workflows/platforms.yml
     with:
       targets: >-
-        [{"runner":"macos-15","target":"aarch64-apple-darwin"},
-        {"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}]
+        [{"runner":"macos-15","target":"aarch64-apple-darwin","timeout":30},
+        {"runner":"windows-latest","target":"x86_64-pc-windows-msvc","timeout":30}]
 
   # The check a merge waits on: every job above passed or was skipped (a documentation-only change, or the platforms on
   # a push to main). A dispatch reports under another name: it runs the branch's tip and not the merge, on the commit
@@ -194,6 +204,7 @@ jobs:
     if: always()
     needs: [changes, checks, heap, repo, loom, shuttle, platforms]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}

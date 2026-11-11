@@ -34,14 +34,16 @@ cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
-cargo xtask check-mutant-exclusions  # every exclude_re in .cargo/mutants.toml still names a mutant (needs cargo-mutants)
+cargo xtask check-mutant-exclusions  # every `// mutant-skip:` and exclude_re still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
 cargo xtask check-diagnostics-off && cargo xtask check-leiden-serial  # what the dependency tree may hold
 python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BASE what it merges into; fails on a survivor
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
-- **Moved a line a `// mutant-skip:` excuses?** `cargo xtask mutant-exclusions`, and commit `.cargo/mutants.toml`.
+- **Moved a line a `// mutant-skip:` excuses?** Keep its comment directly above it, and that is all: the comment is the
+  exclusion, read from the source at each run, and no list of them is committed. A `cargo mutants` run by hand reads
+  them with `--config "$(cargo xtask mutant-exclusions)"`; `.cargo/mutants.toml` holds only exclusions naming no line.
 - **A mutant survived?** Kill it with a test that fails on it, or, when no input tells it from the code, name it in a
   `// mutant-skip:` with why. A mutant in code this machine doesn't compile survives whatever the tests: macOS-only code
   is read on a Mac, Linux-only and Windows-only code by CI, which mutates only what each runner compiles. Breaking a line
