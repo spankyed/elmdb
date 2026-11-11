@@ -8,9 +8,10 @@
 //! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
 //!   goes, as a property key is in a graph database, and pruned only by `rebuild`
 //! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
-//! - `d/xw type index leading… seq` → id, `d/xu type index seq` → id: the entities a value index files besides its
-//!   entries, those without a value in its last field and those holding a value it doesn't order, so that the index
-//!   accounts for every entity an equality on its other fields can name (`ValueIndex::accounts`)
+//! - `d/xw type index leading… seq` → id, `d/xu type index leading… seq` → id: the entities a value index files
+//!   besides its entries, those without a value in its last field and those it doesn't order, each under what its
+//!   fields before the last hold, so that the index accounts for every entity an equality on its other fields can
+//!   name (`ValueIndex::accounts`)
 //!
 //! Every write goes through `put_field` and `delete_field`, which keep the derived keys, the text indexes' (`text`)
 //! among them.
@@ -318,7 +319,8 @@ impl ValueIndex {
     /// (`leading_of`), which is each tuple of values that equalities on those fields can ask for: an entry there
     /// when the last field holds a boolean, a number or a string the index holds; among those without a value
     /// when the last is missing or null; among those it doesn't order when the last holds anything else. Under a
-    /// tuple it files the entity nowhere else, so what one entity holds decides only how its own tuples are read.
+    /// tuple it files the entity in one of those places, so what one entity holds decides only how its own tuples are
+    /// read.
     ///
     /// A unique index on several fields holds an entity to one tuple of values (`unique_keys`), and that tuple is
     /// its one entry, a null among its parts: so a list before the last, which is no one tuple, leaves the entity
@@ -366,7 +368,7 @@ impl ValueIndex {
 }
 
 /// Where an index files an entity (`ValueIndex::files`)
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq)]
 pub struct Filed {
     /// The parts of each of its entries, which the entity's place follows in the entry's key
     pub entries: Vec<Vec<Part>>,
@@ -634,7 +636,16 @@ fn reindex(
         if index.unique && !t.state.unchecked && !t.state.unique_deferred.contains(&index.name) {
             check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
         }
-        let (was, now) = (index.files(&values_before), index.files(&values_after));
+        let was = index.files(&values_before);
+        let mut now = index.files(&values_after);
+        // An entity that is going is filed nowhere besides its entries, which its fields take with them
+        if going {
+            now.others.clear();
+        }
+        // Filed as it was: a field written with what it held, or one that changes nothing the index files
+        if was == now {
+            continue;
+        }
         let filed = values::encode(&id.into());
         // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square
         let (had, has) =
@@ -647,7 +658,7 @@ fn reindex(
             t.put(key, &filed)?;
         }
         let had = was.other_keys(&entity_type, &index.name, seq);
-        let has = if going { BTreeSet::new() } else { now.other_keys(&entity_type, &index.name, seq) };
+        let has = now.other_keys(&entity_type, &index.name, seq);
         for key in had.difference(&has) {
             // An entity just made is filed nowhere until its fields are written (`file_without`), and one being
             // destroyed is taken out as the first of an index's fields goes, so there may be nothing to remove
@@ -656,6 +667,8 @@ fn reindex(
             }
         }
         for key in has.difference(&had) {
+            // A key as an entry's is, and refused as one: what makes it too long is a value the index holds
+            key_fits(key, id, &entity_type, &index.name)?;
             t.put(key, &filed)?;
         }
     }

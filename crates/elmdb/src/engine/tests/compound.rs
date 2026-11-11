@@ -661,13 +661,23 @@ fn an_index_on_several_fields_accounts_for_the_tasks_an_equality_can_name() {
     // The trash moves nothing, and a destroyed task is filed nowhere
     write(&db, vec![json!({ "op": "trash", "id": id(0) })]);
     expect(&db, &[8, 2, 0, 3], &[], "in the trash");
+    // One the index doesn't order goes from under its status as any does
+    write(&db, vec![set(4, "n", json!([1]))]);
+    expect(&db, &[8, 2, 0, 3], &[4], "a list for a number");
     for at in [0, 2, 3, 8, 5, 4] {
         write(&db, vec![json!({ "op": "destroy", "id": id(at) })]);
     }
     expect(&db, &[], &[], "destroyed");
     // Where it files a task with no number is a key too, and one too long for the store is refused
     let long = super::write(&db, vec![task(9, json!({ "tags": "t".repeat(250), "status": "s".repeat(250) }))]);
-    assert_eq!(long.unwrap_err().code, ErrorCode::ValueInvalid);
+    let long = long.unwrap_err();
+    assert_eq!(long.code, ErrorCode::ValueInvalid);
+    // It says which index and that a value is what to shorten, as an entry's refusal does
+    assert!(long.message.contains("Task.tagsStatusN") && long.message.contains("shorten the values"), "{long}");
+    // And so does a list for the number, which files it where the index doesn't order it
+    let listed = task(9, json!({ "tags": "t".repeat(250), "status": "s".repeat(250), "n": [1] }));
+    let listed = super::write(&db, vec![listed]).unwrap_err();
+    assert!(listed.message.contains("Task.tagsStatusN") && listed.message.contains("shorten the values"), "{listed}");
     // A batch refused part way keeps none of what it filed
     let refused =
         super::write(&db, vec![task(9, json!({ "status": "open" })), json!({ "op": "destroy", "id": "Task-nobody" })]);

@@ -3512,8 +3512,7 @@ fn of_types(id: &str, types: Option<&[String]>) -> bool {
 }
 
 /// The built value index of the type a lookup of `name` reads: the built-in one for roles and short codes, or a
-/// declared one whose first field it is, a compound one's included, since its leading part is a prefix of its entries.
-/// An index not yet built isn't read: the lookup walks the type's rows
+/// declared one on that field alone. An index not yet built isn't read: the lookup walks the type's rows
 fn index_on(r: &impl Read, entity_type: &str, name: &str) -> Option<String> {
     let found = match name {
         field::ROLE => Some(ROLE_INDEX.to_owned()),

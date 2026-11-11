@@ -511,7 +511,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                 t.clear_prefix(&retired)?;
             }
             // Every declared index of every type with entities is built by a full rebuild, but a value index a build
-            // couldn't finish, which keeps the entries that fit unmarked, as writes keep an unbuilt index's
+            // couldn't finish, which keeps what it files that fits, unmarked, as writes keep an unbuilt index's
             let all = entities_of(t)?;
             let mut by_type: BTreeMap<String, Vec<&Entity>> = BTreeMap::new();
             for e in &all {
@@ -526,19 +526,30 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         continue;
                     };
                     let mut holders = BTreeMap::new();
-                    match index_entries_into(t, ty, found, of, |key, value| {
+                    // Where it files an entity besides its entries is a key too, and one too long keeps the build
+                    // from finishing as an entry's does
+                    let buildable = index_entries_into(t, ty, found, of, |key, value| {
                         buildable_entry(ty, found, &key, &value, &mut holders)
-                    }) {
+                    })
+                    .and_then(|()| {
+                        index_others_into(t, ty, found, of, |key, value| {
+                            let id = values::decode(&value)?.as_str().unwrap_or_default().to_owned();
+                            entities::key_fits(&key, &id, ty, &found.name)
+                        })
+                    });
+                    match buildable {
                         Ok(()) => t.put(&marker, &values::encode(&true.into()))?,
                         Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
                             t.del(&marker)?;
                             let mut fallback = sorted::Scratch::new()?;
-                            index_entries_into(t, ty, found, of, |key, value| {
+                            let mut fits = |key: Vec<u8>, value: Vec<u8>| {
                                 if key.len() <= values::MAX_KEY_BYTES {
                                     fallback.push(key, value)?;
                                 }
                                 Ok(())
-                            })?;
+                            };
+                            index_entries_into(t, ty, found, of, &mut fits)?;
+                            index_others_into(t, ty, found, of, &mut fits)?;
                             let mut entries = fallback.finish()?;
                             while let Some((key, value)) = entries.next()? {
                                 t.put(&key, &value)?;
@@ -664,6 +675,7 @@ pub fn build_chunk(
             t.put(&key, &values::encode(&id.as_str().into()))?;
         }
         for key in filed.other_keys(entity_type, name, *seq) {
+            entities::key_fits(&key, id, entity_type, name)?;
             t.put(&key, &values::encode(&id.as_str().into()))?;
         }
         last = *seq;

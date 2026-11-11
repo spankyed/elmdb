@@ -209,8 +209,8 @@ when the type has more than one.
   type's rows.
 - A `list` field is indexed per element. A string longer than 256 bytes (UTF-8) isn't indexed: the type's rows are walked
   for it instead.
-- In an index on several fields, a list in a field before the last is filed per element too: the entity has an
-  entry under each element, and with lists in two of those fields under each pair, so `["tags", "updatedAt"]` reads
+- In an index on several fields that isn't `unique`, a list in a field before the last is filed per element too: the
+  entity has an entry under each element, and with lists in two of those fields under each pair, so `["tags", "updatedAt"]` reads
   the entities tagged `x` in `updatedAt`'s order. An entity is refiled under each of those when its last field
   changes, so one holding a hundred tags costs a hundred entries each time its `updatedAt` moves, and lists in two
   fields their product. What no equality the index answers can ask for names nothing: a missing value, a null, an
