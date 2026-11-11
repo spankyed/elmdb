@@ -7,6 +7,9 @@ mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline tha
 missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed and doesn't fail the run, since
 load alone can cause one. In GitHub Actions each is annotated on its line and written to the step summary.
 
+The configuration every run here reads is the one `cargo xtask mutant-exclusions` writes: `.cargo/mutants.toml` with an
+exclusion for each `// mutant-skip:` comment, which only the source holds.
+
 It also exits nonzero when a mutant failed to build for want of a file or a manifest that reads, and not for what
 the mutant changed: cargo-mutants lists such a mutant as unviable, as it does one whose replacement doesn't compile, but
 it means the copy of the tree the mutant was built in was damaged, and the mutant was never tested.
@@ -172,6 +175,9 @@ assert crates, "the workspace names no crate"
 # cargo-mutants builds each job's copy of the tree in a directory of its own; a CARGO_TARGET_DIR from the caller would
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
+# The committed configuration with the exclusions the source's `// mutant-skip:` comments make, which are in no file
+# cargo-mutants reads by itself; the task prints where it wrote it
+configuration = ["--config", subprocess.check_output(["cargo", "xtask", "mutant-exclusions"], text=True).strip()]
 sharding = ["--shard", args.shard] if args.shard else []
 # What a build's log says when a file of the tree it was built in is missing or doesn't read
 DAMAGED = re.compile(r"could not parse .* \(manifest\)|failed to (read|load) |No such file or directory")
@@ -192,7 +198,7 @@ for name, path, features in crates:
     # Every mutant a run of this diff caught, the last run's among them, which a run that was stopped never added
     kept = out / name / "caught.txt"
     caught = set(lines_of(kept) + lines_of(results / "caught.txt")) if same_change else set()
-    selection = ["--in-diff", str(diff), *(arg for file in files for arg in ("--file", file))]
+    selection = [*configuration, "--in-diff", str(diff), *(arg for file in files for arg in ("--file", file))]
     chosen = [*sharding, *platform_args]
     if args.resume and caught:
         # The mutants this run would test, less those caught: named one by one, since a share of what is left is not
