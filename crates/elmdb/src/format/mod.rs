@@ -258,6 +258,10 @@ mod tests {
         tags.dedup();
         assert_eq!(tags.len(), Prefix::ALL.len() + Prefix::RETIRED.len());
         assert!(Prefix::RETIRED.iter().all(|tag| tag.starts_with("d/")), "only derived data is left to a rebuild");
+        // What a rebuild clears is each retired tag's keys, as a key starts with its tag
+        let mut positions = key::KeyWriter::new();
+        positions.string("d/fp");
+        assert_eq!(Prefix::retired().collect::<Vec<_>>(), [positions.to_vec()]);
         for p in Prefix::ALL {
             assert_eq!(Prefix::from_tag(p.tag()), Some(p));
             let expected = match p.tag().split('/').next() {
