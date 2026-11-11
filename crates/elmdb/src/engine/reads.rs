@@ -4,7 +4,7 @@
 //! A type start's leading filters are read from a value index where one covers a `where` or `withRole` among them, its
 //! matches visited as they are read; `orderBy` followed by `limit` holds only the first `limit`.
 
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 
@@ -430,6 +430,8 @@ struct Query<'r, R: Read> {
     sought: Cell<Option<usize>>,
     /// What the plan's last rank or ranked step says of its scores, for the `hits` terminal
     ranked: RefCell<Option<Scored>>,
+    /// The ids each `within` of the plan keeps, by the step's place (`kept_within`)
+    within: OnceCell<Vec<HashSet<String>>>,
 }
 
 /// What a `hits` answer says of a rank's scores
@@ -1661,14 +1663,27 @@ impl<R: Read> Query<'_, R> {
         if self.passes(upto, id)? { visit(id) } else { Ok(true) }
     }
 
+    /// The ids the `within` at step `at` keeps, as a set made once a read: a filter tested against each entity an
+    /// index hands on (`passes`) costs a lookup, where looking through the step's ids costs their number each time
+    fn kept_within(&self, at: usize) -> &HashSet<String> {
+        let kept = self.within.get_or_init(|| {
+            let ids = |step: &Step| match step {
+                Step::Within { ids } => ids.iter().cloned().collect(),
+                _ => HashSet::new(),
+            };
+            self.plan.steps.iter().map(ids).collect()
+        });
+        &kept[at]
+    }
+
     /// Whether every one of the first `upto` steps, the filters before a driving index, keeps `id`
     fn passes(&self, upto: usize, id: &str) -> Result<bool> {
-        for step in &self.plan.steps[..upto] {
+        for (at, step) in self.plan.steps[..upto].iter().enumerate() {
             let kept = match step {
                 Step::OfType { entity_type } => {
                     id.strip_prefix(entity_type.as_str()).is_some_and(|rest| rest.starts_with('-'))
                 }
-                Step::Within { ids } => ids.iter().any(|kept| kept == id),
+                Step::Within { .. } => self.kept_within(at).contains(id),
                 Step::Where { field: name, value } => self.matches(id, name, value)?,
                 Step::Has { field: name } => get(self.r, id, name)?.is_some(),
                 Step::Lacks { field: name } => get(self.r, id, name)?.is_none(),
@@ -2397,6 +2412,7 @@ impl<R: Read> Query<'_, R> {
             best: Cell::new(None),
             sought: Cell::new(None),
             ranked: RefCell::default(),
+            within: OnceCell::new(),
         };
         query.pull(1, &mut |_| Ok(true))?;
         self.visited.set(self.visited.get() + query.visited.get());
@@ -3532,6 +3548,7 @@ fn query_with(
         best: Cell::new(None),
         sought: Cell::new(None),
         ranked: RefCell::new(None),
+        within: OnceCell::new(),
     };
     let last = plan.steps.len();
     let mut w = W(out);

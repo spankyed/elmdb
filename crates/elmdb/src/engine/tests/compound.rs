@@ -554,6 +554,10 @@ fn with_no_index_on_both_the_order_is_walked_while_that_is_the_cheaper_way() {
     // asking, at five hundred and twelve, and at neither before it
     let noted = json!({ "step": "has", "field": "note" });
     assert_eq!(first(vec![noted.clone()], false, 2), (vec![id(597), id(598)], 512 + 600));
+    // Ids to keep are a filter with no index too: the greater of these two is three hundred in from the greatest
+    let two = json!({ "step": "within", "ids": [id(5), id(300)] });
+    assert_eq!(first(vec![two.clone()], true, 1), (vec![id(300)], 300));
+    assert_eq!(first(vec![two, is("status", json!("done"))], true, 1), (vec![id(5)], 100));
     // A filter of null is no equality an index reads: the tasks with no owner are the first four hundred and fifty,
     // met a hundred and fifty in from the greatest
     assert_eq!(first(vec![is("owner", json!(null))], true, 2), (vec![id(449), id(448)], 152));
