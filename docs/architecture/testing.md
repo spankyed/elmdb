@@ -125,15 +125,15 @@ cases: `../evidence/diagnostics.md`.
 cargo-mutants (`.cargo/mutants.toml`) mutates the engine's source — operators, conditions, a function's body — and runs
 the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate,
 and reads the configuration `cargo xtask mutant-exclusions` writes and prints the path of, which holds the exclusions
-the source's `// mutant-skip:` comments make (below); without it a run reports each of those mutants as missed:
+the source's `// mutant-skip:` comments make (below); without it a run reports each of those mutants as missed. Each
+command derives it again, since it holds the lines the comments are above as it is written: one kept from before an
+edit would excuse whatever the edit moved onto those lines, and report the mutants it moved off them.
 
 ```sh
-# The configuration of every run below: .cargo/mutants.toml and the source's exclusions, written to target/mutants.toml
-config="$(cargo xtask mutant-exclusions)"
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
-cargo mutants --config "$config" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
-cargo mutants --config "$config" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
 python3 scripts/mutants-in-diff.py main
 # One of four shares of them, or only the change's Windows-only code (what CI's runners split)
@@ -144,11 +144,11 @@ python3 scripts/mutants-in-diff.py main 3 --resume
 # One of CI's four shares alone, on a branch, while the others run or after its runner was lost
 gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
-diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --config "$config" --file F)
+diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --config "$(cargo xtask mutant-exclusions)" --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
-cargo mutants --config "$config" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
 # Some mutants of a file again, after the specs that should kill them: a regex over their names
-cargo mutants --config "$config" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
 ```
 
 Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one
