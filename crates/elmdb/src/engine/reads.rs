@@ -1650,7 +1650,6 @@ impl<R: Read> Query<'_, R> {
     /// one whose entries for them are the fewest, chosen once a read (`choose`). None when no index reads them and
     /// the type's entities are walked, each filter testing what reaches it, and for a step past those filters
     fn access(&self, before: usize) -> Result<Option<Access>> {
-        // mutant-skip: replace >= with > in Query<'_, R>::access
         // Asked by a filter's stage of its own step: one past the leading filters is at no step that ends them,
         // which is the first that is no filter
         if before >= self.filters {
