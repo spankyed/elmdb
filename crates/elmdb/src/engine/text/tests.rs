@@ -889,6 +889,19 @@ fn visited(db: &Database, scope: &str, steps: Json, terminal: Json) -> (Json, u6
     (answer["answer"].clone(), answer["visited"].as_u64().unwrap())
 }
 
+/// A plan over Message from its type, explained: how many of its matches its search, the first step, held to rank
+/// them. Each stage is whole: one that says it holds fewer keys than it writes leaves its last outside it
+fn held(db: &Database, scope: &str, steps: Json, terminal: Json) -> Json {
+    let plan = json!({
+        "scope": scope, "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": terminal
+    });
+    let explained = read(db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+    let stages = explained["stages"].as_array().unwrap();
+    assert!(stages.iter().all(|stage| stage["kept"].is_number() && stage["ms"].is_number()), "{explained}");
+    assert_eq!(stages[1]["stage"], "search", "{explained}");
+    stages[1]["held"].clone()
+}
+
 /// How many keys the database holds under a prefix
 fn keys_under(db: &Database, prefix: crate::format::Prefix) -> usize {
     db.snapshot(|s| {
@@ -1043,8 +1056,12 @@ fn a_limit_after_a_search_keeps_its_best_matches_and_reads_only_the_entities_it_
     }
     // A limit further on stops the walk as it stops any, without the search keeping only that many
     let late = json!([lmdb, { "step": "has", "field": "text" }, { "step": "limit", "n": 3 }]);
-    let (first, entities) = visited(&db, "live", late, answer.clone());
+    let (first, entities) = visited(&db, "live", late.clone(), answer.clone());
     assert_eq!((first["ids"].clone(), entities), (ids(&best[..3]), 3));
+    // What the search held to rank, which an explained read says: every match, or no more than the limit takes
+    assert_eq!(held(&db, "live", json!([lmdb]), answer.clone()), 32);
+    assert_eq!(held(&db, "live", json!([lmdb, { "step": "limit", "n": 3 }]), answer.clone()), 3);
+    assert_eq!(held(&db, "live", late, answer.clone()), 32);
     let (first, entities) = visited(&db, "live", json!([lmdb]), json!({ "answer": "first" }));
     assert_eq!((first["id"].clone(), entities), (json!(id(0)), 1));
 
@@ -1096,6 +1113,290 @@ fn hits_after_a_limit_are_the_best_matches_with_their_scores_and_no_others() {
     write(&db, vec![json!({ "op": "link", "source": "Message-1", "kind": "in", "target": "Message-3" })]);
     let reached = hits(json!([either, { "step": "limit", "n": 1 }, { "step": "out", "kinds": ["in"] }]));
     assert_eq!(reached, [("Message-3".to_owned(), 0.0, json!([]))]);
+}
+
+fn after(cursor: &str) -> Json {
+    json!({ "step": "after", "id": cursor })
+}
+
+fn limit(n: usize) -> Json {
+    json!({ "step": "limit", "n": n })
+}
+
+#[test]
+fn a_page_of_a_search_is_the_matches_ranked_past_its_cursor_and_reads_those_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Each holds "lmdb" once, in a text some words longer: the shorter the text, the better the match. Three texts
+    // are the word alone, which tie in the order they were made. One message more doesn't hold the word
+    let id = |i: usize| format!("Message-{i:02}");
+    let longer = |i: usize| if i >= 30 { 0 } else { (i * 7) % 30 };
+    write(
+        &db,
+        (0..32)
+            .map(|i| create("Message", &id(i), json!({ "text": format!("lmdb{}", " filler".repeat(longer(i))) })))
+            .collect(),
+    );
+    write(
+        &db,
+        vec![
+            create("Message", "Message-other", json!({ "text": "filler" })),
+            create("Plain", "Plain-1", json!({ "title": "lmdb" })),
+        ],
+    );
+    let mut best: Vec<usize> = (0..32).collect();
+    best.sort_by_key(|i| (longer(*i), *i));
+    let ids = |of: &[usize]| json!(of.iter().map(|i| id(*i)).collect::<Vec<_>>());
+    let lmdb = json!({ "step": "search", "query": "lmdb", "options": { "fuzzy": false } });
+    let answer = json!({ "answer": "ids" });
+    // With each match as the cursor, the page is what the whole answer holds past it, and its entities are all
+    // that is read, wherever the cursor is
+    let pages = |scope: &str, ranked: &[usize]| {
+        let (all, _) = visited(&db, scope, json!([lmdb]), answer.clone());
+        assert_eq!(all["ids"], ids(ranked), "{scope}");
+        for (at, cursor) in ranked.iter().enumerate() {
+            let rest = &ranked[at + 1..];
+            let (past, entities) = visited(&db, scope, json!([lmdb, after(&id(*cursor))]), answer.clone());
+            assert_eq!((past["ids"].clone(), entities), (ids(rest), rest.len() as u64), "{scope}: past {cursor}");
+            for n in [1, 3, 40] {
+                let page = &rest[..n.min(rest.len())];
+                let steps = json!([lmdb, after(&id(*cursor)), limit(n)]);
+                let (got, entities) = visited(&db, scope, steps, answer.clone());
+                assert_eq!(
+                    (got["ids"].clone(), entities),
+                    (ids(page), page.len() as u64),
+                    "{scope}: {n} past {cursor}"
+                );
+            }
+        }
+    };
+    pages("live", &best);
+    // A cursor that is no match has nothing past it, and nothing is read to say so: a message without the word, an
+    // id of no entity, and an entity of a type that isn't searched
+    for cursor in ["Message-other", "Message-none", "Plain-1"] {
+        let (none, entities) = visited(&db, "live", json!([lmdb, after(cursor), limit(3)]), answer.clone());
+        assert_eq!((none["ids"].clone(), entities), (json!([]), 0), "{cursor}");
+    }
+
+    // What the search held to rank: past a cursor, only the matches ranked past it, and of those no more than a
+    // limit after the cursor takes
+    let held_by = |steps: Json| held(&db, "live", steps, answer.clone());
+    assert_eq!(held_by(json!([lmdb, after(&id(best[4]))])), 27);
+    assert_eq!(held_by(json!([lmdb, after(&id(best[4])), limit(3)])), 3);
+    assert_eq!(held_by(json!([lmdb, after(&id(best[30])), limit(3)])), 1);
+    assert_eq!(held_by(json!([lmdb, after("Message-other"), limit(3)])), 0);
+    // A limit past a second cursor asks the search for nothing: the first cursor's page would be cut before the
+    // second was passed
+    let twice = json!([lmdb, after(&id(best[2])), after(&id(best[5])), limit(2)]);
+    let (past_both, entities) = visited(&db, "live", twice.clone(), answer.clone());
+    assert_eq!((past_both["ids"].clone(), entities), (ids(&best[6..8]), 5));
+    assert_eq!(held_by(twice), 29);
+
+    // The trash is left out before the cursor is ranked: a page of a scope is of that scope's matches, and a match
+    // the scope doesn't reach is no cursor of it
+    write(&db, vec![json!({ "op": "trash", "id": id(0) }), json!({ "op": "trash", "id": id(13) })]);
+    let live: Vec<usize> = best.iter().copied().filter(|i| ![0, 13].contains(i)).collect();
+    pages("live", &live);
+    pages("trashed", &[0, 13]);
+    pages("withTrashed", &best);
+    for (scope, cursor) in [("live", id(0)), ("trashed", id(30))] {
+        let (none, entities) = visited(&db, scope, json!([lmdb, after(&cursor), limit(3)]), answer.clone());
+        assert_eq!((none["ids"].clone(), entities), (json!([]), 0), "{scope}: {cursor}");
+    }
+
+    // A page's hits are the whole answer's past the cursor, each with the score it has there
+    let hits = |steps: Json| {
+        let plan = json!({
+            "start": { "from": "types", "types": ["Message"] }, "steps": steps, "terminal": { "answer": "hits" }
+        });
+        let answer = read(&db, json!({ "read": "query", "plan": plan })).unwrap();
+        let hits = answer["hits"].as_array().unwrap().clone();
+        hits.iter().map(|h| (h["id"].as_str().unwrap().to_owned(), h["score"].as_f64().unwrap())).collect::<Vec<_>>()
+    };
+    let all = hits(json!([lmdb]));
+    assert_eq!(all.len(), 30);
+    assert_eq!(hits(json!([lmdb, after(&all[2].0), limit(4)])), all[3..7]);
+}
+
+#[test]
+fn the_first_of_a_search_keeps_one_match_and_whether_there_is_one_scores_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // The later a message was made the shorter its text, so the best match is the last the index holds
+    let id = |i: usize| format!("Message-{i}");
+    write(
+        &db,
+        (0..6)
+            .map(|i| create("Message", &id(i), json!({ "text": format!("lmdb{}", " filler".repeat(5 - i)) })))
+            .collect(),
+    );
+    let word = |word: &str| json!({ "step": "search", "query": word, "options": { "fuzzy": false } });
+    let lmdb = word("lmdb");
+    let first = json!({ "answer": "first" });
+    let exists = json!({ "answer": "exists" });
+    // The answer, the entities read for it, and the matches the search held to rank
+    let asked = |steps: Json, terminal: Json| {
+        let (answer, entities) = visited(&db, "live", steps.clone(), terminal.clone());
+        let found = if answer["kind"] == "bool" { answer["value"].clone() } else { answer["id"].clone() };
+        (found, entities, held(&db, "live", steps, terminal))
+    };
+    // The first is the best match, the one match kept and the one entity read
+    assert_eq!(asked(json!([lmdb]), first.clone()), (json!(id(5)), 1, json!(1)));
+    let row = json!({ "answer": "firstRow", "fields": ["text"] });
+    let (best, entities) = visited(&db, "live", json!([lmdb]), row.clone());
+    assert_eq!((best["row"].clone(), entities), (json!({ "id": id(5), "text": "lmdb" }), 1));
+    assert_eq!(held(&db, "live", json!([lmdb]), row), 1);
+    // Whether there is a match is asked of the index: none is ranked, and one entity is read, or none
+    assert_eq!(asked(json!([lmdb]), exists.clone()), (json!(true), 1, json!(0)));
+    assert_eq!(asked(json!([word("absent")]), exists.clone()), (json!(false), 0, json!(0)));
+    assert_eq!(asked(json!([word("absent")]), first.clone()), (Json::Null, 0, json!(0)));
+
+    // Past a cursor, the first is the best of what is ranked past it, and there is one when any is
+    assert_eq!(asked(json!([lmdb, after(&id(4))]), first.clone()), (json!(id(3)), 1, json!(1)));
+    assert_eq!(asked(json!([lmdb, after(&id(4))]), exists.clone()), (json!(true), 1, json!(1)));
+    assert_eq!(asked(json!([lmdb, after(&id(0))]), first.clone()), (Json::Null, 0, json!(0)));
+    assert_eq!(asked(json!([lmdb, after(&id(0))]), exists.clone()), (json!(false), 0, json!(0)));
+    // Past a second cursor the search is asked for nothing, and hands on all past the first
+    let twice = json!([lmdb, after(&id(5)), after(&id(3))]);
+    assert_eq!(asked(twice.clone(), first.clone()), (json!(id(2)), 3, json!(5)));
+    assert_eq!(asked(twice, exists.clone()), (json!(true), 3, json!(5)));
+    let none_past = json!([lmdb, after(&id(5)), after(&id(0))]);
+    assert_eq!(asked(none_past, exists.clone()), (json!(false), 5, json!(5)));
+    // As it is with a step between it and the terminal, and a limit asks for what it takes
+    let filtered = json!([lmdb, { "step": "has", "field": "text" }]);
+    assert_eq!(asked(filtered.clone(), first.clone()), (json!(id(5)), 1, json!(6)));
+    assert_eq!(asked(filtered, exists.clone()), (json!(true), 1, json!(6)));
+    assert_eq!(asked(json!([lmdb, limit(3)]), first.clone()), (json!(id(5)), 1, json!(3)));
+
+    // Among a set, the first is its best match and whether there is one is asked of the index alike: the type's
+    // six entities are read for the set, and one more for the answer
+    let among = |terminal: Json| {
+        let plan = json!({
+            "start": { "from": "types", "types": ["Message"] },
+            "steps": [{ "step": "within", "ids": [id(1), id(3)] }, lmdb],
+            "terminal": terminal
+        });
+        let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+        let answer = &explained["answer"];
+        let found = if answer["kind"] == "bool" { answer["value"].clone() } else { answer["id"].clone() };
+        (found, explained["visited"].clone(), explained["stages"][2]["held"].clone())
+    };
+    assert_eq!(among(first.clone()), (json!(id(3)), json!(7), json!(1)));
+    assert_eq!(among(exists.clone()), (json!(true), json!(7), json!(0)));
+
+    // The trash is left out of what is asked: a live plan finds no match in it, and a plan of the trash finds its own
+    write(&db, (0..6).filter(|i| *i != 2).map(|i| json!({ "op": "trash", "id": id(i) })).collect());
+    assert_eq!(asked(json!([lmdb]), first.clone()), (json!(id(2)), 1, json!(1)));
+    assert_eq!(asked(json!([lmdb]), exists.clone()), (json!(true), 1, json!(0)));
+    write(&db, vec![json!({ "op": "trash", "id": id(2) })]);
+    assert_eq!(asked(json!([lmdb]), exists.clone()), (json!(false), 0, json!(0)));
+    let (in_trash, entities) = visited(&db, "trashed", json!([lmdb]), exists);
+    assert_eq!((in_trash["value"].clone(), entities), (json!(true), 1));
+    let (in_trash, entities) = visited(&db, "trashed", json!([lmdb]), first);
+    assert_eq!((in_trash["id"].clone(), entities), (json!(id(5)), 1));
+}
+
+#[test]
+fn a_page_of_a_search_of_several_types_or_among_a_set_is_cut_where_its_ties_are_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // A message and a doc of each of two lengths. Each type's index holds the same texts, so the two of a length
+    // score alike, and a tie is broken by the order the types are searched in, or by the set's own
+    write(
+        &db,
+        vec![
+            create("Message", "Message-1", json!({ "text": "zebra" })),
+            create("Doc", "Doc-1", json!({ "body": "zebra" })),
+            create("Message", "Message-2", json!({ "text": "zebra crossing" })),
+            create("Doc", "Doc-2", json!({ "body": "zebra crossing" })),
+        ],
+    );
+    let zebra = json!({ "step": "search", "query": "zebra", "index": "text", "options": { "fuzzy": false } });
+    let read_ids = |start: Json, steps: Json| {
+        let plan = json!({ "start": start, "steps": steps, "terminal": { "answer": "ids" } });
+        let answer = read(&db, json!({ "read": "query", "visits": true, "plan": plan })).unwrap();
+        (answer["answer"]["ids"].clone(), answer["visited"].as_u64().unwrap())
+    };
+    // Every page of a start is what its whole answer holds past the cursor; `read_for_set` is what the start reads
+    // of a set before any match is handed on
+    let pages = |start: Json, ranked: &[&str], read_for_set: u64| {
+        let (all, _) = read_ids(start.clone(), json!([zebra]));
+        assert_eq!(all, json!(ranked), "{start}");
+        for (at, cursor) in ranked.iter().enumerate() {
+            let rest = &ranked[at + 1..];
+            let (past, _) = read_ids(start.clone(), json!([zebra, after(cursor)]));
+            assert_eq!(past, json!(rest), "{start}: past {cursor}");
+            let page = &rest[..rest.len().min(2)];
+            let (got, entities) = read_ids(start.clone(), json!([zebra, after(cursor), limit(2)]));
+            assert_eq!((got, entities), (json!(page), read_for_set + page.len() as u64), "{start}: {cursor}");
+        }
+    };
+    let types = |types: &[&str]| json!({ "from": "types", "types": types });
+    pages(types(&["Message", "Doc"]), &["Message-1", "Doc-1", "Message-2", "Doc-2"], 0);
+    pages(types(&["Doc", "Message"]), &["Doc-1", "Message-1", "Doc-2", "Message-2"], 0);
+    // A type named twice is searched twice, and the cursor is the first of its two
+    let twice = types(&["Message", "Message"]);
+    let both = json!(["Message-1", "Message-1", "Message-2", "Message-2"]);
+    assert_eq!(read_ids(twice.clone(), json!([zebra])).0, both);
+    let past = read_ids(twice.clone(), json!([zebra, after("Message-1")]));
+    assert_eq!(past, (json!(["Message-1", "Message-2", "Message-2"]), 3));
+    assert_eq!(read_ids(twice, json!([zebra, after("Message-2"), limit(2)])), (json!(["Message-2"]), 1));
+    // Among a set, in the set's own order
+    let set = json!({ "from": "ids", "ids": ["Message-2", "Doc-2", "Doc-1", "Message-1"] });
+    pages(set, &["Doc-1", "Message-1", "Message-2", "Doc-2"], 4);
+    // A match of the query that the set doesn't hold is no cursor of it
+    let fewer = json!({ "from": "ids", "ids": ["Message-2", "Doc-2"] });
+    assert_eq!(read_ids(fewer, json!([zebra, after("Message-1"), limit(2)])), (json!([]), 2));
+
+    // Whether there is a match is asked of each type's index in turn, and the first of all is the best of all
+    write(&db, vec![create("Doc", "Doc-3", json!({ "body": "giraffe" }))]);
+    let giraffe = json!({ "step": "search", "query": "giraffe", "index": "text", "options": { "fuzzy": false } });
+    let asked = |terminal: &str| {
+        let plan =
+            json!({ "start": types(&["Message", "Doc"]), "steps": [giraffe], "terminal": { "answer": terminal } });
+        let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+        (explained["answer"].clone(), explained["visited"].clone(), explained["stages"][1]["held"].clone())
+    };
+    assert_eq!(asked("exists"), (json!({ "kind": "bool", "value": true }), json!(1), json!(0)));
+    assert_eq!(asked("first"), (json!({ "kind": "id", "id": "Doc-3" }), json!(1), json!(1)));
+}
+
+#[test]
+fn a_page_past_a_cursor_deep_in_a_terms_blocks_is_what_the_whole_answer_holds_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // 600 messages hold "common", in texts of one to seven words, so many tie; each has a time, which a recency
+    // decay ranks them by as well; some are in the trash, more than are asked for one by one
+    let id = |i: usize| format!("Message-{i:03}");
+    write(
+        &db,
+        (0..600)
+            .map(|i| {
+                let text = format!("common{}", " w".repeat((i * 5) % 7));
+                create("Message", &id(i), json!({ "text": text, "at": (i * 37 % 600) as f64 }))
+            })
+            .collect(),
+    );
+    write(&db, (0..600).step_by(11).map(|i| json!({ "op": "trash", "id": id(i) })).collect());
+    assert!(keys_under(&db, crate::format::Prefix::TextBlock) >= 2, "600 places are more than a block holds");
+    let recent = json!({ "fuzzy": false, "recency": { "field": "at", "halfLife": 150, "now": 600 } });
+    let mut orders = Vec::new();
+    for options in [json!({ "fuzzy": false }), recent] {
+        let common = json!({ "step": "search", "query": "common", "options": options });
+        let (all, _) = visited(&db, "live", json!([common]), json!({ "answer": "ids" }));
+        let all: Vec<String> =
+            all["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned()).collect();
+        assert_eq!(all.len(), 600 - 55);
+        for at in (0..all.len()).step_by(41).chain([all.len() - 2, all.len() - 1]) {
+            let rest = &all[at + 1..];
+            let page = &rest[..rest.len().min(5)];
+            let steps = json!([common, after(&all[at]), limit(5)]);
+            let (got, entities) = visited(&db, "live", steps, json!({ "answer": "ids" }));
+            assert_eq!((got["ids"].clone(), entities), (json!(page), page.len() as u64), "past {}", all[at]);
+        }
+        orders.push(all);
+    }
+    assert_ne!(orders[0], orders[1], "a recency decay ranks the matches by their times as well");
 }
 
 #[test]

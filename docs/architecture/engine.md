@@ -278,8 +278,14 @@ an answer:
   are read from (the cursor's entry among the value's, or its place in the walk of a type with no index), and an
   `orderBy` read from an index (the cursor's entry, or its place among the entities without a value). The page then
   costs what it holds wherever the cursor is. A cursor that isn't in the set (another type's entity, one the scope
-  doesn't reach, one a filter leaves out, one without the value) answers nothing and reads nothing. After any other
-  stage, `after` passes over the ids up to the cursor as they come.
+  doesn't reach, one a filter leaves out, one without the value) answers nothing and reads nothing. A `search` has
+  no order to seek in, so it ranks the cursor among its matches and hands on those ranked past it (`search.md`,
+  Text search as built): its page reads the entities it holds, though every match is scored. After any other stage,
+  `after` passes over the ids up to the cursor as they come.
+- **A search is asked for no more than its answer takes.** A `limit` straight after a `search`, or after the `after`
+  straight after it, asks it for its best that many, which it keeps as it scores and no others; `first` and
+  `firstRow` ask for the best one, and `exists` for any one, which it answers from the indexes with no match
+  scored. With any other step between, the search ranks every match and the step after stops the walk.
 - **`orderBy` then `limit` holds the first `limit`** where the order is sorted, in order with ties kept as they came,
   rather than sorting the whole set: the set is still read, and the memory is the limit's.
 
@@ -299,9 +305,11 @@ the stages' times add up to at most the whole. A stage a driving index answered,
 nothing of its own: the stage reading the index does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
 index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
-engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name. So does a `range` the `orderBy` after it reads
-between. EXPLAIN times each crossing between stages, so its
-`ms` is the explained read's, a little above the plain one's.
+engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name.
+So does a `range` the `orderBy` after it reads between. A `search` stage says how many of its matches it `held` to
+rank them: every one, or those ranked past a page's cursor, and of either no more than it was asked for; none when it
+was asked for any one. A search that held every match before a `limit` further on is one a filter stands between.
+EXPLAIN times each crossing between stages, so its `ms` is the explained read's, a little above the plain one's.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last
 committed one, which a commit in any process moves), and opens one otherwise. At most eight completed

@@ -112,12 +112,20 @@ snapshot as a search when it needs to say that search is incomplete.
 - **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
   other steps it searches among the entities they reached, in which a type with no text index holds no match. Every
   match is scored, and an entity is read only as the step hands it on, best first: a `limit` straight after the step
-  keeps its best matches as they are scored and reads that many entities, and a `count` straight after it counts the
-  matches as the index holds them, scoring and reading none. `hits` answers each entity's score,
+  keeps its best matches as they are scored and reads that many entities, as `first` and `firstRow` keep and read
+  the one. A `count` straight after it counts the matches as the index holds them, scoring and reading none, and an
+  `exists` asks the indexes for one match, scoring none and reading that one. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
-  `counts` is a facet; `after` pages by the last id of the page before. A hit is of an entity the search handed on:
+  `counts` is a facet. A hit is of an entity the search handed on:
   a match a `limit` left out, reached again by a step after it, is answered with no score and no terms, as an entity
   the search never matched is.
+- **A page**: `after` straight after the step pages by the last id of the page before. The search scores that
+  entity first, as the match it is, and hands on the matches ranked past it: those of a lower score, and those of
+  the same score later in the order ties keep. A `limit` after the `after` keeps the best that many of them, so a
+  page reads its own entities and holds no more matches than it answers, wherever its cursor is; scoring every
+  match is what it still costs. The ranking is the index's as the read finds it, not as the page before found it: a
+  cursor that has stopped matching, or has left the plan's scope, has no page after it, and a write between two
+  pages can move a match across their boundary.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).
