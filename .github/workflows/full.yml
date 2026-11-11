@@ -1,11 +1,11 @@
 name: full tier
 
 # What a pull request ready for review must pass beyond ci.yml's fast tier: the binding's suites on every other target
-# it ships for (design.md, Packages), glibc and musl, the instruction counts and the diagnostics overhead. It runs when
-# a pull request is marked ready and on every push to one that is, in a concurrency group of its own, so marking ready
-# starts these jobs and neither cancels nor repeats ci.yml's run of the same commit. A draft's push runs none of them.
-# A dispatch runs the targets on a branch, without the Valgrind readings, which compare with a pull request's base.
-# `full-pass` is the check a merge waits on.
+# it ships for (design.md, Packages), glibc and musl, the instruction counts and the diagnostics overhead. It runs for
+# a pull request that is ready: when it is opened or reopened ready, when a draft is marked ready, and on every push
+# to it from then on. Its concurrency group is its own, so marking ready starts these jobs and neither cancels nor
+# repeats ci.yml's run of the same commit. A draft's push starts a run that skips them all. A dispatch runs the
+# targets on a branch, and neither Valgrind reading. `full-pass` is the check a merge waits on.
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]

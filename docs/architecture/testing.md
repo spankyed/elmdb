@@ -292,8 +292,9 @@ overhead. A dispatch of either workflow runs its platforms on a branch.
 
 A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
 and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
-it passes when every job before it passed or was skipped, as a change to documentation alone skips them, and fails
-when one was cancelled, so a run a newer push replaced never stands for the one that replaced it. The full tier is a
+it passes when every job before it passed or was skipped, and fails when one failed or was cancelled, so a run a newer
+push replaced never stands for the one that replaced it. A change to documentation alone passes all three with nothing
+run: `ci.yml` and `full.yml` skip their jobs, and the mutation jobs find nothing to mutate. The full tier is a
 workflow of its own so that marking a pull request ready starts its jobs and leaves the fast tier's run of the same
 commit alone, neither cancelled nor repeated. Only a pull request ready for review reports `full-pass`. A draft's
 push reports the full tier's last job under another name, because a check on a draft's head still stands when the
