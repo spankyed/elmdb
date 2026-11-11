@@ -123,13 +123,17 @@ cases: `../evidence/diagnostics.md`.
 ## Mutation testing
 
 cargo-mutants (`.cargo/mutants.toml`) mutates the engine's source — operators, conditions, a function's body — and runs
-the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate:
+the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate,
+and reads the configuration `cargo xtask mutant-exclusions` writes and prints the path of, which holds the exclusions
+the source's `// mutant-skip:` comments make (below); without it a run reports each of those mutants as missed. Each
+command derives it again, since it holds the lines the comments are above as it is written: one kept from before an
+edit would excuse whatever the edit moved onto those lines, and report the mutants it moved off them.
 
 ```sh
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
-cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
-cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
 python3 scripts/mutants-in-diff.py main
 # One of four shares of them, or only the change's Windows-only code (what CI's runners split)
@@ -140,11 +144,11 @@ python3 scripts/mutants-in-diff.py main 3 --resume
 # One of CI's four shares alone, on a branch, while the others run or after its runner was lost
 gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
-diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
+diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --config "$(cargo xtask mutant-exclusions)" --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
-cargo mutants -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
 # Some mutants of a file again, after the specs that should kill them: a regex over their names
-cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
 ```
 
 Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one
@@ -183,12 +187,20 @@ the same directory.
 A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
 exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
 an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. One that names
-a line lives in the source: a `// mutant-skip: PATTERN` comment directly above the line it excuses, followed by its reason, or
-` (as above)` where the comment before it gave that. `cargo xtask mutant-exclusions` writes those into a generated part of
-`.cargo/mutants.toml`, each with the line of the next code, so an edit above one moves nothing by hand. It can hide a mutant of
-the same kind that moves onto that line; the `--list --no-config` diff above shows what each exclusion hides. `cargo xtask
-check-mutant-exclusions`, a CI step, fails when that part isn't what the comments generate, and when an exclusion, or one line
-of a pattern naming several, matches no mutant cargo-mutants lists. A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
+a line lives in the source and nowhere else: a `// mutant-skip: PATTERN` comment directly above the line it excuses,
+followed by its reason, or ` (as above)` where the comment before it gave that. It excuses the mutants matching PATTERN
+on the first line of code under it, so it moves with its line through any edit above and through a merge, and two
+branches that each add, move or remove one, or shift the lines above one, have no list of line numbers to reconcile:
+`.cargo/mutants.toml` holds only the exclusions that name no line. `cargo xtask mutant-exclusions` writes the
+configuration a run reads, `target/mutants.toml`, which is that file with a pattern for each comment, carrying the
+line the comment is above when it is written; `scripts/mutants-in-diff.py` asks it for one at every run that has
+something to mutate, and nothing it writes is committed. A comment can hide a mutant of the same kind that moves onto its line; the `--list --no-config`
+diff above shows what each exclusion hides. `cargo xtask check-mutant-exclusions`, a CI step, fails when a comment's
+pattern matches no mutant cargo-mutants lists on the line under it, as after code went in between the two or the
+mutant's name changed; when an exclusion in `.cargo/mutants.toml` matches none; and when one there names a line, which
+every edit above that line would have to rewrite. `cargo xtask mutant-exclusions` writes no configuration from a file
+that holds one either, so a mutation run stops at it as the check does.
+A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`, `check-idle-reader-mutation.py`,
 `check-reader-recovery.py`) make changes cargo-mutants doesn't: one expression swapped for another, and heap, timing and
 cleanup regressions.
