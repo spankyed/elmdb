@@ -1355,8 +1355,7 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
     // Of two ranges and no list, a read that takes every task reads the one holding the fewest, whichever is
     // written first: each is counted to twice as far until one is known to
     for filters in orders(&[every.clone(), late.clone()]) {
-        let (found, visits, _) = read(json!(filters));
-        assert_eq!((found, visits), (20, 20), "{filters:?}");
+        assert_eq!(read(json!(filters)), (20, 20, 32 + 20), "{filters:?}");
     }
 }
 
@@ -1545,14 +1544,16 @@ fn a_tracked_read_depends_on_the_list_it_walked_and_on_the_others_only_at_its_pl
     assert_eq!(touched(vec![set(598, "status", json!("done"))]), [1, 2]);
     assert_eq!(touched(vec![set(300, "owner", json!(7))]), [1, 2]);
 
-    // What lies between a place sought and the one answered was read too. A done task given the owner is a place
-    // of the owner's list that the open tasks' list was asked for: it answered with its first place, fifty on,
-    // so a task between the two made open is one that asking would have found, though it has no owner
+    // What lies between a place sought and the one answered was read too. A done task of the owner's, with the
+    // nine tasks after it done as well, is a place of the owner's list that the open tasks' list was asked for:
+    // it answered with the next open task, ten on. A task between the two made open is one that asking would
+    // have found, though it has no owner; one made open elsewhere is not
     db.untrack(1);
     db.untrack(2);
-    write(&db, vec![set(50, "owner", json!(7))]);
+    write(&db, (400..410).map(|at| set(at, "status", json!("done"))).chain([set(400, "owner", json!(7))]).collect());
     track(json!([open, is("owner", json!(7))]), 3);
-    assert_eq!(touched(vec![set(70, "status", json!("open"))]), [3]);
+    assert!(touched(vec![set(200, "status", json!("open"))]).is_empty());
+    assert_eq!(touched(vec![set(405, "status", json!("open"))]), [3]);
 }
 
 #[test]
@@ -1577,7 +1578,12 @@ fn a_filter_is_refused_as_its_stage_refuses_it_whichever_index_is_read() {
     let both = json!({ "step": "range", "field": "k", "atLeast": 1, "above": 1 });
     for steps in [json!([unbounded, both]), json!([unbounded, is("owner", json!(7)), both])] {
         let refused = read(&db, json!({ "read": "query", "plan": plan("live", steps.clone()) })).unwrap_err();
-        assert!(refused.message.contains("atLeast or above"), "{steps}: {}", refused.message);
+        assert!(refused.message.contains("was given both"), "{steps}: {}", refused.message);
+        // As it is before an order its field is read in, which asks after an index on the filters' fields too
+        let mut ordered = steps.as_array().unwrap().clone();
+        ordered.extend([order("k", false), limit(1)]);
+        let refused = read(&db, json!({ "read": "query", "plan": plan("live", json!(ordered)) })).unwrap_err();
+        assert!(refused.message.contains("was given both"), "{ordered:?}: {}", refused.message);
     }
     // A filter past a step that pulls nothing is not among those a type start begins with, and asks for no index:
     // the role before that step is never reached, as when every stage runs
