@@ -210,10 +210,13 @@ an answer:
   value index on that one field (a `where` on a value other than null); an index on several fields is read for an
   order or a range under equalities, below, and not for an equality alone. Without such an index the type's entities
   are walked. Further
-  along the filters a type start begins with (`where`, `withRole`, `has`, `lacks`, `ofType`, `within`, which keep the
-  same set in any order), the first `where` or `withRole` every start type has a built index for is read instead of
-  the walk, and the filters before it are checked against each match. A filter after any other step filters what
-  reaches it.
+  along the filters a type start begins with (`where`, `withRole`, `has`, `lacks`, `ofType`, `within`, `range`,
+  which keep the same set in any order), the first `where` or `withRole` every start type has a built index for is
+  read instead of the walk, and the filters before it are checked against each match; a `range` among them is
+  refused for bounds it can't take before anything is read. A filter after any other step filters what reaches it.
+  A plan of the trash walks the trash where that reads less: an index's entries are of every entity, each read to
+  learn it is not in the trash, so the trash's own rows are read when there are fewer of them than 1,024 and than
+  the entries the index would read.
 - **An index lookup visits its matches as it reads them.** One value's entries are keyed by place, so they come in
   creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
 - **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
@@ -247,23 +250,28 @@ an answer:
   a few entities of the walk, and filters that keep a thousandth cost the sort a thousandth of the type. So the walk
   is tried when reading the filters would read 128 entities or more, the entries of the index they are read from or
   the type's entities with none, and given up once the walk has read half as many entries as that reading would,
-  which it asks at 128 entries and each time it has read twice as many: every entry it reads counts, one of an
-  entity in the trash as one it hands on. The two together cost a small multiple of the cheaper
+  which it asks at 128 entries and each time it has read twice as many, once it has tested the entry it asks at:
+  every entry it reads counts, one of an entity in the trash as one it hands on, and a plan of both counts the
+  trash's entities among what the sort would read. What it asks is counted in keys, each once over all its
+  askings, and decides only how the order is read: the keys are no entity's and not among a plan's visits, and a
+  tracked read depends on none of them. The two together cost a small multiple of the cheaper
   (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
   the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
   between the cursor and the page's last. One given up, like any page of a sorted order, is sorted as a first page
   is, holding only what the `limit` takes: the entities ordered past the cursor, those of its own value that come
-  after it among them. Only an index on both reads a page at the cost of what it holds.
+  after it among them. A cursor the filters don't keep has no page, and nothing is read to say so. Only an index on
+  both reads a page at the cost of what it holds.
 - **A range is read from an index.** A `range` of numbers straight after a type start reads the entries between its
   bounds from such an index, when the index holds no list or other value it doesn't order, and hands them on in
   creation order: it reads as many entries as are within the bounds. An `orderBy` of the same field straight after it
   reads those entries in order instead, as above, and a `count` of it counts them by their places, less the trash's
   as a search leaves them out, and reads no entity. Among equalities alone, a range is read from the index on their
   fields and then its own, as an order is, by whichever of them is written last: the range may stand before them,
-  between them or after. With no index on them all, an equality's own index is read whichever of them comes first,
-  and the range filters its matches. A plan of the trash that starts with a range reads as it is written, the range
-  walking the trash, which is the smaller where an index's entries are of every entity. A range of strings, one
-  among any other steps, and one over a type without such an index filter what reaches them.
+  between them or after; an index on the equalities up to the range and on it is read for those, before an index
+  of an equality after them. With no such index the first of them to have an index is read: a range the plan
+  starts with reads the index on its own field, and one with none is a filter of the equality's index after it.
+  A range of strings, one among any other steps, and one over a type without such an index filter what reaches
+  them.
 - **A page's cursor is sought.** The stage before an `after` starts past its cursor when it reads an order it can
   seek in: a type start (the cursor's place in its type's creation order, the types before its own
   left out), a `where` or `withRole` reading its matches straight after the start or as the index its leading filters
@@ -291,7 +299,7 @@ the stages' times add up to at most the whole. A stage a driving index answered,
 nothing of its own: the stage reading the index does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
 index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
-engine writes, whose order an index's entries have. So does a `range` the `orderBy` after it reads
+engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name. So does a `range` the `orderBy` after it reads
 between. EXPLAIN times each crossing between stages, so its
 `ms` is the explained read's, a little above the plain one's.
 
