@@ -53,10 +53,12 @@ python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BA
   their CI: survivors cleared where the code was written cost minutes, cleared at the end of a stack, hours.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
-- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
-  tier, adding Apple silicon and Windows; a pull request ready for review runs every target the binding ships for.
-  Open a pull request as a draft while iterating, mark it ready (`gh pr ready`) for the full tier, and merge when
-  `ci-pass`, the one required check, and the `mutants` jobs, which a surviving mutant fails, are green.
+- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`, and for every pull request with the
+  fast tier's platforms, Apple silicon and Windows. The full tier (`full.yml`), every other target the binding ships
+  for and the Valgrind readings, runs once a pull request is ready for review: marking it ready starts the full tier
+  and leaves the fast tier's run alone. Open a pull request as a draft while iterating, mark it ready (`gh pr ready`)
+  for the full tier, and merge when the three required checks are green: `ci-pass`, `full-pass`, and `mutants-pass`,
+  which a surviving mutant fails.
 
 The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supported Rust version.
 
