@@ -1490,3 +1490,43 @@ fn a_term_an_entity_holds_more_or_less_often_than_it_did_is_filed_again() {
     write(&db, vec![json!({ "op": "set", "id": "Message-3", "fields": { "text": "lmdb about lmdb" } })]);
     held(score(2.0, 3.0, 15.0));
 }
+
+// A search paged, against the same search whole
+
+fn ids_of(db: &Database, scope: &str, start: Json, steps: Json) -> Vec<String> {
+    let plan = json!({ "scope": scope, "start": start, "steps": steps, "terminal": { "answer": "ids" } });
+    read(db, json!({ "read": "query", "plan": plan })).unwrap()["ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_page_of_a_search_is_cut_past_its_own_cursor_when_a_step_below_it_sought_one_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let id = |i: usize| format!("Message-{i}");
+    write(
+        &db,
+        (0..8).map(|i| create("Message", &id(i), json!({ "text": format!("lmdb{}", " filler".repeat(i)) }))).collect(),
+    );
+    let lmdb = json!({ "step": "search", "query": "lmdb", "options": { "fuzzy": false } });
+    let start = json!({ "from": "types", "types": ["Message"] });
+    let ids = |steps: Json| ids_of(&db, "live", start.clone(), steps);
+    let among = ids(json!([after(&id(1)), lmdb]));
+    assert_eq!(among, (2..8).map(id).collect::<Vec<_>>());
+    let paged = ids(json!([after(&id(1)), lmdb, after(&id(3))]));
+    let paged_limit = ids(json!([after(&id(1)), lmdb, after(&id(3)), limit(2)]));
+    let (first, _) = visited(&db, "live", json!([after(&id(1)), lmdb, after(&id(3))]), json!({ "answer": "first" }));
+    let (exists, _) = visited(&db, "live", json!([after(&id(1)), lmdb, after(&id(3))]), json!({ "answer": "exists" }));
+    assert_eq!((first["id"].clone(), exists["value"].clone()), (json!(id(4)), json!(true)));
+    // a filter that seeks below, and a limit under the search
+    write(&db, (0..8).map(|i| json!({ "op": "set", "id": id(i), "fields": { "sender": "a" } })).collect());
+    let held = json!({ "step": "where", "field": "sender", "value": "a" });
+    let under = ids(json!([held, after(&id(1)), limit(5), lmdb, after(&id(3)), limit(2)]));
+    assert_eq!(under, (4..6).map(id).collect::<Vec<_>>());
+    assert_eq!(paged, (4..8).map(id).collect::<Vec<_>>());
+    assert_eq!(paged_limit, (4..6).map(id).collect::<Vec<_>>());
+}

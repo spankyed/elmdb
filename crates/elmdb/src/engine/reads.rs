@@ -1219,10 +1219,6 @@ impl<R: Read> Query<'_, R> {
                 })
             }
             Step::Search { query, index, options } => {
-                // Before an `after` it hands on only its matches past the cursor
-                if cursor.is_some() {
-                    self.sought.set(Some(upto));
-                }
                 self.search(before, ask, cursor, query, index.as_deref(), options, visit)
             }
             Step::Containing { text, index, case_insensitive } => self.containing(
@@ -1316,6 +1312,11 @@ impl<R: Read> Query<'_, R> {
         let raw = text::search::parse(query);
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
         let (types, among) = self.searched(before)?;
+        // Before an `after` it hands on only its matches past the cursor, and says so once the stages before it have
+        // run: one of those that sought to a cursor of its own said so of itself
+        if cursor.is_some() {
+            self.sought.set(Some(before + 1));
+        }
         let order: Option<HashMap<&str, usize>> =
             among.as_ref().map(|ids| ids.iter().enumerate().rev().map(|(at, id)| (id.as_str(), at)).collect());
         let mut indexes = Vec::with_capacity(types.len());
