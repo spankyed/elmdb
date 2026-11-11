@@ -26,6 +26,25 @@ entries for a value a list in place order: one list is walked and its places sou
 than the shortest holds whichever filter is written first, and nothing is counted to choose (`../architecture/engine.md`,
 Reads: plans). That answers what the first phase below was for without its `d/xn` key.
 
+The reading of The measurements below, taken again as a disposable program through `Database::read_bytes`: 100,000
+tasks, `status` half `open`, `prio` a fifth `high`, 10,000 both, each field in an index of its own; a release build
+on an Apple M1 Pro at a load of 3.5 to 7, 2026-11-11, medians of seven. `session/filter-access` at `d814908` reads
+the filters from the one index it counts to hold the fewest, and `session/leapfrog-filters` at `8b7c833` as the
+places both hold.
+
+| The read | One index chosen | The places in common |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 61.8 ms | 19.3 ms |
+| `where(prio).where(status)`, every id | 26.3 ms | 18.9 ms |
+| `where(status).where(prio)`, the first | 60.3 µs | 8.0 µs |
+| `where(status)`, the first | 5.1 µs | 4.8 µs |
+| `where(prio)`, every id | 14.3 ms | 14.3 ms |
+
+The order written no longer matters, and a first over two filters costs 1.7 times a first over one, where counting
+the two indexes to choose between them cost twelve times. Every id of the two together still costs more than every
+id of the smaller alone, a place sought in the other list for each of its twenty thousand: that is what the lists
+as bitmaps are for.
+
 What the planner still does not do: read those lists as bitmaps, a seek a place where a block would be an AND, or run
 a search inside a filter's set when the filter comes first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
 the test is a lookup in a set.
