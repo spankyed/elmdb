@@ -288,7 +288,8 @@ Every pull request, draft or ready for review, also runs the fast tier's platfor
 pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
 every suite, the model and crash harnesses included, on it, and adds the instruction counts and the diagnostics
-overhead. A dispatch of either workflow runs its platforms on a branch.
+overhead. A dispatch of either workflow runs its platforms on a branch, and reports none of the checks a merge waits
+on.
 
 A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
 and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
