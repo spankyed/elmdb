@@ -679,20 +679,14 @@ impl<'a> Walk<'a> {
             self.entries = self.postings.run_at(self.run - 1);
             self.next = None;
         }
+        // The run being read is now the only one that can hold the place, so the place is not held once it ends
         loop {
             if let Some((at, counts)) = self.next
                 && at >= place
             {
                 return (at == place).then_some(counts);
             }
-            self.next = self.entries.next();
-            if self.next.is_none() {
-                if self.run == self.postings.runs.len() {
-                    return None;
-                }
-                self.entries = self.postings.run_at(self.run);
-                self.run += 1;
-            }
+            self.next = Some(self.entries.next()?);
         }
     }
 }
