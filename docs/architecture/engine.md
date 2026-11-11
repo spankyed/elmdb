@@ -220,12 +220,14 @@ an answer:
     Equalities on every field of an index on several fields read its entries under those values as one list in
     place of their own, the index on the most fields, while it holds no entity it doesn't order under the values
     of the fields before its last: `where owner = 9` and `where rank = 3` read an index on `[owner, rank]`.
-  - **What that reads.** Nothing is counted to choose an index. What is read is bounded by the shortest list and
-    not the longest, whichever order the filters are written in: for each place the shortest holds, a few entries
-    of each of the others. A `first`, `exists` or `limit` reads an entry or two of each list for each entity it
-    takes. The list walked is the one whose places have been furthest apart, which where each list's first place
-    is says to begin with, and a list that comes to leap twice as far is walked in its place: an entry walked is
-    the next one read, where a place sought is found from the root.
+  - **What that reads.** Nothing is counted to choose among lists. What is read is bounded by the shortest list
+    and not the longest: for each place the shortest holds, an entry sought in each other list, and in the one
+    walked up to eight passed over and one sought. A `first`, `exists` or `limit` reads an entry or two of each
+    list for each place tried, which is each entity it takes where the lists mostly agree. The list walked is the
+    one whose places have been furthest apart, one from the next, where the read has seen them: where each list's
+    first place is says so to begin with, and a list whose places come to be twice as far apart is walked in its
+    place. An entry walked is the next one read, where a place sought is found from the root, so walking the
+    shortest reads the fewest; the order the filters are written in can change the cost only until it is.
   - **A range's index is read once the read has paid for it.** A `range` of numbers has an index to read where
     the type has one on its field alone that accounts for every entity, or, over one type, where the plan's first
     steps are equalities and the range and an index is on their fields and then its own, whichever way round they
@@ -235,8 +237,8 @@ an answer:
     entries counted, keys alone, no further than that; and at the start, a range holding fewer than 16 is read,
     the one holding the fewest of several. Until then the range is tested against each entity. So a read that
     stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
-    of the cheaper way. A read that takes every entity the filters keep, and has no list, reads the first such
-    range whatever it holds. An index on several fields is not read for equalities on some of its fields alone.
+    of the cheaper way. A read that takes every entity the filters keep, and has no list, reads a range whatever
+    it holds, the one holding the fewest, each counted to twice as far until one is known to. An index on several fields is not read for equalities on some of its fields alone.
   - **A plan of the trash** reads the type's trash, its rows keyed by place, as a list among the others, where an
     index's entries are of every entity: only entities in the trash are read. It reads a range's index only once
     it has read as many entries, never at the start.
@@ -288,7 +290,8 @@ an answer:
   every entry it reads counts, one of an entity in the trash as one it hands on, and a plan of both counts the
   trash's entities among what the sort would read. What it asks is counted in keys, each once over all its
   askings, and decides only how the order is read: the keys are no entity's and not among a plan's visits, and a
-  tracked read depends on none of them. The two together cost a small multiple of the cheaper
+  tracked read depends on none of them. The two together cost a small multiple of the cheaper, what the filters
+would read being taken as what the shortest of their lists holds
   (`docs/evidence/million-notes.md`, A filter before an order). A page of it, an `after` between the `orderBy` and
   the `limit`, walks from past its cursor, sought in the order's index, under the same rule: it costs the entities
   between the cursor and the page's last. One given up, like any page of a sorted order, is sorted as a first page

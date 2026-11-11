@@ -23,9 +23,9 @@ such index an `orderBy` before a `limit` walks its order and tests the filters w
 what they keep, which it learns by counting the entries the filters would read as it goes.
 
 Since then a type start's leading filters are read as the places their indexes hold in common, each index's
-entries for a value a list in place order: one list is walked and its places sought in the others, so no more is read
-than the shortest holds whichever filter is written first, and nothing is counted to choose (`../architecture/engine.md`,
-Reads: plans). That answers what the first phase below was for without its `d/xn` key.
+entries for a value a list in place order: one list is walked and its places sought in the others, so what is read
+is bounded by the shortest whichever filter is written first, and nothing is counted to choose among them
+(`../architecture/engine.md`, Reads: plans). That answers what the first phase below was for without its `d/xn` key.
 
 The reading of The measurements below, taken again as a disposable program through `Database::read_bytes`: 100,000
 tasks, `status` half `open`, `prio` a fifth `high`, 10,000 both, each field in an index of its own; a release build
