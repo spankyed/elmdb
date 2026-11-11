@@ -302,6 +302,9 @@ push reports the full tier's last job under another name, because a check on a d
 pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
 that is ready therefore merges only after the full tier passed on its head.
 
+Changing a pull request's base starts no workflow. Its checks stay the ones its head earned against the old base, the
+mutants of the old diff among them, so after a base change a push comes before the merge.
+
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
 The latter two reuse the same binary: `scripts/runtime-binding.cjs` loads through the generated loader
