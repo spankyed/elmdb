@@ -1945,8 +1945,8 @@ impl<R: Read> Query<'_, R> {
     /// Each `where` of a value an index files, where the type has a built index on that one field, and each
     /// `withRole`, is a list of places in creation order (`listed`). An entity the filters keep is at a place every
     /// list holds, so the places the lists hold in common are read (`common`) and only the other filters are tested
-    /// against the entity at each: no more is read than the shortest list holds, times the lists, in whichever
-    /// order the filters are written. With no list the type's rows are walked and every filter tested. A plan of
+    /// against the entity at each: what is read is bounded by the shortest list, and not the longest, in whichever
+    /// order the filters are written (`common`). With no list the type's rows are walked and every filter tested. A plan of
     /// the trash reads the type's trash as a list among the others, where an index's entries are of every entity.
     ///
     /// A `range` of numbers an index reads (`ranges_of`) is no such list: its entries are in the numbers' order, so
@@ -2706,7 +2706,9 @@ impl<R: Read> Query<'_, R> {
     /// order, and reading the filters reads `WALK_BEFORE_ASKING` entities or more. It is given up once reading the
     /// filters would cost less than the walk has: asked each time the walk has read twice what it had, from
     /// `WALK_BEFORE_ASKING` on, it stops when the filters would read fewer than `WALK_FOR_EACH_READ` times that. So
-    /// the two together cost a small multiple of the cheaper, whatever the entities hold. A page's walk begins past
+    /// the two together cost a small multiple of the cheaper, where what the filters would read is taken as what
+    /// the shortest of their lists holds (`filters_read_fewer`): lists that hold few places in common are read
+    /// for less than that, and the walk is then given up later than it need be. A page's walk begins past
     /// its `cursor`, sought in the order's index, and holds nothing when the filters don't keep the cursor
     fn walked_first(
         &self,
@@ -2779,21 +2781,16 @@ impl<R: Read> Query<'_, R> {
         Ok((!given_up).then_some(found))
     }
 
-    /// Whether reading a type start's leading filters reads fewer than `than` entities from the store: whether
-    /// one of the lists they are read from holds fewer (`listed`), or a range's index does (`ranges_of`), the
-    /// places they hold in common being no more than the shortest holds; or with neither, whether the type holds
-    /// fewer entities, the trash's among them for a plan of both. It is asked as a probe: it decides how the order
-    /// is read and not what is answered, so a tracked read records nothing of it, and the keys it counts, which are
-    /// no entity's, are not among a plan's visits
+    /// Whether reading a type start's leading filters reads fewer than `than` entities from the store, as nearly as a
+    /// count says: whether one of the lists they are read from holds fewer (`listed`), the places they hold in
+    /// common being no more than the shortest holds, though they may be far fewer; or with no list, whether the
+    /// type holds fewer entities, the trash's among them for a plan of both. It is asked as a probe: it decides how
+    /// the order is read and not what is answered, so a tracked read records nothing of it, and the keys it counts,
+    /// which are no entity's, are not among a plan's visits
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
         let listed = self.listed(self.filters, entity_type)?;
-        let ranged = self.ranges_of(self.filters, entity_type)?;
-        let read = listed
-            .iter()
-            .filter_map(|list| list.places.keys())
-            .chain(ranged.into_iter().map(|ranged| (ranged.from, ranged.to)));
         let mut any = false;
-        for (from, to) in read {
+        for (from, to) in listed.iter().filter_map(|list| list.places.keys()) {
             any = true;
             if self.counted_within(&from, &to, than)? < than {
                 return Ok(true);
