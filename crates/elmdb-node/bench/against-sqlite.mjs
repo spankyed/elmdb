@@ -205,8 +205,13 @@ function sqlite() {
   const create = (one) => insert.run(one.id, one.title, one.n, one.status);
   const best = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10');
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
-  // FTS5 ranks as it reads, with no key to seek a rank by: a page is its offset
+  // FTS5 ranks as it reads, with no key to seek a rank by. A page is read two ways: past its offset, the common
+  // idiom, and past the rank and rowid of its cursor, which a caller keeps from the page before: that one scores
+  // every match and keeps ten, as elmdb does past its cursor
   const bestAfter = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10 OFFSET ?');
+  const keyOf = text && db.prepare('SELECT f.rank AS rank, f.rowid AS at FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? AND n.id = ?');
+  const bestPast = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? AND (f.rank > ? OR (f.rank = ? AND f.rowid > ?)) ORDER BY f.rank, f.rowid LIMIT 10');
+  const keys = new Map();
   const any = text && db.prepare('SELECT EXISTS (SELECT 1 FROM notes_fts WHERE notes_fts MATCH ?) AS found');
   const lowest = db.prepare('SELECT n FROM notes ORDER BY n LIMIT 10');
   const highest = db.prepare('SELECT n FROM notes ORDER BY n DESC LIMIT 10');
@@ -229,6 +234,13 @@ function sqlite() {
     best: (text) => best.all(text).map((row) => row.id),
     count: (text) => count.get(text).n,
     bestAfter: (text, page) => bestAfter.all(text, page.before).map((row) => row.id),
+    // The cursor's rank and rowid are found once, outside any timing, as kept from the page before
+    bestPast: (text, page) => {
+      const name = `${text} ${page.cursor}`;
+      if (!keys.has(name)) keys.set(name, keyOf.get(text, page.cursor));
+      const key = keys.get(name);
+      return bestPast.all(text, key.rank, key.rank, key.at).map((row) => row.id);
+    },
     any: (text) => any.get(text).found === 1,
     lowest: () => lowest.all().map((row) => row.n),
     highest: () => highest.all().map((row) => row.n),
@@ -329,6 +341,11 @@ function measure(name, engine) {
       misspelledMs: timed(5, () => engine.best('foxtrott', true)).ms,
       misspelledFound: engine.best('foxtrott', true).length,
     };
+    if (engine.bestPast) {
+      assert.deepEqual(engine.bestPast('quokka', RANKED_PAGE), answers.rankedPage, `${name} cut a page past a rank elsewhere than past its offset`);
+      assert.equal(engine.bestPast('the', EVERY_PAGE).length, answers.everyPage, `${name} read another page past a rank than past its offset`);
+      out.searches.everyPageNearEndPastRankMs = timed(5, () => engine.bestPast('the', EVERY_PAGE)).ms;
+    }
   }
   out.reads = {
     lowestTenMs: timed(5, () => engine.lowest()).ms,

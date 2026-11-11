@@ -504,7 +504,9 @@ many entities each of those plans visited (`visits`, `explain`), which is a coun
 Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
 best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking
 orders alike, as is a page of them past the third; the other searches' matches tie, and are compared as counts. A
-page of a search is elmdb's `after` and SQLite's `OFFSET`, FTS5 having no key to seek a rank by. Those ten notes'
+page of a search is elmdb's `after`. SQLite's is read two ways, FTS5 having no key to seek a rank by: past an
+`OFFSET`, the common idiom, and past the rank and rowid of the cursor, which a caller keeps from the page before and
+which, as elmdb's does, scores every match and keeps ten; the second is held to the first's answers. Those ten notes'
 numbers are past every other note's, so they are the ten highest, and the last 500 are counted below them. A Node
 whose SQLite is built without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`;
 `--require-text` fails the run there instead. The databases are made under `--dir`, the system's temporary directory
