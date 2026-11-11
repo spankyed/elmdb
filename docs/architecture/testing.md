@@ -168,6 +168,10 @@ runner doesn't compile builds unchanged and passes every test, so it would show 
 reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
 Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing
 there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing.
+`mutants-pass`, the workflow's last job, passes when every job before it did, at once for a change with nothing to
+mutate, and is the check a merge waits on. A dispatched share reports under another name: it runs on the pull
+request's own commit, where one share passing would otherwise stand for all of them until the pull request's run
+reported.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 
@@ -289,13 +293,27 @@ and 19 of 200 runs of the Windows job's benchmark command died, and with copies 
 
 ## Platforms
 
-CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux. A draft pull request runs the fast
-tier, those and macOS arm64 and Windows x64; a pull request ready for review, and a dispatch, run the full matrix —
+CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
+Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
+pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
-every suite, the model and crash harnesses included, on it; a pull request ready for review also runs the instruction
-counts and the diagnostics overhead.
-`ci-pass` passes when every job passed or was skipped, and is the check `main`'s branch protection requires; a change
-to documentation alone skips everything else.
+every suite, the model and crash harnesses included, on it, and adds the instruction counts and the diagnostics
+overhead. A dispatch of either workflow runs its platforms on a branch, and reports none of the checks a merge waits
+on.
+
+A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
+and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
+it passes when every job before it passed or was skipped, and fails when one failed or was cancelled, so a run a newer
+push replaced never stands for the one that replaced it. A change to documentation alone passes all three with nothing
+run: `ci.yml` and `full.yml` skip their jobs, and the mutation jobs find nothing to mutate. The full tier is a
+workflow of its own so that marking a pull request ready starts its jobs and leaves the fast tier's run of the same
+commit alone, neither cancelled nor repeated. Only a pull request ready for review reports `full-pass`. A draft's
+push reports the full tier's last job under another name, because a check on a draft's head still stands when the
+pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
+that is ready therefore merges only after the full tier passed on its head.
+
+Changing a pull request's base starts no workflow. Its checks stay the ones its head earned against the old base, the
+mutants of the old diff among them, so after a base change a push comes before the merge.
 
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
