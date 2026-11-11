@@ -367,7 +367,8 @@ in either order. `db.sequence` is the last commit's.
   The callback guard also covers destruction of listener captures, including their last database reference.
   `Database::unwatch` ends a watch: once it returns, the listener isn't called again, and it answers what it left.
   `Ended`: the listener has returned and been dropped, a delivery running it on another thread waited for, so whatever
-  it uses may be released. Called from inside a listener of the same database's watches it doesn't wait, so a listener
+  it uses may be released. Called from inside a listener of the same database, a watch's or the builder's commits',
+  it doesn't wait, so a listener
   may end its own watch or another's: it answers `Ending` while a delivery still holds the ended watch's listener,
   which is dropped when that delivery lets go of it, and `Ended` when none does. Its caller mustn't hold anything the
   listener needs.
@@ -375,7 +376,10 @@ in either order. `db.sequence` is the last commit's.
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
   The listener of the builder's commits is such a callback, run on the builder's thread, and a close it asks for
   is refused the same way: a close waits for the store that thread holds. So is a wait for the index builds asked
-  for on that thread, which would wait for the listener asking. A schema change made by a listener on that thread,
+  for on the thread of the builder it would wait for, which would wait for the listener asking; a listener that
+  changed the schema waits for the builder started for it. The listener is let go of inside the callback too, so
+  the last of a database it held closes nothing that waits for the builder's thread: the environment is let go of
+  as that thread ends. One that panics is heard no more, and the builder goes on. A schema change made by a listener on that thread,
   a watch's or the builder's commits', stops the builder without waiting for it, there being no other thread to
   wait: the builder ends once it has delivered that commit, and the one started for the new schema builds what it
   left. A close after such a change, by the same listener, is refused like any it asks for.

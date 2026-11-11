@@ -245,7 +245,7 @@ pub enum Unwatched {
 
 /// Ends a watch: once this returns, its listener isn't called again. A delivery running its listener on another thread
 /// is waited for, and the answer is `Ended`: the listener has returned and been dropped. Called from inside a listener of
-/// this database's watches, its own or another's, it doesn't wait — a delivery running on this thread can't end while it
+/// this database, a watch's, its own or another's, or the builder's commits', it doesn't wait — a delivery running on this thread can't end while it
 /// does, and two listeners ending each other's watch would wait on each other — so it answers `Ending` while a delivery
 /// holds the watch's listener, and `Ended` when none does. Nor may the caller hold anything the listener needs, which
 /// the wait would never get

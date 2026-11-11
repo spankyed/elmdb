@@ -832,14 +832,17 @@ fn a_close_ends_while_a_listener_on_the_builder_s_thread_calls_the_database() {
 
 /// A database with a rank index over sixty tasks, built; `schema(tolerance)` is its schema with that tolerance, and
 /// `top` a read of the index's best, which a drain's commit writes into
+/// The tests' schema with a rank index over its tasks, at a tolerance
+fn ranked_schema(tolerance: f64) -> crate::schema::Schema {
+    let mut json = super::schema_json();
+    json["ranks"] = json!({ "taskRank": {
+        "types": ["Task"], "relations": ["refs"], "direction": "out", "weights": false, "tolerance": tolerance
+    } });
+    crate::schema::Schema::from_json(&json).unwrap()
+}
+
 fn ranked_tasks() -> (tempfile::TempDir, Arc<Database>, impl Fn(f64) -> crate::schema::Schema, Json) {
-    let schema = |tolerance: f64| {
-        let mut json = super::schema_json();
-        json["ranks"] = json!({ "taskRank": {
-            "types": ["Task"], "relations": ["refs"], "direction": "out", "weights": false, "tolerance": tolerance
-        } });
-        crate::schema::Schema::from_json(&json).unwrap()
-    };
+    let schema = ranked_schema;
     let dir = tempfile::tempdir().unwrap();
     let options = crate::OpenOptions { schema: Some(schema(1e-9)), syncs: false, ..Default::default() };
     let db = Arc::new(Database::open(dir.path(), options).unwrap());
@@ -946,7 +949,7 @@ fn a_close_on_the_builder_s_thread_is_refused() {
 #[test]
 fn a_close_after_a_schema_change_on_the_builder_s_thread_is_refused() {
     use std::time::Duration;
-    let changed = ranked_tasks().2(1e-8);
+    let changed = ranked_schema(1e-8);
     let (_dir, db, (schema, close)) = asked_on_the_builder_s_thread(move |db| {
         let schema = db.set_schema(changed.clone()).map(|changes| changes.len());
         (schema, db.close_within(Some(Duration::from_millis(50))).map_err(|refused| refused.code))
@@ -965,5 +968,76 @@ fn a_wait_for_the_builds_on_the_builder_s_thread_is_refused() {
         asked_on_the_builder_s_thread(|db| db.wait_for_index_builds().map_err(|refused| refused.code));
     assert_eq!(waited, Err(crate::ErrorCode::CallbackActive));
     db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}
+
+/// The listener of the builder's commits is let go of on the builder's thread, when it was taken away as it ran.
+/// What it held may be the last of the database, whose close, there, waits for the store that thread holds: it is
+/// refused as any close the listener asks for is, and the environment is let go of as the thread ends
+#[test]
+fn the_last_of_a_database_let_go_of_with_the_builder_s_listener_waits_for_nothing() {
+    use std::time::{Duration, Instant};
+    let (dir, db, schema, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    let (started, starts) = std::sync::mpsc::channel();
+    let started = Mutex::new(Some(started));
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let released = Mutex::new(released);
+    let held = Arc::clone(&db);
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        let Some(started) = started.lock().unwrap().take() else { return };
+        started.send(()).unwrap();
+        released.lock().unwrap().recv().unwrap();
+        // Taken away as it runs: this call's hold on it is then the last, and its own on the database with it
+        held.hear_builder_commits(None).unwrap();
+    })))
+    .unwrap();
+    link_all(&db);
+    starts.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    drop(db);
+    release.send(()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let again = loop {
+        let options = crate::OpenOptions { schema: Some(schema(1e-9)), syncs: false, ..Default::default() };
+        match Database::open(dir.path(), options) {
+            Ok(db) => break db,
+            Err(held) if held.code == crate::ErrorCode::AlreadyOpen && Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(refused) => panic!("the close is waiting for its own thread, which holds the environment: {refused}"),
+        }
+    };
+    again.close().unwrap();
+}
+
+/// A listener of the builder's commits that panics is heard no more, as a watch whose listener panics is ended. The
+/// builder goes on to finish its builds, where the panic would have ended its thread with builds nothing waits
+/// out, and it is stopped and waited for as ever
+#[test]
+fn a_listener_of_the_builder_s_commits_that_panics_is_heard_no_more() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+    let (_dir, db, schema, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    let heard = Arc::new(AtomicUsize::new(0));
+    let hears = Arc::clone(&heard);
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        hears.fetch_add(1, Ordering::SeqCst);
+        panic!("the listener's own");
+    })))
+    .unwrap();
+    link_all(&db);
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    std::thread::spawn(move || tell.send(waiting.wait_for_index_builds()).unwrap());
+    told.recv_timeout(Duration::from_secs(4)).expect("the builder went on past its listener's panic").unwrap();
+    assert_eq!(heard.load(Ordering::SeqCst), 1);
+    // A schema change waits for the builder's thread, which ended without the panic, and the next builder's commits
+    // tell no one
+    assert_eq!(db.set_schema(schema(1e-8)).unwrap().len(), 1, "the tolerance changed");
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(heard.load(Ordering::SeqCst), 1);
+    // Taken away, so another may be given, which a database with one refuses
+    db.hear_builder_commits(Some(Arc::new(|_, _| {}))).unwrap();
     db.close().unwrap();
 }
