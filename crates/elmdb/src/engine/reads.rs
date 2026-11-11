@@ -500,24 +500,49 @@ fn place_of(entry: &[u8]) -> Result<u64> {
     })
 }
 
+/// How far apart the places of a list have been, where a read saw them: what says which of several lists holds the
+/// fewest places, and so is the one to walk (`Query::common`)
+#[derive(Clone, Copy, Default)]
+struct Spread {
+    /// The last place the list was seen to hold
+    last: Option<u64>,
+    /// How many places it was seen to hold, one after another, and how many places lie between them all: from where
+    /// the read began to the first, and from each to the next
+    seen: u64,
+    apart: u64,
+}
+
+impl Spread {
+    /// Notes that the list holds `place`, the first it was seen to hold from `from` on or one after the last
+    fn saw(&mut self, from: u64, place: u64) {
+        let since = self.last.unwrap_or(from);
+        if self.last.is_none() || place > since {
+            self.seen += 1;
+            self.apart += place - since;
+            self.last = Some(place);
+        }
+    }
+
+    /// Whether this list's places have been more than `times` as far apart as `other`'s
+    fn wider(&self, times: u128, other: &Spread) -> bool {
+        u128::from(self.apart) * u128::from(other.seen) > times * u128::from(other.apart) * u128::from(self.seen)
+    }
+}
+
 /// A list a type's leading filters are read from (`Query::filtered`), the index it is of, and the steps it stands
-/// for: an entity it holds is one each of them keeps, so none of them is tested against it. With it, how far apart
-/// its places have been where this read asked for them, which says which list to walk (`Query::common`)
+/// for: an entity it holds is one each of them keeps, so none of them is tested against it
 struct Listed {
     places: Places,
     index: Option<String>,
     covers: Vec<usize>,
-    /// How many times the list was asked for a place, and how many places lay between what was asked for and what
-    /// it held, over all of them
-    asked: u64,
-    leapt: u64,
+    spread: Spread,
     /// The place last sought in the store, and what was found: the answer to any place between the two
     last: Option<(u64, Option<u64>)>,
 }
 
 impl Listed {
     fn new(places: Places, index: Option<String>, covers: Vec<usize>) -> Self {
-        Listed { places, index, covers, asked: 0, leapt: 0, last: None }
+        Listed { places, index, covers, spread: Spread::default(), last: None }
     }
 
     /// The first place the list holds that is `place` or after it. The store is read, and `read` grows by one, unless
@@ -532,15 +557,10 @@ impl Listed {
         let found = self.places.seek(r, place)?;
         *read += 1;
         self.last = Some((place, found));
-        self.asked += 1;
-        self.leapt += found.map_or(0, |found| found - place);
+        if let Some(found) = found {
+            self.spread.saw(place, found);
+        }
         Ok(found)
-    }
-
-    /// Whether this list's places have been more than `times` as far apart as those of a list asked `asked` times
-    /// that leapt `leapt` places
-    fn sparser(&self, times: u128, asked: u64, leapt: u64) -> bool {
-        u128::from(self.leapt) * u128::from(asked) > times * u128::from(leapt) * u128::from(self.asked)
     }
 }
 
@@ -2169,11 +2189,17 @@ impl<R: Read> Query<'_, R> {
     /// asked in its turn and the shortest ends the read whichever it is. What the walked list holds before that
     /// place is passed over as it comes, and sought past once `PASSED_OVER` entries have been.
     ///
-    /// The list walked is the one whose places have been furthest apart: where each list's first place is says so
-    /// to begin with, and a list that comes to leap twice as far as the walked one is walked in its place. Walking
-    /// the list with the fewest places reads the fewest entries, an entry walked being the next one where a place
-    /// sought is found from the root. It is also what a tracked read then depends on least: every entry of the
-    /// walked list up to where the read stopped, and of the others only those at its places.
+    /// The list walked is the one whose places have been furthest apart, one from the next, where the read has seen
+    /// them (`Spread`): where each list's first place is says so to begin with, and a list whose places come to
+    /// be twice as far apart as the walked one's is walked in its place. Walking the list with the fewest places
+    /// reads the fewest entries, an entry walked being the next one where a place sought is found from the root.
+    /// So for each place the shortest list holds, the read costs each other list an entry sought, and the walked
+    /// one as many as `PASSED_OVER` passed over and one sought: a bound by the shortest list, whose factor the
+    /// order the filters are written in can change while a list not the shortest is the one walked.
+    ///
+    /// A tracked read depends on every entry it read: those of the walked list up to where the read stopped,
+    /// and of each other list the entry at each place sought, with whatever lies between a place sought and the
+    /// place answered, the rest of the list where it answered with none.
     ///
     /// A tracked read misses no write that changes what was handed on. Every place up to where the read stopped
     /// either was handed on, each list's entry there read, or lies between a place some list was sought at and
@@ -2203,7 +2229,7 @@ impl<R: Read> Query<'_, R> {
         loop {
             let mut furthest = 0;
             for at in 1..lists.len() {
-                if lists[at].sparser(1, lists[furthest].asked, lists[furthest].leapt) {
+                if lists[at].spread.wider(1, &lists[furthest].spread) {
                     furthest = at;
                 }
             }
@@ -2211,17 +2237,16 @@ impl<R: Read> Query<'_, R> {
             let Some((walked, others)) = lists.split_first_mut() else { return Ok(Left::Ended) };
             let mut left = None;
             let mut passed = 0;
-            let (mut asked, mut leapt) = (walked.asked, walked.leapt);
+            let mut spread = walked.spread;
             let from = *next;
             let ran_out = walked.places.from(self.r, from, &mut |place, named| {
                 *read += 1;
-                asked += 1;
+                spread.saw(from, place);
                 if place < *next {
                     passed += 1;
                     return Ok(passed <= PASSED_OVER);
                 }
                 passed = 0;
-                leapt += place - *next;
                 for nth in 0..others.len() {
                     let at = (turn + nth) % others.len();
                     match others[at].ask(self.r, place, read)? {
@@ -2235,8 +2260,8 @@ impl<R: Read> Query<'_, R> {
                             if *read >= asks.pause_at {
                                 left = Some(Left::Paused);
                             }
-                            // One that leaps twice as far as this list is walked in its place
-                            return Ok(left.is_none() && !others[at].sparser(2, asked, leapt));
+                            // One whose places are twice as far apart as this list's is walked in its place
+                            return Ok(left.is_none() && !others[at].spread.wider(2, &spread));
                         }
                         Some(_) => {}
                     }
@@ -2255,7 +2280,7 @@ impl<R: Read> Query<'_, R> {
                 }
                 Ok(left.is_none())
             })?;
-            (walked.asked, walked.leapt) = (asked, leapt);
+            walked.spread = spread;
             match left {
                 Some(left) => return Ok(left),
                 None if ran_out => return Ok(Left::Ended),
