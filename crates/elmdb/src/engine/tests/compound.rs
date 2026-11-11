@@ -1347,6 +1347,54 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
 }
 
 #[test]
+fn equalities_on_every_field_of_an_index_on_several_are_read_from_it_as_one_list() {
+    let (_dir, db) = open();
+    held(&db);
+    let open = is("status", json!("open"));
+    let owned = is("owner", json!(9));
+    let ids = |range: std::ops::Range<usize>| range.map(id).collect::<Vec<_>>();
+    // Seven of this owner's hundred and forty-seven tasks have a rank, one of them this one: the index on the
+    // owner and the rank holds that task under the two values, and it alone is read, whichever is written first
+    write(&db, (585..592).map(|at| set(at, "rank", json!(at))).collect());
+    let ranked = is("rank", json!(587));
+    let read_from = |steps: Json| {
+        let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan("live", steps) })).unwrap();
+        let stages = explained["stages"].as_array().unwrap().clone();
+        let named: Vec<Json> = stages.iter().filter_map(|stage| stage.get("index").cloned()).collect();
+        (explained["answer"]["ids"].clone(), explained["visited"].clone(), named)
+    };
+    for filters in orders(&[owned.clone(), ranked.clone()]) {
+        assert_eq!(read_from(json!(filters)), (json!([id(587)]), json!(1), vec![json!("ownerRank")]), "{filters:?}");
+    }
+    // A filter with a list of its own is read with it, the owner's own list having given way
+    for filters in orders(&[open.clone(), owned.clone(), ranked.clone()]) {
+        let (found, visits, named) = read_from(json!(filters));
+        assert_eq!((found, visits), (json!([id(587)]), json!(1)), "{filters:?}");
+        assert_eq!(named.len(), 1, "{filters:?}");
+        let named = named[0].as_str().unwrap();
+        assert!(named == "byStatus, ownerRank" || named == "ownerRank, byStatus", "{filters:?}: {named}");
+    }
+    // Of two indexes whose every field has an equality, the one on the most fields is read: two of the owner's
+    // open tasks hold this number, and a third another
+    write(&db, vec![set(500, "n", json!(3)), set(501, "n", json!(3)), set(502, "n", json!(4))]);
+    let numbered = is("n", json!(3));
+    for filters in orders(&[open.clone(), owned.clone(), numbered.clone()]) {
+        let expected = (json!(ids(500..502)), json!(2), vec![json!("ownerStatusN")]);
+        assert_eq!(read_from(json!(filters)), expected, "{filters:?}");
+    }
+    // A task that holds the number in a list is one the index doesn't order, among its owner's open tasks: the
+    // index is not read while it holds one, nor is the one on the status and the number. The owner's and the
+    // status's own lists are, and the number tested against the hundred and forty-seven tasks both hold
+    write(&db, vec![set(503, "n", json!([3, 9]))]);
+    for filters in orders(&[open.clone(), owned.clone(), numbered.clone()]) {
+        let (found, visits, _) = read_from(json!(filters));
+        assert_eq!((found, visits), (json!([id(500), id(501), id(503)]), json!(147)), "{filters:?}");
+    }
+    // An equality on some of an index's fields alone reads none of it
+    assert_eq!(read_from(json!([numbered, open])).2, vec![json!("byStatus")]);
+}
+
+#[test]
 fn lists_that_share_no_place_are_read_no_further_than_the_shortest_of_them_holds() {
     // Two thousand tasks, the odd ones open and the even ones of one owner: two lists of a thousand places with
     // none in common. One odd task holds a role, a third list of the one place

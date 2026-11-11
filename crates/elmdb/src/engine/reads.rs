@@ -1816,7 +1816,7 @@ impl<R: Read> Query<'_, R> {
     /// filter is. A read that takes every entity the filters keep, and has no list, reads the first such range
     /// whatever it holds: nothing it would walk in its place is shorter
     fn filtered_of(&self, upto: usize, entity_type: &str, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
-        let mut lists = self.listed(upto, entity_type);
+        let mut lists = self.listed(upto, entity_type)?;
         let mut ranged = self.ranges_of(upto, entity_type)?;
         let trash = self.plan.scope == Scope::Trashed;
         if trash && !lists.is_empty() {
@@ -1889,7 +1889,7 @@ impl<R: Read> Query<'_, R> {
         }
         let mut together = false;
         for entity_type in types {
-            if !self.listed(self.filters, entity_type).is_empty()
+            if !self.listed(self.filters, entity_type)?.is_empty()
                 || !self.ranges_of(self.filters, entity_type)?.is_empty()
             {
                 together = true;
@@ -1907,15 +1907,21 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The lists of a type's places that the plan's first `upto` steps are read from as the store holds them, each
-    /// standing for its filter: a `where` of a value an index files reads the value's entries in a built index on
-    /// its field alone, and a `withRole` its role's in the role index. One value's entries are keyed by place, so
-    /// they are in creation order, an entity once
-    fn listed(&self, upto: usize, entity_type: &str) -> Vec<Listed> {
+    /// standing for its filters. A `where` of a value an index files reads the value's entries in a built index on
+    /// its field alone, and a `withRole` its role's in the role index: one value's entries are keyed by place, so
+    /// they are in creation order, an entity once. Equalities on every field of an index on several read its
+    /// entries for those values as one list (`equal_index`), which stands for them all in place of their own: its
+    /// places are among each of theirs
+    fn listed(&self, upto: usize, entity_type: &str) -> Result<Vec<Listed>> {
         let mut lists = Vec::new();
+        let mut equals: Vec<(usize, &str, Part)> = Vec::new();
         for (at, step) in self.plan.steps[..upto].iter().enumerate() {
             let (name, part) = match step {
                 Step::Where { field, value } => match indexable(field, value) {
-                    Some(part) => (field.as_str(), part),
+                    Some(part) => {
+                        equals.push((at, field.as_str(), part.clone()));
+                        (field.as_str(), part)
+                    }
                     None => continue,
                 },
                 Step::WithRole { role } => (field::ROLE, Part::String(role.clone())),
@@ -1925,7 +1931,38 @@ impl<R: Read> Query<'_, R> {
             let under = keys::index_range(entity_type, &index, std::slice::from_ref(&part));
             lists.push(Listed::new(Places::stored(under), Some(index), vec![at]));
         }
-        lists
+        if let Some(together) = self.equal_index(entity_type, &equals)? {
+            lists.retain(|list| !list.covers.iter().all(|step| together.covers.contains(step)));
+            lists.push(together);
+        }
+        Ok(lists)
+    }
+
+    /// The list of a type's places that equalities on every field of one of its indexes on several fields are
+    /// read from, the index on the most fields: its entries under those values, which are keyed by place under
+    /// the last field's as under any one value. An index is read so only while it holds, under the values of its
+    /// fields before the last, no entity it doesn't order, which may hold the last one's in a list
+    /// (`order_index`). `equals` are the equalities, each with its step; of two on one field the first is the
+    /// index's
+    fn equal_index(&self, entity_type: &str, equals: &[(usize, &str, Part)]) -> Result<Option<Listed>> {
+        let Some(declared) = self.r.schema().types.get(entity_type) else { return Ok(None) };
+        let asked = |name: &String| equals.iter().find(|(_, field, _)| field == name);
+        let mut found: Option<Listed> = None;
+        for definition in declared.indexes.values() {
+            let crate::schema::IndexDef::Value { fields, .. } = definition else { continue };
+            let Some((last, before)) = fields.split_last() else { continue };
+            if before.is_empty() || found.as_ref().is_some_and(|list| list.covers.len() >= fields.len()) {
+                continue;
+            }
+            let Some(all) = fields.iter().map(asked).collect::<Option<Vec<_>>>() else { continue };
+            let leading: Vec<(&str, Part)> =
+                all[..before.len()].iter().map(|(_, field, part)| (*field, part.clone())).collect();
+            let Some((index, mut parts)) = self.order_index(entity_type, &leading, last)? else { continue };
+            parts.push(all[before.len()].2.clone());
+            let under = keys::index_range(entity_type, &index, &parts);
+            found = Some(Listed::new(Places::stored(under), Some(index), all.iter().map(|(at, _, _)| *at).collect()));
+        }
+        Ok(found)
     }
 
     /// The entries an index holds for each `range` of numbers among the plan's first `upto` steps. The first of
@@ -2585,7 +2622,7 @@ impl<R: Read> Query<'_, R> {
     /// is read and not what is answered, so a tracked read records nothing of it, and the keys it counts, which are
     /// no entity's, are not among a plan's visits
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
-        let listed = self.listed(self.filters, entity_type);
+        let listed = self.listed(self.filters, entity_type)?;
         let ranged = self.ranges_of(self.filters, entity_type)?;
         let read = listed
             .iter()

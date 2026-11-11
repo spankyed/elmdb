@@ -45,10 +45,12 @@ fn schema() -> Schema {
                 "byB": { "kind": "value", "fields": ["b"] },
                 "byN": { "kind": "value", "fields": ["n"] },
                 "byM": { "kind": "value", "fields": ["m"] },
+                "ab": { "kind": "value", "fields": ["a", "b"] },
                 "aN": { "kind": "value", "fields": ["a", "n"] },
                 "abN": { "kind": "value", "fields": ["a", "b", "n"] }
             } },
             "B": { "fields": fields, "indexes": {
+                "ba": { "kind": "value", "fields": ["b", "a"] },
                 "byA": { "kind": "value", "fields": ["a"] },
                 "byN": { "kind": "value", "fields": ["n"] }
             } },

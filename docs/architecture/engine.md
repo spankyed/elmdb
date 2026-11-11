@@ -217,6 +217,9 @@ an answer:
     is sought in the others: a list that doesn't hold it answers with the next place it does hold, which no place
     before can be in them all, and the walk goes on to that. The filters with no list are tested against the
     entity at each place the lists share, and a type with no list has its rows walked and every filter tested.
+    Equalities on every field of an index on several fields read its entries under those values as one list in
+    place of their own, the index on the most fields, while it holds no entity it doesn't order under the values
+    of the fields before its last: `where owner = 9` and `where rank = 3` read an index on `[owner, rank]`.
   - **What that reads.** Nothing is counted to choose an index. What is read is bounded by the shortest list and
     not the longest, whichever order the filters are written in: for each place the shortest holds, a few entries
     of each of the others. A `first`, `exists` or `limit` reads an entry or two of each list for each entity it
@@ -233,7 +236,7 @@ an answer:
     the one holding the fewest of several. Until then the range is tested against each entity. So a read that
     stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
     of the cheaper way. A read that takes every entity the filters keep, and has no list, reads the first such
-    range whatever it holds. An index on several fields is not read for equalities alone.
+    range whatever it holds. An index on several fields is not read for equalities on some of its fields alone.
   - **A plan of the trash** reads the type's trash, its rows keyed by place, as a list among the others, where an
     index's entries are of every entity: only entities in the trash are read. It reads a range's index only once
     it has read as many entries, never at the start.
