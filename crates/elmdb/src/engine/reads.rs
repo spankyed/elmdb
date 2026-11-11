@@ -1957,8 +1957,9 @@ impl<R: Read> Query<'_, R> {
     /// of entities it doesn't reach. So a range holding a handful is read at once, a read that stops at its first
     /// match reads no range holding more than it had read by then, and the whole costs a small multiple of the
     /// cheaper way, whatever the store holds. Until it is read the range is tested against each entity, as any
-    /// filter is. A read that takes every entity the filters keep, and has no list, reads the first such range
-    /// whatever it holds: nothing it would walk in its place is shorter
+    /// filter is. A read that takes every entity the filters keep, and has no list, reads a range whatever it
+    /// holds, its rows being no fewer: the one holding the fewest, each counted to twice as far until one is
+    /// known to
     fn filtered_of(&self, upto: usize, entity_type: &str, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
         let mut lists = self.listed(upto, entity_type)?;
         let mut ranged = self.ranges_of(upto, entity_type)?;
@@ -1972,9 +1973,21 @@ impl<R: Read> Query<'_, R> {
         let mut ask_at = RANGE_ASKED;
         // A range's entries are of every entity, so a plan of the trash reads none it hasn't paid for
         self.read_ranges(&mut lists, &mut ranged, &mut read, if trash { 0 } else { RANGE_ASKED })?;
-        if lists.is_empty() && !trash && !ranged.is_empty() && !self.stops_early() {
-            let whole = ranged.remove(0);
-            lists.push(self.read_range(whole)?);
+        if !trash && !self.stops_early() {
+            // Counted to twice as far each time, until the one holding the fewest is known, and so read: one
+            // range alone is the fewest
+            let mut upto = RANGE_ASKED;
+            while lists.is_empty() && ranged.len() > 1 {
+                upto *= 2;
+                self.read_ranges(&mut lists, &mut ranged, &mut read, upto)?;
+            }
+            if lists.is_empty() && !ranged.is_empty() {
+                let whole = self.read_range(ranged.remove(0))?;
+                if let Places::Held { places, .. } = &whole.places {
+                    read += places.len() as u64;
+                }
+                lists.push(whole);
+            }
         }
         loop {
             let tested: Vec<usize> =
