@@ -16,9 +16,12 @@ const schema = {
 
 test('least, greatest and sum answer what the set of a plan holds, through the binding', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-aggregates-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, syncs: false });
-  t.after(() => db.close());
+  // One hook, closing first: Windows won't remove the files of a database that is open
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   const prices = [5, 2, 9, undefined, 2, 7.5];
   db.writeSync(packr.pack({
     ops: prices.map((price, i) => ({ op: 'create', type: 'Item', id: `Item-${i}`, fields: { ...(price === undefined ? {} : { price }), qty: 1, name: `item ${i}` } })),
