@@ -1,6 +1,6 @@
 # One plan algebra
 
-Status: built, 2026-11-11: elmdb #107, #108 and the change that moved this file here. Designed 2026-10-28, when the
+Status: built, 2026-11-11: elmdb #107, #108 and #109. Designed 2026-10-28, when the
 planner's three fixes and EXPLAIN were built (goal-elmdb-next's Phase 4, `../../evidence/next-phase-4.md`) and the
 rest waited for a plan over large sets (`../../evidence/next-phase-10.md`, Plan algebra). How it reads now is in
 `../../architecture/engine.md`, Reads: plans. Where the build differs from the design below:

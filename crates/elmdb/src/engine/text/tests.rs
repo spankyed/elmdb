@@ -1585,6 +1585,15 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
             "Plain": {
                 "fields": { "sender": { "type": "string", "optional": true } },
                 "indexes": { "bySender": by_sender }
+            },
+            // Two text indexes, so a search of it that names none is refused
+            "Twice": {
+                "fields": { "text": { "type": "string", "optional": true }, "sender": { "type": "string", "optional": true } },
+                "indexes": {
+                    "one": { "kind": "text", "fields": { "text": {} } },
+                    "other": { "kind": "text", "fields": { "text": {} } },
+                    "bySender": by_sender
+                }
             }
         }
     }))
@@ -1680,6 +1689,14 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
     let tied = asked(json!(["Message"]), json!([from, lmdb, limit(2)]), "ids");
     assert_eq!(tied["ids"], json!([id(40), id(41)]), "the shortest two, in the order they were made");
     assert_eq!(asked(json!(["Plain"]), json!([from, lmdb]), "ids")["ids"], json!([]));
+    // A type the filters keep nothing of is not searched, whatever a search of it would be refused for
+    write(&db, vec![create("Twice", "Twice-1", json!({ "text": "lmdb", "sender": "b" }))]);
+    let beside = asked(json!(["Message", "Twice"]), json!([from, lmdb, limit(2)]), "ids");
+    assert_eq!(beside, tied);
+    let kept = json!({ "step": "where", "field": "sender", "value": "b" });
+    let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message", "Twice"] },
+        "steps": [kept, lmdb], "terminal": { "answer": "ids" } });
+    assert_eq!(read(&db, json!({ "read": "query", "plan": plan })).unwrap_err().code, ErrorCode::UnknownIndex);
     // A filter no stage would take is refused as its stage refuses it
     let nobodys = json!({ "step": "withRole", "role": "nobody" });
     let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message"] },
