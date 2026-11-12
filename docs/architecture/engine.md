@@ -455,6 +455,16 @@ The failed call does not return its touched-token list: callers managing tracked
 all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
 `close()` syncs what is owed, and reports a sync that failed.
 
+`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made,
+its pages before the meta page that names them, so a commit that returned survives the machine losing power, and no
+group commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
+LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and `durable()`
+then answer at once, since each commit was synced. The price is a
+sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
+rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
+4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
+may be lost to a power loss until its sync, a moment later. A test replays the loss (`testing.md`, Power loss).
+
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
 bulk load reuse the reset's freed pages: LMDB protects the immediately preceding generation even with no readers.

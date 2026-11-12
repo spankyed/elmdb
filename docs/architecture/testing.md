@@ -70,6 +70,21 @@ failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `d
 advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
 waited on failed.
 
+## Power loss
+
+`engine/tests/power_loss.rs` replays what a power loss can leave on the data file, without a disk: after each commit of a
+workload the file is copied, the pages that differ from one copy to the next are what that commit wrote, and the files a
+loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
+meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
+before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
+pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
+only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
+that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files crash the reader itself: LMDB
+maps a file whose meta page names pages past its end, and touching one is a SIGBUS, which the replay counts as a file that
+didn't survive. elmdb doesn't check a file's length before mapping it, so that open crashes where it should refuse; a
+follow-up, not this mode's. A child that reads a file and says nothing fails the test.
+
 ## Failpoints
 
 A fault a test injects — a commit refused as on a full disk, a failed sync, a pause before a read takes its snapshot,

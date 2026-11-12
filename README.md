@@ -99,6 +99,10 @@ don't blindly retry it.
 promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and
 `db.backupSync` are the blocking forms. Await a write before one that depends on it.
 
+**Power loss:** by default a commit that returned can be lost if the machine loses power before its sync, about a second
+after it. Open with `syncEachCommit: true` to sync every commit as it is made, so a commit that returned survives a power
+loss; each commit then costs its own sync.
+
 **Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
 refused.
 
