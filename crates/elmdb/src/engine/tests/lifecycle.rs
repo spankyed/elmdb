@@ -500,3 +500,35 @@ fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_writ
         assert!(super::row(&again, "Task-after").is_some() && super::row(&again, "Task-before").is_some(), "{point}");
     }
 }
+
+#[test]
+fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is() {
+    // A power loss can leave the trees' pages unwritten at the end of the file. The open reads the file's trees by seeks
+    // and refuses it, whichever way it is opened, without changing it: nothing is extended and nothing is mapped past its end
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        for n in 0..200 {
+            let task = json!({ "op": "create", "type": "Task", "id": format!("Task-{n}"), "fields": { "c": "x".repeat(2000) } });
+            write(&db, vec![task]).unwrap();
+        }
+        db.close().unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let whole = std::fs::metadata(&data).unwrap().len();
+    // Cut to whole 4 KiB pages: heed refuses a read-only open of a length that is not one on Windows, before the walk runs
+    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2 / 4096 * 4096).unwrap();
+    let writable =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
+            .err()
+            .expect("a writable open refuses the cut file");
+    assert_eq!(writable.code, ErrorCode::Corrupted, "{writable}");
+    let read_only = Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(schema()), syncs: false, read_only: true, ..Default::default() },
+    )
+    .err()
+    .expect("a read-only open refuses the cut file");
+    assert_eq!(read_only.code, ErrorCode::Corrupted, "{read_only}");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2 / 4096 * 4096, "the file is left as it was");
+}

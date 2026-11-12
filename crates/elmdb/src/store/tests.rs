@@ -1235,3 +1235,244 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
     drop(resizing);
     store.sync_owed().unwrap();
 }
+/// A store of many rows, of which `destroy` removes them all in one commit, and its data file's path
+fn filled(dir: &tempfile::TempDir, destroy: bool) -> std::path::PathBuf {
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        for n in 0..200u32 {
+            put(&store, &format!("key-{n:03}"), &[7u8; 2000]).unwrap();
+        }
+        if destroy {
+            store
+                .write(
+                    |txn, db| {
+                        for n in 0..200u32 {
+                            db.delete(txn, format!("key-{n:03}").as_bytes())?;
+                        }
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+    }
+    dir.path().join("data.mdb")
+}
+
+/// The highest page the trees reach in a file as it is, and the last page of its meta page's pages
+fn reached_in(dir: &tempfile::TempDir, data: &std::path::Path) -> (u64, u64) {
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    let last = store.env.info().last_page_number as u64;
+    let txnid = store.env.info().last_txn_id as u64;
+    let mut file = std::fs::File::open(data).unwrap();
+    let page = super::page_size_of(&mut file, data).unwrap() as u64;
+    let reached =
+        super::reach::reach(&mut file, page as usize, std::fs::metadata(data).unwrap().len() / page, txnid, data)
+            .unwrap();
+    assert!(reached.missing.is_none(), "the whole file holds every page the trees reach");
+    (reached.highest, last)
+}
+
+#[test]
+fn a_short_file_missing_a_page_the_trees_reach_is_refused_in_both_modes() {
+    // Cut short of its last page, the file lacks a page the meta page names. The open refuses exactly when the trees reach it
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (highest, last) = reached_in(&dir, &data);
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len(last * page).unwrap();
+    drop(file);
+    for options in [StoreOptions { read_only: true, ..quiet() }, quiet()] {
+        let outcome = Store::open(dir.path(), options).err();
+        assert_eq!(outcome.is_some(), highest == last, "reached the last page: {}", highest == last);
+        if let Some(error) = outcome {
+            assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+            assert!(error.message.contains("past its end"), "{error}");
+        }
+    }
+}
+
+/// A store whose trees, emptied again and again, leave the file's last pages free: each round writes rows in one commit
+/// and deletes them in another, and the rounds stop once the trees reach fewer pages than the file's meta page names
+fn drained(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let data = dir.path().join("data.mdb");
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    for round in 0..60u32 {
+        store
+            .write(
+                |txn, db| {
+                    for n in 0..200u32 {
+                        db.put(txn, format!("key-{round}-{n:03}").as_bytes(), &[7u8; 2000])?;
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        store
+            .write(
+                |txn, db| {
+                    for n in 0..200u32 {
+                        db.delete(txn, format!("key-{round}-{n:03}").as_bytes())?;
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        let last = store.env.info().last_page_number as u64;
+        let txnid = store.env.info().last_txn_id as u64;
+        let mut file = std::fs::File::open(&data).unwrap();
+        let page = super::page_size_of(&mut file, &data).unwrap();
+        let reached = super::reach::reach(&mut file, page, last + 1, txnid, &data).unwrap();
+        if reached.missing.is_none() && reached.highest < last {
+            break;
+        }
+    }
+    data
+}
+
+#[test]
+fn a_short_file_whose_tail_the_trees_do_not_reach_opens_and_a_writable_open_extends_it() {
+    // Emptied, the trees reach far fewer pages than the file holds, and LMDB leaves the free tail out of the file. Such a
+    // file is healthy: cut to the pages the trees reach, it opens read-only and a writable open extends it again
+    let dir = tempfile::tempdir().unwrap();
+    let data = drained(&dir);
+    let (highest, last) = reached_in(&dir, &data);
+    assert!(highest < last, "the drained trees leave a free tail: reached {highest}, last {last}");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len((highest + 1) * page).unwrap();
+    drop(file);
+    Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() })
+        .expect("a read-only open of a healthy short file");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), (highest + 1) * page, "a read-only open does not extend it");
+    drop(Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file"));
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), (last + 1) * page, "extended to the pages its meta page names");
+}
+
+#[test]
+fn a_short_file_whose_last_page_is_an_overflow_page_the_trees_reach_is_refused() {
+    // A value larger than a page lives on overflow pages, which the trees reach by the node that names them. When the
+    // file's last page is one of them, cutting it short is a file the open refuses
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        put(&store, "big", &vec![9u8; 200_000]).unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let (highest, last) = reached_in(&dir, &data);
+    assert_eq!(highest, last, "the big value's overflow pages are the file's last, and the trees reach them");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len(last * page).unwrap();
+    drop(file);
+    let error = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("refused");
+    assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+}
+
+#[test]
+fn a_short_file_whose_tree_root_is_torn_is_refused_whichever_tree_it_is() {
+    // The meta page names each tree's root, which the trees reach by definition. Zeroed in a file cut short before its last
+    // page, each root is refused, the free tree's and the main tree's alike: the expectation comes from the meta page read
+    // here, not from the walk under test
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (_, last) = reached_in(&dir, &data);
+    let image = std::fs::read(&data).unwrap();
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
+    let txnid =
+        Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap().env.info().last_txn_id as u64;
+    let (free, main) = meta_roots(&image, page, txnid);
+    for root in [free, main] {
+        assert!(root != u64::MAX && root < last, "the root {root} is an inner page of the file, below its last {last}");
+        let mut torn = image[..(last as usize) * page].to_vec();
+        torn[(root as usize) * page..(root as usize + 1) * page].fill(0);
+        std::fs::write(&data, &torn).unwrap();
+        let error =
+            Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a torn root is refused");
+        assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+        assert!(error.message.contains("carry its own number"), "root {root}: {error}");
+    }
+}
+
+/// The free and main roots of the meta page written by `txnid`, read from the file's bytes at the offsets LMDB writes them
+fn meta_roots(image: &[u8], psize: usize, txnid: u64) -> (u64, u64) {
+    for at in [0, psize] {
+        let field = |offset: usize| u64::from_ne_bytes(image[at + offset..at + offset + 8].try_into().unwrap());
+        if field(144) == txnid {
+            return (field(80), field(128));
+        }
+    }
+    panic!("no meta page of transaction {txnid}");
+}
+
+#[test]
+fn a_value_overwritten_in_place_by_a_shorter_one_leaves_a_longer_run_the_walk_accepts() {
+    // Two values of one key in one commit: the second, of two pages, overwrites the first's run of three in place, and the
+    // run keeps its count. The walk reads that run as its value's pages or more, never as a torn file
+    let dir = tempfile::tempdir().unwrap();
+    let data = {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        store
+            .write(
+                |txn, db| {
+                    db.put(txn, b"big", &vec![1u8; 40_000])?;
+                    db.put(txn, b"big", &vec![2u8; 20_000])?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        dir.path().join("data.mdb")
+    };
+    let _ = reached_in(&dir, &data);
+}
+
+#[test]
+fn a_reached_page_zeroed_in_a_short_file_is_refused_as_not_one_lmdb_wrote() {
+    // Within the file, a page the trees reach that carries no page header is torn, and the walk refuses it rather than
+    // letting a read see zeros
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (highest, _) = reached_in(&dir, &data);
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+        file.seek(SeekFrom::Start(highest * page)).unwrap();
+        file.write_all(&vec![0u8; page as usize]).unwrap();
+        file.set_len((highest + 1) * page).unwrap();
+    }
+    let error = Store::open(dir.path(), quiet()).err().expect("a torn reached page is refused");
+    assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+    assert!(error.message.contains("carry its own number"), "{error}");
+}
+
+#[test]
+fn a_file_names_its_own_page_size_whatever_the_host_is() {
+    // LMDB opens a file with the page size the file's meta page names, so a file of another host's page size is read at
+    // its own. The host's size would be read here as 4 KiB or 16 KiB, never 8 KiB, and a size LMDB never writes is refused
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.mdb");
+    let mut image = vec![0u8; 64];
+    image[40..44].copy_from_slice(&8192u32.to_ne_bytes());
+    std::fs::write(&path, &image).unwrap();
+    assert_eq!(super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).unwrap(), 8192);
+    image[40..44].copy_from_slice(&3000u32.to_ne_bytes());
+    std::fs::write(&path, &image).unwrap();
+    let refused = super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).expect_err("refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+}
+
+#[test]
+fn the_page_size_read_from_a_real_file_is_the_one_lmdb_uses() {
+    // The reader is checked against the page size LMDB reports for the open environment, not only a hand-built header
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "key", &[1u8; 64]).unwrap();
+    let data = dir.path().join("data.mdb");
+    let from_file = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
+    assert_eq!(from_file, store.page_size());
+}
