@@ -1235,3 +1235,34 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
     drop(resizing);
     store.sync_owed().unwrap();
 }
+
+#[test]
+fn a_data_file_holding_its_last_commits_pages_opens_and_one_byte_fewer_is_refused_before_anything_reads_it() {
+    // The meta page LMDB picks names the pages the file must hold; a file shorter than them is refused as corrupt, which a
+    // read of one of its pages would instead end the process for. The exact length is enough, and one byte fewer is not
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        for n in 0..40u32 {
+            put(&store, &format!("key-{n:03}"), &[7u8; 900]).unwrap();
+        }
+    }
+    let data = dir.path().join("data.mdb");
+    let (last, page) = {
+        let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+        (store.env.info().last_page_number as u64, super::os_page_size() as u64)
+    };
+    let needed = (last + 1) * page;
+    assert!(std::fs::metadata(&data).unwrap().len() >= needed, "the file holds every page its meta page names");
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len(needed).unwrap();
+    drop(file);
+    Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).expect("exactly the pages it names opens");
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len(needed - 1).unwrap();
+    drop(file);
+    let refused =
+        Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a short file is refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+    assert!(refused.message.contains("power loss left them unwritten"), "{refused}");
+}

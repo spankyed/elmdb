@@ -89,6 +89,23 @@ impl Default for StoreOptions {
     }
 }
 
+/// The size of a page of the operating system, which LMDB uses for its file, as `sysconf` or `GetSystemInfo` says
+#[cfg(unix)]
+fn os_page_size() -> usize {
+    // SAFETY: `sysconf` reads no memory of ours, and `_SC_PAGESIZE` is a name every unix defines
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    usize::try_from(size).expect("the page size is positive")
+}
+
+#[cfg(windows)]
+fn os_page_size() -> usize {
+    let mut info = std::mem::MaybeUninit::<windows_sys::Win32::System::SystemInformation::SYSTEM_INFO>::uninit();
+    // SAFETY: `GetSystemInfo` writes the whole structure it is given, and nothing else
+    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(info.as_mut_ptr()) };
+    // SAFETY: written by the call above
+    unsafe { info.assume_init() }.dwPageSize as usize
+}
+
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
 pub const MAP_STEP: usize = 64 << 20;
 
@@ -338,6 +355,21 @@ impl Store {
                 e => e.into(),
             })?;
 
+        // The file must hold every page the meta page LMDB chose names: mapped short of one, a read of it is a SIGBUS (on
+        // Windows, an access violation) that ends the process. A grouped commit's pages can be lost to a power loss before
+        // its meta page is, so this is a file a power loss left, refused rather than read
+        let needed = (env.info().last_page_number as u64 + 1) * os_page_size() as u64;
+        let held = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+        if held < needed {
+            return Err(Error::new(
+                ErrorCode::Corrupted,
+                format!(
+                    "{} is {held} bytes, shorter than the {needed} its last commit's pages need: a power loss left them \
+                     unwritten. Restore the database from a backup, or from a copy of the file that holds them",
+                    data.display()
+                ),
+            ));
+        }
         if options.read_only {
             require_registered_reader(&env, &canonical)?;
         }

@@ -500,3 +500,26 @@ fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_writ
         assert!(super::row(&again, "Task-after").is_some() && super::row(&again, "Task-before").is_some(), "{point}");
     }
 }
+
+#[test]
+fn a_data_file_cut_short_by_a_power_loss_is_refused_as_corrupt_when_the_database_opens() {
+    // A file shorter than the pages its last commit names is what a power loss leaves; opening it must say so, not
+    // read a page that is not there and end the process
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        for n in 0..200 {
+            let task = json!({ "op": "create", "type": "Task", "id": format!("Task-{n}"), "fields": { "c": "x".repeat(2000) } });
+            write(&db, vec![task]).unwrap();
+        }
+        db.close().unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let whole = std::fs::metadata(&data).unwrap().len();
+    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2).unwrap();
+    let refused =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
+            .err()
+            .expect("a cut-short file is refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+}
