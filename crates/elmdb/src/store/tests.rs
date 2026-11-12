@@ -1393,7 +1393,7 @@ fn a_short_file_whose_tree_root_is_torn_is_refused_whichever_tree_it_is() {
         let error =
             Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a torn root is refused");
         assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
-        assert!(error.message.contains("not a page LMDB wrote"), "root {root}: {error}");
+        assert!(error.message.contains("carry its own number"), "root {root}: {error}");
     }
 }
 
@@ -1406,6 +1406,28 @@ fn meta_roots(image: &[u8], psize: usize, txnid: u64) -> (u64, u64) {
         }
     }
     panic!("no meta page of transaction {txnid}");
+}
+
+#[test]
+fn a_value_overwritten_in_place_by_a_shorter_one_leaves_a_longer_run_the_walk_accepts() {
+    // Two values of one key in one commit: the second, of two pages, overwrites the first's run of three in place, and the
+    // run keeps its count. The walk reads that run as its value's pages or more, never as a torn file
+    let dir = tempfile::tempdir().unwrap();
+    let data = {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        store
+            .write(
+                |txn, db| {
+                    db.put(txn, b"big", &vec![1u8; 40_000])?;
+                    db.put(txn, b"big", &vec![2u8; 20_000])?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        dir.path().join("data.mdb")
+    };
+    let _ = reached_in(&dir, &data);
 }
 
 #[test]
@@ -1425,7 +1447,7 @@ fn a_reached_page_zeroed_in_a_short_file_is_refused_as_not_one_lmdb_wrote() {
     }
     let error = Store::open(dir.path(), quiet()).err().expect("a torn reached page is refused");
     assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
-    assert!(error.message.contains("not a page LMDB wrote"), "{error}");
+    assert!(error.message.contains("carry its own number"), "{error}");
 }
 
 #[test]

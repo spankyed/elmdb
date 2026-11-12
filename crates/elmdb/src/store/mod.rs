@@ -91,7 +91,7 @@ impl Default for StoreOptions {
     }
 }
 
-// The offset `page_size_of` reads is for a 64-bit host, which every target this crate ships for is
+// The offset `page_size_of` reads is for a 64-bit host; every target this crate ships for is one.
 const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
 
 /// The page size LMDB wrote a file with, which it reads from the file and not from the host: a file written on a host with
@@ -368,13 +368,14 @@ impl Store {
         // a file shorter than its meta page's pages is read first, by seeks, to see whether the trees reach any of them. LMDB
         // may leave its last free pages out of the file, and then the file is healthy: a writable open extends it with zeros,
         // as LMDB's write map would, and a read-only open goes on, since it touches no page the trees don't reach. A page the
-        // trees reach past the end, or that is not a page LMDB wrote, is a torn file, refused whichever way it is opened
+        // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
-        let needed = (env.info().last_page_number as u64 + 1) * page as u64;
+        let info = env.info();
+        let needed = (info.last_page_number as u64 + 1) * page as u64;
         let held = file.metadata()?.len();
         if held < needed {
-            let reached = reach::reach(&mut file, page, held / page as u64, env.info().last_txn_id as u64, &data)?;
+            let reached = reach::reach(&mut file, page, held / page as u64, info.last_txn_id as u64, &data)?;
             if let Some(missing) = reached.missing {
                 return Err(Error::new(
                     ErrorCode::Corrupted,
