@@ -23,6 +23,10 @@ pub struct OpenOptions {
     pub schema: Option<Schema>,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once, for a test's temporary directory
     pub syncs: bool,
+    /// Every commit synced as it is made, so that one that returned survives the machine losing power, at the cost
+    /// of a sync a commit (`docs/architecture/engine.md`, Durability). Group commit's syncs and their timings are
+    /// then unused
+    pub sync_each_commit: bool,
     pub sync_idle_ms: u64,
     pub sync_interval_ms: u64,
     /// The map's size at open; by default twice the data file, and 64 MiB at least
@@ -35,6 +39,7 @@ impl Default for OpenOptions {
             read_only: false,
             schema: None,
             syncs: true,
+            sync_each_commit: false,
             sync_idle_ms: 100,
             sync_interval_ms: 1000,
             map_size_bytes: None,
@@ -120,6 +125,7 @@ impl Database {
             StoreOptions {
                 read_only: options.read_only,
                 syncs: options.syncs,
+                sync_each_commit: options.sync_each_commit,
                 sync_idle: Duration::from_millis(options.sync_idle_ms),
                 sync_interval: Duration::from_millis(options.sync_interval_ms),
                 map_size_bytes: options.map_size_bytes,
