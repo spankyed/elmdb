@@ -458,7 +458,12 @@ impl Database {
     /// durable unit
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
         let op = Op::rebuild(index);
-        let result = op.in_scope(|| self.admin_unit(|t| derive::rebuild(t, index)));
+        let result = op.in_scope(|| {
+            if index.is_none() {
+                self.store()?.make_room(REBUILD_ROOM)?;
+            }
+            self.admin_unit(|t| derive::rebuild(t, index))
+        });
         op.ended(result, "durable")
     }
 
@@ -989,6 +994,10 @@ impl Drop for Unit {
         self.abort();
     }
 }
+
+/// How many times what the database holds a full rebuild asks the map to be before it begins: it deletes every
+/// derived key and writes each again in one unit, where a page freed is no room until the unit commits
+const REBUILD_ROOM: usize = 3;
 
 #[cfg(test)]
 mod tests;

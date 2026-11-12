@@ -551,7 +551,9 @@ unit is open.
 - `rebuild(type?, index?)`: deletes derived data, every index's or one type's index's, and writes what primary data derives, in one
   durable unit. One index is refused when the schema doesn't declare it (`UNKNOWN_INDEX`) or a build of it couldn't
   finish (`UNIQUE` over rows holding the same values, `VALUE_INVALID` for an entry past LMDB's key); a rebuild of
-  everything leaves such an index unbuilt, as a build does.
+  everything leaves such an index unbuilt, as a build does. A rebuild of everything first grows the map to three
+  times what the database has in use: the pages it frees are no room for it until it commits, and in a map with
+  less it would run until the map is full, and then again in a larger one.
 - Rank indexes (`archive/roadmap/rank-index.md`): every write that changes a rank index's graph — a link, an unlink, a weight
   changed, an entity created, trashed, restored or destroyed — updates the index in its unit by forward push: each
   node holds an estimate and a residual, a change moves the residuals its edges touch, and pushing a node moves its
