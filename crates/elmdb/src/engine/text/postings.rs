@@ -518,9 +518,13 @@ pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
 }
 
 /// `held`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
-/// Blocks are counted whole, so the answer may pass `upto` by what the last one read holds
-pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8], upto: u64) -> Result<u64> {
-    held_as(r, term, stored, Some(upto))
+/// Blocks are counted whole, so the answer may pass `upto` by what the last one read holds. With it, whether
+/// that is every entity holding the term: false when the count came to `upto`, where it stopped
+pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8], upto: u64) -> Result<(u64, bool)> {
+    let mut rest = stored;
+    let own = varint(&mut rest)? > 0;
+    let held = held_as(r, term, stored, Some(upto))?;
+    Ok((held, own || held < upto))
 }
 
 fn held_as(r: &impl Read, term: &Term, stored: &[u8], probe: Option<u64>) -> Result<u64> {

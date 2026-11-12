@@ -1386,6 +1386,11 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
     // open tasks' list asks whether the list holds 128, which its own key and the first block of the 2,200 say
     let ordered = json!([open, order("k", false), limit(1)]);
     assert_eq!(probed(&db, ordered, "ids"), (json!([id(0)]), 1, 2));
+    // A count that stopped among a list's places is taken further by an asking for more. The second owner's
+    // 1,023 tasks come after 1,024 in the number's order: the walk of that order asks at 128, 256 and 512 tasks
+    // whether the list holds twice as many, and gives up at 512, where it first doesn't, to read the list
+    let first_owned = json!([owned(2), order("k", false), limit(1)]);
+    assert_eq!(visited(&db, plan("live", first_owned)), (vec![id(1024)], 512 + 1023));
     // What a range's places cost to read is among what the read has read. A range of seven is read at the start,
     // each list is asked for its first place, and each of the seven is walked and asked of the open tasks' list:
     // after the fourth, seventeen places, more than the sixteen a second range holds, which is read then, where

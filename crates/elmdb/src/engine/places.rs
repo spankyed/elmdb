@@ -49,8 +49,9 @@ pub fn count(r: &impl Read, own: &[u8], stored: &[u8]) -> Result<u64> {
 }
 
 /// `count`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
-/// Places in blocks are counted a block at a time, so the answer may pass `upto` by what the last block read holds
-pub fn count_probed(r: &impl Read, own: &[u8], stored: &[u8], upto: u64) -> Result<u64> {
+/// Places in blocks are counted a block at a time, so the answer may pass `upto` by what the last block read holds.
+/// With it, whether that is every place under the key: false when the count came to `upto`, where it stopped
+pub fn count_probed(r: &impl Read, own: &[u8], stored: &[u8], upto: u64) -> Result<(u64, bool)> {
     postings::held_probed(r, &term(own.to_vec()), stored, upto)
 }
 
@@ -107,7 +108,7 @@ pub fn visit(
 }
 
 /// What a value index's keys hold, from each place it files under each key, handed over in any order: the places
-/// are sorted on disk, and each key's are laid out in turn
+/// are sorted on disk, where one handed over twice under a key is kept once, and each key's are laid out in turn
 pub struct Sorting {
     rows: super::derive::sorted::Scratch,
 }
@@ -131,7 +132,6 @@ impl Sorting {
         let unread = || Error::new(ErrorCode::Corrupted, "A sorted value index row doesn't read");
         let mut sorted = self.rows.finish()?;
         let mut filing: Option<(Vec<u8>, postings::Filing)> = None;
-        let mut last = None;
         while let Some((order, _)) = sorted.next()? {
             let mut parts = decode(&order)?.into_iter();
             let (Some(Part::Bytes(own)), Some(Part::Bytes(place))) = (parts.next(), parts.next()) else {
@@ -143,13 +143,7 @@ impl Sorting {
                     done.finish(&mut emit)?;
                 }
                 filing = Some((own.clone(), postings::Filing::new(term(own))));
-                last = None;
             }
-            // A place handed over twice under one key is there once
-            if last == Some(place) {
-                continue;
-            }
-            last = Some(place);
             if let Some((_, filing)) = filing.as_mut() {
                 filing.entry(place, Vec::new(), &mut emit)?;
             }

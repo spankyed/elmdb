@@ -2385,8 +2385,9 @@ impl<R: Read> Query<'_, R> {
         Ok(self.admitted(cursor)?.map(|seq| (at, seq)))
     }
 
-    /// Hands on the entity of a type at a place an index names, counted as read, when the scope reaches one there;
-    /// false when `visit` stopped the walk
+    /// Hands on the entity of a type at a place an index names in an order, when the scope reaches one there;
+    /// false when `visit` stopped the walk. The place counts as a visit either way: what a walk of an order costs
+    /// is the places it reads, one of an entity the scope leaves out as one it hands on
     fn hand(&self, entity_type: &str, place: u64, visit: &mut Visit<'_>) -> Result<bool> {
         self.count_visit();
         match self.at_place(entity_type, place)? {
@@ -2790,20 +2791,30 @@ impl<R: Read> Query<'_, R> {
     /// How many places the value keys that are `from` or after it and before `to` hold between them, or with
     /// `places` unset how many keys there are, each a row: counted no further than `upto`, and on from where this
     /// read's last count of them stopped, so a question asked again of more counts each key once over all its
-    /// askings
+    /// askings. But for a value in blocks whose places the count stopped among: its blocks are counted only as
+    /// far as `upto` takes, so the answer may pass `upto` by what a block holds, and an asking for more counts
+    /// that value again
     fn counted_within(&self, from: &[u8], to: &[u8], upto: u64, places: bool) -> Result<u64> {
         let mut counted = self.counted.borrow_mut();
         let (so_far, next) = counted.entry((from.to_vec(), to.to_vec())).or_insert_with(|| (0, from.to_vec()));
         if *so_far >= upto {
             return Ok(*so_far);
         }
-        // A key's places are counted whole, so the count may pass `upto` by what the last key read holds
-        let (mut more, mut past, mut failed) = (0u64, next.clone(), None);
+        let (mut more, mut past, mut among, mut failed) = (0u64, next.clone(), 0u64, None);
         self.r.probe_visit_within(next, to, |own, stored| {
             if places {
-                match super::places::count_probed(self.r, own, stored, upto - (*so_far + more)) {
-                    Ok(held) => more += held,
-                    Err(error) => failed = Some(error),
+                let wanted = upto - (*so_far + more);
+                match super::places::count_probed(self.r, own, stored, wanted) {
+                    Ok((held, true)) => more += held,
+                    // The count stopped among this value's blocks: the next begins at this key again
+                    Ok((held, false)) => {
+                        among = held;
+                        return false;
+                    }
+                    Err(error) => {
+                        failed = Some(error);
+                        return false;
+                    }
                 }
             } else {
                 more += 1;
@@ -2811,14 +2822,14 @@ impl<R: Read> Query<'_, R> {
             past.clear();
             past.extend_from_slice(own);
             past.push(0);
-            failed.is_none() && *so_far + more < upto
+            *so_far + more < upto
         })?;
         if let Some(error) = failed {
             return Err(error);
         }
         *so_far += more;
         *next = past;
-        Ok(*so_far)
+        Ok(*so_far + among)
     }
 
     /// Tells a read asked to explain itself which value index would have read the order of `name` that stage `stage`
