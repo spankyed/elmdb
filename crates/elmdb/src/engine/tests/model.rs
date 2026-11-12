@@ -1825,15 +1825,14 @@ fn relations_of(step: &Step, before: &Model) -> Vec<Rel> {
 fn rel_effects_in(current: &mut Model, step: &Step, rels: &mut Vec<Rel>) -> Result<(), Refusal> {
     match step {
         Step::Unit { steps, throws, .. } => {
+            // A nested unit's events go straight into the commit's list, so each finds the entry it follows by the key the
+            // edge had then; a savepoint that fails or throws is rolled back with its events
             let saved = current.clone();
-            let mut inner = Vec::new();
-            let outcome = steps.iter().try_for_each(|member| rel_effects_in(current, member, &mut inner));
+            let saved_rels = rels.clone();
+            let outcome = steps.iter().try_for_each(|member| rel_effects_in(current, member, rels));
             if outcome.is_err() || *throws {
                 *current = saved;
-                return Ok(());
-            }
-            for rel in inner {
-                push_rel(rels, rel);
+                *rels = saved_rels;
             }
             Ok(())
         }
@@ -2446,6 +2445,41 @@ fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
     let step = Step::RenameField { from: "c", to: "spare" };
     reference.outcome = model.step(&step);
     assert!(reference.outcome.is_err(), "the model refuses the rename");
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_rekey_in_a_nested_unit_is_the_same_relation_as_an_earlier_rekey_of_it_in_the_commit() {
+    // An outer unit rekeys an edge to the key it has, and a nested unit rekeys it again: one relation, one entry
+    let prelude = vec![
+        Step::Create { id: "Note-1", fields: BTreeMap::from([("a", json!("t"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::LinkKeyed { id: "Note-1", target: "Task-2", n: 0 },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Rekey { id: "Note-1", target: "Task-2", from: 0, to: 0 },
+            Step::Unit {
+                steps: vec![Step::Rekey { id: "Note-1", target: "Task-2", from: 0, to: 1 }],
+                throws: false,
+                durable: false,
+            },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
     reference.model = model;
     let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
         engine,
