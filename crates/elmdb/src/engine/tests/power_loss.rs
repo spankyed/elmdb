@@ -172,7 +172,8 @@ enum Read {
     Holds(Model),
     Refused(String),
     /// The reader was killed by a signal before it said anything: LMDB mapped a file whose meta page names pages past its
-    /// end, and touched one (SIGBUS). elmdb doesn't check a file's length before mapping it, so the open itself crashes
+    /// end, and touched one (SIGBUS). `Store::open` refuses such a file before it reads a page, so a crash here means that
+    /// check did not run
     Crashed(String),
 }
 

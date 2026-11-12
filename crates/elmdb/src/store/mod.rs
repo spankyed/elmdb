@@ -22,6 +22,7 @@ mod writers;
 pub(crate) use writers::WriterLock;
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -89,21 +90,25 @@ impl Default for StoreOptions {
     }
 }
 
-/// The size of a page of the operating system, which LMDB uses for its file, as `sysconf` or `GetSystemInfo` says
-#[cfg(unix)]
-fn os_page_size() -> usize {
-    // SAFETY: `sysconf` reads no memory of ours, and `_SC_PAGESIZE` is a name every unix defines
-    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
-    usize::try_from(size).expect("the page size is positive")
-}
-
-#[cfg(windows)]
-fn os_page_size() -> usize {
-    let mut info = std::mem::MaybeUninit::<windows_sys::Win32::System::SystemInformation::SYSTEM_INFO>::uninit();
-    // SAFETY: `GetSystemInfo` writes the whole structure it is given, and nothing else
-    unsafe { windows_sys::Win32::System::SystemInformation::GetSystemInfo(info.as_mut_ptr()) };
-    // SAFETY: written by the call above
-    unsafe { info.assume_init() }.dwPageSize as usize
+/// The page size LMDB wrote a file with, which it reads from the file and not from the host: a file written on a host with
+/// 4 KiB pages opens with 4 KiB pages on one with 16 KiB. It is `mm_psize`, in the first meta page: the page header (16
+/// bytes), then `mm_magic`, `mm_version`, `mm_address` and `mm_mapsize` (24 bytes on a 64-bit host), then the free tree's
+/// `md_pad`. It is read by seeking, so the file is never mapped to find it
+fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usize> {
+    const AT: u64 = 16 + 24;
+    file.seek(SeekFrom::Start(AT))?;
+    let mut bytes = [0u8; 4];
+    file.read_exact(&mut bytes).map_err(|_| {
+        Error::new(ErrorCode::Corrupted, format!("{} is too short to hold a meta page", path.display()))
+    })?;
+    let page = u32::from_ne_bytes(bytes) as usize;
+    if !page.is_power_of_two() || !(512..=65536).contains(&page) {
+        return Err(Error::new(
+            ErrorCode::Corrupted,
+            format!("{}'s meta page names a page size of {page}, which LMDB does not write", path.display()),
+        ));
+    }
+    Ok(page)
 }
 
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
@@ -357,15 +362,18 @@ impl Store {
 
         // The file must hold every page the meta page LMDB chose names: mapped short of one, a read of it is a SIGBUS (on
         // Windows, an access violation) that ends the process. A grouped commit's pages can be lost to a power loss before
-        // its meta page is, so this is a file a power loss left, refused rather than read
-        let needed = (env.info().last_page_number as u64 + 1) * os_page_size() as u64;
-        let held = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
+        // its meta page is, so this is a file a power loss may have left, refused rather than read
+        let mut file = std::fs::File::open(&data)?;
+        let page = page_size_of(&mut file, &data)?;
+        let needed = (env.info().last_page_number as u64 + 1) * page as u64;
+        let held = file.metadata()?.len();
         if held < needed {
             return Err(Error::new(
                 ErrorCode::Corrupted,
                 format!(
-                    "{} is {held} bytes, shorter than the {needed} its last commit's pages need: a power loss left them \
-                     unwritten. Restore the database from a backup, or from a copy of the file that holds them",
+                    "{} is {held} bytes, shorter than the {needed} its last commit's pages need: a power loss, or a copy or \
+                     sync cut short, may have left them unwritten. Restore the database from a backup, or from a copy of the \
+                     file that holds them",
                     data.display()
                 ),
             ));

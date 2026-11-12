@@ -1248,10 +1248,11 @@ fn a_data_file_holding_its_last_commits_pages_opens_and_one_byte_fewer_is_refuse
         }
     }
     let data = dir.path().join("data.mdb");
-    let (last, page) = {
+    let last = {
         let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
-        (store.env.info().last_page_number as u64, super::os_page_size() as u64)
+        store.env.info().last_page_number as u64
     };
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
     let needed = (last + 1) * page;
     assert!(std::fs::metadata(&data).unwrap().len() >= needed, "the file holds every page its meta page names");
     let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
@@ -1264,5 +1265,21 @@ fn a_data_file_holding_its_last_commits_pages_opens_and_one_byte_fewer_is_refuse
     let refused =
         Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a short file is refused");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
-    assert!(refused.message.contains("power loss left them unwritten"), "{refused}");
+    assert!(refused.message.contains("shorter than the"), "{refused}");
+}
+
+#[test]
+fn a_file_names_its_own_page_size_whatever_the_host_is() {
+    // LMDB opens a file with the page size the file's meta page names, so a file of another host's page size is read at
+    // its own. The host's size would be read here as 4 KiB or 16 KiB, never 8 KiB, and a size LMDB never writes is refused
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.mdb");
+    let mut image = vec![0u8; 64];
+    image[40..44].copy_from_slice(&8192u32.to_ne_bytes());
+    std::fs::write(&path, &image).unwrap();
+    assert_eq!(super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).unwrap(), 8192);
+    image[40..44].copy_from_slice(&3000u32.to_ne_bytes());
+    std::fs::write(&path, &image).unwrap();
+    let refused = super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).expect_err("refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
 }

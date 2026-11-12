@@ -522,4 +522,5 @@ fn a_data_file_cut_short_by_a_power_loss_is_refused_as_corrupt_when_the_database
             .err()
             .expect("a cut-short file is refused");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+    assert!(refused.message.contains("shorter than the"), "{refused}");
 }
