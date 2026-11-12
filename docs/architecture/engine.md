@@ -211,43 +211,51 @@ an answer:
   stage of the last of them reads for them all (`reads.rs`, `Query::filtered`), each start type by turn: the answer
   and its order, creation order, are those of a walk of the type testing each filter.
   - **A filter with an index is a list of places.** In each type, a `where` of a value other than null, where the
-    type has a built index on that one field, and a `withRole`, read the entries of that one value or role, which
-    are keyed by place: a list of the type's places in creation order. An entity the filters keep is at a place
+    type has a built index on that one field, and a `withRole`, read the places the index files under that one
+    value or role (`format.md`, `d/x`): a list of the type's places in creation order, held in the value's own
+    key or, past 256, in blocks of no more than that. An entity the filters keep is at a place
     every such list holds, so the places they hold in common are read. One list is walked, and each place it holds
     is sought in the others: a list that doesn't hold it answers with the next place it does hold, which no place
-    before can be in them all, and the walk goes on to that. The filters with no list are tested against the
-    entity at each place the lists share, and a type with no list has its rows walked and every filter tested.
-    Equalities on every field of an index on several fields read its entries under those values as one list in
+    before can be in them all, and the walk goes on to that. A place carries no id: the entity at a place the
+    lists share is read from its type's rows there, which is the one read that counts among a plan's visits, and
+    the filters with no list are tested against it. A type with no list has its rows walked and every filter
+    tested. Equalities on every field of an index on several fields read its places under those values as one list in
     place of their own, the index on the most fields, while it holds no entity it doesn't order under the values
     of the fields before its last: `where owner = 9` and `where rank = 3` read an index on `[owner, rank]`.
   - **What that reads.** Nothing is counted to choose among lists. What is read is bounded by the shortest list
-    and not the longest: for each place the shortest holds, an entry sought in each other list, and in the one
-    walked up to eight passed over and one sought. A `first`, `exists` or `limit` reads an entry or two of each
-    list for each place tried, which is each entity it takes where the lists mostly agree. The list walked is the
+    and not the longest: for each place the shortest holds, a place sought in each other list, and in the one
+    walked up to eight passed over and one sought. A `first`, `exists` or `limit` asks for a place or two of each
+    list for each place tried, which is each entity it takes where the lists mostly agree. A key is read only
+    for a place the one last read doesn't answer for: a value's own key once, and then a block of its places at
+    a time, so places close together cost one key between them. The list walked is the
     one whose places have been furthest apart, one from the next, where the read has seen them: where each list's
     first place is says so to begin with, and a list whose places come to be twice as far apart is walked in its
-    place. An entry walked is the next one read, where a place sought is found from the root, so walking the
-    shortest reads the fewest. Which list is walked follows from what the read has seen, which the order the
+    place. A place walked is the next one held, where a place sought is searched for, in the block held or
+    from the root in another, so walking the shortest asks the fewest. Which list is walked follows from what the read has seen, which the order the
     filters are written in decides to begin with: that order can change what is read, within the bound.
   - **A range's index is read once the read has paid for it.** A `range` of numbers has an index to read where
     the type has one on its field alone that accounts for every entity, or, over one type, where the plan's first
     steps are equalities and the range and an index is on their fields and then its own, whichever way round they
-    were asked: that one stands for all those steps, the one on the most of them. Its entries are in the numbers'
-    order, so they are no list until all are read and sorted by place. They are read once that costs no more than
-    the read has read already, which is asked each time it has read twice what it had, from 16 entries on, the
-    entries counted, keys alone, no further than that; and at the start, a range holding fewer than 16 is read,
+    were asked: that one stands for all those steps, the one on the most of them. Its places are under its
+    values in the numbers' order, so they are no list until all are read and sorted by place, which reads no
+    entity. They are read once that costs no more than the read has read already, in places walked and sought,
+    which is asked each time it has read twice what it had, from 16 places on, the range's places counted a
+    value's at a time and no further than that; and at the start, a range holding fewer than 16 is read,
     the one holding the fewest of several. Until then the range is tested against each entity. So a read that
     stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
     of the cheaper way. A read that takes every entity the filters keep, and has no list, reads a range whatever
     it holds, the one holding the fewest, each counted to twice as far until one is known to. An index on several
     fields is not read for equalities on some of its fields alone.
   - **A plan of the trash** reads the type's trash, its rows keyed by place, as a list among the others, where an
-    index's entries are of every entity: only entities in the trash are read. It reads a range's index only once
-    it has read as many entries, never at the start.
-  - **A tracked read** depends on each entry it read: those of the list it walked up to where it stopped, those of
-    the others at the places sought, with what lay between a place sought and the one answered, and the fields it
-    tested. What was counted decides only what is read: the keys are no entity's and not among a plan's visits,
-    and a tracked read records none of them.
+    index's places are of every entity: only entities in the trash are read. It reads a range's index only once
+    it has read as many places, never at the start.
+  - **A tracked read** depends on each key it read: a value's own key, each block of its places the read came
+    to, in the list it walked up to where it stopped and in the others where places were sought, the row at
+    each place the lists shared, and the fields it tested. A block holds up to 256 places, so a write that files
+    or unfiles another entity in a block the read came to touches the read, though it asked nothing of that
+    place: a tracked read is rerun more often than its answer changes, and never less. What was counted decides
+    only what is read: the keys are no entity's and not among a plan's visits, and a tracked read records none
+    of them.
 
   A filter no stage would take, a `withRole` of an undeclared role or a `range` with bounds it can't take, is
   refused before anything is read, the last written first, as when every stage runs. A page's cursor straight
@@ -255,8 +263,9 @@ an answer:
   filters don't keep. Where no index reads any of the filters in any start type, the stage of the first of them
   walks the types for it, and each stage after tests its own filter against what the one before hands on. A
   filter after any other step filters what reaches it.
-- **An index lookup visits its matches as it reads them.** One value's entries are keyed by place, so they come in
-  creation order, and a `limit`, `first` or `exists` after the lookup reads no further than its answer.
+- **An index lookup visits its matches as it reads them.** One value's places are held in order, so they come in
+  creation order, each entity read at its place, and a `limit`, `first` or `exists` after the lookup reads no
+  entity past its answer and no block of places past the one its answer is in.
 - **A walk visits an entity's edges as it reads them**, in place order, so a `limit` after `out` or `in` reads no
   further than its answer. A `reverse` straight after `out` or `in` from one entity over one kind reads that entity's
   edges from the last instead of collecting the walk, an end joined by several edges of a keyed kind
@@ -326,8 +335,10 @@ an answer:
 - **`orderBy` then `limit` holds the first `limit`** where the order is sorted, in order with ties kept as they came,
   rather than sorting the whole set: the set is still read, and the memory is the limit's.
 
-A query asked for its `visits` answers how many entities its start and walks read from the store, index entries
-included, which is what says whether a filter walked rows an index could have answered.
+A query asked for its `visits` answers how many entities its start and walks read from the store, one found
+through an index counted as it is read at its place, which is what says whether a filter walked rows an index could
+have answered. A place read from an index, and not then read as an entity, is no visit: a range's places before
+they are found in the other lists, a `count` of a range.
 
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and

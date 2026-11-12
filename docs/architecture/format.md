@@ -22,9 +22,12 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rc` kind | a relation kind's count | derived |
 | `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |
-| `d/x` type index values seq | a value index | derived |
-| `d/xw` type index values seq | an entity of the type without a value in a value index's last field, which is missing or null, under what its fields before that one hold: none for an index on one field, and for one on several each a value an equality can ask for, once for each tuple of them when lists are among them | derived |
-| `d/xu` type index values seq | an entity of the type the index doesn't order, under what its fields before the last hold as `d/xw` has them: its last field holds a list or a value the index can't file, or the index is unique and a field before the last holds a list | derived |
+| `d/x` type index values | a value index: the places of the entities holding the values, each as its distance from the one before, when they are no more than 256; that they are in blocks, when more. A place is an entity's through `d/e` or `d/t` | derived |
+| `d/xp` type index values start | a block of the places of the entities holding values more than 256 hold: those of a range of places that starts at `start`, the largest range of a power of two places starting at a multiple of its size that holds no more than 256, as a text index's `d/fb` has them, with no counts | derived |
+| `d/xw` type index values | the places, held as `d/x` holds them, of the entities of the type without a value in a value index's last field, which is missing or null, under what its fields before that one hold: none for an index on one field, and for one on several each a value an equality can ask for, once for each tuple of them when lists are among them | derived |
+| `d/xwp` type index values start | a block of those places, as `d/xp` is of a value's | derived |
+| `d/xu` type index values | the places, held as `d/x` holds them, of the entities of the type the index doesn't order, under what its fields before the last hold as `d/xw` has them: its last field holds a list or a value the index can't file, or the index is unique and a field before the last holds a list | derived |
+| `d/xup` type index values start | a block of those places, as `d/xp` is of a value's | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's term: the places of the entities holding it, each with the term's count in each field, when they are no more than 256; that they are in blocks, when more | derived |
