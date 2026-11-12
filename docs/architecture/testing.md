@@ -25,6 +25,15 @@ unit, a savepoint and a refused commit roll back with it. A workload also rebuil
 show that code wrong. Ranking is checked separately, against fixed corpora (`engine/text/tests.rs`,
 `engine/vector/tests.rs`).
 
+Each commit's change set is checked too: the entities it made, destroyed, trashed or restored, and the fields and roles
+it wrote (whether or not the value changed), against what the model changed. A unit's members are replayed one at a
+time, so a write a later member reverts is still named, as the engine names it. Not checked yet: the change set's
+relations, and the ends of the edges it changed beyond what `changedSince` names. After every step, `changedSince` from
+the start must name each entity still there with the sequence of its last change, the ends of a changed edge included,
+and the entities destroyed and not made again; a commit's sequence must increase. Not checked yet: the admin calls.
+`reset`, `replaceWith` and `renameType` make `changedSince` incomplete for the type they touch, and rename and purge
+need the database reopened under another schema.
+
 It runs in two places:
 
 - in Rust, against the engine directly;

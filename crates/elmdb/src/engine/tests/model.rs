@@ -13,6 +13,7 @@ use serde_json::{Value as Json, json};
 
 use super::rank_bound::RankIndex;
 use super::{edges as stored_edges, row, schema_json};
+use crate::ChangeSet;
 use crate::engine::unit::Read;
 use crate::engine::{entities, keys, relations, values};
 use crate::format::key::{Part, decode as decode_key};
@@ -825,14 +826,14 @@ fn apply_in(unit: &mut crate::Unit, step: &Step) -> Result<(), crate::Error> {
     }
 }
 
-/// Applies a step at the top
-fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
+/// Runs one step on the engine: the change set of the commit it made, or `None` when it made none
+fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
     match step {
         Step::RefuseNext => {
             crate::failpoints::fail_once_at(crate::failpoints::points::COMMIT, db.path());
-            Ok(())
+            Ok(None)
         }
-        Step::Rebuild { index } => db.rebuild(*index),
+        Step::Rebuild { index } => db.rebuild(*index).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -844,9 +845,9 @@ fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
                 unit.abort();
                 return Err(crate::Error::new(crate::ErrorCode::Io, "the unit threw"));
             }
-            unit.commit(*durable).map(|_| ())
+            unit.commit(*durable).map(Some)
         }
-        write => db.write(&super::batch(vec![op_of(db, write)]), false).map(|_| ()),
+        write => db.write(&super::batch(vec![op_of(db, write)]), false).map(|(_, changes)| Some(changes)),
     }
 }
 
@@ -1488,6 +1489,10 @@ const TOLERANCE: f64 = 1e-9;
 /// The engine tests' schema with `RANKED` declared
 fn open(dir: &tempfile::TempDir) -> Database {
     let mut schema = schema_json();
+    // Change order is what `changed_since` answers from: each type it is asked of is declared to keep it
+    for entity_type in ["Task", "Note"] {
+        schema["types"][entity_type]["changeOrder"] = json!(true);
+    }
     schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
                                               "direction": RANKED.direction, "weights": RANKED.weights,
                                               "tolerance": TOLERANCE } });
@@ -1496,10 +1501,309 @@ fn open(dir: &tempfile::TempDir) -> Database {
 }
 
 /// The engine under the model: the prelude written, each step run and its answer compared, and after each the data, every
-/// derived key and every derived read compared with the model's; after the workload, `check()` finds nothing
+/// derived key, every derived read and the change set the commit made compared with the model's; after the workload,
+/// `check()` finds nothing
 struct Engine {
     db: Database,
     _dir: tempfile::TempDir,
+    /// The model as it was before the step being tracked, which the step's change is the difference from
+    before: Model,
+    since: Since,
+    /// The entities of `Task` and `Note`, which `changed_since` is asked about
+    types: Vec<String>,
+    /// The sequence of the last commit the engine reported
+    sequence: u64,
+}
+
+/// What `changed_since` answers from position zero: each entity still there with the sequence of its last change, and
+/// those destroyed and not made again
+#[derive(Default)]
+struct Since {
+    last: BTreeMap<String, u64>,
+    gone: BTreeSet<String>,
+}
+
+/// What a commit did to one entity, as the engine's change set names it: the fields are the ones the commit wrote, the
+/// engine's own left out
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Change {
+    created: bool,
+    destroyed: bool,
+    trashed: bool,
+    restored: bool,
+    /// The roles the entity holds differ: a grant or a revoke, which the engine names as its `role` field
+    roles: bool,
+    fields: BTreeSet<String>,
+}
+
+/// The model's changes between two of its states, each entity the commit changed, with the fields whose values differ
+fn changes_between(before: &Model, after: &Model) -> BTreeMap<String, Change> {
+    let mut out = BTreeMap::new();
+    let ids: BTreeSet<&String> = before.entities.keys().chain(after.entities.keys()).collect();
+    for id in ids {
+        let change = match (before.entities.get(id), after.entities.get(id)) {
+            (None, Some(a)) => {
+                Change { created: true, fields: a.fields.keys().cloned().collect(), ..Default::default() }
+            }
+            (Some(_), None) => Change { destroyed: true, ..Default::default() },
+            (Some(b), Some(a)) => {
+                let fields = b
+                    .fields
+                    .keys()
+                    .chain(a.fields.keys())
+                    .filter(|k| b.fields.get(*k) != a.fields.get(*k))
+                    .cloned()
+                    .collect();
+                let (mut was, mut now) = (b.roles.clone(), a.roles.clone());
+                was.sort();
+                now.sort();
+                Change {
+                    trashed: !b.trashed && a.trashed,
+                    restored: b.trashed && !a.trashed,
+                    roles: was != now,
+                    fields,
+                    ..Default::default()
+                }
+            }
+            (None, None) => continue,
+        };
+        if change != Change::default() {
+            out.insert(id.clone(), Change { fields: without_engine_fields(change.fields), ..change });
+        }
+    }
+    out
+}
+
+fn without_engine_fields(fields: BTreeSet<String>) -> BTreeSet<String> {
+    fields.into_iter().filter(|f| !ENGINE_FIELDS.contains(&f.as_str())).collect()
+}
+
+/// The changes a commit's change set names, the engine's own fields left out and an entity that changed in no way the
+/// model holds left out
+fn changes_of(changes: &ChangeSet) -> BTreeMap<String, Change> {
+    changes
+        .entities
+        .iter()
+        .map(|(id, e)| {
+            let change = Change {
+                created: e.created,
+                destroyed: e.destroyed,
+                trashed: e.trashed,
+                restored: e.restored,
+                roles: e.fields.iter().any(|f| f == "role"),
+                fields: without_engine_fields(e.fields.iter().cloned().collect()),
+            };
+            (id.clone(), change)
+        })
+        .filter(|(_, change)| *change != Change::default())
+        .collect()
+}
+
+/// What a step that committed made: each entity it changed and the ends of the edges it changed. The step is replayed on the
+/// model one member at a time, so a write a later member reverts is still named, as the engine names it, and a savepoint
+/// the model rolls back makes none; the replay must land on the state the reference holds after the step
+fn effects_of(step: &Step, before: &Model, after: &Model) -> (BTreeMap<String, Change>, BTreeSet<String>) {
+    let mut current = before.clone();
+    let mut changes = BTreeMap::new();
+    let mut ends = BTreeSet::new();
+    effects_in(&mut current, step, &mut changes, &mut ends).expect("a committed step applies");
+    // A write that changes nothing the engine names (an upsert of no fields) leaves no entry
+    changes.retain(|_, change| *change != Change::default());
+    // An entity the commit found and left destroyed is named as destroyed alone, though a unit made it again on the way
+    for (id, change) in changes.iter_mut() {
+        if before.entities.contains_key(id) && change.created && change.destroyed {
+            change.created = false;
+        }
+    }
+    assert!(
+        current.entities == after.entities && current.edges == after.edges && current.keyed == after.keyed,
+        "replaying a committed step lands on the reference's state: {step:?}"
+    );
+    (changes, ends)
+}
+
+/// Applies one step to `current`, adding what it made. A unit's members in turn; a unit inside another is a savepoint, and
+/// one that fails or throws is rolled back with its effects. Err when a leaf step is refused
+fn effects_in(
+    current: &mut Model,
+    step: &Step,
+    changes: &mut BTreeMap<String, Change>,
+    ends: &mut BTreeSet<String>,
+) -> Result<(), Refusal> {
+    match step {
+        Step::Unit { steps, throws, .. } => {
+            let saved = current.clone();
+            let (mut inner_changes, mut inner_ends) = (BTreeMap::new(), BTreeSet::new());
+            let outcome =
+                steps.iter().try_for_each(|member| effects_in(current, member, &mut inner_changes, &mut inner_ends));
+            if outcome.is_err() || *throws {
+                *current = saved;
+                return Ok(());
+            }
+            merge(changes, inner_changes);
+            ends.extend(inner_ends);
+            Ok(())
+        }
+        leaf => {
+            let previous = current.clone();
+            current.apply(leaf)?;
+            merge(changes, changes_between(&previous, current));
+            merge(changes, writes_of(leaf, &previous));
+            ends.extend(touched_ends(&previous, current));
+            ends.extend(written_ends(leaf));
+            Ok(())
+        }
+    }
+}
+
+/// The fields and roles a write names, whether or not its value changed: the engine reports each one it wrote. A grant of a
+/// role the entity holds, or a revoke of one it lacks, writes nothing
+fn writes_of(step: &Step, previous: &Model) -> BTreeMap<String, Change> {
+    let field = |id: &str, names: Vec<&str>| {
+        let fields = names.into_iter().map(str::to_owned).collect();
+        [(id.to_owned(), Change { fields, ..Default::default() })].into_iter().collect()
+    };
+    let held = |id: &str, key: &str| previous.entities.get(id).and_then(|e| e.fields.get(key));
+    match step {
+        Step::Set { id, key, .. } | Step::Append { id, key, .. } | Step::Merge { id, key, .. } => field(id, vec![key]),
+        // Removals that take nothing away write nothing: a missing field, or an index past the list's end
+        Step::Delete { id, key } => {
+            if held(id, key).is_some() {
+                field(id, vec![key])
+            } else {
+                BTreeMap::new()
+            }
+        }
+        Step::RemoveAt { id, key, index } => match held(id, key) {
+            Some(Json::Array(items)) if (*index as usize) < items.len() => field(id, vec![key]),
+            _ => BTreeMap::new(),
+        },
+        Step::RemoveValue { id, key, value } => match held(id, key) {
+            Some(Json::Array(items)) if items.contains(value) => field(id, vec![key]),
+            _ => BTreeMap::new(),
+        },
+        Step::Create { id, fields } | Step::Upsert { id, fields } => field(id, fields.keys().copied().collect()),
+        Step::Grant { id, role } | Step::GrantExclusive { id, role } | Step::Revoke { id, role } => {
+            let held = previous.entities.get(*id).is_some_and(|e| e.roles.iter().any(|r| r == role));
+            let writes = if matches!(step, Step::Revoke { .. }) { held } else { !held };
+            if writes {
+                [(id.to_string(), Change { roles: true, ..Default::default() })].into_iter().collect()
+            } else {
+                BTreeMap::new()
+            }
+        }
+        _ => BTreeMap::new(),
+    }
+}
+
+/// The ends a step writes whether or not its edge changes: a rekey stamps both, to its own key or another, and a move
+fn written_ends(step: &Step) -> BTreeSet<String> {
+    match step {
+        Step::Rekey { id, target, .. } => [id.to_string(), target.to_string()].into_iter().collect(),
+        // A move wrote the ends it left and the one it joined, though to the same target it changes nothing
+        Step::MoveRelation { id, target, to, .. } => {
+            [id.to_string(), target.to_string(), to.to_string()].into_iter().collect()
+        }
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Adds the changes of a later step to those of the steps before it. An entity destroyed and made again within the commit is
+/// named as made alone, with only what was done to the one made, as `ChangeSet::entities` documents
+fn merge(into: &mut BTreeMap<String, Change>, from: BTreeMap<String, Change>) {
+    for (id, later) in from {
+        match into.get_mut(&id) {
+            Some(earlier) if later.created && earlier.destroyed => *earlier = later,
+            Some(earlier) => {
+                earlier.created |= later.created;
+                earlier.destroyed |= later.destroyed;
+                earlier.trashed |= later.trashed;
+                earlier.restored |= later.restored;
+                earlier.roles |= later.roles;
+                earlier.fields.extend(later.fields);
+            }
+            None => {
+                into.insert(id, later);
+            }
+        }
+    }
+}
+
+impl Since {
+    fn record(&mut self, sequence: u64, changes: &BTreeMap<String, Change>) {
+        for (id, change) in changes {
+            if change.destroyed {
+                self.last.remove(id);
+                self.gone.insert(id.clone());
+            } else {
+                self.gone.remove(id);
+                self.last.insert(id.clone(), sequence);
+            }
+        }
+    }
+}
+
+/// The entities at either end of an edge a step added, removed or moved, or of a keyed edge whose key changed. A relation
+/// change stamps both its ends in `changed_since`, though the change set names them as changed only in its relations
+fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
+    let mut ends = BTreeSet::new();
+    for (source, _, target) in before.edges.symmetric_difference(&after.edges) {
+        ends.insert(source.clone());
+        ends.insert(target.clone());
+    }
+    for (source, target, _) in before.keyed.symmetric_difference(&after.keyed) {
+        ends.insert(source.clone());
+        ends.insert(target.clone());
+    }
+    ends
+}
+
+/// Records the model's state after a step, comparing the change set the engine made with the change the model's states
+/// name, and what `changed_since` answers from the start with what the changes so far say
+fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model) {
+    match got {
+        Ok(Some(commit)) => {
+            let (changes, ends) = effects_of(step, &engine.before, &after);
+            assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+            engine.sequence = commit.sequence;
+            assert_eq!(changes_of(commit), changes, "{step:?}: the change set the commit reported");
+            engine.since.record(commit.sequence, &changes);
+            // An end the step left destroyed is not stamped: its destruction is the change
+            for id in ends.iter().filter(|id| after.entities.contains_key(*id)) {
+                engine.since.last.insert(id.clone(), commit.sequence);
+            }
+        }
+        _ => {
+            assert!(
+                changes_between(&engine.before, &after).is_empty(),
+                "{step:?}: the model changed where the engine made no commit"
+            );
+            assert!(
+                touched_ends(&engine.before, &after).is_empty(),
+                "{step:?}: the model moved an edge where the engine made no commit"
+            );
+        }
+    }
+    engine.before = after;
+    assert_since(engine, step);
+}
+
+fn assert_since(engine: &Engine, step: &Step) {
+    let got = engine
+        .db
+        .changed_since(&engine.types, &crate::engine::changed::Position::default(), 1_000_000)
+        .expect("changed_since answers");
+    assert_eq!(got.ids.len(), got.sequences.len(), "each changed entity has the sequence of its last change");
+    let ids: BTreeMap<String, u64> = got.ids.iter().cloned().zip(got.sequences.iter().copied()).collect();
+    assert_eq!(got.ids.len(), ids.len(), "each changed entity is named once");
+    assert_eq!(
+        ids, engine.since.last,
+        "{step:?}: changed since the start, each entity still there and the commit of its last change"
+    );
+    let destroyed: BTreeSet<String> = got.destroyed.iter().cloned().collect();
+    assert_eq!(got.destroyed.len(), destroyed.len(), "each destroyed entity is named once");
+    assert_eq!(destroyed, engine.since.gone, "changed since the start: the entities destroyed and not made again");
+    assert!(got.done && got.complete, "changed since the start answers everything: {got:?}");
 }
 
 struct EngineMachine;
@@ -1511,13 +1815,25 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
     fn init_test(reference: &Reference) -> Engine {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
+        let mut engine = Engine {
+            db,
+            _dir: dir,
+            before: Model::default(),
+            since: Since::default(),
+            types: vec!["Task".to_owned(), "Note".to_owned()],
+            sequence: 0,
+        };
         for step in &reference.prelude {
-            run(&db, step).unwrap();
+            let got = run(&engine.db, step);
+            assert!(got.is_ok(), "the prelude's {step:?}: {got:?}");
+            let mut after = engine.before.clone();
+            after.step(step).expect("the prelude creates each id once");
+            track(&mut engine, step, &got, after);
         }
-        Engine { db, _dir: dir }
+        engine
     }
 
-    fn apply(engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
+    fn apply(mut engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
         let got = run(&engine.db, &transition.step);
         assert_eq!(
             got.is_ok(),
@@ -1526,6 +1842,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             transition.step,
             reference.outcome
         );
+        track(&mut engine, &transition.step, &got, reference.model.clone());
         engine
     }
 
@@ -1561,6 +1878,59 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         let report = engine.db.check().unwrap();
         assert!(report.is_clean(), "check() after the workload: {report:?}");
     }
+}
+
+#[test]
+fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destroyed_alone() {
+    // The engine names an entity the commit found and left destroyed as destroyed alone, though the commit made it again
+    // on the way; the model's union of the members' changes must say so too
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Destroy { id: "Task-1" },
+            Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("y"))]) },
+            Step::Destroy { id: "Task-1" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_entity() {
+    // A grant made before the destroy in the commit is the destroyed entity's `role` field, as the engine names it
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![Step::Grant { id: "Task-1", role: "r1" }, Step::Destroy { id: "Task-1" }],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
 }
 
 proptest_state_machine::prop_state_machine! {
