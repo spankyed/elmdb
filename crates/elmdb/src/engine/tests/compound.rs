@@ -1414,6 +1414,37 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
 }
 
 #[test]
+fn a_count_of_places_is_taken_as_far_as_it_is_asked_and_no_further() {
+    // Seven hundred tasks: the first hundred hold the number 0 and the rest the number 1, whose six hundred places
+    // are in blocks; 256 of them, from the three hundredth on, have an owner, whose places its own key holds
+    let (_dir, db) = open_with(schema_json());
+    let tasks: Vec<Json> = (0..700)
+        .map(|at| {
+            let mut fields = json!({ "k": if at < 100 { 0 } else { 1 }, "status": "open" });
+            if (300..556).contains(&at) {
+                fields["owner"] = json!(3);
+            }
+            task(at, fields)
+        })
+        .collect();
+    for some in tasks.chunks(350) {
+        write(&db, some.to_vec());
+    }
+    // A range of every task, tested against each of a walk that takes 130: asked at 16 tasks whether it holds
+    // fewer, the first number's key says no, a hundred. Asked again at 128, it is counted on from there: the
+    // second number's own key, and the one block that holds the 28 more that were asked for, not the one after
+    let every = json!({ "step": "range", "field": "k", "atLeast": 0 });
+    let noted = json!({ "step": "lacks", "field": "note" });
+    let (found, visits, counted) = probed(&db, json!([noted, every, limit(130)]), "ids");
+    assert_eq!((found.as_array().unwrap().len(), visits, counted), (130, 130, 1 + 2));
+    // A list holding as many as a walk asks after holds no fewer. The first of the owner's tasks in the number's
+    // order comes after three hundred: the walk asks at 128 whether the owner's list holds fewer than 256, which
+    // it doesn't, and at 256 whether fewer than 512, and gives up there to read the list
+    let owned = json!([is("owner", json!(3)), order("k", false), limit(1)]);
+    assert_eq!(visited(&db, plan("live", owned)), (vec![id(300)], 256 + 256));
+}
+
+#[test]
 fn equalities_on_every_field_of_an_index_on_several_are_read_from_it_as_one_list() {
     let (_dir, db) = open();
     held(&db);

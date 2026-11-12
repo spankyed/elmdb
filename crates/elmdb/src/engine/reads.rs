@@ -3079,7 +3079,6 @@ impl<R: Read> Query<'_, R> {
         };
         query.pull(1, &mut |_| Ok(true))?;
         self.visited.set(self.visited.get() + query.visited.get());
-        self.places.set(self.places.get() + query.places.get());
         let scores: HashMap<String, f64, Fixed> =
             query.hits.into_inner().into_iter().map(|(id, (hit, _))| (id, hit.score)).collect();
         let (error, step) = ranks::reported(def.tolerance, scores.len() as u64);
