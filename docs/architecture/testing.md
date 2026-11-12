@@ -32,6 +32,14 @@ replayed one at a time, so a write a later member reverts is still named, as the
 `changedSince` from the start must name each entity still there with the sequence of its last change, the ends of a
 changed edge included, and the entities destroyed and not made again; a commit's sequence must increase.
 
+The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
+set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
+from the commit before the first after it reads what changed since, checked against the model. The boundary itself, the
+reader one sequence below the reset, is checked by a deterministic test, since a rebuild between the two can take a
+sequence. It renames a relation kind to another now and then: its edges move, each end stamped with the rename's
+sequence, and a rename onto an edge of the new kind with the same ends is refused. Not checked yet: `renameField`,
+`renameType`, `replaceWith` and purge, which need a schema that declares their names or reopens the database.
+
 It runs in two places:
 
 - in Rust, against the engine directly;

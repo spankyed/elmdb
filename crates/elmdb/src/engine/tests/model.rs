@@ -153,7 +153,22 @@ enum Step {
     },
     /// Every entity, edge and derived row removed; the schema, the meta data and the sequence counter are kept
     Reset,
+    /// Every edge of one kind moved to another: a commit with no change set, which stamps the ends of each edge it moved
+    RenameRelation {
+        from: &'static str,
+        to: &'static str,
+    },
 }
+
+/// The kinds a relation rename moves between: the workload's two plain kinds and the one it never links
+const RENAMES: [(&str, &str); 6] = [
+    ("refs", "tags"),
+    ("tags", "refs"),
+    ("blocks", "tags"),
+    ("tags", "blocks"),
+    ("refs", "blocks"),
+    ("blocks", "refs"),
+];
 
 fn value() -> impl Strategy<Value = Json> {
     prop_oneof![
@@ -257,6 +272,8 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let blind = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: false });
         let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
         let reset = Just(Step::Reset).boxed();
+        let rename =
+            prop::sample::select(&RENAMES[..]).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
         prop_oneof![
             7 => aimed(aimed_write(&state.model)),
             1 => blind(write()),
@@ -264,6 +281,7 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             1 => blind(Just(Step::RefuseNext).boxed()),
             1 => blind(rebuild),
             1 => blind(reset),
+            1 => blind(rename),
             1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
@@ -287,8 +305,12 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
 /// other edge of its pair holds, which the engine refuses and random steps rarely make; blind, since an aimed step must
 /// be one the model takes. Any write when the model holds neither
 fn onto_joined_ends(m: &Model) -> BoxedStrategy<Step> {
-    let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let edges: Vec<(&'static str, &'static str, &'static str)> = m
+        .edges
+        .iter()
+        .filter(|(_, k, _)| KINDS.contains(&k.as_str()))
+        .map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t)))
+        .collect();
     let onto: Vec<_> = edges
         .iter()
         .flat_map(|a| edges.iter().filter(move |b| a.0 == b.0 && a.1 == b.1 && a.2 != b.2).map(move |b| (*a, b.2)))
@@ -329,8 +351,12 @@ fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
     let existing = ids(&|e| e.is_some());
     let missing = ids(&|e| e.is_none());
     let trashed = ids(&|e| e.is_some_and(|e| e.trashed));
-    let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let edges: Vec<(&'static str, &'static str, &'static str)> = m
+        .edges
+        .iter()
+        .filter(|(_, k, _)| KINDS.contains(&k.as_str()))
+        .map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t)))
+        .collect();
     let keys_where = |keep: &dyn Fn(Option<&Json>) -> bool| -> Vec<(&'static str, &'static str)> {
         existing
             .iter()
@@ -655,7 +681,7 @@ impl Model {
             }
             // What the model holds is primary data, which a rebuild leaves as it is
             Step::Rebuild { .. } => {}
-            Step::RefuseNext | Step::Reset => unreachable!("only at the top"),
+            Step::RefuseNext | Step::Reset | Step::RenameRelation { .. } => unreachable!("only at the top"),
         }
         Ok(())
     }
@@ -676,6 +702,26 @@ impl Model {
     fn step(&mut self, step: &Step) -> Result<(), Refusal> {
         if let Step::RefuseNext = step {
             self.refuse_next = true;
+            return Ok(());
+        }
+        if let Step::RenameRelation { from, to } = step {
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            // An edge of the new kind joining the ends of a moving edge would be one identity twice: refused, nothing moves
+            let moving: Vec<(String, String, String)> =
+                self.edges.iter().filter(|(_, kind, _)| kind.as_str() == *from).cloned().collect();
+            if moving
+                .iter()
+                .any(|(source, _, target)| self.edges.contains(&(source.clone(), to.to_string(), target.clone())))
+            {
+                return Err("an edge of the new kind joins the ends");
+            }
+            self.pending.clear();
+            for (source, kind, target) in moving {
+                self.edges.remove(&(source.clone(), kind, target.clone()));
+                self.edges.insert((source, to.to_string(), target));
+            }
             return Ok(());
         }
         if let Step::Reset = step {
@@ -820,6 +866,7 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::Unit { .. }
         | Step::RefuseNext
         | Step::Reset
+        | Step::RenameRelation { .. }
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -850,6 +897,7 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
         }
         Step::Rebuild { index } => db.rebuild(*index).map(|()| None),
         Step::Reset => db.reset().map(|()| None),
+        Step::RenameRelation { from, to } => db.rename_relation(from, to).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -1943,6 +1991,32 @@ fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
 /// Records the model's state after a step, comparing the change set the engine made with the change the model's states
 /// name, and what `changed_since` answers from the start with what the changes so far say
 fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model) {
+    if let (Step::RenameRelation { from, .. }, Ok(_)) = (step, got) {
+        // A rename commits no change set and reports no sequence: the database's own is the commit's. It stamps the ends
+        // of each edge it moved, and the ends are alive
+        let sequence = engine.db.sequence().expect("the sequence reads");
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        let moved: Vec<(String, String)> = engine
+            .before
+            .edges
+            .iter()
+            .filter(|(_, kind, _)| kind.as_str() == *from)
+            .map(|(source, _, target)| (source.clone(), target.clone()))
+            .collect();
+        for id in moved.into_iter().flat_map(|(source, target)| [source, target]) {
+            if after.entities.contains_key(&id) {
+                engine.since.gone.remove(&id);
+                engine.since.last.insert(id, sequence);
+            }
+        }
+        if engine.replaced && engine.replaced_at.is_none() {
+            engine.replaced_at = Some(sequence - 1);
+        }
+        engine.before = after;
+        assert_since(engine, step);
+        return;
+    }
     if let (Step::Reset, Ok(_)) = (step, got) {
         // A reset commits no change set, and a reader from before it is told the answer is incomplete: the entities it
         // removed have no tombstone. The tracking starts again from the database as it is
@@ -2228,6 +2302,33 @@ fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_first_ends() {
     );
 }
 
+#[test]
+fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refused_by_both() {
+    // Renaming refs to tags, where tags already joins the same two entities, would leave two edges with one identity: the
+    // engine refuses it, and the model must refuse it the same way, moving nothing
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "tags", target: "Task-2" },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::RenameRelation { from: "refs", to: "tags" };
+    reference.outcome = model.step(&step);
+    assert!(reference.outcome.is_err(), "the model refuses the rename");
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
 proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
@@ -2236,7 +2337,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 25] = [
+const STEP_KINDS: [&str; 26] = [
     "Create",
     "Set",
     "Append",
@@ -2262,6 +2363,7 @@ const STEP_KINDS: [&str; 25] = [
     "RefuseNext",
     "Rebuild",
     "Reset",
+    "RenameRelation",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -2291,6 +2393,7 @@ fn kind_of(step: &Step) -> &'static str {
         Step::RefuseNext => "RefuseNext",
         Step::Rebuild { .. } => "Rebuild",
         Step::Reset => "Reset",
+        Step::RenameRelation { .. } => "RenameRelation",
     }
 }
 
