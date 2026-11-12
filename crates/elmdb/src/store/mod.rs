@@ -12,6 +12,7 @@
 
 mod backup;
 mod idle_reads;
+mod reach;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
@@ -90,13 +91,13 @@ impl Default for StoreOptions {
     }
 }
 
+// The offset `page_size_of` reads is for a 64-bit host, which every target this crate ships for is
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
+
 /// The page size LMDB wrote a file with, which it reads from the file and not from the host: a file written on a host with
 /// 4 KiB pages opens with 4 KiB pages on one with 16 KiB. It is `mm_psize`, in the first meta page: the page header (16
 /// bytes), then `mm_magic`, `mm_version`, `mm_address` and `mm_mapsize` (24 bytes on a 64-bit host), then the free tree's
 /// `md_pad`. It is read by seeking, so the file is never mapped to find it
-/// The offset below is for a 64-bit host, which every target this crate ships for is
-const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
-
 fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usize> {
     const AT: u64 = 16 + 24;
     file.seek(SeekFrom::Start(AT))?;
@@ -363,27 +364,31 @@ impl Store {
                 e => e.into(),
             })?;
 
-        // The file must be as long as the pages its meta page names, or a read of a page past its end is a SIGBUS (on Windows,
-        // an access violation) that ends the process. LMDB may leave the last of them out of the file, when the free list
-        // holds them, and a power loss may leave the tree's pages unwritten: so a writable open extends the file to them,
-        // as LMDB's own write map does. The extension is zeros, and a page the tree uses that no commit wrote reads as
-        // corrupt rather than as a crash. A read-only open cannot extend the file, so it refuses one that is short
+        // A read of a page past the end of the file is a SIGBUS (on Windows, an access violation) that ends the process, so
+        // a file shorter than its meta page's pages is read first, by seeks, to see whether the trees reach any of them. LMDB
+        // may leave its last free pages out of the file, and then the file is healthy: a writable open extends it with zeros,
+        // as LMDB's write map would, and a read-only open goes on, since it touches no page the trees don't reach. A page the
+        // trees reach past the end, or that is not a page LMDB wrote, is a torn file, refused whichever way it is opened
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
         let needed = (env.info().last_page_number as u64 + 1) * page as u64;
         let held = file.metadata()?.len();
         if held < needed {
-            if options.read_only {
+            let reached = reach::reach(&mut file, page, held / page as u64, env.info().last_txn_id as u64, &data)?;
+            if let Some(missing) = reached.missing {
                 return Err(Error::new(
                     ErrorCode::Corrupted,
                     format!(
-                        "{} is {held} bytes, shorter than the {needed} its meta page names. Open it writable once, which \
-                         extends it with zeros, or restore it from a backup",
+                        "{} is {held} bytes, and page {missing} of its trees is past its end: a power loss may have left it \
+                         unwritten. Restore the database from a backup, or from a copy of the file that holds it",
                         data.display()
                     ),
                 ));
             }
-            file.set_len(needed)?;
+            debug_assert!(reached.highest < held / page as u64, "a clean walk reaches only pages in the file");
+            if !options.read_only {
+                file.set_len(needed)?;
+            }
         }
         if options.read_only {
             require_registered_reader(&env, &canonical)?;

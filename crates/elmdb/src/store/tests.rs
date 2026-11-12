@@ -1235,38 +1235,197 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
     drop(resizing);
     store.sync_owed().unwrap();
 }
+/// A store of many rows, of which `destroy` removes them all in one commit, and its data file's path
+fn filled(dir: &tempfile::TempDir, destroy: bool) -> std::path::PathBuf {
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        for n in 0..200u32 {
+            put(&store, &format!("key-{n:03}"), &[7u8; 2000]).unwrap();
+        }
+        if destroy {
+            store
+                .write(
+                    |txn, db| {
+                        for n in 0..200u32 {
+                            db.delete(txn, format!("key-{n:03}").as_bytes())?;
+                        }
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        }
+    }
+    dir.path().join("data.mdb")
+}
+
+/// The highest page the trees reach in a file as it is, and the last page of its meta page's pages
+fn reached_in(dir: &tempfile::TempDir, data: &std::path::Path) -> (u64, u64) {
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    let last = store.env.info().last_page_number as u64;
+    let txnid = store.env.info().last_txn_id as u64;
+    let mut file = std::fs::File::open(data).unwrap();
+    let page = super::page_size_of(&mut file, data).unwrap() as u64;
+    let reached =
+        super::reach::reach(&mut file, page as usize, std::fs::metadata(data).unwrap().len() / page, txnid, data)
+            .unwrap();
+    assert!(reached.missing.is_none(), "the whole file holds every page the trees reach");
+    (reached.highest, last)
+}
 
 #[test]
-fn a_short_data_file_is_refused_read_only_and_extended_to_its_pages_by_a_writable_open() {
-    // The meta page names the pages the file must hold. One byte fewer is refused by a read-only open, which cannot extend
-    // the file, and a writable open extends it to exactly those pages, so no page past its end is ever mapped
+fn a_short_file_missing_a_page_the_trees_reach_is_refused_in_both_modes() {
+    // One byte short cuts the last page of the meta page's pages. The open refuses exactly when the trees reach that page
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (highest, last) = reached_in(&dir, &data);
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len((last + 1) * page - 1).unwrap();
+    drop(file);
+    for options in [StoreOptions { read_only: true, ..quiet() }, quiet()] {
+        let outcome = Store::open(dir.path(), options).err();
+        assert_eq!(outcome.is_some(), highest == last, "reached the last page: {}", highest == last);
+        if let Some(error) = outcome {
+            assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+            assert!(error.message.contains("past its end"), "{error}");
+        }
+    }
+}
+
+/// A store whose trees, emptied again and again, leave the file's last pages free: each round writes rows in one commit
+/// and deletes them in another, and the rounds stop once the trees reach fewer pages than the file's meta page names
+fn drained(dir: &tempfile::TempDir) -> std::path::PathBuf {
+    let data = dir.path().join("data.mdb");
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    for round in 0..60u32 {
+        store
+            .write(
+                |txn, db| {
+                    for n in 0..200u32 {
+                        db.put(txn, format!("key-{round}-{n:03}").as_bytes(), &[7u8; 2000])?;
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        store
+            .write(
+                |txn, db| {
+                    for n in 0..200u32 {
+                        db.delete(txn, format!("key-{round}-{n:03}").as_bytes())?;
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        let last = store.env.info().last_page_number as u64;
+        let txnid = store.env.info().last_txn_id as u64;
+        let mut file = std::fs::File::open(&data).unwrap();
+        let page = super::page_size_of(&mut file, &data).unwrap();
+        let reached = super::reach::reach(&mut file, page, last + 1, txnid, &data).unwrap();
+        if reached.missing.is_none() && reached.highest < last {
+            break;
+        }
+    }
+    data
+}
+
+#[test]
+fn a_short_file_whose_tail_the_trees_do_not_reach_opens_and_a_writable_open_extends_it() {
+    // Emptied, the trees reach far fewer pages than the file holds, and LMDB leaves the free tail out of the file. Such a
+    // file is healthy: cut to the pages the trees reach, it opens read-only and a writable open extends it again
+    let dir = tempfile::tempdir().unwrap();
+    let data = drained(&dir);
+    let (highest, last) = reached_in(&dir, &data);
+    assert!(highest < last, "the drained trees leave a free tail: reached {highest}, last {last}");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len((highest + 1) * page).unwrap();
+    drop(file);
+    Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() })
+        .expect("a read-only open of a healthy short file");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), (highest + 1) * page, "a read-only open does not extend it");
+    drop(Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file"));
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), (last + 1) * page, "extended to the pages its meta page names");
+}
+
+#[test]
+fn a_short_file_whose_last_page_is_an_overflow_page_the_trees_reach_is_refused() {
+    // A value larger than a page lives on overflow pages, which the trees reach by the node that names them. When the
+    // file's last page is one of them, cutting it short is a file the open refuses
     let dir = tempfile::tempdir().unwrap();
     {
         let store = Store::open(dir.path(), quiet()).unwrap();
-        for n in 0..40u32 {
-            put(&store, &format!("key-{n:03}"), &[7u8; 900]).unwrap();
-        }
+        put(&store, "big", &vec![9u8; 200_000]).unwrap();
     }
     let data = dir.path().join("data.mdb");
-    let read_only = StoreOptions { read_only: true, ..quiet() };
-    let last = {
-        let store = Store::open(dir.path(), read_only.clone()).unwrap();
-        store.env.info().last_page_number as u64
-    };
+    let (highest, last) = reached_in(&dir, &data);
+    assert_eq!(highest, last, "the big value's overflow pages are the file's last, and the trees reach them");
     let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
-    let needed = (last + 1) * page;
-    assert!(std::fs::metadata(&data).unwrap().len() >= needed, "the file holds every page its meta page names");
     let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
-    file.set_len(needed - 1).unwrap();
+    file.set_len((last + 1) * page - 1).unwrap();
     drop(file);
-    let refused = Store::open(dir.path(), read_only.clone()).err().expect("a short file is refused read-only");
-    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
-    assert!(refused.message.contains("shorter than the"), "{refused}");
-    let writable = Store::open(dir.path(), quiet());
-    assert!(writable.is_ok(), "a writable open extends the file");
-    drop(writable);
-    assert_eq!(std::fs::metadata(&data).unwrap().len(), needed, "extended to exactly the pages it names");
-    Store::open(dir.path(), read_only).expect("the extended file opens read-only");
+    let error = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("refused");
+    assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+}
+
+#[test]
+fn a_short_file_whose_tree_root_is_torn_is_refused_whichever_tree_it_is() {
+    // The meta page names each tree's root, which the trees reach by definition. Zeroed in a file cut short before its last
+    // page, each root is refused, the free tree's and the main tree's alike: the expectation comes from the meta page read
+    // here, not from the walk under test
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (_, last) = reached_in(&dir, &data);
+    let image = std::fs::read(&data).unwrap();
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
+    let txnid =
+        Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap().env.info().last_txn_id as u64;
+    let (free, main) = meta_roots(&image, page, txnid);
+    for root in [free, main] {
+        assert!(root != u64::MAX && root < last, "the root {root} is an inner page of the file, below its last {last}");
+        let mut torn = image[..(last as usize) * page].to_vec();
+        torn[(root as usize) * page..(root as usize + 1) * page].fill(0);
+        std::fs::write(&data, &torn).unwrap();
+        let error =
+            Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a torn root is refused");
+        assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+        assert!(error.message.contains("not a page LMDB wrote"), "root {root}: {error}");
+    }
+}
+
+/// The free and main roots of the meta page written by `txnid`, read from the file's bytes at the offsets LMDB writes them
+fn meta_roots(image: &[u8], psize: usize, txnid: u64) -> (u64, u64) {
+    for at in [0, psize] {
+        let field = |offset: usize| u64::from_ne_bytes(image[at + offset..at + offset + 8].try_into().unwrap());
+        if field(144) == txnid {
+            return (field(80), field(128));
+        }
+    }
+    panic!("no meta page of transaction {txnid}");
+}
+
+#[test]
+fn a_reached_page_zeroed_in_a_short_file_is_refused_as_not_one_lmdb_wrote() {
+    // Within the file, a page the trees reach that carries no page header is torn, and the walk refuses it rather than
+    // letting a read see zeros
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let (highest, _) = reached_in(&dir, &data);
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+        file.seek(SeekFrom::Start(highest * page)).unwrap();
+        file.write_all(&vec![0u8; page as usize]).unwrap();
+        file.set_len((highest + 1) * page).unwrap();
+    }
+    let error = Store::open(dir.path(), quiet()).err().expect("a torn reached page is refused");
+    assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+    assert!(error.message.contains("not a page LMDB wrote"), "{error}");
 }
 
 #[test]

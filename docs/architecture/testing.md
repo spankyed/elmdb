@@ -81,10 +81,11 @@ pages present. In the grouped mode nothing orders the pages written since the la
 only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
 that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
 disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
-itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` checks
-the length first: a writable open extends a short file with zeros, so a page the tree uses that no commit wrote reads as
-corrupt, and a read-only open refuses the file. A torn file that is refused, or whose missing pages read as corrupt,
-counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
+itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
+such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
+they reach is past the end or is not a page LMDB wrote. A file whose missing pages no tree reaches is healthy, since
+LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. A torn
+file that is refused counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
 
 ## Failpoints
 

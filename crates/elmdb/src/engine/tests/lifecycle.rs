@@ -502,10 +502,9 @@ fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_writ
 }
 
 #[test]
-fn a_data_file_cut_short_is_extended_by_a_writable_open_and_what_its_missing_pages_hold_is_refused_not_faulted() {
-    // A power loss can leave the tree's pages unwritten at the end of the file. The writable open extends the file with
-    // zeros, so a read of one of them is an error from the engine, which the open or a check reports, and not a fault that
-    // ends the process
+fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is() {
+    // A power loss can leave the trees' pages unwritten at the end of the file. The open reads the file's trees by seeks
+    // and refuses it, whichever way it is opened, without changing it: nothing is extended and nothing is mapped past its end
     let dir = tempfile::tempdir().unwrap();
     {
         let db = open(&dir);
@@ -518,14 +517,17 @@ fn a_data_file_cut_short_is_extended_by_a_writable_open_and_what_its_missing_pag
     let data = dir.path().join("data.mdb");
     let whole = std::fs::metadata(&data).unwrap().len();
     std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2).unwrap();
-    let options = || OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() };
-    match Database::open(dir.path(), options()) {
-        Err(error) => assert_eq!(error.code, ErrorCode::Corrupted, "{error}"),
-        Ok(db) => {
-            let report = db.check();
-            assert!(report.map(|r| !r.is_clean()).unwrap_or(true), "a page the file lost is reported");
-            db.close().unwrap();
-        }
-    }
-    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole, "extended to the pages its meta page names");
+    let writable =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
+            .err()
+            .expect("a writable open refuses the cut file");
+    assert_eq!(writable.code, ErrorCode::Corrupted, "{writable}");
+    let read_only = Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(schema()), syncs: false, read_only: true, ..Default::default() },
+    )
+    .err()
+    .expect("a read-only open refuses the cut file");
+    assert_eq!(read_only.code, ErrorCode::Corrupted, "{read_only}");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2, "the file is left as it was");
 }
