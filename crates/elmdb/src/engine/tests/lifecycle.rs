@@ -516,7 +516,7 @@ fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is()
     }
     let data = dir.path().join("data.mdb");
     let whole = std::fs::metadata(&data).unwrap().len();
-    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2).unwrap();
+    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2 / 4096 * 4096).unwrap();
     let writable =
         Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
             .err()
@@ -529,5 +529,5 @@ fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is()
     .err()
     .expect("a read-only open refuses the cut file");
     assert_eq!(read_only.code, ErrorCode::Corrupted, "{read_only}");
-    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2, "the file is left as it was");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2 / 4096 * 4096, "the file is left as it was");
 }

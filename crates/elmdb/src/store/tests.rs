@@ -1275,13 +1275,13 @@ fn reached_in(dir: &tempfile::TempDir, data: &std::path::Path) -> (u64, u64) {
 
 #[test]
 fn a_short_file_missing_a_page_the_trees_reach_is_refused_in_both_modes() {
-    // One byte short cuts the last page of the meta page's pages. The open refuses exactly when the trees reach that page
+    // Cut short of its last page, the file lacks a page the meta page names. The open refuses exactly when the trees reach it
     let dir = tempfile::tempdir().unwrap();
     let data = filled(&dir, false);
     let (highest, last) = reached_in(&dir, &data);
     let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
     let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
-    file.set_len((last + 1) * page - 1).unwrap();
+    file.set_len(last * page).unwrap();
     drop(file);
     for options in [StoreOptions { read_only: true, ..quiet() }, quiet()] {
         let outcome = Store::open(dir.path(), options).err();
@@ -1366,7 +1366,7 @@ fn a_short_file_whose_last_page_is_an_overflow_page_the_trees_reach_is_refused()
     assert_eq!(highest, last, "the big value's overflow pages are the file's last, and the trees reach them");
     let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
     let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
-    file.set_len((last + 1) * page - 1).unwrap();
+    file.set_len(last * page).unwrap();
     drop(file);
     let error = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("refused");
     assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
