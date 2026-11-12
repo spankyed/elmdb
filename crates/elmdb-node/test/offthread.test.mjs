@@ -79,13 +79,15 @@ test('a rebuild of a large database leaves the event loop turning until it answe
 });
 
 test('a check, a backup and a rebuild answer what their blocking forms answer', async (t) => {
-  const { db, dir } = open(t);
+  const { db } = open(t);
   fill(db, 500);
   assert.deepEqual(await db.check(), db.checkSync());
   assert.equal(db.checkSync().violations.length, 0);
   await db.rebuild('Note', 'byTitle');
-  const target = join(dir, '..', `${dir.split('/').pop()}-backup`);
-  t.after(() => rmSync(target, { recursive: true, force: true }));
+  // A directory of its own for the copy: splitting the database's path would not hold on Windows' separators
+  const copies = mkdtempSync(join(tmpdir(), 'elmdb-offthread-copy-'));
+  t.after(() => rmSync(copies, { recursive: true, force: true }));
+  const target = join(copies, 'copy');
   await db.backup(target);
   const copy = Database.open(target, { schema, syncs: false });
   t.after(() => copy.close());
