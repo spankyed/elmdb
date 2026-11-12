@@ -50,7 +50,8 @@ pub fn count(r: &impl Read, own: &[u8], stored: &[u8]) -> Result<u64> {
 
 /// `count`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
 /// Places in blocks are counted a block at a time, so the answer may pass `upto` by what the last block read holds.
-/// With it, whether that is every place under the key: false when the count came to `upto`, where it stopped
+/// With it, whether that is every place under the key: true for a key holding its own places, and for one in
+/// blocks false when the count came to `upto`, where it stopped
 pub fn count_probed(r: &impl Read, own: &[u8], stored: &[u8], upto: u64) -> Result<(u64, bool)> {
     postings::held_probed(r, &term(own.to_vec()), stored, upto)
 }

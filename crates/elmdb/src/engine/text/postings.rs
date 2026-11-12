@@ -531,7 +531,8 @@ pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
 
 /// `held`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
 /// Blocks are counted whole, so the answer may pass `upto` by what the last one read holds. With it, whether
-/// that is every entity holding the term: false when the count came to `upto`, where it stopped
+/// that is every entity holding the term: true for a term whose own key holds them, and for one in blocks false
+/// when the count came to `upto`, where it stopped
 pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8], upto: u64) -> Result<(u64, bool)> {
     let mut rest = stored;
     let own = varint(&mut rest)? > 0;
@@ -688,6 +689,8 @@ impl Sought {
     /// Reads the block that answers for `place`: the one it is in, or with none the first after it, which answers
     /// for every place from `place` to its last. False when the term has no block so late
     fn read(&mut self, r: &impl Read, place: u64) -> Result<bool> {
+        // Until a block is read whole, the places held answer for nothing
+        self.covers = None;
         let mut past = self.term.block(place);
         let from = past.len();
         past.push(0);

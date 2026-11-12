@@ -854,8 +854,8 @@ fn a_unit_grows_the_map_first_once_the_map_is_more_than_half_used() {
 #[test]
 fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
     let dir = tempfile::tempdir().unwrap();
-    let page = 16 << 10;
-    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(64 * page), ..quiet() }).unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..quiet() }).unwrap();
+    let page = store.env.unnamed_database_stat().page_size as usize;
     let used = |store: &Store| (store.env.info().last_page_number + 1) * page;
     // With three times what is in use already, nothing grows
     let before = store.map_size();
@@ -876,6 +876,14 @@ fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
     assert!(used(&store) * 9 <= store.map_size());
     let grown = store.map_size();
     store.make_room(9).unwrap();
+    assert_eq!(store.map_size(), grown);
+    // With a unit open nothing grows, and the call returns: a growth would wait for the unit to end
+    let (txn, gate, writer) = store.begin().unwrap();
+    store.make_room(1000).unwrap();
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
     assert_eq!(store.map_size(), grown);
 }
 

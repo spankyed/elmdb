@@ -265,3 +265,43 @@ The ten lowest of the open half visited ten entities: the notes the benchmark's 
 and are open, so the walk meets its ten at once. On a quiet machine the load, the creates, the check and the rebuild
 are what they were before an index accounted for its entities, which the reading under load two sections above
 couldn't say.
+
+## With a value index's places in blocks
+
+The benchmark once a value index holds a value's places together (`../architecture/format.md`, `d/x`), on
+`session/value-blocks` at `5646e7f`, the same machine, 2026-11-11. The machine was busy with other work: load 13.3
+as it began and 7.8 as it ended, where the column before it was read at 3.6 falling to 2.5, which the seconds carry.
+SQLite's readings are its own of this run; its load took 43.6 s where it had taken 33.1.
+
+| | A key an entity | Places in blocks | SQLite |
+|---|---:|---:|---:|
+| Bytes a note, as loaded | 1,174 | 956 | 151 |
+| Bytes a note, compacted | 1,186 | 1,042 | 145 |
+| Load | 57.7 s | 70.7 s | 43.6 s |
+| A create of three terms every note holds, at a million | 0.167 ms | 0.150 ms | 0.056 ms |
+| A create of thirty terms, fifteen widely held, at a million | 0.415 ms | 0.439 ms | 0.071 ms |
+| The ten lowest of the indexed number | 0.030 ms | 0.030 ms | 0.009 ms |
+| The ten highest of it | 0.037 ms | 0.031 ms | 0.007 ms |
+| The ten lowest of the half that are open | 0.041 ms | 0.038 ms | 106 ms |
+| The count of the last 500 of it | 0.025 ms | 0.049 ms | 0.014 ms |
+| A page of 50 near the end of creation order | 0.025 ms | 0.028 ms | 0.022 ms |
+| A page of 50 near the end of the number's order | 0.060 ms | 0.059 ms | 0.046 ms |
+| A check | 34.9 s | 38.8 s | 2.4 s |
+| A rebuild | 36.6 s | 43.0 s | 2.3 s |
+
+What each read visited is what it was: ten, ten, ten, 500, fifty and fifty.
+
+The 218 bytes a note are the status index's: a key for each note under one of two values became a block of 256
+places. The number's index holds a key for each note as it did, every note holding a number of its own, so the two
+indexes together went from about 400 bytes a note to about 180. The count of the last 500 reads 500 keys that each
+hold one place, and costs twice what it did. The load, the check and the rebuild are within what the load on the
+machine and SQLite's own slower load account for; none was read on a quiet machine.
+
+Two runs before this one, on the same tree but for the rebuild, read a rebuild of 85 s each, twice the check. A
+rebuild writes every derived key again in one unit, where a page it frees is no room until the unit commits, and
+this database, smaller than it had been, used just under half its map: the rebuild ran until the map was full,
+the map grew, and it ran again. `main` did the same at other sizes, which a disposable program through
+`Database::rebuild` showed on the same day at a load of 35 to 50: 220,000 notes of a number and a status rebuilt in
+10.0 s where a check took 3.9 s. A rebuild of everything now grows the map to three times what is in use before it
+begins (`../architecture/engine.md`, Admin), and the same program read 3.7 s for those 220,000, at a load
+of 7.

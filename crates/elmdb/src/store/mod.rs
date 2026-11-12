@@ -867,9 +867,12 @@ impl Store {
 
     /// Grows the map until it is `times` what is in use: what a write that makes again most of what the database
     /// holds asks before it begins. The pages such a write frees are no room for it until it commits, so in a map
-    /// with less it would run until the map is full, and then again in a larger one
+    /// with less it would run until the map is full, and then again in a larger one. Nothing grows while a unit
+    /// is open
     pub fn make_room(&self, times: usize) -> Result<()> {
-        while self.map_short_of(times) {
+        // A growth waits for an open unit to end, which one of this thread's never would: the write this is for
+        // is refused while one is open
+        while !self.unit_is_open() && self.map_short_of(times) {
             self.grow()?;
         }
         Ok(())
