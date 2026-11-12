@@ -516,6 +516,7 @@ fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is()
     }
     let data = dir.path().join("data.mdb");
     let whole = std::fs::metadata(&data).unwrap().len();
+    // Cut to whole 4 KiB pages: heed refuses a read-only open of a length that is not one on Windows, before the walk runs
     std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2 / 4096 * 4096).unwrap();
     let writable =
         Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
