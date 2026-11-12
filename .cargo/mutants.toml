@@ -56,8 +56,9 @@ exclude_re = [
     # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
     # own entry under one key
     "derive.rs:.*replace match guard other != id with true in buildable_entry",
-    # begin's growth when more than half the map is used: at exactly half, growing or not is a page's difference
-    "store/mod.rs:.*replace > with >= in Store::map_half_used",
+    # A growth when the map is short of so many times what is in use: at exactly as many, growing or not is a
+    # page's difference
+    "store/mod.rs:.*replace > with >= in Store::map_short_of",
     # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
     # from-address and pin
     "backup.rs:.*replace \\| with \\^ in move_file",
