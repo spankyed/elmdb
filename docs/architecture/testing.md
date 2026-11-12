@@ -30,9 +30,10 @@ it wrote (whether or not the value changed), against what the model changed. A u
 time, so a write a later member reverts is still named, as the engine names it. Not checked yet: the change set's
 relations, and the ends of the edges it changed beyond what `changedSince` names. After every step, `changedSince` from
 the start must name each entity still there with the sequence of its last change, the ends of a changed edge included,
-and the entities destroyed and not made again; a commit's sequence must increase. Not checked yet: the admin calls.
-`reset`, `replaceWith` and `renameType` make `changedSince` incomplete for the type they touch, and rename and purge
-need the database reopened under another schema.
+and the entities destroyed and not made again; a commit's sequence must increase. The workload also resets the database now and then: `reset` keeps the schema and clears the rows, a commit with no
+change set, after which `changedSince` from before it is incomplete, and one from after it is checked against the
+changes since. Not checked yet: `replaceWith`, `renameType`, and the renames and purge, which need the database reopened
+under another schema.
 
 It runs in two places:
 

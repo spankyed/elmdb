@@ -151,6 +151,8 @@ enum Step {
     Rebuild {
         index: Option<(&'static str, &'static str)>,
     },
+    /// Every entity, edge and derived row removed, the schema kept: the database as it was when created with its schema
+    Reset,
 }
 
 fn value() -> impl Strategy<Value = Json> {
@@ -254,12 +256,14 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let aimed = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: true });
         let blind = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: false });
         let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
+        let reset = Just(Step::Reset).boxed();
         prop_oneof![
             7 => aimed(aimed_write(&state.model)),
             1 => blind(write()),
             2 => aimed(aimed_unit(&state.model, true)),
             1 => blind(Just(Step::RefuseNext).boxed()),
             1 => blind(rebuild),
+            1 => blind(reset),
             1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
@@ -651,7 +655,7 @@ impl Model {
             }
             // What the model holds is primary data, which a rebuild leaves as it is
             Step::Rebuild { .. } => {}
-            Step::RefuseNext => unreachable!("only at the top"),
+            Step::RefuseNext | Step::Reset => unreachable!("only at the top"),
         }
         Ok(())
     }
@@ -672,6 +676,16 @@ impl Model {
     fn step(&mut self, step: &Step) -> Result<(), Refusal> {
         if let Step::RefuseNext = step {
             self.refuse_next = true;
+            return Ok(());
+        }
+        if let Step::Reset = step {
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.entities.clear();
+            self.edges.clear();
+            self.keyed.clear();
+            self.pending.clear();
             return Ok(());
         }
         let saved = self.clone();
@@ -805,6 +819,7 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::Rekey { .. }
         | Step::Unit { .. }
         | Step::RefuseNext
+        | Step::Reset
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -834,6 +849,7 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
             Ok(None)
         }
         Step::Rebuild { index } => db.rebuild(*index).map(|()| None),
+        Step::Reset => db.reset().map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -1513,6 +1529,9 @@ struct Engine {
     types: Vec<String>,
     /// The sequence of the last commit the engine reported
     sequence: u64,
+    /// Whether a reset has happened, and the position a reader from after it starts at
+    replaced: bool,
+    replaced_at: Option<u64>,
 }
 
 /// What `changed_since` answers from position zero: each entity still there with the sequence of its last change, and
@@ -1761,11 +1780,25 @@ fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
 /// Records the model's state after a step, comparing the change set the engine made with the change the model's states
 /// name, and what `changed_since` answers from the start with what the changes so far say
 fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model) {
+    if let (Step::Reset, Ok(_)) = (step, got) {
+        // A reset commits no change set, and a reader from before it is told the answer is incomplete: the entities it
+        // removed have no tombstone. The tracking starts again from the database as it is
+        engine.before = after;
+        engine.since = Since::default();
+        engine.replaced = true;
+        engine.replaced_at = None;
+        assert_since(engine, step);
+        return;
+    }
     match got {
         Ok(Some(commit)) => {
             let (changes, ends) = effects_of(step, &engine.before, &after);
             assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
             engine.sequence = commit.sequence;
+            // A reader from the commit before the first after a reset reads what changed since the reset
+            if engine.replaced && engine.replaced_at.is_none() {
+                engine.replaced_at = Some(commit.sequence - 1);
+            }
             assert_eq!(changes_of(commit), changes, "{step:?}: the change set the commit reported");
             engine.since.record(commit.sequence, &changes);
             // An end the step left destroyed is not stamped: its destruction is the change
@@ -1789,10 +1822,25 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
 }
 
 fn assert_since(engine: &Engine, step: &Step) {
-    let got = engine
+    let from_start = engine
         .db
         .changed_since(&engine.types, &crate::engine::changed::Position::default(), 1_000_000)
         .expect("changed_since answers");
+    if engine.replaced {
+        assert!(!from_start.complete, "{step:?}: a reader from before a reset is told the answer is incomplete");
+    } else {
+        assert_answer(engine, step, &from_start);
+    }
+    if let Some(sequence) = engine.replaced_at {
+        let position = crate::engine::changed::Position { sequence, after: None };
+        let since = engine.db.changed_since(&engine.types, &position, 1_000_000).expect("changed_since answers");
+        assert_answer(engine, step, &since);
+    }
+}
+
+/// What `changed_since` answers, which must be the entities still there with the sequence of their last change, and the
+/// entities destroyed and not made again, and everything
+fn assert_answer(engine: &Engine, step: &Step, got: &crate::engine::changed::Changed) {
     assert_eq!(got.ids.len(), got.sequences.len(), "each changed entity has the sequence of its last change");
     let ids: BTreeMap<String, u64> = got.ids.iter().cloned().zip(got.sequences.iter().copied()).collect();
     assert_eq!(got.ids.len(), ids.len(), "each changed entity is named once");
@@ -1822,6 +1870,8 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             since: Since::default(),
             types: vec!["Task".to_owned(), "Note".to_owned()],
             sequence: 0,
+            replaced: false,
+            replaced_at: None,
         };
         for step in &reference.prelude {
             let got = run(&engine.db, step);
@@ -1941,7 +1991,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 24] = [
+const STEP_KINDS: [&str; 25] = [
     "Create",
     "Set",
     "Append",
@@ -1966,6 +2016,7 @@ const STEP_KINDS: [&str; 24] = [
     "Unit",
     "RefuseNext",
     "Rebuild",
+    "Reset",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -1994,6 +2045,7 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Unit { .. } => "Unit",
         Step::RefuseNext => "RefuseNext",
         Step::Rebuild { .. } => "Rebuild",
+        Step::Reset => "Reset",
     }
 }
 
