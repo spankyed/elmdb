@@ -1336,9 +1336,11 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
         let mut two = filters.clone();
         two.push(limit(2));
         assert_eq!(probed(&db, json!(two), "ids"), (json!([id(0), id(1)]), 2, 0), "{filters:?}");
-        // One list is walked and the other sought: an entry of each for each task, and no more
+        // One list is walked and the other sought, an entry of each for each task. Both begin at the first task,
+        // so the first written is the one walked: the open tasks' goes one entry on, to learn the owner's has ended
         let (found, entries) = walked(&db, json!(filters), "ids");
-        assert!(found == 1024 && matches!(entries, 2049 | 2050), "{filters:?}: {entries}");
+        let walked_on = if filters[0] == open { 1 } else { 0 };
+        assert_eq!((found, entries), (1024, 2049 + walked_on), "{filters:?}");
         assert_eq!(walked(&db, json!(filters), "first"), (1, 3), "{filters:?}");
     }
     for filters in orders(&[open.clone(), owned(2)]) {
