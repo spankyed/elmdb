@@ -502,9 +502,10 @@ fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_writ
 }
 
 #[test]
-fn a_data_file_cut_short_by_a_power_loss_is_refused_as_corrupt_when_the_database_opens() {
-    // A file shorter than the pages its last commit names is what a power loss leaves; opening it must say so, not
-    // read a page that is not there and end the process
+fn a_data_file_cut_short_is_extended_by_a_writable_open_and_what_its_missing_pages_hold_is_refused_not_faulted() {
+    // A power loss can leave the tree's pages unwritten at the end of the file. The writable open extends the file with
+    // zeros, so a read of one of them is an error from the engine, which the open or a check reports, and not a fault that
+    // ends the process
     let dir = tempfile::tempdir().unwrap();
     {
         let db = open(&dir);
@@ -517,10 +518,14 @@ fn a_data_file_cut_short_by_a_power_loss_is_refused_as_corrupt_when_the_database
     let data = dir.path().join("data.mdb");
     let whole = std::fs::metadata(&data).unwrap().len();
     std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2).unwrap();
-    let refused =
-        Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
-            .err()
-            .expect("a cut-short file is refused");
-    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
-    assert!(refused.message.contains("shorter than the"), "{refused}");
+    let options = || OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() };
+    match Database::open(dir.path(), options()) {
+        Err(error) => assert_eq!(error.code, ErrorCode::Corrupted, "{error}"),
+        Ok(db) => {
+            let report = db.check();
+            assert!(report.map(|r| !r.is_clean()).unwrap_or(true), "a page the file lost is reported");
+            db.close().unwrap();
+        }
+    }
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole, "extended to the pages its meta page names");
 }

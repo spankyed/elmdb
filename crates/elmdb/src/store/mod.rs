@@ -94,6 +94,9 @@ impl Default for StoreOptions {
 /// 4 KiB pages opens with 4 KiB pages on one with 16 KiB. It is `mm_psize`, in the first meta page: the page header (16
 /// bytes), then `mm_magic`, `mm_version`, `mm_address` and `mm_mapsize` (24 bytes on a 64-bit host), then the free tree's
 /// `md_pad`. It is read by seeking, so the file is never mapped to find it
+/// The offset below is for a 64-bit host, which every target this crate ships for is
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
+
 fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usize> {
     const AT: u64 = 16 + 24;
     file.seek(SeekFrom::Start(AT))?;
@@ -102,7 +105,7 @@ fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usiz
         Error::new(ErrorCode::Corrupted, format!("{} is too short to hold a meta page", path.display()))
     })?;
     let page = u32::from_ne_bytes(bytes) as usize;
-    if !page.is_power_of_two() || !(512..=65536).contains(&page) {
+    if !page.is_power_of_two() || !(512..=32768).contains(&page) {
         return Err(Error::new(
             ErrorCode::Corrupted,
             format!("{}'s meta page names a page size of {page}, which LMDB does not write", path.display()),
@@ -360,23 +363,27 @@ impl Store {
                 e => e.into(),
             })?;
 
-        // The file must hold every page the meta page LMDB chose names: mapped short of one, a read of it is a SIGBUS (on
-        // Windows, an access violation) that ends the process. A grouped commit's pages can be lost to a power loss before
-        // its meta page is, so this is a file a power loss may have left, refused rather than read
-        let mut file = std::fs::File::open(&data)?;
+        // The file must be as long as the pages its meta page names, or a read of a page past its end is a SIGBUS (on Windows,
+        // an access violation) that ends the process. LMDB may leave the last of them out of the file, when the free list
+        // holds them, and a power loss may leave the tree's pages unwritten: so a writable open extends the file to them,
+        // as LMDB's own write map does. The extension is zeros, and a page the tree uses that no commit wrote reads as
+        // corrupt rather than as a crash. A read-only open cannot extend the file, so it refuses one that is short
+        let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
         let needed = (env.info().last_page_number as u64 + 1) * page as u64;
         let held = file.metadata()?.len();
         if held < needed {
-            return Err(Error::new(
-                ErrorCode::Corrupted,
-                format!(
-                    "{} is {held} bytes, shorter than the {needed} its last commit's pages need: a power loss, or a copy or \
-                     sync cut short, may have left them unwritten. Restore the database from a backup, or from a copy of the \
-                     file that holds them",
-                    data.display()
-                ),
-            ));
+            if options.read_only {
+                return Err(Error::new(
+                    ErrorCode::Corrupted,
+                    format!(
+                        "{} is {held} bytes, shorter than the {needed} its meta page names. Open it writable once, which \
+                         extends it with zeros, or restore it from a backup",
+                        data.display()
+                    ),
+                ));
+            }
+            file.set_len(needed)?;
         }
         if options.read_only {
             require_registered_reader(&env, &canonical)?;

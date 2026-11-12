@@ -1237,9 +1237,9 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
 }
 
 #[test]
-fn a_data_file_holding_its_last_commits_pages_opens_and_one_byte_fewer_is_refused_before_anything_reads_it() {
-    // The meta page LMDB picks names the pages the file must hold; a file shorter than them is refused as corrupt, which a
-    // read of one of its pages would instead end the process for. The exact length is enough, and one byte fewer is not
+fn a_short_data_file_is_refused_read_only_and_extended_to_its_pages_by_a_writable_open() {
+    // The meta page names the pages the file must hold. One byte fewer is refused by a read-only open, which cannot extend
+    // the file, and a writable open extends it to exactly those pages, so no page past its end is ever mapped
     let dir = tempfile::tempdir().unwrap();
     {
         let store = Store::open(dir.path(), quiet()).unwrap();
@@ -1248,24 +1248,25 @@ fn a_data_file_holding_its_last_commits_pages_opens_and_one_byte_fewer_is_refuse
         }
     }
     let data = dir.path().join("data.mdb");
+    let read_only = StoreOptions { read_only: true, ..quiet() };
     let last = {
-        let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+        let store = Store::open(dir.path(), read_only.clone()).unwrap();
         store.env.info().last_page_number as u64
     };
     let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
     let needed = (last + 1) * page;
     assert!(std::fs::metadata(&data).unwrap().len() >= needed, "the file holds every page its meta page names");
     let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
-    file.set_len(needed).unwrap();
-    drop(file);
-    Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).expect("exactly the pages it names opens");
-    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
     file.set_len(needed - 1).unwrap();
     drop(file);
-    let refused =
-        Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("a short file is refused");
+    let refused = Store::open(dir.path(), read_only.clone()).err().expect("a short file is refused read-only");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
     assert!(refused.message.contains("shorter than the"), "{refused}");
+    let writable = Store::open(dir.path(), quiet());
+    assert!(writable.is_ok(), "a writable open extends the file");
+    drop(writable);
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), needed, "extended to exactly the pages it names");
+    Store::open(dir.path(), read_only).expect("the extended file opens read-only");
 }
 
 #[test]
@@ -1282,4 +1283,15 @@ fn a_file_names_its_own_page_size_whatever_the_host_is() {
     std::fs::write(&path, &image).unwrap();
     let refused = super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).expect_err("refused");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+}
+
+#[test]
+fn the_page_size_read_from_a_real_file_is_the_one_lmdb_uses() {
+    // The reader is checked against the page size LMDB reports for the open environment, not only a hand-built header
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "key", &[1u8; 64]).unwrap();
+    let data = dir.path().join("data.mdb");
+    let from_file = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
+    assert_eq!(from_file, store.page_size());
 }
