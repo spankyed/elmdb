@@ -158,7 +158,15 @@ enum Step {
         from: &'static str,
         to: &'static str,
     },
+    /// A `Task` field's values moved to another: the harness declares `spare` as a second unindexed field of `Task`
+    RenameField {
+        from: &'static str,
+        to: &'static str,
+    },
 }
+
+/// The field renames the workload makes, both ways between `c` and the spare field
+const FIELD_RENAMES: [(&str, &str); 2] = [("c", "spare"), ("spare", "c")];
 
 /// The kinds a relation rename moves between: the workload's two plain kinds and the one it never links
 const RENAMES: [(&str, &str); 6] = [
@@ -274,6 +282,8 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let reset = Just(Step::Reset).boxed();
         let rename =
             prop::sample::select(&RENAMES[..]).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
+        let field_rename =
+            prop::sample::select(&FIELD_RENAMES[..]).prop_map(|(from, to)| Step::RenameField { from, to }).boxed();
         prop_oneof![
             7 => aimed(aimed_write(&state.model)),
             1 => blind(write()),
@@ -282,6 +292,7 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             1 => blind(rebuild),
             1 => blind(reset),
             1 => blind(rename),
+            1 => blind(field_rename),
             1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
@@ -681,7 +692,9 @@ impl Model {
             }
             // What the model holds is primary data, which a rebuild leaves as it is
             Step::Rebuild { .. } => {}
-            Step::RefuseNext | Step::Reset | Step::RenameRelation { .. } => unreachable!("only at the top"),
+            Step::RefuseNext | Step::Reset | Step::RenameRelation { .. } | Step::RenameField { .. } => {
+                unreachable!("only at the top")
+            }
         }
         Ok(())
     }
@@ -702,6 +715,27 @@ impl Model {
     fn step(&mut self, step: &Step) -> Result<(), Refusal> {
         if let Step::RefuseNext = step {
             self.refuse_next = true;
+            return Ok(());
+        }
+        if let Step::RenameField { from, to } = step {
+            // A Task holding both names would have one value replaced: refused before the commit, so an armed refusal stays
+            let clash = self.entities.iter().any(|(id, e)| {
+                crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from) && e.fields.contains_key(*to)
+            });
+            if clash {
+                return Err("a Task holds both names");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.pending.clear();
+            for (id, entity) in self.entities.iter_mut() {
+                if crate::engine::ids::type_of(id) == "Task"
+                    && let Some(value) = entity.fields.remove(*from)
+                {
+                    entity.fields.insert(to.to_string(), value);
+                }
+            }
             return Ok(());
         }
         if let Step::RenameRelation { from, to } = step {
@@ -868,6 +902,7 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::RefuseNext
         | Step::Reset
         | Step::RenameRelation { .. }
+        | Step::RenameField { .. }
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -899,6 +934,7 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
         Step::Rebuild { index } => db.rebuild(*index).map(|()| None),
         Step::Reset => db.reset().map(|()| None),
         Step::RenameRelation { from, to } => db.rename_relation(from, to).map(|()| None),
+        Step::RenameField { from, to } => db.rename_field("Task", from, to).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -1552,12 +1588,20 @@ const RANKED: RankIndex<'static> =
 const TOLERANCE: f64 = 1e-9;
 
 /// The engine tests' schema with `RANKED` declared
+/// The schema with the spare field a renameField moves values into: unindexed, so the workload's indexes are the same as
+/// before. Every database the model compares declares it, the crash child's included
+fn with_spare(mut schema: Json) -> Json {
+    schema["types"]["Task"]["fields"]["spare"] = json!({ "type": "any", "optional": true });
+    schema
+}
+
 fn open(dir: &tempfile::TempDir) -> Database {
     let mut schema = schema_json();
     // Change order is what `changed_since` answers from: each type it is asked of is declared to keep it
     for entity_type in ["Task", "Note"] {
         schema["types"][entity_type]["changeOrder"] = json!(true);
     }
+    schema = with_spare(schema);
     schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
                                               "direction": RANKED.direction, "weights": RANKED.weights,
                                               "tolerance": TOLERANCE } });
@@ -1992,6 +2036,31 @@ fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
 /// Records the model's state after a step, comparing the change set the engine made with the change the model's states
 /// name, and what `changed_since` answers from the start with what the changes so far say
 fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model) {
+    if let (Step::RenameField { from, .. }, Ok(_)) = (step, got) {
+        // A field rename commits, consuming a sequence even when no entity held the field; it stamps the entities that did
+        let sequence = engine.db.sequence().expect("the sequence reads");
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        let holders: Vec<String> = engine
+            .before
+            .entities
+            .iter()
+            .filter(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in holders {
+            if after.entities.contains_key(&id) {
+                engine.since.gone.remove(&id);
+                engine.since.last.insert(id, sequence);
+            }
+        }
+        if engine.replaced && engine.replaced_at.is_none() {
+            engine.replaced_at = Some(sequence - 1);
+        }
+        engine.before = after;
+        assert_since(engine, step);
+        return;
+    }
     if let (Step::RenameRelation { from, .. }, Ok(_)) = (step, got) {
         // A rename commits no change set and reports no sequence: the database's own is the commit's. It stamps the ends
         // of each edge it moved, and the ends are alive
@@ -2363,6 +2432,28 @@ fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_the_engine_do
     assert!(reference.outcome.is_err(), "the create after the failed rename is refused, as the armed refusal says");
 }
 
+#[test]
+fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
+    // A Task holding both c and spare would have one value replaced: the engine refuses the rename and the model must too,
+    // moving nothing
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("c", json!(1)), ("spare", json!(2))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::RenameField { from: "c", to: "spare" };
+    reference.outcome = model.step(&step);
+    assert!(reference.outcome.is_err(), "the model refuses the rename");
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
 proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
@@ -2371,7 +2462,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 26] = [
+const STEP_KINDS: [&str; 27] = [
     "Create",
     "Set",
     "Append",
@@ -2398,6 +2489,7 @@ const STEP_KINDS: [&str; 26] = [
     "Rebuild",
     "Reset",
     "RenameRelation",
+    "RenameField",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -2428,6 +2520,7 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Rebuild { .. } => "Rebuild",
         Step::Reset => "Reset",
         Step::RenameRelation { .. } => "RenameRelation",
+        Step::RenameField { .. } => "RenameField",
     }
 }
 
@@ -2525,9 +2618,16 @@ mod crash {
     fn child_runs_a_seeded_workload_acknowledging_each_step() {
         let (Ok(path), Ok(seed)) = (std::env::var("ELMDB_CRASH_DB"), std::env::var("ELMDB_CRASH_SEED")) else { return };
         // Syncs on, as the app runs: a commit survives the process's death before any sync
-        let db =
-            Database::open(&path, crate::OpenOptions { schema: Some(super::super::schema()), ..Default::default() })
-                .unwrap();
+        let db = Database::open(
+            &path,
+            crate::OpenOptions {
+                schema: Some(
+                    crate::schema::Schema::from_json(&super::with_spare(super::super::schema_json())).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut out = std::io::stdout().lock();
         for (i, step) in seeded(seed.parse().unwrap()).iter().enumerate() {
             let _ = run(&db, step);
