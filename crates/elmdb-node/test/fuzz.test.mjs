@@ -72,13 +72,13 @@ test('random bytes and random msgpack as batches, reads and loads throw elmdb co
     const bytes = Buffer.from(Array.from({ length: Math.floor(r() * 64) }, () => Math.floor(r() * 256)));
     const packed = packr.pack(junk(r));
     for (const payload of [bytes, packed]) {
-      survives(() => db.write(payload), true, `seed ${seed} write`);
+      survives(() => db.writeSync(payload), true, `seed ${seed} write`);
       survives(() => db.readSync(payload), true, `seed ${seed} read`);
       survives(() => db.bulkLoad(payload), true, `seed ${seed} load`);
     }
   }
   // Still working
-  db.write(valid);
+  db.writeSync(valid);
   assert.equal(packr.unpack(db.readSync(validRead))[0].rows.length, 2);
 });
 
@@ -90,10 +90,10 @@ test('valid batches and reads with bytes flipped throw elmdb codes or apply', (t
       const mutated = Buffer.from(source);
       const flips = 1 + Math.floor(r() * 3);
       for (let i = 0; i < flips; i++) mutated[Math.floor(r() * mutated.length)] = Math.floor(r() * 256);
-      survives(() => (source === valid ? db.write(mutated) : db.readSync(mutated)), true, `seed ${seed}`);
+      survives(() => (source === valid ? db.writeSync(mutated) : db.readSync(mutated)), true, `seed ${seed}`);
     }
   }
-  assert.deepEqual(db.check().differences, []);
+  assert.deepEqual(db.checkSync().differences, []);
 });
 
 test('arguments of the wrong type to every method throw rather than crash', (t) => {
@@ -108,7 +108,7 @@ test('arguments of the wrong type to every method throw rather than crash', (t) 
   const db = open(t);
   const unit = db.begin();
   const targets = [
-    ['write', db], ['readSync', db], ['bulkLoad', db], ['backup', db], ['replaceWith', db], ['rebuild', db],
+    ['writeSync', db], ['readSync', db], ['bulkLoad', db], ['backupSync', db], ['replaceWith', db], ['rebuildSync', db],
     ['purge', db], ['renameType', db], ['renameField', db], ['renameRelation', db],
     ['write', unit], ['read', unit], ['savepoint', unit], ['rollbackTo', unit], ['release', unit],
   ];
@@ -122,7 +122,7 @@ test('arguments of the wrong type to every method throw rather than crash', (t) 
   unit.abort();
   survives(() => Database.open(42), false, 'open with a number');
   survives(() => Database.open('/nonexistent/' + 'x'.repeat(5000), { readOnly: true }), true, 'open of nothing');
-  db.write(valid);
+  db.writeSync(valid);
 });
 
 test('a closed database and an ended unit refuse every call', async (t) => {
@@ -133,7 +133,7 @@ test('a closed database and an ended unit refuse every call', async (t) => {
     assert.throws(call, { code: 'CLOSED' });
   }
   db.close();
-  for (const call of [() => db.write(valid), () => db.readSync(validRead), () => db.begin(), () => db.check(), () => db.stats(), () => db.syncs]) {
+  for (const call of [() => db.writeSync(valid), () => db.readSync(validRead), () => db.begin(), () => db.checkSync(), () => db.stats(), () => db.syncs]) {
     assert.throws(call, { code: 'CLOSED' });
   }
   // A call answering a promise refuses by rejecting it

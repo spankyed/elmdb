@@ -95,9 +95,9 @@ test('durable() resolves once what was committed is on disk', async (t) => {
 test('rebuild() takes a type and an index, or neither', (t) => {
   const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
   for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
-    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
+    assert.throws(() => db.rebuildSync(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
   }
-  db.rebuild();
+  db.rebuildSync();
   db.close();
 });
 
@@ -142,7 +142,7 @@ test("committedElsewhere is never a handle's own commit, a unit reads its pendin
     const db = Database.open(join(dir, 'db'), { schema: {
       $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
     } });
-    db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
+    db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
     assert.equal(db.committedElsewhere(), false);
 
     const unit = db.begin();

@@ -26,8 +26,8 @@ const dir = mkdtempSync(join(tmpdir(), 'elmdb-diagnostics-'));
 const db = Database.open(dir, { schema, syncs: false });
 try {
   const ops = Array.from({ length: 1000 }, (_, i) => ({ op: 'create', type: 'Note', fields: { title: `note ${i}` } }));
-  db.write(packr.pack({ ops, now: 1000 }));
-  db.rebuild('Note', 'title');
+  db.writeSync(packr.pack({ ops, now: 1000 }));
+  db.rebuildSync('Note', 'title');
 } finally {
   db.close();
   rmSync(dir, { recursive: true, force: true });

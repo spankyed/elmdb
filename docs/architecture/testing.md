@@ -331,6 +331,10 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
+`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
+promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
+refusal made before the work throws. Each `…Sync` form is the blocking one the rest of the suite calls.
+
 ## Platforms
 
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.

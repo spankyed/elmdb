@@ -97,7 +97,7 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncIdleMs: 60000, syncIntervalMs: 60000 });`,
-    `db.write(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
+    `db.writeSync(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
     'process.stdout.write(String(db.sequence));',
     'process.exit(0);',
   ].join('\n');

@@ -507,6 +507,7 @@ impl Database {
     ) -> Result<()> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = now_ms();
         let (waiting, mut commit) = store.write_committed(
             |txn, db| {
@@ -528,11 +529,12 @@ impl Database {
             commit.synced = store.committed(true);
         }
         drop(schema);
-        self.finish_admin_commit(&store, commit)?;
-        if let Some(builders) = self.builders()? {
+        // As in `write`: queued before a failed sync is reported, the commit having landed
+        let landed = self.finish_admin_commit(&store, commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(())
+        landed
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
@@ -695,6 +697,7 @@ impl Database {
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
         let ((results, changes, written, waiting), commit) = store.write_committed(
@@ -714,11 +717,12 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
-        if let Some(builders) = self.builders()? {
+        // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
+        let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok((results, changes))
+        Ok((results, landed?))
     }
 
     /// Runs `f` on a read snapshot of the last commit
@@ -994,18 +998,19 @@ impl Unit {
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        let changes = finish_commit(
+        // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
+        let landed = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },
-        )?;
+        );
         if let Some(builders) = &self.builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(changes)
+        landed
     }
 
     /// Ends the unit, keeping nothing of it

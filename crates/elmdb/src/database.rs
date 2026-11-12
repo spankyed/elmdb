@@ -428,9 +428,12 @@ impl Database {
                         if !at_exit
                             && let Ok(Some(builders)) = self.builders()
                             && let Ok(store) = self.store()
-                            && let Ok(owed) = crate::engine::remaining_indexes(&store, &self.engine_schema.read())
                         {
-                            builders.queue(owed);
+                            // The schema's read is let go before the builders queue, which reads it too
+                            let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read());
+                            if let Ok(owed) = owed {
+                                builders.queue(owed);
+                            }
                         }
                         return Ok(false);
                     }
@@ -508,12 +511,18 @@ impl Builders {
 impl Database {
     /// What a commit hands the pushes it left to; none in a read-only database, which never writes
     pub(crate) fn builders(&self) -> Result<Option<Builders>> {
+        self.builders_of(self.store()?)
+    }
+
+    /// `builders`, for the store a commit is made in, taken before the commit: a close may take the store slot once the
+    /// commit is made, and a commit that has landed must not be answered CLOSED for it
+    pub(crate) fn builders_of(&self, store: Arc<Store>) -> Result<Option<Builders>> {
         if self.read_only {
             return Ok(None);
         }
         Ok(Some(Builders {
             slot: Arc::clone(&self.builder),
-            store: self.store()?,
+            store,
             schemas: self.observing_schema(),
             tracks: Arc::clone(&self.tracks),
         }))
