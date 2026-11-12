@@ -130,6 +130,10 @@ fn place() -> impl Strategy<Value = u64> {
 /// 300 times in its last field, beside once in its first when the index has more than one. 256 and 300 are two bytes,
 /// the first the least such a byte is and one past that
 fn counts_for(fields: usize, often: u8) -> Vec<u8> {
+    // A list of places alone has no counts
+    if fields == 0 {
+        return Vec::new();
+    }
     let first = (0, vec![0]);
     let last = (fields as u32 - 1, (0..if often == 1 { 256 } else { 300 }).collect());
     match (often, fields) {
@@ -144,9 +148,10 @@ proptest! {
 
     #[test]
     fn a_terms_keys_hold_what_its_entities_alone_make_them_however_they_were_filed(
-        fields in prop_oneof![Just(1usize), Just(3), Just(9)],
+        fields in prop_oneof![Just(0usize), Just(1), Just(3), Just(9)],
         capacity in 1usize..5,
         ops in prop::collection::vec((place(), prop::option::weighted(0.7, 0u8..3)), 0..70),
+        asked in prop::collection::vec(place(), 0..40),
     ) {
         let filed = Filed::new(fields, capacity);
         let mut model: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -161,6 +166,28 @@ proptest! {
             };
             prop_assert_eq!(filed.stored(), filed_in_order(filed.term(), &model), "after {:?} at {}", op, place);
         }
+        // What a read that seeks reads of it: from any place, the first at it or after, whatever order they are
+        // asked in; and asked in order, each key read once
+        filed.snapshot(|r| {
+            let first_from = |place: u64| model.range(place..).next().map(|(held, _)| *held);
+            let mut sought = Sought::new(filed.term());
+            for place in &asked {
+                assert_eq!(sought.seek(r, *place, &mut false)?, first_from(*place), "from {place}");
+            }
+            let mut sought = Sought::new(filed.term());
+            let mut reads = 0;
+            let mut ascending: Vec<u64> = asked.iter().copied().chain(model.keys().map(|place| place + 1)).collect();
+            ascending.sort_unstable();
+            for place in ascending {
+                let mut read = false;
+                assert_eq!(sought.seek(r, place, &mut read)?, first_from(place), "on to {place}");
+                reads += u64::from(read);
+            }
+            // The term's own key, and each block twice at most: where a place is in it, and as the next after one
+            let keys = filed.stored().len() as u64;
+            assert!(reads <= 2 * keys + 1, "{reads} reads of {keys} keys");
+            Ok(())
+        }).unwrap();
         // What a search reads of it: the places as a set, each one's counts where it is, and none between them
         filed.snapshot(|r| {
             let Some(postings) = read(r, &filed.term())? else {
@@ -497,4 +524,30 @@ fn a_frequency_is_each_fields_count_at_its_weight() {
         assert_eq!(weighted(cut, &[1.0]).unwrap_err().code, ErrorCode::Corrupted, "{cut:?}");
     }
     assert_eq!(weighted(&[0b1, 0x80], &[1.0, 1.0]).unwrap_err().code, ErrorCode::Corrupted);
+}
+
+#[test]
+fn a_count_asked_no_further_than_some_stops_at_the_block_that_reaches_it_and_says_whether_it_is_whole() {
+    // Ten places in blocks of four, four and two
+    let filed = Filed::new(0, 4);
+    filed.write(false, |t| (0..10).try_for_each(|place| put(t, &filed.term(), place, &[]))).unwrap();
+    let counted = |upto: u64| {
+        filed
+            .snapshot(|s| {
+                let own = crate::engine::unit::Read::get(s, &filed.term().own)?.unwrap();
+                held_probed(s, &filed.term(), &own, upto)
+            })
+            .unwrap()
+    };
+    // Reached by a block exactly, the count stops there, with more it hasn't counted
+    assert_eq!(counted(4), (4, false));
+    assert_eq!(counted(5), (8, false));
+    // Asked for as many as there are, it can't say it has them all; asked for one more, it can
+    assert_eq!(counted(10), (10, false));
+    assert_eq!(counted(11), (10, true));
+    // A term whose own key holds its places is counted whole whatever was asked
+    let few = Filed::new(0, 4);
+    few.write(false, |t| (0..3).try_for_each(|place| put(t, &few.term(), place, &[]))).unwrap();
+    let own = few.snapshot(|s| Ok(crate::engine::unit::Read::get(s, &few.term().own)?.unwrap())).unwrap();
+    assert_eq!(few.snapshot(|s| held_probed(s, &few.term(), &own, 2)).unwrap(), (3, true));
 }

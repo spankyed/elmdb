@@ -852,6 +852,42 @@ fn a_unit_grows_the_map_first_once_the_map_is_more_than_half_used() {
 }
 
 #[test]
+fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..quiet() }).unwrap();
+    let page = store.env.unnamed_database_stat().page_size as usize;
+    let used = |store: &Store| (store.env.info().last_page_number + 1) * page;
+    // With three times what is in use already, nothing grows
+    let before = store.map_size();
+    assert!(used(&store) * 3 <= before);
+    store.make_room(3).unwrap();
+    assert_eq!(store.map_size(), before);
+    // Filled to more than a third and less than half, where no unit would grow it
+    let mut n = 0u64;
+    while used(&store) * 3 <= store.map_size() {
+        store.write(|txn, db| db.put(txn, &n.to_be_bytes(), &[1u8; 512]).map_err(Into::into), false).unwrap();
+        n += 1;
+    }
+    assert!(used(&store) * 2 <= store.map_size() && store.map_size() == before);
+    store.make_room(3).unwrap();
+    assert!(store.map_size() > before && used(&store) * 3 <= store.map_size());
+    // And as many times as asked, however many growths that takes
+    store.make_room(9).unwrap();
+    assert!(used(&store) * 9 <= store.map_size());
+    let grown = store.map_size();
+    store.make_room(9).unwrap();
+    assert_eq!(store.map_size(), grown);
+    // With a unit open nothing grows, and the call returns: a growth would wait for the unit to end
+    let (txn, gate, writer) = store.begin().unwrap();
+    store.make_room(1000).unwrap();
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    assert_eq!(store.map_size(), grown);
+}
+
+#[test]
 fn a_store_closing_at_exit_reports_a_sync_that_failed() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), StoreOptions::default()).unwrap();

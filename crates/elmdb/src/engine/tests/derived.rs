@@ -69,14 +69,19 @@ fn check_reports_damaged_derived_keys_and_rebuild_repairs_them() {
         d.put(txn, &crate::engine::keys::count("Task"), &crate::engine::values::encode(&7.into()))?;
         d.put(
             txn,
-            &crate::engine::keys::index_entry("Task", "a", &[crate::format::key::Part::Number(99.0)], 1),
-            &crate::engine::values::encode(&"Task-1".into()),
+            // One place, the first, under a value no task holds
+            &crate::engine::keys::index_range("Task", "a", &[crate::format::key::Part::Number(99.0)]),
+            &[1, 1],
         )?;
         Ok(())
     });
     let report = db.check().unwrap();
     let kinds: Vec<&str> = report.differences.iter().map(|d| d.kind.as_str()).collect();
     assert!(kinds.contains(&"missing") && kinds.contains(&"differs") && kinds.contains(&"extra"), "{report:?}");
+    // A rebuild of the one index clears what it held: the entry nothing derives goes, and the rest stays wrong
+    db.rebuild(Some(("Task", "a"))).unwrap();
+    let kinds: Vec<String> = db.check().unwrap().differences.iter().map(|d| d.kind.clone()).collect();
+    assert!(kinds.iter().any(|k| k == "missing") && !kinds.iter().any(|k| k == "extra"), "{kinds:?}");
     db.rebuild(None).unwrap();
     let after = db.check().unwrap();
     assert!(after.is_clean(), "{after:?}");
@@ -292,6 +297,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     assert!(!trio.built && trio.failure.as_deref().is_some_and(|f| f.contains("Note.trio")), "{trio:?}");
     let trio = db.rebuild(Some(("Note", "trio"))).unwrap_err();
     assert_eq!(trio.code, ErrorCode::ValueInvalid, "{}", trio.message);
+    // Where it files the note besides its entries is refused as an entry is, by the note and the index
+    assert!(trio.message.contains("Note-1") && trio.message.contains("Note.trio"), "{}", trio.message);
     // A rebuild of everything, which a rename or a replace runs, goes on and leaves the three unbuilt
     db.rebuild(None).unwrap();
     let status = db.index_status().unwrap();
@@ -300,14 +307,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     // Unbuilt, the index keeps what it files that fits, as a build that failed part way does: the third note,
     // among those without a `more`
     let without = crate::engine::keys::index_others(crate::format::Prefix::IndexWithout, "Note", "trio", &[]);
-    let filed: Vec<String> = db
-        .snapshot(|s| {
-            let ids = s.scan(&without)?.into_iter();
-            Ok(ids
-                .map(|(_, id)| rmpv::decode::read_value(&mut &id[..]).unwrap().as_str().unwrap().to_owned())
-                .collect())
-        })
-        .unwrap();
+    let filed: Vec<String> =
+        db.snapshot(|s| Ok(super::filed_under(s, "Note", &without).into_iter().map(|(_, id)| id).collect())).unwrap();
     assert_eq!(filed, ["Note-3"]);
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");

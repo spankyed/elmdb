@@ -141,6 +141,11 @@ pub trait Read {
         Ok((counted, next))
     }
 
+    /// `visit_within`, read as a probe: what a count that reads more than keys is made of
+    fn probe_visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.visit_within(from, to, visit)
+    }
+
     fn schema(&self) -> &Schema;
     /// The transaction and the databases themselves, for what reads them through another library: hannoy's graphs
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db);

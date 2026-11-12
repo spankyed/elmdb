@@ -7,8 +7,9 @@
 //! - `d/c type` → the type's count of live entities
 //! - `d/f type field` → that the type's entities have held the field: put by the first write, kept when its last value
 //!   goes, as a property key is in a graph database, and pruned only by `rebuild`
-//! - `d/x type index parts… seq` → id: each value index, kept by every attribute write
-//! - `d/xw type index leading… seq` → id, `d/xu type index leading… seq` → id: the entities a value index files
+//! - `d/x type index parts…` → the places of the entities a value index files under those parts (`places`), kept by
+//!   every attribute write
+//! - `d/xw type index leading…`, `d/xu type index leading…` → the places of the entities a value index files
 //!   besides its entries, those without a value in its last field and those it doesn't order, each under what its
 //!   fields before the last hold, so that the index accounts for every entity an equality on its other fields can
 //!   name (`ValueIndex::accounts`)
@@ -27,7 +28,7 @@ use crate::schema::IndexDef;
 use super::changes::Event;
 use super::keys::{self, ROLE_INDEX, SHORT_CODE_INDEX};
 use super::unit::{Read, Txn};
-use super::{ids, values};
+use super::{ids, places, values};
 
 /// The engine's own fields, which a caller's write can't name
 pub mod field {
@@ -132,6 +133,17 @@ fn set_trashed(t: &mut Txn<'_, '_>, id: &str, trashed: bool) -> Result<()> {
     super::ranks::liveness(t, id, !trashed)?;
     t.event(if trashed { Event::Trashed { id: id.to_owned() } } else { Event::Restored { id: id.to_owned() } });
     Ok(())
+}
+
+/// The entity of a type at a place in the store's sequence, live or in the trash, and which: what a value index's
+/// place names
+pub fn at_place(t: &impl Read, entity_type: &str, place: u64) -> Result<Option<(String, bool)>> {
+    for trashed in [false, true] {
+        if let Some(id) = t.get(&keys::of_type(trashed, entity_type, place))? {
+            return Ok(Some((values::decode(&id)?.as_str().unwrap_or_default().to_owned(), trashed)));
+        }
+    }
+    Ok(None)
 }
 
 pub fn get(t: &impl Read, id: &str, field: &str) -> Result<Option<Value>> {
@@ -276,7 +288,7 @@ pub fn destroy(t: &mut Txn<'_, '_>, id: &str) -> Result<()> {
             if let [only] = index.fields.as_slice()
                 && !held.iter().any(|(field, _)| field == only)
             {
-                t.del(&Other::Without(Vec::new()).key(&entity_type, &index.name, record.seq))?;
+                places::unfile(t, Other::Without(Vec::new()).key(&entity_type, &index.name), record.seq)?;
             }
         }
         t.del(&keys::of_type(record.trashed, &entity_type, record.seq))?;
@@ -370,21 +382,21 @@ impl ValueIndex {
 /// Where an index files an entity (`ValueIndex::files`)
 #[derive(Debug, Default, PartialEq)]
 pub struct Filed {
-    /// The parts of each of its entries, which the entity's place follows in the entry's key
+    /// The parts of the key each of its entries is filed under, which holds the entity's place
     pub entries: Vec<Vec<Part>>,
     /// Where an index that accounts for its entities files it besides
     pub others: Vec<Other>,
 }
 
 impl Filed {
-    /// The keys of the entries, for the entity at `seq`
-    pub fn entry_keys(&self, entity_type: &str, index: &str, seq: u64) -> BTreeSet<Vec<u8>> {
-        self.entries.iter().map(|parts| keys::index_entry(entity_type, index, parts, seq)).collect()
+    /// The keys the entity's place is filed under as an entry: each tuple of parts' own
+    pub fn entry_keys(&self, entity_type: &str, index: &str) -> BTreeSet<Vec<u8>> {
+        self.entries.iter().map(|parts| keys::index_range(entity_type, index, parts)).collect()
     }
 
-    /// The keys the entity at `seq` is filed under besides its entries
-    pub fn other_keys(&self, entity_type: &str, index: &str, seq: u64) -> BTreeSet<Vec<u8>> {
-        self.others.iter().map(|other| other.key(entity_type, index, seq)).collect()
+    /// The keys the entity's place is filed under besides its entries
+    pub fn other_keys(&self, entity_type: &str, index: &str) -> BTreeSet<Vec<u8>> {
+        self.others.iter().map(|other| other.key(entity_type, index)).collect()
     }
 }
 
@@ -409,13 +421,12 @@ pub enum Other {
 }
 
 impl Other {
-    /// The key the entity at `seq` is filed under
-    pub fn key(&self, entity_type: &str, index: &str, seq: u64) -> Vec<u8> {
-        let under = match self {
+    /// The key an entity's place is filed under
+    pub fn key(&self, entity_type: &str, index: &str) -> Vec<u8> {
+        match self {
             Other::Without(leading) => keys::index_others(Prefix::IndexWithout, entity_type, index, leading),
             Other::Unordered(leading) => keys::index_others(Prefix::IndexUnordered, entity_type, index, leading),
-        };
-        keys::place_under(&under, seq)
+        }
     }
 }
 
@@ -458,7 +469,7 @@ pub fn file_without(t: &mut Txn<'_, '_>, id: &str, seq: u64, valued: impl Fn(&st
         if let [only] = index.fields.as_slice()
             && !valued(only)
         {
-            t.put(&Other::Without(Vec::new()).key(&entity_type, &index.name, seq), &values::encode(&id.into()))?;
+            places::file(t, Other::Without(Vec::new()).key(&entity_type, &index.name), seq)?;
         }
     }
     Ok(())
@@ -480,8 +491,11 @@ pub fn value_indexes(schema: &crate::schema::Schema, entity_type: &str) -> Vec<V
     out
 }
 
-/// Refuses an index entry whose key is longer than LMDB stores (`VALUE_INVALID`), naming the entity and the index
-pub fn key_fits(key: &[u8], id: &str, entity_type: &str, index: &str) -> Result<()> {
+/// Refuses values an index would file an entity under a key longer than LMDB stores (`VALUE_INVALID`), naming the
+/// entity and the index: `own` is the key the values have, and the longest key they make is a block's of their
+/// places, which is that and a place
+pub fn key_fits(own: &[u8], id: &str, entity_type: &str, index: &str) -> Result<()> {
+    let key = keys::place_under(&keys::index_blocks(own), 0);
     if key.len() <= values::MAX_KEY_BYTES {
         return Ok(());
     }
@@ -573,14 +587,13 @@ fn check_unique(
         let parts: Option<Vec<Part>> = key.iter().map(values::index_part).collect();
         match parts.filter(|_| built) {
             Some(parts) => {
-                t.visit(&keys::index_range(entity_type, &index.name, &parts), |_, held| {
-                    holder = values::decode(held).ok().and_then(|v| v.as_str().map(str::to_owned));
-                    // mutant-skip: replace == with != in check_unique
-                    // check_unique's index read skips the entity's own entry; a unique index holds one entity a value,
-                    // so stopping at the first entry or the one after it finds the same holder
-                    holder.as_deref() == Some(id)
-                })?;
-                holder = holder.filter(|h| h != id);
+                // The entities filed under the values, but for this one
+                for place in &places::under(t, &keys::index_range(entity_type, &index.name, &parts))? {
+                    holder = at_place(t, entity_type, place)?.map(|(held, _)| held).filter(|held| held != id);
+                    if holder.is_some() {
+                        break;
+                    }
+                }
                 if holder.is_some() {
                     break;
                 }
@@ -646,30 +659,20 @@ fn reindex(
         if was == now {
             continue;
         }
-        let filed = values::encode(&id.into());
-        // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square
-        let (had, has) =
-            (was.entry_keys(&entity_type, &index.name, seq), now.entry_keys(&entity_type, &index.name, seq));
-        for key in had.difference(&has) {
-            t.del(key)?;
+        // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square.
+        // An entity just made is filed nowhere besides its entries until its fields are written (`file_without`),
+        // and one being destroyed is taken out as the first of an index's fields goes: taking it out from where it
+        // isn't changes nothing
+        let (had, has) = (was.entry_keys(&entity_type, &index.name), now.entry_keys(&entity_type, &index.name));
+        let (had_others, has_others) =
+            (was.other_keys(&entity_type, &index.name), now.other_keys(&entity_type, &index.name));
+        for key in had.difference(&has).chain(had_others.difference(&has_others)) {
+            places::unfile(t, key.clone(), seq)?;
         }
-        for key in has.difference(&had) {
+        for key in has.difference(&had).chain(has_others.difference(&had_others)) {
+            // What makes a key too long is a value the index holds
             key_fits(key, id, &entity_type, &index.name)?;
-            t.put(key, &filed)?;
-        }
-        let had = was.other_keys(&entity_type, &index.name, seq);
-        let has = now.other_keys(&entity_type, &index.name, seq);
-        for key in had.difference(&has) {
-            // An entity just made is filed nowhere until its fields are written (`file_without`), and one being
-            // destroyed is taken out as the first of an index's fields goes, so there may be nothing to remove
-            if t.contains(key)? {
-                t.del(key)?;
-            }
-        }
-        for key in has.difference(&had) {
-            // A key as an entry's is, and refused as one: what makes it too long is a value the index holds
-            key_fits(key, id, &entity_type, &index.name)?;
-            t.put(key, &filed)?;
+            places::file(t, key.clone(), seq)?;
         }
     }
     Ok(())

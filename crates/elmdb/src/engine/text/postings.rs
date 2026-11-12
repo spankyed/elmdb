@@ -29,7 +29,7 @@ use super::super::unit::{Read, Txn};
 pub const BLOCK_PLACES: usize = 256;
 
 fn corrupt() -> Error {
-    Error::new(ErrorCode::Corrupted, "A text index's places don't read: rebuild() derives them again")
+    Error::new(ErrorCode::Corrupted, "An index's places don't read: rebuild() derives them again")
 }
 
 fn put_varint(out: &mut Vec<u8>, n: u64) {
@@ -91,6 +91,10 @@ fn counts_len(bytes: &[u8], fields: usize) -> Result<usize> {
 /// Each field holding the term and its count there, in field order, from the counts `bytes` starts with, and `bytes`
 /// moved past them
 fn each_count(bytes: &mut &[u8], fields: usize, mut each: impl FnMut(u32, u64)) -> Result<()> {
+    // A list of places alone, which has no fields: an entry is its place and nothing more
+    if fields == 0 {
+        return Ok(());
+    }
     if fields <= 1 {
         each(0, varint(bytes)?);
         return Ok(());
@@ -211,6 +215,20 @@ fn own_entries(stored: &[u8]) -> Result<Option<(Held, &[u8])>> {
     })
 }
 
+/// Hands `each` the places a list's own key holds as `stored`, in order, until it answers false: whether it went
+/// through them all. None for a list in blocks, which holds none of its own, and which `Sought` reads: as it reads
+/// one whose own key holds them, to the same places, so answering none for every list changes no answer
+pub fn each_own(stored: &[u8], each: &mut dyn FnMut(u64) -> Result<bool>) -> Result<Option<bool>> {
+    // mutant-skip: replace each_own -> Result<Option<bool>> with Ok\(None\)
+    let Some((held, bytes)) = own_entries(stored)? else { return Ok(None) };
+    for entry in each_entry(bytes, held, 0) {
+        if !each(entry?.0)? {
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(true))
+}
+
 /// How many places the range of a block at `start` covers, two to the `level`: one a place can be in, that starts at
 /// a multiple of its size
 fn range(start: u64, level: u32) -> Result<u64> {
@@ -291,6 +309,12 @@ impl Term {
             fields,
             capacity: BLOCK_PLACES,
         }
+    }
+
+    /// A list of places with no counts, laid out as a term's are: its own key, and the key its blocks are under.
+    /// What a value index holds for one value (`engine/places.rs`)
+    pub fn places(own: Vec<u8>, blocks: Vec<u8>) -> Self {
+        Term { own, blocks, fields: 0, capacity: BLOCK_PLACES }
     }
 
     fn block(&self, start: u64) -> Vec<u8> {
@@ -504,6 +528,21 @@ impl Filing {
 
 /// How many entities hold a term, from what its own key holds
 pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
+    held_as(r, term, stored, None)
+}
+
+/// `held`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
+/// Blocks are counted whole, so the answer may pass `upto` by what the last one read holds. With it, whether
+/// that is every entity holding the term: true for a term whose own key holds them, and for one in blocks false
+/// when the count came to `upto`, where it stopped
+pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8], upto: u64) -> Result<(u64, bool)> {
+    let mut rest = stored;
+    let own = varint(&mut rest)? > 0;
+    let held = held_as(r, term, stored, Some(upto))?;
+    Ok((held, own || held < upto))
+}
+
+fn held_as(r: &impl Read, term: &Term, stored: &[u8], probe: Option<u64>) -> Result<u64> {
     let mut rest = stored;
     let count = varint(&mut rest)?;
     if count > 0 {
@@ -511,7 +550,7 @@ pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
     }
     let mut total = 0u64;
     let mut failed = None;
-    r.visit(&term.blocks, |_, block| {
+    let each = |_: &[u8], block: &[u8]| {
         let mut rest = block.get(1..).unwrap_or_default();
         match varint(&mut rest) {
             Ok(count) => match total.checked_add(count) {
@@ -520,12 +559,176 @@ pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
             },
             Err(error) => failed = Some(error),
         }
-        failed.is_none()
-    })?;
+        failed.is_none() && probe.is_none_or(|upto| total < upto)
+    };
+    let (low, high) = crate::format::key::prefix_range(&term.blocks);
+    if probe.is_some() {
+        r.probe_visit_within(&low, &high, each)?;
+    } else {
+        r.visit_within(&low, &high, each)?;
+    }
     match failed {
         Some(error) => Err(error),
         None => Ok(total),
     }
+}
+
+/// A term's places read where they are asked for, a key at a time: its own key's, or one block's. A read that wants
+/// the first few of a term many entities hold reads the block they are in and no other, where `read` takes in every
+/// block the term has
+pub struct Sought {
+    term: Term,
+    /// Whether the term's own key was read, and what it said: no entity, its entries, or that they are in blocks
+    own: Option<Own>,
+    /// The places of the key last read, in order, and the places it answers for, from the first to the last: none
+    /// but these are among them
+    run: Vec<u64>,
+    covers: Option<(u64, u64)>,
+    /// The key the term's blocks begin after
+    low: Vec<u8>,
+}
+
+/// Reads into `run` the places of the block `stored` at `key`, and answers the first and the last place of its
+/// range. A block that doesn't hold `holding` is left unread, and answers none
+fn block_into(
+    key: &[u8],
+    stored: &[u8],
+    fields: usize,
+    holding: Option<u64>,
+    run: &mut Vec<u64>,
+) -> Result<Option<(u64, u64)>> {
+    let start = keys::place_of(key).ok_or_else(corrupt)?;
+    let (&level, mut rest) = stored.split_first().ok_or_else(corrupt)?;
+    let level = u32::from(level);
+    let size = range(start, level)?;
+    if holding.is_some_and(|place| !together(start, place, level)) {
+        return Ok(None);
+    }
+    let count = varint(&mut rest)?;
+    // A range starts at a multiple of its size, so its last place is no more than a u64 holds
+    let end = start + (size - 1);
+    run.clear();
+    for entry in each_entry(rest, Held { count, start, end }, fields) {
+        run.push(entry?.0);
+    }
+    Ok(Some((start, end)))
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Own {
+    Nothing,
+    Entries,
+    Blocks,
+}
+
+impl Sought {
+    pub fn new(term: Term) -> Self {
+        let (low, _) = crate::format::key::prefix_range(&term.blocks);
+        Sought { term, own: None, run: Vec::new(), covers: None, low }
+    }
+
+    /// A term whose own key holds `stored`, which a walk of the keys it is among has read already
+    pub fn stored(term: Term, stored: &[u8]) -> Result<Self> {
+        let mut sought = Sought::new(term);
+        sought.own = Some(sought.read_own(stored)?);
+        Ok(sought)
+    }
+
+    /// Takes in what the term's own key holds
+    fn read_own(&mut self, stored: &[u8]) -> Result<Own> {
+        Ok(match own_entries(stored)? {
+            Some((held, bytes)) => {
+                self.run = places_of(bytes, held, self.term.fields)?;
+                self.covers = Some((0, u64::MAX));
+                Own::Entries
+            }
+            None => Own::Blocks,
+        })
+    }
+
+    /// The first place the term's entities are at that is `place` or after it. The store is read only for a place
+    /// the key last read doesn't answer for: `read` says whether it was
+    pub fn seek(&mut self, r: &impl Read, mut place: u64, read: &mut bool) -> Result<Option<u64>> {
+        if self.own.is_none() {
+            *read = true;
+            self.own = Some(match r.get(&self.term.own)? {
+                None => Own::Nothing,
+                Some(stored) => self.read_own(&stored)?,
+            });
+        }
+        if self.own == Some(Own::Nothing) {
+            return Ok(None);
+        }
+        // A block is read at most twice over: the one the place is in, and when that holds none so late, the next
+        let asked = place;
+        for _ in 0..3 {
+            if let Some((first, last)) = self.covers
+                && (first..=last).contains(&place)
+            {
+                let at = self.run.partition_point(|held| *held < place);
+                if let Some(found) = self.run.get(at) {
+                    return Ok(Some(*found));
+                }
+                // No place of this key's is so late, and the places after its last are another's
+                match last.checked_add(1) {
+                    Some(after) => place = after,
+                    None => return Ok(None),
+                }
+            }
+            *read = true;
+            let found = self.read(r, place)?;
+            // What was read answers for the place asked for too: none lies between it and the place read from
+            if let Some((first, last)) = self.covers {
+                self.covers = Some((first.min(asked), last));
+            }
+            if !found {
+                return Ok(None);
+            }
+        }
+        Err(corrupt())
+    }
+
+    /// Reads the block that answers for `place`: the one it is in, or with none the first after it, which answers
+    /// for every place from `place` to its last. False when the term has no block so late
+    fn read(&mut self, r: &impl Read, place: u64) -> Result<bool> {
+        // Until a block is read whole, the places held answer for nothing
+        self.covers = None;
+        let mut past = self.term.block(place);
+        let from = past.len();
+        past.push(0);
+        let fields = self.term.fields;
+        let run = &mut self.run;
+        let mut found = None;
+        r.visit_back_within(&self.low, &past, |key, stored| {
+            found = Some(block_into(key, stored, fields, Some(place), run));
+            false
+        })?;
+        if let Some(covers) = found.transpose()?.flatten() {
+            self.covers = Some(covers);
+            return Ok(true);
+        }
+        let mut found = None;
+        r.visit_from(&self.term.blocks, &past[..from], |key, stored| {
+            found = Some(block_into(key, stored, fields, None, run));
+            false
+        })?;
+        match found.transpose()?.flatten() {
+            Some((_, last)) => {
+                self.covers = Some((place, last));
+                Ok(true)
+            }
+            None => {
+                self.run.clear();
+                self.covers = Some((place, u64::MAX));
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// The places of the entries `bytes` holds, as `held` says they are
+fn places_of(bytes: &[u8], held: Held, fields: usize) -> Result<Vec<u64>> {
+    each_entry(bytes, held, fields).map(|entry| entry.map(|(place, _)| place)).collect()
 }
 
 /// A term's entities as a search reads them: their places as a set, and each's counts

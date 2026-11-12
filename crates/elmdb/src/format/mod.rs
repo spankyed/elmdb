@@ -49,17 +49,25 @@ pub enum Prefix {
     RelationCount,
     /// `d/f type field` → that a type's entities have held the field
     FieldName,
-    /// `d/x type index …` → a value index's entries
+    /// `d/x type index values` → the places of the type's entities that a value index files under these values,
+    /// in the layout a text index's term has (`engine/text/postings.rs`): the places themselves, or that they are
+    /// in blocks
     Index,
+    /// `d/xp type index values start` → a block of those places
+    IndexPlaces,
     /// `d/xb type index` → that a value index is built
     IndexBuilt,
-    /// `d/xw type index values seq` → an entity of the type without a value in a value index's last field, which is
-    /// missing or null, under what its fields before that one hold
+    /// `d/xw type index values` → the places of the type's entities without a value in a value index's last field,
+    /// which is missing or null, under what its fields before that one hold: laid out as `d/x` is
     IndexWithout,
-    /// `d/xu type index values seq` → an entity of the type a value index holds no one place for, under what its
-    /// fields before the last hold: its last field holds a list or a value the index can't file, or the index is
-    /// unique and a field before the last holds a list
+    /// `d/xwp type index values start` → a block of those places
+    IndexWithoutPlaces,
+    /// `d/xu type index values` → the places of the type's entities a value index holds no one place for, under
+    /// what its fields before the last hold: its last field holds a list or a value the index can't file, or the
+    /// index is unique and a field before the last holds a list. Laid out as `d/x` is
     IndexUnordered,
+    /// `d/xup type index values start` → a block of those places
+    IndexUnorderedPlaces,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
@@ -114,7 +122,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 38] = [
+    pub const ALL: [Prefix; 41] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -126,9 +134,12 @@ impl Prefix {
         Prefix::RelationCount,
         Prefix::FieldName,
         Prefix::Index,
+        Prefix::IndexPlaces,
         Prefix::IndexBuilt,
         Prefix::IndexWithout,
+        Prefix::IndexWithoutPlaces,
         Prefix::IndexUnordered,
+        Prefix::IndexUnorderedPlaces,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
@@ -169,9 +180,12 @@ impl Prefix {
             Prefix::RelationCount => "d/rc",
             Prefix::FieldName => "d/f",
             Prefix::Index => "d/x",
+            Prefix::IndexPlaces => "d/xp",
             Prefix::IndexBuilt => "d/xb",
             Prefix::IndexWithout => "d/xw",
+            Prefix::IndexWithoutPlaces => "d/xwp",
             Prefix::IndexUnordered => "d/xu",
+            Prefix::IndexUnorderedPlaces => "d/xup",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",

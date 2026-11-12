@@ -854,10 +854,28 @@ impl Store {
 
     /// Whether more than half the map is used, which a unit about to open grows it for
     fn map_half_used(&self) -> bool {
+        self.map_short_of(2)
+    }
+
+    /// Whether `times` what the map has in use is more than the map
+    fn map_short_of(&self, times: usize) -> bool {
         let _gate = self.gate();
         let info = self.env.info();
         let page = self.env.unnamed_database_stat().page_size as usize;
-        (info.last_page_number + 1) * page * 2 > info.map_size
+        ((info.last_page_number + 1) * page).saturating_mul(times) > info.map_size
+    }
+
+    /// Grows the map until it is `times` what is in use: what a write that makes again most of what the database
+    /// holds asks before it begins. The pages such a write frees are no room for it until it commits, so in a map
+    /// with less it would run until the map is full, and then again in a larger one. Nothing grows while a unit
+    /// is open
+    pub fn make_room(&self, times: usize) -> Result<()> {
+        // A growth waits for an open unit to end, which one of this thread's never would: the write this is for
+        // is refused while one is open
+        while !self.unit_is_open() && self.map_short_of(times) {
+            self.grow()?;
+        }
+        Ok(())
     }
 
     /// The open unit ended, committed or not: whoever waits for the write transaction hears of it

@@ -107,8 +107,9 @@ fn the_engine_never_installs_a_collector_and_one_installed_hears_every_operation
     let ids: std::collections::HashSet<String> = heard.iter().map(|h| h.field("id")).collect();
     assert_eq!(ids.len(), heard.len(), "every span its own id");
     assert!(sorts.iter().all(|s| s.field(names::OUTCOME) == "sorted"));
-    // One index's entries: eight tags for each of the 200 entities
-    assert_eq!(sorts[0].field(names::ROWS), "1600");
+    // One index's places: eight tags for each of the 200 entities, and each once among those the index doesn't
+    // order, a list being what its field holds
+    assert_eq!(sorts[0].field(names::ROWS), "1800");
     assert!(sorts.iter().all(|s| s.has(names::RUNS) && s.has(names::SPILLED_BYTES)));
 
     for h in &heard {

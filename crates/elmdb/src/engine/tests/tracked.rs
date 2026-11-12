@@ -117,7 +117,7 @@ fn a_walk_between_two_keys_reads_and_records_nothing_outside_them() {
     assert_eq!(seen, [4.0, 3.0]);
     assert_eq!(ranges.len(), 1);
     let (low, high) = (&ranges[0].0, ranges[0].1.as_ref().unwrap());
-    assert!(low > &at(3.0) && low < &at(3.5), "it starts at the entry of 3");
+    assert_eq!(low, &at(3.0), "it starts at the key of 3");
     assert_eq!(high, &at(5.0));
     // Nothing lies from a key up to itself, or up to one before it
     for back in [false, true] {

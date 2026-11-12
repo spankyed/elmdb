@@ -100,7 +100,24 @@ pub(super) fn op(json: Json) -> Op {
     serde_json::from_value(json).unwrap()
 }
 
-/// The batch of these ops, at a fixed time
+/// What a value index files under `under` and under every key that starts with it: each key with the id of each
+/// entity filed there, the keys in order and a key's entities by place
+pub(super) fn filed_under(
+    s: &impl crate::engine::unit::Read,
+    entity_type: &str,
+    under: &[u8],
+) -> Vec<(Vec<u8>, String)> {
+    let (_, to) = crate::format::key::prefix_range(under);
+    let mut out = Vec::new();
+    super::places::visit(s, under, &to, false, &mut |own, place| {
+        let (id, _) = super::entities::at_place(s, entity_type, place)?.expect("an entity at a place an index files");
+        out.push((own.to_vec(), id));
+        Ok(true)
+    })
+    .unwrap();
+    out
+}
+
 pub(super) fn batch(ops: Vec<Json>) -> Batch {
     Batch { ops: ops.into_iter().map(op).collect(), now: Some(1000.0) }
 }

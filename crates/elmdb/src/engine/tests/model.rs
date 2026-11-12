@@ -893,7 +893,11 @@ fn all_edges(m: &Model) -> Vec<(String, String, String)> {
     edges
 }
 
-/// The ids under a derived key range, in key order
+/// The ids of the entities a value index files under a key
+fn filed(s: &impl Read, entity_type: &str, own: &[u8]) -> Vec<String> {
+    super::filed_under(s, entity_type, own).into_iter().map(|(_, id)| id).collect()
+}
+
 fn ids_under(s: &impl Read, prefix: &[u8]) -> Vec<String> {
     s.scan(prefix).unwrap().into_iter().map(|(_, v)| values::decode(&v).unwrap().as_str().unwrap().to_owned()).collect()
 }
@@ -909,15 +913,15 @@ fn derived_of(db: &Database) -> BTreeMap<String, Json> {
             for role in ROLES {
                 out.insert(
                     format!("{t} role {role}"),
-                    json!(ids_under(s, &keys::index_range(t, "role", &[Part::from(role)]))),
+                    json!(filed(s, t, &keys::index_range(t, "role", &[Part::from(role)]))),
                 );
             }
         }
         // Task's index on `a`: every entry, as (part, id)
         let mut entries = Vec::new();
-        for (k, v) in s.scan(&keys::index_range("Task", "a", &[])).unwrap() {
+        for (k, id) in super::filed_under(s, "Task", &keys::index_range("Task", "a", &[])) {
             let parts = decode_key(&k).unwrap();
-            entries.push(json!([format!("{:?}", parts[3]), values::decode(&v).unwrap().as_str().unwrap()]));
+            entries.push(json!([format!("{:?}", parts[3]), id]));
         }
         out.insert("Task index a".to_owned(), json!(entries));
         for kind in ALL_KINDS {

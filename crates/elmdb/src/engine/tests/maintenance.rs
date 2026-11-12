@@ -92,16 +92,18 @@ fn stats_count_entities_fields_relations_and_index_entries() {
         vec![
             json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": 1 } }),
             json!({ "op": "create", "type": "Task", "id": "Task-2", "fields": { "a": 2 } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-3", "fields": { "a": 1 } }),
             json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
             json!({ "op": "trash", "id": "Task-2" }),
         ],
     )
     .unwrap();
     let stats = db.stats().unwrap();
-    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 1));
-    assert_eq!(stats.types["Task"].fields["a"].entities, 2);
+    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (2, 1));
+    assert_eq!(stats.types["Task"].fields["a"].entities, 3);
     assert_eq!(stats.relations["refs"], 1);
-    assert_eq!(stats.indexes["Task.a"], 2);
+    // An index's entries are its entities under each value: two under one, and the one in the trash
+    assert_eq!(stats.indexes["Task.a"], 3);
     assert!(stats.file_bytes > 0 && stats.map_bytes >= stats.file_bytes);
 }
 
@@ -116,6 +118,7 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
         Load::Entity { id: "Ghost-1".into(), fields: fields(&[("anything", 1.into())]), trashed: false },
         Load::Entity { id: "Task-1".into(), fields: fields(&[("shortCode", "TSK-1".into())]), trashed: false },
         Load::Entity { id: "Task-2".into(), fields: fields(&[("shortCode", "TSK-1".into())]), trashed: true },
+        Load::Entity { id: "Task-3".into(), fields: fields(&[("shortCode", "TSK-10".into())]), trashed: false },
         Load::Relation {
             id: "Relation-x".into(),
             kind: "gone".into(),
@@ -128,8 +131,9 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
     ])
     .unwrap();
     assert_eq!(row(&db, "Ghost-1").unwrap()["anything"], 1);
+    // The sequence's next code is one a task holds already, which the code after it is taken in place of
     let next = write(&db, vec![json!({ "op": "create", "type": "Task" })]).unwrap();
-    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-10"), "{next:?}");
+    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-11"), "{next:?}");
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");
     let said: Vec<&str> = report.violations.iter().map(|v| v.message.as_str()).collect();

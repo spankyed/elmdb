@@ -140,6 +140,10 @@ impl<R: Read> Read for Recording<'_, R> {
         self.inner.probe_within(from, to, upto)
     }
 
+    fn probe_visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.inner.probe_visit_within(from, to, visit)
+    }
+
     fn schema(&self) -> &Schema {
         self.inner.schema()
     }

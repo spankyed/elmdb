@@ -46,9 +46,48 @@ where counting the two indexes cost twelve times. Every id of the two together s
 the smaller alone, a place sought in the other list for each of its twenty thousand: that is what the lists as
 bitmaps are for. No row here reads a range, the trash, three lists or lists whose places come in runs.
 
-What the planner still does not do: read those lists as bitmaps, a seek a place where a block would be an AND, or run
-a search inside a filter's set when the filter comes first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
-the test is a lookup in a set.
+Since then a value index holds a value's places together, in its own key while they are 256 or fewer and in blocks
+of no more than that past it, where it held a key for each entity (`../architecture/format.md`, `d/x`): the second
+phase below, with a block of places as their distances one from the next, the text index's layout, in place of a
+roaring bitmap. A list is asked a place at a time and a key is read only for a place the one last read doesn't
+answer for, so places close together cost one key between them, and a place carries no id: the entity at a place the
+lists share is read from its type's rows.
+
+What chose the layout, a disposable program on LMDB through `heed` with no engine: 1,000,000 entities filed in place
+order in units of 5,000, not synced, 16 KB pages; the pages in use once loaded, and one entity more filed in a commit
+of its own, the median of 300. An Apple M1 Pro, 2026-11-11, at a load of 15 to 37.
+
+| The index | A key an entity | Blocks of distances | Blocks, a bitmap where smaller |
+|---|---:|---:|---:|
+| A status of two values | 93.7 MB, 11 µs | 1.3 MB, 7 µs | 0.5 MB, 7 µs |
+| An owner of 1,000 values | 113.3 MB, 15 µs | 3.9 MB, 15 µs | 3.9 MB, 12 µs |
+| A number every entity holds its own | 67.5 MB, 19 µs | 67.5 MB, 19 µs | 67.5 MB, 21 µs |
+| All three | 296.2 MB, 37 µs | 73.3 MB, 41 µs | 72.2 MB, 36 µs |
+
+A bitmap saves under a megabyte of a million entities' indexes, so the blocks hold distances alone. A value every
+entity holds its own costs what it did: a key for each.
+
+The reading above taken again with the places in blocks, the same program and machine, 2026-11-11, at a load of 7:
+`main` at `d5e8e08` and `session/value-blocks`, one run after the other.
+
+| The read | A key an entity | Places in blocks |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 19.3 ms | 7.0 ms |
+| `where(prio).where(status)`, every id | 18.8 ms | 6.8 ms |
+| `where(status).where(prio)`, the first | 8.1 µs | 11.6 µs |
+| `where(status)`, every id | 35.1 ms | 28.0 ms |
+| `where(status)`, the first | 4.9 µs | 7.2 µs |
+| `where(prio)`, every id | 13.8 ms | 11.5 ms |
+| `where(status).where(owner)`, an owner of 100 none of them open | 0.064 ms | 0.184 ms |
+
+Every id of the two together costs less than every id of the smaller alone did, a place sought being found in the
+block already held. A first costs two keys more than it did, the value's own and the entity's row. The last row is
+what the blocks cost: a hundred places a thousand apart are each sought in a block of their own, which is read and
+its 256 places decoded for the one, 1.8 µs where a key sought was 0.6.
+
+What the planner still does not do: run a search inside a filter's set when the filter comes first, or read `lacks`
+from the list an index keeps of the entities without a value. A walked entity is tested by reading its record and the
+filters' fields.
 
 ## The measurements
 
@@ -119,7 +158,7 @@ set operation, its kind (`and`, `or`, `minus`).
    `rebuild()` (the model harness's derived reads include it); the plans spec shows `where(a).where(b)` visiting the
    smaller index's matches whichever order they're written in, its answer equal to the plain reading's; EXPLAIN shows
    the counts; the 100,000-task reading above is taken again and is within 10% of its smaller-first figure either way.
-2. **Value indexes as bitmaps.** Triggered by a plan over value indexes measured slow in apack, or an index whose
+2. **Value indexes as bitmaps.** Built as blocks of places, above. Triggered by a plan over value indexes measured slow in apack, or an index whose
    entries are a measurable share of the file. Done when: the layout is format 1 edited in place (G3 of goal-elmdb-next,
    while it holds); a lookup, a range, a unique check and `orderBy` from an index answer what they answer today
    (model harness, plans spec); G8's file size and apack's bench are recorded before and after.
