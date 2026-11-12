@@ -55,7 +55,7 @@ exclude_re = [
     "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
     # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
     # own entry under one key
-    "derive.rs:.*replace match guard \\*other != id with true in buildable_entry",
+    "derive.rs:.*replace match guard other != id with true in buildable_entry",
     # begin's growth when more than half the map is used: at exactly half, growing or not is a page's difference
     "store/mod.rs:.*replace > with >= in Store::map_half_used",
     # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
