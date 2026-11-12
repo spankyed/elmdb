@@ -2067,7 +2067,8 @@ impl<R: Read> Query<'_, R> {
     /// its field alone, and a `withRole` its role's in the role index: one value's places are held in order, so
     /// they are in creation order, an entity once. Equalities on every field of an index on several read its
     /// entries for those values as one list (`equal_index`), which stands for them all in place of their own: its
-    /// places are among each of theirs
+    /// places are among each of theirs. A `lacks` of a field with an index of its own reads the entities the index
+    /// files as without a value
     fn listed(&self, upto: usize, entity_type: &str) -> Result<Vec<Listed>> {
         let mut lists = Vec::new();
         let mut equals: Vec<(usize, &str, Part)> = Vec::new();
@@ -2081,6 +2082,16 @@ impl<R: Read> Query<'_, R> {
                     None => continue,
                 },
                 Step::WithRole { role } => (field::ROLE, Part::String(role.clone())),
+                Step::Lacks { field } => {
+                    // The entities an index on the field files as without a value are those it is missing in and
+                    // those it is null in, so the list narrows the read and the filter is still tested: it stands
+                    // for no step
+                    if let Some(index) = index_on(self.r, entity_type, field).filter(|_| accounted(field)) {
+                        let own = keys::index_others(Prefix::IndexWithout, entity_type, &index, &[]);
+                        lists.push(Listed::new(Places::filed(own), Some(index), Vec::new()));
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             let Some(index) = index_on(self.r, entity_type, name) else { continue };
@@ -2088,7 +2099,9 @@ impl<R: Read> Query<'_, R> {
             lists.push(Listed::new(Places::filed(under), Some(index), vec![at]));
         }
         if let Some(together) = self.equal_index(entity_type, &equals)? {
-            lists.retain(|list| !list.covers.iter().all(|step| together.covers.contains(step)));
+            lists.retain(|list| {
+                list.covers.is_empty() || !list.covers.iter().all(|step| together.covers.contains(step))
+            });
             lists.push(together);
         }
         Ok(lists)
@@ -4025,6 +4038,12 @@ fn of_types(id: &str, types: Option<&[String]>) -> bool {
     types.is_none_or(|ts| {
         ts.is_empty() || ts.iter().any(|t| id.strip_prefix(t.as_str()).is_some_and(|rest| rest.starts_with('-')))
     })
+}
+
+/// Whether an index on this field alone accounts for every entity of its type, filing those without a value: any but
+/// the short code's and the roles', which hold only what their lookups read (`entities::ValueIndex::accounts`)
+fn accounted(name: &str) -> bool {
+    name != field::ROLE && name != field::SHORT_CODE
 }
 
 /// The built value index of the type a lookup of `name` reads: the built-in one for roles and short codes, or a
