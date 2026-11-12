@@ -329,7 +329,9 @@ impl Database {
         answer(env, &self.inner.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
     }
 
-    /// Blocks until every index waiting to be built is built or has failed
+    /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
+    /// (`UNIT_OPEN`), and from the listener of the builder's commits, on the thread of the builder it would wait for
+    /// (`CALLBACK_ACTIVE`): wait after the listener returns
     #[napi]
     pub fn wait_for_index_builds(&self) -> Result<(), Code> {
         self.inner.wait_for_index_builds().map_err(to_js)
@@ -412,7 +414,9 @@ impl Database {
         AsyncTask::new(task)
     }
 
-    /// Syncs what is owed and releases the environment; closing a closed database does nothing
+    /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
+    /// unit is open (`UNIT_OPEN`), and from a listener of this database, a watch's or the builder's commits'
+    /// (`CALLBACK_ACTIVE`): close after the listener returns
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
         self.inner.close().map_err(to_js)
