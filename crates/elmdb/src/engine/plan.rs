@@ -603,7 +603,7 @@ pub enum Terminal {
         counts: bool,
     },
     /// The entity whose field is least in the order `orderBy` sorts it in, among the entities holding a value for it: the
-    /// first of equal values in the plan's order. Its `id` and `value`, both `null` when none holds one
+    /// first of equal values in the plan's order. Its `id` and `value`, both `null` when none holds one.
     Least {
         field: String,
     },

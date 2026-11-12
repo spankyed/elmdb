@@ -4299,6 +4299,21 @@ pub fn collator(collation: &str) -> Result<icu_collator::CollatorBorrowed<'stati
 }
 
 /// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
+/// What kind of value `v` is, in words a message can name it by
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "null",
+        Value::Boolean(_) => "boolean",
+        Value::Integer(_) | Value::F32(_) | Value::F64(_) => "number",
+        Value::String(_) => "string",
+        Value::Binary(_) => "binary",
+        Value::Array(_) => "list",
+        Value::Map(_) => "map",
+        Value::Ext(t, _) if *t == TIMESTAMP_EXTENSION => "timestamp",
+        Value::Ext(..) => "extension value",
+    }
+}
+
 fn json_text(v: &Value) -> String {
     match v {
         Value::Nil => "null".to_owned(),
@@ -4631,16 +4646,21 @@ fn query_with(
                 let Some(number) = values::as_number(&value) else {
                     return Err(Error::new(
                         ErrorCode::ValueInvalid,
-                        format!("sum({name}) needs a number, and {id} holds {} in it", json_text(&value)),
+                        format!(
+                            "sum({name}) needs numbers, and {id} holds a {}: change its field or sum another field",
+                            value_kind(&value)
+                        ),
                     ));
                 };
                 sum += number;
                 n += 1;
             }
+            // The running total is checked as it is added: one that passes what a number holds is refused, even where a
+            // later value would bring it back, so near the largest number the answer can depend on the order of the set
             if !sum.is_finite() {
                 return Err(Error::new(
                     ErrorCode::ValueInvalid,
-                    format!("sum({name}) is past what a number holds: the values added up to {sum}"),
+                    format!("sum({name}) passes what a number holds: sum fewer or smaller values of {name}"),
                 ));
             }
             w.map(3);

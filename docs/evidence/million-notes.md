@@ -320,6 +320,6 @@ Apple M1 Pro, 2026-11-12, the machine busy with other work.
 | 2 | 38 | 5.61 s | 11.9 ms | 6.26 s, no timer tick in it |
 | 3 | 69 | not read | 16.8 ms | not read |
 
-The timer's own worst gap on this machine with nothing else running was 4.9 ms and 5.6 ms (load 41 to 43), so the pool's
-longest holds are mostly the scheduler's. The 10 ms target is not cleanly met at these loads; a quiet-machine reading is
-needed to claim it. The calling-thread form held the loop for the whole rebuild each time.
+The timer's own worst gap on this machine, read while idle at a load of 41 to 43, was 4.9 ms and 5.6 ms. That noise
+explains the 5.8 ms run and about half of the 11.9 ms one; the 16.8 ms run at a load of 69 is not explained by it. The 10
+ms target is not cleanly met at these loads; a quiet-machine reading is needed to claim it. The calling-thread form held the loop for the whole rebuild each time.

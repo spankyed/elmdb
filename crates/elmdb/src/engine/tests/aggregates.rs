@@ -39,8 +39,8 @@ fn plan(scope: &str, steps: Json, terminal: Json) -> Json {
     json!({ "scope": scope, "start": { "from": "types", "types": ["Item"] }, "steps": steps, "terminal": terminal })
 }
 
-/// Nine items: the prices 5, 2, 9, 2, none for the fourth and the seventh, 7.5 and 0.5, and a null for the ninth, so the two
-/// 2s tie; `qty` 1 for all but one
+/// Nine items. Prices: 5, 2, 9, none (Item-3), 2, 7.5, none (Item-6), 0.5, none (Item-8), so Item-1 and Item-4 tie at 2.
+/// `qty` is 1 for all but Item-3 (2) and Item-5 (3); Item-8 holds a `rank` that is null, not a price
 fn stocked(db: &Database) {
     let item =
         |i: usize, fields: Json| json!({ "op": "create", "type": "Item", "id": format!("Item-{i}"), "fields": fields });
@@ -72,7 +72,7 @@ fn least_and_greatest_answer_the_first_entity_at_the_extreme_value_in_the_plans_
     assert_eq!(least, json!({ "kind": "least", "id": "Item-7", "value": 0.5 }));
     let greatest = read(&db, plan("live", json!([]), json!({ "answer": "greatest", "field": "price" }))).unwrap();
     assert_eq!(greatest, json!({ "kind": "greatest", "id": "Item-2", "value": 9.0 }));
-    // Ties: the first of two 2s in the plan's order, not the later one, from the least and from the greatest alike
+    // Ties: the first of two 2s in the plan's order (Item-1, not Item-4), from the least and from the greatest alike
     let tied = read(&db, plan("live", json!([{ "step": "where", "field": "qty", "value": 1 }, { "step": "range", "field": "price", "atLeast": 2.0, "below": 3.0 }]), json!({ "answer": "least", "field": "price" }))).unwrap();
     assert_eq!(tied, json!({ "kind": "least", "id": "Item-1", "value": 2.0 }));
     let tied_greatest = read(
@@ -92,7 +92,7 @@ fn an_entity_without_the_field_is_no_least_or_greatest_and_none_holding_one_answ
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     stocked(&db);
-    // Item-3 and Item-6 hold no price: the greatest of the two without one is none
+    // Item-3 is the one set by qty 2 to 3, and it holds no price: the greatest of a set with none holding one is none
     let none =
         json!([{ "step": "range", "field": "qty", "atLeast": 2, "below": 3 }, { "step": "lacks", "field": "price" }]);
     assert_eq!(
@@ -138,10 +138,10 @@ fn sum_adds_the_numbers_the_set_holds_and_counts_them() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     stocked(&db);
-    // Five prices hold 5 + 2 + 9 + 2 + 7.5 + 0.5 over the eight: 26 over six, and the two without one are left out
+    // Six prices hold 5 + 2 + 9 + 2 + 7.5 + 0.5 = 26; the three items without one (Item-3, Item-6, Item-8) are left out
     let all = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "price" }))).unwrap();
     assert_eq!(all, json!({ "kind": "sum", "sum": 26.0, "n": 6 }));
-    // An integer field sums the same way: the quantities of the set
+    // An integer field sums the same way: 1+1+1+2+1+3+1+1+1 = 12 over all nine items
     let qty = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "qty" }))).unwrap();
     assert_eq!(qty, json!({ "kind": "sum", "sum": 12.0, "n": 9 }));
     // Of a filter's set only
@@ -154,7 +154,11 @@ fn sum_adds_the_numbers_the_set_holds_and_counts_them() {
         ),
     )
     .unwrap();
-    assert_eq!(some, json!({ "kind": "sum", "sum": 18.5, "n": 5 }), "the null of the ninth is left out");
+    assert_eq!(
+        some,
+        json!({ "kind": "sum", "sum": 18.5, "n": 5 }),
+        "Item-8's null rank is no price, and Item-6 holds none"
+    );
     // A set of none sums to zero over none
     let none = read(
         &db,
@@ -176,7 +180,9 @@ fn a_sum_over_a_value_that_is_no_number_refuses_the_plan_and_names_the_entity() 
     let error = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "name" }))).unwrap_err();
     assert_eq!(error.code, ErrorCode::ValueInvalid, "{}", error.message);
     assert!(
-        error.message.contains("sum(name)") && error.message.contains("Item-0") && error.message.contains("pear"),
+        error.message.contains("sum(name)")
+            && error.message.contains("Item-0")
+            && error.message.contains("holds a string"),
         "{}",
         error.message
     );
@@ -228,4 +234,33 @@ fn a_null_is_no_value_for_least_or_greatest_and_is_left_out_of_both() {
         read(&db, plan("live", nulls, json!({ "answer": "greatest", "field": "rank" }))).unwrap()["id"],
         json!(null)
     );
+}
+
+#[test]
+fn a_sum_over_a_boolean_refuses_the_plan_and_names_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Item", "id": "Item-0", "fields": { "rank": true } })]).unwrap();
+    let error = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "rank" }))).unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{}", error.message);
+    assert!(error.message.contains("holds a boolean") && error.message.contains("Item-0"), "{}", error.message);
+}
+
+#[test]
+fn a_sum_past_what_a_number_holds_is_refused_as_it_passes_not_as_it_ends() {
+    // The running total passes the largest number, though a later value would bring it back: refused
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Item", "id": "Item-0", "fields": { "price": 1e308 } }),
+            json!({ "op": "create", "type": "Item", "id": "Item-1", "fields": { "price": 1e308 } }),
+            json!({ "op": "create", "type": "Item", "id": "Item-2", "fields": { "price": -1e308 } }),
+        ],
+    )
+    .unwrap();
+    let error = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "price" }))).unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{}", error.message);
+    assert!(error.message.contains("passes what a number holds"), "{}", error.message);
 }
