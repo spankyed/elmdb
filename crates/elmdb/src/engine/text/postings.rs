@@ -216,8 +216,10 @@ fn own_entries(stored: &[u8]) -> Result<Option<(Held, &[u8])>> {
 }
 
 /// Hands `each` the places a list's own key holds as `stored`, in order, until it answers false: whether it went
-/// through them all. None for a list in blocks, which holds none of its own
+/// through them all. None for a list in blocks, which holds none of its own, and which `Sought` reads: as it reads
+/// one whose own key holds them, to the same places, so answering none for every list changes no answer
 pub fn each_own(stored: &[u8], each: &mut dyn FnMut(u64) -> Result<bool>) -> Result<Option<bool>> {
+    // mutant-skip: replace each_own -> Result<Option<bool>> with Ok\(None\)
     let Some((held, bytes)) = own_entries(stored)? else { return Ok(None) };
     for entry in each_entry(bytes, held, 0) {
         if !each(entry?.0)? {

@@ -1108,7 +1108,12 @@ fn probed(db: &Database, steps: Json, terminal: &str) -> (Json, u64, u64) {
 /// How many ids a plan of tasks with these steps answers, and how many places its leading filters were handed:
 /// each place of a list, walked or sought, each of a range read, and each row walked
 fn walked(db: &Database, steps: Json, terminal: &str) -> (usize, u64) {
-    let mut plan = plan("live", steps);
+    walked_in(db, "live", steps, terminal)
+}
+
+/// `walked`, of a plan of this scope
+fn walked_in(db: &Database, scope: &str, steps: Json, terminal: &str) -> (usize, u64) {
+    let mut plan = plan(scope, steps);
     plan["terminal"]["answer"] = json!(terminal);
     let plan: Plan = serde_json::from_value(plan).unwrap();
     db.snapshot(|s| {
@@ -1282,6 +1287,11 @@ fn the_filters_a_type_start_begins_with_are_read_as_the_places_their_indexes_hol
             "{filters:?}"
         );
     }
+    // The trash's rows are the list that bounds it: four of the five in the trash are open, and the open tasks'
+    // five hundred places are asked only where a row is. Each list is asked for its first place; the open tasks',
+    // whose first is the later, is walked one place and the rows asked for it; and the rows, further apart, are
+    // walked from there, the four of them each asked of the open tasks'
+    assert_eq!(walked_in(&db, "trashed", json!([open]), "ids"), (4, 2 + 2 + 4 + 4));
 }
 
 #[test]

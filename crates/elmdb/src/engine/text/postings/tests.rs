@@ -525,3 +525,29 @@ fn a_frequency_is_each_fields_count_at_its_weight() {
     }
     assert_eq!(weighted(&[0b1, 0x80], &[1.0, 1.0]).unwrap_err().code, ErrorCode::Corrupted);
 }
+
+#[test]
+fn a_count_asked_no_further_than_some_stops_at_the_block_that_reaches_it_and_says_whether_it_is_whole() {
+    // Ten places in blocks of four, four and two
+    let filed = Filed::new(0, 4);
+    filed.write(false, |t| (0..10).try_for_each(|place| put(t, &filed.term(), place, &[]))).unwrap();
+    let counted = |upto: u64| {
+        filed
+            .snapshot(|s| {
+                let own = crate::engine::unit::Read::get(s, &filed.term().own)?.unwrap();
+                held_probed(s, &filed.term(), &own, upto)
+            })
+            .unwrap()
+    };
+    // Reached by a block exactly, the count stops there, with more it hasn't counted
+    assert_eq!(counted(4), (4, false));
+    assert_eq!(counted(5), (8, false));
+    // Asked for as many as there are, it can't say it has them all; asked for one more, it can
+    assert_eq!(counted(10), (10, false));
+    assert_eq!(counted(11), (10, true));
+    // A term whose own key holds its places is counted whole whatever was asked
+    let few = Filed::new(0, 4);
+    few.write(false, |t| (0..3).try_for_each(|place| put(t, &few.term(), place, &[]))).unwrap();
+    let own = few.snapshot(|s| Ok(crate::engine::unit::Read::get(s, &few.term().own)?.unwrap())).unwrap();
+    assert_eq!(few.snapshot(|s| held_probed(s, &few.term(), &own, 2)).unwrap(), (3, true));
+}

@@ -78,6 +78,10 @@ fn check_reports_damaged_derived_keys_and_rebuild_repairs_them() {
     let report = db.check().unwrap();
     let kinds: Vec<&str> = report.differences.iter().map(|d| d.kind.as_str()).collect();
     assert!(kinds.contains(&"missing") && kinds.contains(&"differs") && kinds.contains(&"extra"), "{report:?}");
+    // A rebuild of the one index clears what it held: the entry nothing derives goes, and the rest stays wrong
+    db.rebuild(Some(("Task", "a"))).unwrap();
+    let kinds: Vec<String> = db.check().unwrap().differences.iter().map(|d| d.kind.clone()).collect();
+    assert!(kinds.iter().any(|k| k == "missing") && !kinds.iter().any(|k| k == "extra"), "{kinds:?}");
     db.rebuild(None).unwrap();
     let after = db.check().unwrap();
     assert!(after.is_clean(), "{after:?}");
