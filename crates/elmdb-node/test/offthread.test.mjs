@@ -89,9 +89,15 @@ test('a check, a backup and a rebuild answer what their blocking forms answer', 
   t.after(() => rmSync(copies, { recursive: true, force: true }));
   const target = join(copies, 'copy');
   await db.backup(target);
+  // Closed before the directory is removed: Windows won't remove a file that is open
   const copy = Database.open(target, { schema, syncs: false });
-  t.after(() => copy.close());
-  assert.equal(packr.unpack(copy.readSync(count))[0].n, 500);
+  let notes;
+  try {
+    notes = packr.unpack(copy.readSync(count))[0].n;
+  } finally {
+    copy.close();
+  }
+  assert.equal(notes, 500);
 });
 
 test('a failure is the promise rejecting with elmdb\'s code, and a refusal made before the work throws', async (t) => {
