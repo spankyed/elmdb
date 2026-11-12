@@ -196,8 +196,10 @@ fn held_apart(image: &[u8]) -> Read {
     });
     match (verdict, child.status.code()) {
         (Some(verdict), Some(0)) => verdict,
-        // Killed by a signal, after the child started: the file was read, and it crashed the reader
+        // Killed by a signal, or by Windows' exception (an NTSTATUS code, with its top bits set), after the child started:
+        // the file was read, and it crashed the reader
         (None, None) => Read::Crashed(format!("{}", child.status)),
+        (None, Some(code)) if code as u32 >= 0xC000_0000 => Read::Crashed(format!("{}", child.status)),
         // The child exited without a verdict, or without success: it did not run the reader
         _ => panic!("the child reading the file did not say what it holds: {} {said}", child.status),
     }
