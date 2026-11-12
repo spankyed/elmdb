@@ -130,6 +130,10 @@ fn place() -> impl Strategy<Value = u64> {
 /// 300 times in its last field, beside once in its first when the index has more than one. 256 and 300 are two bytes,
 /// the first the least such a byte is and one past that
 fn counts_for(fields: usize, often: u8) -> Vec<u8> {
+    // A list of places alone has no counts
+    if fields == 0 {
+        return Vec::new();
+    }
     let first = (0, vec![0]);
     let last = (fields as u32 - 1, (0..if often == 1 { 256 } else { 300 }).collect());
     match (often, fields) {
@@ -144,9 +148,10 @@ proptest! {
 
     #[test]
     fn a_terms_keys_hold_what_its_entities_alone_make_them_however_they_were_filed(
-        fields in prop_oneof![Just(1usize), Just(3), Just(9)],
+        fields in prop_oneof![Just(0usize), Just(1), Just(3), Just(9)],
         capacity in 1usize..5,
         ops in prop::collection::vec((place(), prop::option::weighted(0.7, 0u8..3)), 0..70),
+        asked in prop::collection::vec(place(), 0..40),
     ) {
         let filed = Filed::new(fields, capacity);
         let mut model: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
@@ -161,6 +166,28 @@ proptest! {
             };
             prop_assert_eq!(filed.stored(), filed_in_order(filed.term(), &model), "after {:?} at {}", op, place);
         }
+        // What a read that seeks reads of it: from any place, the first at it or after, whatever order they are
+        // asked in; and asked in order, each key read once
+        filed.snapshot(|r| {
+            let first_from = |place: u64| model.range(place..).next().map(|(held, _)| *held);
+            let mut sought = Sought::new(filed.term());
+            for place in &asked {
+                assert_eq!(sought.seek(r, *place, &mut false)?, first_from(*place), "from {place}");
+            }
+            let mut sought = Sought::new(filed.term());
+            let mut reads = 0;
+            let mut ascending: Vec<u64> = asked.iter().copied().chain(model.keys().map(|place| place + 1)).collect();
+            ascending.sort_unstable();
+            for place in ascending {
+                let mut read = false;
+                assert_eq!(sought.seek(r, place, &mut read)?, first_from(place), "on to {place}");
+                reads += u64::from(read);
+            }
+            // The term's own key, and each block twice at most: where a place is in it, and as the next after one
+            let keys = filed.stored().len() as u64;
+            assert!(reads <= 2 * keys + 1, "{reads} reads of {keys} keys");
+            Ok(())
+        }).unwrap();
         // What a search reads of it: the places as a set, each one's counts where it is, and none between them
         filed.snapshot(|r| {
             let Some(postings) = read(r, &filed.term())? else {
