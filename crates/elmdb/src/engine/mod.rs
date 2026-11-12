@@ -738,33 +738,67 @@ impl Database {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
         let held = self.schema_guard();
         let store = self.store()?;
+        // The unit's place is let go if no unit comes of it, refused or panicking, once the transaction and its
+        // holds, declared after it, have gone
+        let mut place = Place { store: &store, taken: false };
         let (txn, gate, writer) = store.begin()?;
+        // Declared so that an unwind drops the transaction first, then the gate, as the unit's own end does
+        let (writer, gate, txn) = (writer, gate, txn);
+        place.taken = true;
+        run_point!(UNIT_HELD);
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
             writer.release();
-            store.end_unit();
             return Err(error);
         }
         let schema = Arc::clone(&held);
         drop(held);
+        let builders = match self.builders() {
+            Ok(builders) => builders,
+            Err(error) => {
+                drop(txn);
+                drop(gate);
+                writer.release();
+                return Err(error);
+            }
+        };
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
         let logging = !self.tracks.lock().is_empty();
+        let (tracks, schemas) = (Arc::clone(&self.tracks), self.observing_schema());
+        // From here the unit holds the place, and ends it
+        place.taken = false;
+        drop(place);
         Ok(Unit {
             txn: Some(txn),
             state: UnitState::new(logging),
-            tracks: Arc::clone(&self.tracks),
-            schemas: self.observing_schema(),
+            tracks,
+            schemas,
             poisoned: None,
             gate: Some(gate),
             writer: Some(writer),
             schema,
             store,
-            builders: self.builders()?,
+            builders,
+            ended: false,
             _thread: PhantomData,
         })
+    }
+}
+
+/// A unit's place in the store while the unit is being made: ended when dropped while taken
+struct Place<'a> {
+    store: &'a Store,
+    taken: bool,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        if self.taken {
+            self.store.end_unit();
+        }
     }
 }
 
@@ -786,6 +820,8 @@ pub struct Unit {
     tracks: watch::SharedTracks,
     /// The builder the rank indexes' pushes its commit leaves go to
     builders: Option<crate::database::Builders>,
+    /// Whether the store has been told the unit ended: once, however it ends
+    ended: bool,
     _thread: PhantomData<*const ()>,
 }
 
@@ -948,11 +984,13 @@ impl Unit {
         };
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
+        run_point!(UNIT_COMMITTING);
         self.store.deposit(std::mem::take(&mut self.state.edges));
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.writer = None;
+        self.ended = true;
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
@@ -972,9 +1010,13 @@ impl Unit {
 
     /// Ends the unit, keeping nothing of it
     pub fn abort(&mut self) {
-        if self.txn.take().is_some() {
+        // The transaction first, and then its holds. A commit that panicked once it had taken the transaction has
+        // not told the store, which is told here as the unit is dropped
+        self.txn = None;
+        if !self.ended {
             self.gate = None;
             self.writer = None;
+            self.ended = true;
             self.store.end_unit();
         }
     }

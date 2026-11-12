@@ -688,4 +688,31 @@ codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compi
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 
+A panic in elmdb is a bug in elmdb, and in Node it is an error too: the binding runs every export's work where a
+panic is caught, and throws it as `PANICKED`, naming the export, where the panic was raised and what it said, or
+rejects the promise of a call whose work is on a thread of the pool. Left to unwind into Node, a panic would abort
+the process; caught, the process lives. What the panic left in memory is not known, so:
+
+- **The handle refuses calls after it**, with `PANICKED` and the first panic's message, but `close`, `path`,
+  `readOnly`, `isOpen` and a unit's `isOpen`. The unit the handle had open is ended by the call that panicked,
+  keeping none of its writes, whether the panic was in the unit or in the database: what a panic interrupted may be
+  half of a batch. A panic on a thread of the pool is the handle's too, and its unit is ended by the next call on
+  the handle or the unit.
+- **What was committed is kept.** A transaction a panic unwinds through is aborted, and a unit's place, the write
+  transaction and the gate are let go as it unwinds (`Store::begin`, `Database::begin`, `Unit::commit`): the handle closed and the
+  database opened again is a database as any other. A panic raised after a commit landed leaves the commit made,
+  so the error says the call may not have finished, not that it didn't.
+- **A close of such a handle closes it** where the panic was raised at an export's door or in a read or a write,
+  which hold none of the locks a close takes. A close that panics itself throws `PANICKED`: where it had taken
+  the store, the store is let go as the panic unwinds and the database is closed; where it had not, a close
+  asked again closes it, unless the panic was raised holding the store's own lock, where the database stays open
+  until its handle is collected or the process ends, a later open of its path refused (`ALREADY_OPEN`), and
+  `isOpen` may throw too.
+- **A panic on one of elmdb's own threads**, the index builder's, the sync's or the one that lets idle reads go, is not a call's and marks no
+  handle: a listener's is caught there (`CALLBACK_PANICKED`), and any other ends the thread, which the close
+  that joins it then reports as its own panic.
+
+What V8 collects, an unclosed database or an open unit, and the closes the binding makes as an environment or the
+process ends, are dropped where a panic is caught as well. In Rust a panic unwinds to the caller, as any does.
+
 Filesystem support and deployment-specific validation requirements are stated in [filesystems.md](filesystems.md).

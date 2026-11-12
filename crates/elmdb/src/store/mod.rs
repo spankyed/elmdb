@@ -93,6 +93,15 @@ pub const MAP_STEP: usize = 64 << 20;
 #[cfg(test)]
 const TEST_MAP_LIMIT: usize = 1 << 30;
 
+/// A unit's place, reserved while the unit is begun: let go when dropped, which a unit that began forgets it for
+struct Reserved<'a>(&'a Store);
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        self.0.end_unit();
+    }
+}
+
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
 
@@ -574,6 +583,7 @@ impl Store {
             *self.deposited.lock() = None;
             *self.touched.lock() = None;
             self.replacing.store(0, Ordering::Release);
+            run_point!(WRITE_HELD);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -822,7 +832,10 @@ impl Store {
     ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
         self.unit.reserve()?;
+        // Let go when the unit doesn't begin, whether it is refused or what begins it panics
+        let reserved = Reserved(self);
         let begun = (|| {
+            run_point!(UNIT_RESERVED);
             if self.map_half_used() {
                 self.grow()?;
             }
@@ -846,8 +859,8 @@ impl Store {
                 }
             }
         })();
-        if begun.is_err() {
-            self.end_unit();
+        if begun.is_ok() {
+            std::mem::forget(reserved);
         }
         begun
     }

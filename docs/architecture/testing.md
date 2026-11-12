@@ -293,6 +293,19 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
+A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
+factory, and the work two exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
+without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
+a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
+panic was raised in the unit or in the database; and the
+database opened again holds what was committed before and none of what the unit or the call wrote, takes a write,
+and passes `check()`. The variable is read once, as the addon first runs an export; a value naming no export asks
+for nothing; and nothing but that test sets it. That panic is raised at the export's door. One raised inside the
+engine, with the write transaction held, a unit's place reserved, a unit half begun, or a unit's commit under
+way, is the engine's
+own test (`engine/tests/lifecycle.rs`): after each the database takes a unit and a write, and closes.
+
 An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
 over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
 the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on
