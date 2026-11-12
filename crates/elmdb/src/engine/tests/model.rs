@@ -1587,7 +1587,6 @@ const RANKED: RankIndex<'static> =
 
 const TOLERANCE: f64 = 1e-9;
 
-/// The engine tests' schema with `RANKED` declared
 /// The schema with the spare field a renameField moves values into: unindexed, so the workload's indexes are the same as
 /// before. Every database the model compares declares it, the crash child's included
 fn with_spare(mut schema: Json) -> Json {
@@ -1595,6 +1594,7 @@ fn with_spare(mut schema: Json) -> Json {
     schema
 }
 
+/// The engine tests' schema with `RANKED` declared, the spare field included, opened over a fresh directory
 fn open(dir: &tempfile::TempDir) -> Database {
     let mut schema = schema_json();
     // Change order is what `changed_since` answers from: each type it is asked of is declared to keep it
