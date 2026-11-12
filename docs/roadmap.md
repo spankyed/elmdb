@@ -10,7 +10,7 @@ waiting on a trigger below, which add to them and reorder nothing.
 | # | Change | Done when | State |
 |---|---|---|---|
 | 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince` and the admin calls | fixed, `79f646f`; the model harness's part is open |
-| 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | open |
+| 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | built: `PANICKED` (`architecture/engine.md`, Errors; `architecture/testing.md`, The binding) |
 | 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | open |
 | 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | open |
 | 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers and the engine's times: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end (`evidence/million-notes.md`). A string's order is still sorted, the collation's order not being its index's |

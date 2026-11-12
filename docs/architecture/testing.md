@@ -293,6 +293,13 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
+A panic in each export is caught (`panics.test.mjs`): a child process started with `ELMDB_TEST_PANICS` set, which
+has each export panic the first time it is called, calls every member the binding's classes have, by a table the
+test fails without an entry of for each. Each throws `PANICKED` once and then does its work, a promise's call once
+on the calling thread and once on the pool's, and at the end a write lands, a read answers it, `check()` is clean
+and the child exits with 0. The variable is read once, as the addon first runs an export, and nothing but that test
+sets it.
+
 An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
 over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
 the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on

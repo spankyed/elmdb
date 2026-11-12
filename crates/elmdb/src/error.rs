@@ -114,6 +114,9 @@ pub enum ErrorCode {
     /// A call that waits for what a listener of the database is called from was made by that listener: a close,
     /// or on the index builder's thread a wait for its builds
     CallbackActive,
+    /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call did not
+    /// finish, and the process lives
+    Panicked,
 }
 
 impl ErrorCode {
@@ -170,6 +173,7 @@ impl ErrorCode {
             Self::CallbackPanicked => "CALLBACK_PANICKED",
             Self::WatchPanicked => "WATCH_PANICKED",
             Self::CallbackActive => "CALLBACK_ACTIVE",
+            Self::Panicked => "PANICKED",
         }
     }
 }
@@ -262,6 +266,7 @@ mod tests {
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
+            ErrorCode::Panicked,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

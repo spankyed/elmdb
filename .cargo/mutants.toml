@@ -18,6 +18,8 @@ exclude_globs = [
     # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
     # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
     "crates/elmdb-node/src/lib.rs",
+    # What stops a panic at the binding: reached only through an export, and held by `test/panics.test.mjs`
+    "crates/elmdb-node/src/panics.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]

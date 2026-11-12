@@ -688,4 +688,11 @@ codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compi
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 
+A panic in elmdb is a bug in elmdb, and in Node it is an error too: the binding runs every export's work where a
+panic is caught, and throws it as `PANICKED`, naming the export, where the panic was raised and what it said, or
+rejects the promise of a call whose work is on a thread of the pool. The call did not finish: a transaction it
+held is aborted as an early return aborts it, and the process lives. Left to unwind into Node, a panic would abort
+the process. The closes the binding makes as an environment or the process ends catch theirs and leave the database
+as a close that failed leaves it. In Rust a panic unwinds to the caller, as any does.
+
 Filesystem support and deployment-specific validation requirements are stated in [filesystems.md](filesystems.md).

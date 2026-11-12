@@ -36,13 +36,17 @@ fn close_all(open: Vec<Weak<elmdb::Database>>) {
 }
 
 extern "C" fn close_at_process_exit() {
-    // A lock poisoned by a panic elsewhere still holds the list
-    let open = std::mem::take(&mut *PROCESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-    // On Windows `exit` has ended every other thread before this runs, each database's sync and index threads among
-    // them, so the close waits on none of them
-    for db in open.iter().filter_map(Weak::upgrade) {
-        let _ = db.close_at_exit(CLOSE_WAIT);
-    }
+    // A panic that unwound out of here would cross into C's `exit`, which aborts: a close that panics is left, as
+    // one that fails is
+    let _ = crate::panics::caught("the close at the process's exit", || {
+        // A lock poisoned by a panic elsewhere still holds the list
+        let open = std::mem::take(&mut *PROCESS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        // On Windows `exit` has ended every other thread before this runs, each database's sync and index threads
+        // among them, so the close waits on none of them
+        for db in open.iter().filter_map(Weak::upgrade) {
+            let _ = db.close_at_exit(CLOSE_WAIT);
+        }
+    });
 }
 
 /// The environment's list of the databases it opened, made with its cleanup hook on its first open
@@ -54,8 +58,11 @@ fn opened(env: &Env) -> Result<Opened> {
     env.set_instance_data(Arc::clone(&opened), (), |_| {})?;
     let at_teardown = Arc::clone(&opened);
     env.add_env_cleanup_hook((), move |()| {
-        let open = std::mem::take(&mut *at_teardown.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-        close_all(open);
+        // As at the process's exit: a panic here would unwind into Node as it tears the environment down
+        let _ = crate::panics::caught("the close at an environment's end", || {
+            let open = std::mem::take(&mut *at_teardown.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            close_all(open);
+        });
     })?;
     Ok(opened)
 }
@@ -63,7 +70,7 @@ fn opened(env: &Env) -> Result<Opened> {
 /// Keeps `db` to be closed as its environment or the process ends, if it is still open then
 pub fn close_at_exit(env: &Env, db: &Arc<elmdb::Database>) -> Result<()> {
     AT_EXIT.call_once(|| {
-        // SAFETY: `close_at_process_exit` is a plain function that neither unwinds nor calls back into the runtime
+        // SAFETY: `close_at_process_exit` is a plain function that catches what would unwind and doesn't call back into the runtime
         // `exit` is tearing down; registering it has no other effect
         unsafe {
             atexit(close_at_process_exit);
