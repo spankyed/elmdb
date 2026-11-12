@@ -104,7 +104,8 @@ type UnitSlot = std::rc::Rc<std::cell::RefCell<Option<elmdb::Unit>>>;
 
 /// Ends the unit in a slot, keeping none of its writes, where a panic in ending it is caught
 fn end_unit(slot: &UnitSlot) {
-    // A slot borrowed here is one a panic unwound out of the borrow of, which nothing holds any more
+    // Nothing borrows the slot as this runs: an export's borrow ends with its work, panicking or not, and no
+    // export calls back into JavaScript. A slot found borrowed is left, as a drop mustn't panic
     let unit = slot.try_borrow_mut().ok().and_then(|mut unit| unit.take());
     if let Some(unit) = unit {
         let _ = panics::caught("ending a unit", move || drop(unit));
@@ -731,6 +732,12 @@ impl Unit {
         if self.health.panicked() {
             end_unit(&self.inner);
         }
-        self.health.unrefused("Unit.isOpen", || Ok(self.inner.borrow().as_ref().is_some_and(elmdb::Unit::is_open)))
+        let open =
+            self.health.unrefused("Unit.isOpen", || Ok(self.inner.borrow().as_ref().is_some_and(elmdb::Unit::is_open)));
+        // And when this is the call that panicked
+        if self.health.panicked() {
+            end_unit(&self.inner);
+        }
+        open
     }
 }

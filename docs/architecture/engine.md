@@ -704,10 +704,11 @@ the process; caught, the process lives. What the panic left in memory is not kno
   so the error says the call may not have finished, not that it didn't.
 - **A close of such a handle closes it** where the panic was raised at an export's door or in a read or a write,
   which hold none of the locks a close takes. A close that panics itself throws `PANICKED`: where it had taken
-  the store, the store is let go as the panic unwinds and the database is closed; where it had not, the database
-  stays open until its handle is collected or the process ends, a later open of its path refused
-  (`ALREADY_OPEN`), and `isOpen` may throw too.
-- **A panic on one of elmdb's own threads**, the index builder's or the sync's, is not a call's and marks no
+  the store, the store is let go as the panic unwinds and the database is closed; where it had not, a close
+  asked again closes it, unless the panic was raised holding the store's own lock, where the database stays open
+  until its handle is collected or the process ends, a later open of its path refused (`ALREADY_OPEN`), and
+  `isOpen` may throw too.
+- **A panic on one of elmdb's own threads**, the index builder's, the sync's or the one that lets idle reads go, is not a call's and marks no
   handle: a listener's is caught there (`CALLBACK_PANICKED`), and any other ends the thread, which the close
   that joins it then reports as its own panic.
 

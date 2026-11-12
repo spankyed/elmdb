@@ -742,6 +742,8 @@ impl Database {
         // holds, declared after it, have gone
         let mut place = Place { store: &store, taken: false };
         let (txn, gate, writer) = store.begin()?;
+        // Declared so that an unwind drops the transaction first, then the gate, as the unit's own end does
+        let (writer, gate, txn) = (writer, gate, txn);
         place.taken = true;
         run_point!(UNIT_HELD);
         if let Err(error) = held.validate(&txn, store.db()) {

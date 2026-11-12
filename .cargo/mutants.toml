@@ -75,6 +75,9 @@ exclude_re = [
     # process for each export to hold it, and no test of this process can ask twice
     "elmdb-node/src/panics.rs:.* in asked_for",
     "elmdb-node/src/panics.rs:.*replace asked_for with ",
+    # The closes made as an environment or the process ends, which only a Node process that ends reaches:
+    # `test/exit.test.mjs` holds them, by the semaphores a database left open would leave
+    "elmdb-node/src/exit.rs:.*replace (close_at_process_exit|close_at_exit|opened) ",
     # An export's answer made of a caught panic: a napi error, which a test binary can't link the dropping of
     # without Node (`napi_delete_reference`). `test/panics.test.mjs` holds each through every export
     "elmdb-node/src/panics.rs:.*replace (guarded|Health::guarded|Health::unrefused) -> ",

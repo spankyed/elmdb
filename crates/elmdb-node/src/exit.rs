@@ -70,8 +70,8 @@ fn opened(env: &Env) -> Result<Opened> {
 /// Keeps `db` to be closed as its environment or the process ends, if it is still open then
 pub fn close_at_exit(env: &Env, db: &Arc<elmdb::Database>) -> Result<()> {
     AT_EXIT.call_once(|| {
-        // SAFETY: `close_at_process_exit` is a plain function that catches what would unwind and doesn't call back into the runtime
-        // `exit` is tearing down; registering it has no other effect
+        // SAFETY: `close_at_process_exit` is a plain function that catches what would unwind, and doesn't call back
+        // into the runtime `exit` is tearing down; registering it has no other effect
         unsafe {
             atexit(close_at_process_exit);
         }
