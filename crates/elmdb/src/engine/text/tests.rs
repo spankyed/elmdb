@@ -1586,6 +1586,10 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
                 "fields": { "sender": { "type": "string", "optional": true } },
                 "indexes": { "bySender": by_sender }
             },
+            "Memo": {
+                "fields": { "text": { "type": "string", "optional": true }, "sender": { "type": "string", "optional": true } },
+                "indexes": { "text": { "kind": "text", "fields": { "text": {} } }, "bySender": by_sender }
+            },
             // Two text indexes, so a search of it that names none is refused
             "Twice": {
                 "fields": { "text": { "type": "string", "optional": true }, "sender": { "type": "string", "optional": true } },
@@ -1686,6 +1690,19 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
             );
         }
     }
+    // Two types searched, with matches that tie across them: in the types' order whichever way the set is made
+    write(
+        &db,
+        (0..2).map(|i| create("Memo", &format!("Memo-{i}"), json!({ "text": "lmdb tied", "sender": "a" }))).collect(),
+    );
+    for types in [json!(["Message", "Memo"]), json!(["Memo", "Message"])] {
+        for terminal in ["ids", "hits", "count"] {
+            let within = asked(types.clone(), json!([from, lmdb, limit(6)]), terminal);
+            assert_eq!(within, asked(types.clone(), json!([from, texted, lmdb, limit(6)]), terminal), "{types}");
+        }
+    }
+    let across = asked(json!(["Memo", "Message"]), json!([from, lmdb, limit(4)]), "ids");
+    assert_eq!(across["ids"], json!(["Memo-0", "Memo-1", id(40), id(41)]));
     let tied = asked(json!(["Message"]), json!([from, lmdb, limit(2)]), "ids");
     assert_eq!(tied["ids"], json!([id(40), id(41)]), "the shortest two, in the order they were made");
     assert_eq!(asked(json!(["Plain"]), json!([from, lmdb]), "ids")["ids"], json!([]));
