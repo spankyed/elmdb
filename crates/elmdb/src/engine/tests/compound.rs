@@ -1424,6 +1424,45 @@ fn what_reading_the_filters_reads_is_bounded_by_the_shortest_list_and_a_first_co
 }
 
 #[test]
+fn a_lacks_of_a_field_with_an_index_reads_the_entities_the_index_files_without_a_value() {
+    let (_dir, db) = open();
+    held(&db);
+    let ids = |range: std::ops::Range<usize>| range.map(id).collect::<Vec<_>>();
+    let lacking = json!({ "step": "lacks", "field": "owner" });
+    // The four hundred and fifty tasks with no owner are the ones read, of the six hundred
+    assert_eq!(visited(&db, plan("live", json!([lacking]))), (ids(0..450), 450));
+    // Among other lists it is one more: the open tasks with no owner, whichever is written first
+    let open = is("status", json!("open"));
+    for filters in orders(&[open, lacking.clone()]) {
+        assert_eq!(visited(&db, plan("live", json!(filters))), (ids(100..450), 350), "{filters:?}");
+    }
+    // With equalities an index on several fields reads together, it is kept beside that index's list: fifteen open
+    // tasks hold a number, ten of them with no owner. Each list is asked for its first place, and the index's are
+    // walked and asked of the other, which has ended at the eleventh
+    write(&db, (440..455).map(|at| set(at, "n", json!(5))).collect());
+    let both = json!([is("status", json!("open")), is("n", json!(5)), lacking]);
+    assert_eq!(visited(&db, plan("live", both.clone())), (ids(440..450), 10));
+    assert_eq!(walked(&db, both, "ids"), (10, 2 + 11 + 11));
+    // A task whose owner is taken away is among them, and one given an owner no longer
+    write(&db, vec![json!({ "op": "delete", "id": id(500), "field": "owner" }), set(0, "owner", json!(4))]);
+    let (found, visits) = visited(&db, plan("live", json!([lacking])));
+    assert_eq!((found.len(), visits), (450, 450));
+    assert!(found.contains(&id(500)) && !found.contains(&id(0)));
+    // A field holding null is filed with those holding none, and the filter says which it keeps: what it keeps of
+    // the tasks named one by one, which no list reads
+    write(&db, vec![set(5, "status", Json::Null), json!({ "op": "delete", "id": id(6), "field": "status" })]);
+    let unset = json!({ "step": "lacks", "field": "status" });
+    let named = json!({ "scope": "live", "start": { "from": "ids", "ids": (0..600).map(id).collect::<Vec<_>>() },
+        "steps": [unset], "terminal": { "answer": "ids" } });
+    let (kept, visits) = visited(&db, plan("live", json!([unset])));
+    assert_eq!((&kept, visits), (&visited(&db, named).0, 2), "the two the index files without a status");
+    assert!(kept.contains(&id(6)));
+    // The roles' index and the short code's file no entity without one: their `lacks` walks the type
+    let unranked = json!({ "step": "lacks", "field": "role" });
+    assert_eq!(visited(&db, plan("live", json!([unranked]))).1, 600);
+}
+
+#[test]
 fn a_count_of_places_is_taken_as_far_as_it_is_asked_and_no_further() {
     // Seven hundred tasks: the first hundred hold the number 0 and the rest the number 1, whose six hundred places
     // are in blocks; 256 of them, from the three hundredth on, have an owner, whose places its own key holds

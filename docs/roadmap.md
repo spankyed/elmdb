@@ -53,6 +53,7 @@ with its journal, since a vector index's journal outliving its commit is the sam
 | Call counts, bounded watches, EXPLAIN, field types, compressed values, trigram search | `evidence/next-phase-3.md` to `next-phase-9.md` |
 | Graph algorithms, and their weights | [graph-algorithms](archive/roadmap/graph-algorithms.md), [rank-weights](archive/roadmap/rank-weights.md) |
 | Rank indexes | [rank-index](archive/roadmap/rank-index.md), `evidence/rank-index.md` |
+| Filters read as the places their indexes hold in common, a value index's places in blocks, a search within a filter's set | [plan-algebra](archive/roadmap/plan-algebra.md), `evidence/million-notes.md` |
 
 Other built directions are in `archive/roadmap/`.
 
@@ -61,8 +62,6 @@ Other built directions are in `archive/roadmap/`.
 Each is a design in `roadmap/` with its measurements (`evidence/next-phase-10.md`), built when the reading it names calls
 for it:
 
-- **The smaller filter first, then value indexes as bitmaps** (`roadmap/plan-algebra.md`): when a plan over value
-  indexes is measured slow in apack.
 - **Incremental backup as the fields changed since a sequence** (`roadmap/change-log.md`): when apack's backup screen
   takes incremental backups.
 - **Maintained views** (`roadmap/incremental-views.md`): when a view's re-run is a measurable share of a user action.

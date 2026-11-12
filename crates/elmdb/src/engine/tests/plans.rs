@@ -185,7 +185,7 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         stages,
         vec![
             json!({ "stage": "types", "visited": 0, "kept": 0 }),
-            json!({ "stage": "where", "index": "status", "visited": 50, "kept": 50 }),
+            json!({ "stage": "where", "index": "status", "places": 50, "visited": 50, "kept": 50 }),
             json!({ "stage": "limit", "visited": 50, "kept": 50 }),
             json!({ "stage": "rows", "visited": 50, "kept": 50 }),
         ]
@@ -201,7 +201,7 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         stages,
         vec![
             json!({ "stage": "types", "visited": 0, "kept": 0 }),
-            json!({ "stage": "where", "index": "none: walks the type", "visited": all, "kept": ranked }),
+            json!({ "stage": "where", "index": "none: walks the type", "places": all, "visited": all, "kept": ranked }),
             json!({ "stage": "count", "visited": ranked, "kept": ranked }),
         ]
     );
@@ -216,7 +216,7 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         stages,
         vec![
             json!({ "stage": "types", "visited": 0, "kept": 0 }),
-            json!({ "stage": "lacks", "index": "none: walks the type", "visited": all, "kept": untitled }),
+            json!({ "stage": "lacks", "index": "none: walks the type", "places": all, "visited": all, "kept": untitled }),
             json!({ "stage": "where", "visited": untitled, "kept": both }),
             json!({ "stage": "count", "visited": both, "kept": both }),
         ]
@@ -237,7 +237,7 @@ fn explain_answers_each_stage_its_index_what_it_visited_and_kept() {
         vec![
             json!({ "stage": "types", "visited": 0, "kept": 0 }),
             json!({ "stage": "has", "visited": 0, "kept": 0 }),
-            json!({ "stage": "where", "index": "status", "visited": done, "kept": titled_done }),
+            json!({ "stage": "where", "index": "status", "places": done, "visited": done, "kept": titled_done }),
             json!({ "stage": "ids", "visited": titled_done, "kept": titled_done }),
         ]
     );
