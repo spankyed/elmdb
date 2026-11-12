@@ -305,3 +305,21 @@ the map grew, and it ran again. `main` did the same at other sizes, which a disp
 10.0 s where a check took 3.9 s. A rebuild of everything now grows the map to three times what is in use before it
 begins (`../architecture/engine.md`, Admin), and the same program read 3.7 s for those 220,000, at a load
 of 7.
+
+## Off the calling thread: a rebuild of 200,000 notes
+
+`write`, `check`, `rebuild` and `backup` run on a thread of the pool (`architecture/engine.md`, Writes), so a rebuild of a
+large database doesn't hold the event loop. The measurement: a disposable program through the binding, 200,000 notes of a
+string and a number, each indexed, filled with 5,000-op writes, then `rebuild()` on the pool and `rebuildSync()` on the
+calling thread, each on a database of its own. The longest stretch the event loop was held was read with a 1 ms timer.
+Apple M1 Pro, 2026-11-12, the machine busy with other work.
+
+| run | load | `rebuild()` on the pool | longest hold of the event loop | `rebuildSync()` on the calling thread |
+|---|---:|---:|---:|---|
+| 1 | 36 | 3.99 s | 5.8 ms | 4.47 s, no timer tick in it |
+| 2 | 38 | 5.61 s | 11.9 ms | 6.26 s, no timer tick in it |
+| 3 | 69 | not read | 16.8 ms | not read |
+
+The timer's own worst gap on this machine, read while idle at a load of 41 to 43, was 4.9 ms and 5.6 ms. That noise
+explains the 5.8 ms run and about half of the 11.9 ms one; the 16.8 ms run at a load of 69 is not explained by it. The 10
+ms target is not cleanly met at these loads; a quiet-machine reading is needed to claim it. The calling-thread form held the loop for the whole rebuild each time.

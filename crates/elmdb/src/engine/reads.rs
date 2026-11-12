@@ -3940,6 +3940,9 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::StrongComponents { .. } => "strongComponents",
         Terminal::Communities { .. } => "communities",
         Terminal::GroupBy { .. } => "groupBy",
+        Terminal::Least { .. } => "least",
+        Terminal::Greatest { .. } => "greatest",
+        Terminal::Sum { .. } => "sum",
         Terminal::Hits { .. } => "hits",
     }
 }
@@ -4296,6 +4299,21 @@ pub fn collator(collation: &str) -> Result<icu_collator::CollatorBorrowed<'stati
 }
 
 /// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
+/// What kind of value `v` is, in words a message can name it by
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "null",
+        Value::Boolean(_) => "boolean",
+        Value::Integer(_) | Value::F32(_) | Value::F64(_) => "number",
+        Value::String(_) => "string",
+        Value::Binary(_) => "binary",
+        Value::Array(_) => "list",
+        Value::Map(_) => "map",
+        Value::Ext(t, _) if *t == TIMESTAMP_EXTENSION => "timestamp",
+        Value::Ext(..) => "extension value",
+    }
+}
+
 fn json_text(v: &Value) -> String {
     match v {
         Value::Nil => "null".to_owned(),
@@ -4581,6 +4599,76 @@ fn query_with(
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, *weights)?;
             let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
             write_groups("communities", &ids, &groups, false, &mut w);
+        }
+        Terminal::Least { field: name } | Terminal::Greatest { field: name } => {
+            let greatest = matches!(plan.terminal, Terminal::Greatest { .. });
+            let ids = q.collect(last)?;
+            let collator = collator(&r.schema().collation)?;
+            // The first of equal values in the plan's order stays: a value replaces the best only when it is past it
+            let mut best: Option<(SortKey, String, Value)> = None;
+            for id in ids {
+                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                let key = sort_key(Some(&value));
+                let past = match &best {
+                    None => true,
+                    Some((held, _, _)) => {
+                        let order = compare(&collator, &key, held);
+                        if greatest { order == Ordering::Greater } else { order == Ordering::Less }
+                    }
+                };
+                if past {
+                    best = Some((key, id, value));
+                }
+            }
+            w.map(3);
+            w.kind(if greatest { "greatest" } else { "least" });
+            match &best {
+                Some((_, id, _)) => {
+                    w.str("id");
+                    w.str(id);
+                }
+                None => {
+                    w.str("id");
+                    w.nil();
+                }
+            }
+            w.str("value");
+            match &best {
+                Some((_, _, value)) => w.raw(&values::encode(value)),
+                None => w.nil(),
+            }
+        }
+        Terminal::Sum { field: name } => {
+            let ids = q.collect(last)?;
+            let (mut sum, mut n) = (0.0_f64, 0u64);
+            for id in ids {
+                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                let Some(number) = values::as_number(&value) else {
+                    return Err(Error::new(
+                        ErrorCode::ValueInvalid,
+                        format!(
+                            "sum({name}) needs numbers, and {id} holds a {}: change its field or sum another field",
+                            value_kind(&value)
+                        ),
+                    ));
+                };
+                sum += number;
+                n += 1;
+            }
+            // The running total is checked as it is added: one that passes what a number holds is refused, even where a
+            // later value would bring it back, so near the largest number the answer can depend on the order of the set
+            if !sum.is_finite() {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!("sum({name}) passes what a number holds: sum fewer or smaller values of {name}"),
+                ));
+            }
+            w.map(3);
+            w.kind("sum");
+            w.str("sum");
+            rmp::encode::write_f64(w.0, sum).expect("a Vec");
+            w.str("n");
+            w.uint(n);
         }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;

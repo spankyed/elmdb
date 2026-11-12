@@ -12,7 +12,7 @@ waiting on a trigger below, which add to them and reorder nothing.
 | 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince` and the admin calls | fixed, `79f646f`; the model harness's part is open |
 | 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | built: `PANICKED` (`architecture/engine.md`, Errors; `architecture/testing.md`, The binding) |
 | 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | built: `syncEachCommit` (`architecture/engine.md`, Durability; `architecture/testing.md`, Power loss); the README states the trade |
-| 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | open |
+| 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | open: built on the pool (#113, `evidence/million-notes.md`, off the calling thread), but the 10 ms gate is not cleanly met on a loaded machine, and a quiet-machine reading is needed |
 | 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers and the engine's times: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end (`evidence/million-notes.md`). A string's order is still sorted, the collation's order not being its index's |
 | 6 | Vector builds off the commit path | one embedding a commit costs within twice a batch's; a commit of one takes under 2 ms at 100,000 vectors | open |
 | 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | open |
@@ -33,7 +33,7 @@ Of milestone 0.2, compound indexes are read for an order or a range under equali
 walked while that is cheaper than sorting the filter's matches (`evidence/million-notes.md`, A filter before an
 order). The smaller filter first is built as the places the filters' indexes hold in common, a read bounded by the
 shortest of them whichever is written first, equalities on every field of a compound index among
-them as one list (`architecture/engine.md`, Reads: plans); least, greatest and sum are open.
+them as one list (`architecture/engine.md`, Reads: plans). Least, greatest and sum are the plan's terminals `least`, `greatest` and `sum` (`architecture/engine.md`, Reads: plans).
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the
