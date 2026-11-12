@@ -1565,10 +1565,31 @@ fn a_page_of_a_search_is_cut_past_its_own_cursor_when_a_step_below_it_sought_one
 #[test]
 fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_only_what_it_hands_on() {
     let dir = tempfile::tempdir().unwrap();
-    let mut indexes = message_text();
-    indexes["bySender"] = json!({ "kind": "value", "fields": ["sender"] });
-    indexes["byAt"] = json!({ "kind": "value", "fields": ["at"] });
-    let options = OpenOptions { schema: Some(schema_with(indexes)), syncs: false, ..Default::default() };
+    // Messages with a text index and an index on each of two fields; and a type with one on the sender and no text
+    let by_sender = json!({ "kind": "value", "fields": ["sender"] });
+    let schema = Schema::from_json(&json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": {
+            "Message": {
+                "fields": {
+                    "text": { "type": "string", "optional": true },
+                    "sender": { "type": "string", "optional": true },
+                    "at": { "type": "number", "optional": true }
+                },
+                "indexes": {
+                    "text": { "kind": "text", "fields": { "text": {} } },
+                    "bySender": by_sender,
+                    "byAt": { "kind": "value", "fields": ["at"] }
+                }
+            },
+            "Plain": {
+                "fields": { "sender": { "type": "string", "optional": true } },
+                "indexes": { "bySender": by_sender }
+            }
+        }
+    }))
+    .unwrap();
+    let options = OpenOptions { schema: Some(schema), syncs: false, ..Default::default() };
     let db = Database::open(dir.path(), options).unwrap();
     let id = |i: usize| format!("Message-{i:02}");
     // Forty messages holding the word, each longer than the one before and so ranked after it, every second one
@@ -1627,6 +1648,38 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
         "{explained}"
     );
     assert!(explained["stages"][1].get("index").is_none() && explained["stages"][2].get("index").is_none());
+    // Whatever the plan answers, and from whichever types, it answers what the search among the entities the
+    // filters keep answers. Two messages of one text tie, and are in the order they were made either way
+    write(&db, (40..42).map(|i| create("Message", &id(i), json!({ "text": "lmdb tied", "sender": "a" }))).collect());
+    write(&db, vec![create("Plain", "Plain-1", json!({ "sender": "a" }))]);
+    let asked = |types: Json, steps: Json, terminal: &str| {
+        let plan = json!({ "scope": "live", "start": { "from": "types", "types": types }, "steps": steps,
+            "terminal": { "answer": terminal } });
+        read(&db, json!({ "read": "query", "plan": plan })).unwrap()
+    };
+    let after = json!({ "step": "after", "id": id(4) });
+    for terminal in ["ids", "count", "exists", "first", "hits"] {
+        for tail in [json!([]), json!([limit(4)]), json!([after, limit(2)])] {
+            let steps = |filters: Json| {
+                let mut steps = filters.as_array().unwrap().clone();
+                steps.push(lmdb.clone());
+                steps.extend(tail.as_array().unwrap().iter().cloned());
+                json!(steps)
+            };
+            let within = asked(json!(["Message"]), steps(json!([from])), terminal);
+            assert_eq!(within, asked(json!(["Message"]), steps(json!([from, texted])), terminal), "{terminal} {tail}");
+            // A type with no text index holds no match, and one named twice is searched once
+            assert_eq!(within, asked(json!(["Message", "Plain"]), steps(json!([from])), terminal), "{terminal} {tail}");
+            assert_eq!(
+                within,
+                asked(json!(["Message", "Message"]), steps(json!([from])), terminal),
+                "{terminal} {tail}"
+            );
+        }
+    }
+    let tied = asked(json!(["Message"]), json!([from, lmdb, limit(2)]), "ids");
+    assert_eq!(tied["ids"], json!([id(40), id(41)]), "the shortest two, in the order they were made");
+    assert_eq!(asked(json!(["Plain"]), json!([from, lmdb]), "ids")["ids"], json!([]));
     // A filter no stage would take is refused as its stage refuses it
     let nobodys = json!({ "step": "withRole", "role": "nobody" });
     let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message"] },

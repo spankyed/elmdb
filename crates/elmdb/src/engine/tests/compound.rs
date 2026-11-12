@@ -1448,6 +1448,15 @@ fn a_lacks_of_a_field_with_an_index_reads_the_entities_the_index_files_without_a
     let (found, visits) = visited(&db, plan("live", json!([lacking])));
     assert_eq!((found.len(), visits), (450, 450));
     assert!(found.contains(&id(500)) && !found.contains(&id(0)));
+    // A field holding null is filed with those holding none, and the filter says which it keeps: what it keeps of
+    // the tasks named one by one, which no list reads
+    write(&db, vec![set(5, "status", Json::Null), json!({ "op": "delete", "id": id(6), "field": "status" })]);
+    let unset = json!({ "step": "lacks", "field": "status" });
+    let named = json!({ "scope": "live", "start": { "from": "ids", "ids": (0..600).map(id).collect::<Vec<_>>() },
+        "steps": [unset], "terminal": { "answer": "ids" } });
+    let (kept, visits) = visited(&db, plan("live", json!([unset])));
+    assert_eq!((&kept, visits), (&visited(&db, named).0, 2), "the two the index files without a status");
+    assert!(kept.contains(&id(6)));
     // The roles' index and the short code's file no entity without one: their `lacks` walks the type
     let unranked = json!({ "step": "lacks", "field": "role" });
     assert_eq!(visited(&db, plan("live", json!([unranked]))).1, 600);

@@ -1484,7 +1484,7 @@ impl<R: Read> Query<'_, R> {
                 Ok(found) => indexes.push((entity_type, found)),
                 // Among a set, a type with no text index holds no match; one with several, none named, is refused
                 Err(_)
-                    if among.is_some()
+                    if (among.is_some() || sets.is_some())
                         && index.is_none()
                         && text::text_indexes(self.r.schema(), entity_type).is_empty() => {}
                 Err(e) => return Err(e),
@@ -1654,9 +1654,22 @@ impl<R: Read> Query<'_, R> {
             return Ok(None);
         }
         self.filters_taken(before)?;
-        let mut sets = Vec::new();
+        // A type named twice is searched once, as a set holds its entities once
+        let mut once: Vec<&String> = Vec::new();
         for entity_type in types {
-            let Some(mut set) = self.filtered_places(before, entity_type)? else { return Ok(None) };
+            if !once.contains(&entity_type) {
+                once.push(entity_type);
+            }
+        }
+        // Nothing is read until every type is known to have a list for every filter
+        for entity_type in &once {
+            if !self.lists_cover(before, entity_type)? {
+                return Ok(None);
+            }
+        }
+        let mut sets = Vec::new();
+        for entity_type in once {
+            let mut set = self.filtered_places(before, entity_type)?;
             if self.plan.scope != Scope::WithTrashed {
                 let mut trashed = RoaringTreemap::new();
                 self.r.visit(&keys::type_range(true, entity_type), |key, _| {
@@ -1679,18 +1692,26 @@ impl<R: Read> Query<'_, R> {
         Ok(Some(sets))
     }
 
+    /// Whether a list of a type's places, or a range's index, reads every one of the plan's first `upto` steps:
+    /// asked before any of them is read
+    fn lists_cover(&self, upto: usize, entity_type: &str) -> Result<bool> {
+        let lists = self.listed(upto, entity_type)?;
+        let ranged = self.ranges_of(upto, entity_type)?;
+        let covers = |at: &usize| {
+            lists.iter().any(|list| list.covers.contains(at)) || ranged.iter().any(|range| range.covers.contains(at))
+        };
+        Ok((0..upto).all(|at| covers(&at)))
+    }
+
     /// The places of a type every one of the plan's first `upto` steps keeps, read from their lists and from the
-    /// ranges among them, each read whole: none when a step has no list, or no step has one
-    fn filtered_places(&self, upto: usize, entity_type: &str) -> Result<Option<RoaringTreemap>> {
+    /// ranges among them, each read whole: for a type whose lists cover every step (`lists_cover`)
+    fn filtered_places(&self, upto: usize, entity_type: &str) -> Result<RoaringTreemap> {
         let mut lists = self.listed(upto, entity_type)?;
         for ranged in self.ranges_of(upto, entity_type)? {
             let list = self.read_range(ranged)?;
             lists
                 .retain(|other| other.covers.is_empty() || !other.covers.iter().all(|step| list.covers.contains(step)));
             lists.push(list);
-        }
-        if !(0..upto).all(|at| lists.iter().any(|list| list.covers.contains(&at))) {
-            return Ok(None);
         }
         let kept = RefCell::new(RoaringTreemap::new());
         let asks = Asks { entity_type, tested: &[], pause_at: u64::MAX, kept: Some(&kept) };
@@ -1705,7 +1726,7 @@ impl<R: Read> Query<'_, R> {
         }
         self.common(&mut lists, &asks, &mut next, &mut read, &mut |_| Ok(true))?;
         self.handed(read);
-        Ok(Some(kept.into_inner()))
+        Ok(kept.into_inner())
     }
 
     /// The places of a type a search from it reads, as those to search among and whether its trash is left out: all
