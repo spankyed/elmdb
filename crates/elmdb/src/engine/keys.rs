@@ -132,9 +132,9 @@ pub fn index_strings(entity_type: &str, index: &str, parts: &[crate::format::key
     })
 }
 
-/// The entities of a type that a value index files besides its entries, in place order: those without a value in its
-/// last field (`Prefix::IndexWithout`), or those it doesn't order (`Prefix::IndexUnordered`), each under the parts
-/// its fields before the last hold. An entity's key is this and its place (`place_under`)
+/// The key a value index files entities under besides its entries: those without a value in its last field
+/// (`Prefix::IndexWithout`), or those it doesn't order (`Prefix::IndexUnordered`), each under the parts its fields
+/// before the last hold. The key holds their places, as a value's does (`engine/places.rs`)
 pub fn index_others(prefix: Prefix, entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Vec<u8> {
     with(prefix, |w| {
         w.string(entity_type).string(index);

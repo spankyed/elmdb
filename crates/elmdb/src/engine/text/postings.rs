@@ -29,7 +29,7 @@ use super::super::unit::{Read, Txn};
 pub const BLOCK_PLACES: usize = 256;
 
 fn corrupt() -> Error {
-    Error::new(ErrorCode::Corrupted, "A text index's places don't read: rebuild() derives them again")
+    Error::new(ErrorCode::Corrupted, "An index's places don't read: rebuild() derives them again")
 }
 
 fn put_varint(out: &mut Vec<u8>, n: u64) {
@@ -298,7 +298,7 @@ impl Term {
     }
 
     /// A list of places with no counts, laid out as a term's are: its own key, and the key its blocks are under.
-    /// What a value index holds for one value (`engine/entities.rs`)
+    /// What a value index holds for one value (`engine/places.rs`)
     pub fn places(own: Vec<u8>, blocks: Vec<u8>) -> Self {
         Term { own, blocks, fields: 0, capacity: BLOCK_PLACES }
     }
@@ -514,15 +514,16 @@ impl Filing {
 
 /// How many entities hold a term, from what its own key holds
 pub fn held(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
-    held_as(r, term, stored, false)
+    held_as(r, term, stored, None)
 }
 
-/// `held`, read as a probe: what a count that decides how a plan is read asks
-pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8]) -> Result<u64> {
-    held_as(r, term, stored, true)
+/// `held`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
+/// Blocks are counted whole, so the answer may pass `upto` by what the last one read holds
+pub fn held_probed(r: &impl Read, term: &Term, stored: &[u8], upto: u64) -> Result<u64> {
+    held_as(r, term, stored, Some(upto))
 }
 
-fn held_as(r: &impl Read, term: &Term, stored: &[u8], probe: bool) -> Result<u64> {
+fn held_as(r: &impl Read, term: &Term, stored: &[u8], probe: Option<u64>) -> Result<u64> {
     let mut rest = stored;
     let count = varint(&mut rest)?;
     if count > 0 {
@@ -539,10 +540,10 @@ fn held_as(r: &impl Read, term: &Term, stored: &[u8], probe: bool) -> Result<u64
             },
             Err(error) => failed = Some(error),
         }
-        failed.is_none()
+        failed.is_none() && probe.is_none_or(|upto| total < upto)
     };
     let (low, high) = crate::format::key::prefix_range(&term.blocks);
-    if probe {
+    if probe.is_some() {
         r.probe_visit_within(&low, &high, each)?;
     } else {
         r.visit_within(&low, &high, each)?;

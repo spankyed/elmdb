@@ -240,7 +240,7 @@ an answer:
     values in the numbers' order, so they are no list until all are read and sorted by place, which reads no
     entity. They are read once that costs no more than the read has read already, in places walked and sought,
     which is asked each time it has read twice what it had, from 16 places on, the range's places counted a
-    value's at a time and no further than that; and at the start, a range holding fewer than 16 is read,
+    key at a time, a value's own or a block of them, and so no further than that by more than a block; and at the start, a range holding fewer than 16 is read,
     the one holding the fewest of several. Until then the range is tested against each entity. So a read that
     stops at its first match reads no range holding more than it had read, and the whole costs a small multiple
     of the cheaper way. A read that takes every entity the filters keep, and has no list, reads a range whatever
@@ -337,8 +337,8 @@ an answer:
 
 A query asked for its `visits` answers how many entities its start and walks read from the store, one found
 through an index counted as it is read at its place, which is what says whether a filter walked rows an index could
-have answered. A place read from an index, and not then read as an entity, is no visit: a range's places before
-they are found in the other lists, a `count` of a range.
+have answered. A range's places, read to make a list of them, are no visits until an entity is read at one; a
+`count` of a range reads no entity and counts each place it counted as a visit.
 
 **EXPLAIN.** A query asked to `explain` answers `{ kind: "explained", answer, visited, ms, stages }`: the answer it would
 have given, the visits, the milliseconds the whole read took, and a stage per part of the plan — its start, each step and

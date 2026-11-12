@@ -293,6 +293,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     assert!(!trio.built && trio.failure.as_deref().is_some_and(|f| f.contains("Note.trio")), "{trio:?}");
     let trio = db.rebuild(Some(("Note", "trio"))).unwrap_err();
     assert_eq!(trio.code, ErrorCode::ValueInvalid, "{}", trio.message);
+    // Where it files the note besides its entries is refused as an entry is, by the note and the index
+    assert!(trio.message.contains("Note-1") && trio.message.contains("Note.trio"), "{}", trio.message);
     // A rebuild of everything, which a rename or a replace runs, goes on and leaves the three unbuilt
     db.rebuild(None).unwrap();
     let status = db.index_status().unwrap();

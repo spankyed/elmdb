@@ -893,7 +893,6 @@ fn all_edges(m: &Model) -> Vec<(String, String, String)> {
     edges
 }
 
-/// The ids under a derived key range, in key order
 /// The ids of the entities a value index files under a key
 fn filed(s: &impl Read, entity_type: &str, own: &[u8]) -> Vec<String> {
     super::filed_under(s, entity_type, own).into_iter().map(|(_, id)| id).collect()

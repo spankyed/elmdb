@@ -48,9 +48,10 @@ pub fn count(r: &impl Read, own: &[u8], stored: &[u8]) -> Result<u64> {
     postings::held(r, &term(own.to_vec()), stored)
 }
 
-/// `count`, read as a probe: what a count that decides how a plan is read asks
-pub fn count_probed(r: &impl Read, own: &[u8], stored: &[u8]) -> Result<u64> {
-    postings::held_probed(r, &term(own.to_vec()), stored)
+/// `count`, read as a probe and no further than `upto` takes: what a count that decides how a plan is read asks.
+/// Places in blocks are counted a block at a time, so the answer may pass `upto` by what the last block read holds
+pub fn count_probed(r: &impl Read, own: &[u8], stored: &[u8], upto: u64) -> Result<u64> {
+    postings::held_probed(r, &term(own.to_vec()), stored, upto)
 }
 
 /// Hands `each` the places `sought` holds from `from` on, in order: a key of them is read as the walk comes to
@@ -144,7 +145,7 @@ impl Sorting {
                 filing = Some((own.clone(), postings::Filing::new(term(own))));
                 last = None;
             }
-            // An entity filed twice under one key, as a list holding a value twice files it, is there once
+            // A place handed over twice under one key is there once
             if last == Some(place) {
                 continue;
             }
@@ -157,5 +158,35 @@ impl Sorting {
             Some((_, done)) => done.finish(&mut emit),
             None => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn emitted(entries: &[(&[u8], u64)]) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut sorting = Sorting::new().unwrap();
+        for (own, place) in entries {
+            sorting
+                .entry(keys::index_range("Task", "byN", &[]).into_iter().chain(own.iter().copied()).collect(), *place)
+                .unwrap();
+        }
+        let mut out = Vec::new();
+        sorting
+            .finish(|key, value| {
+                out.push((key, value));
+                Ok(())
+            })
+            .unwrap();
+        out
+    }
+
+    #[test]
+    fn places_handed_over_in_any_order_are_filed_once_each() {
+        let once = emitted(&[(b"a", 3), (b"a", 9), (b"b", 5)]);
+        assert_eq!(once.len(), 2, "a key for each of the two");
+        // The same places out of order, one of them twice: the same keys holding the same
+        assert_eq!(emitted(&[(b"b", 5), (b"a", 9), (b"a", 3), (b"a", 9)]), once);
     }
 }

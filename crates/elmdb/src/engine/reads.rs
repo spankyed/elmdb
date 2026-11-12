@@ -413,7 +413,8 @@ enum RankScores {
 /// The most rounds `rank` runs for an index not built yet, which its tolerance stops long before
 const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
 
-/// How many keys between two a read has counted, and the key its count of the rest goes on from
+/// How many places the value keys between two hold, or how many rows there are, as far as a read has counted,
+/// and the key its count of the rest goes on from
 type Counted = (u64, Vec<u8>);
 
 /// One list of a type's places in creation order: what a value index files under the value a filter asks of, the
@@ -439,7 +440,8 @@ impl Places {
         Places::Rows { under, to }
     }
 
-    /// The first place the list holds that is `place` or after it
+    /// The first place the list holds that is `place` or after it. Places read and sorted are sought at places
+    /// that only grow
     fn seek(&mut self, r: &impl Read, place: u64) -> Result<Option<u64>> {
         match self {
             Places::Filed { sought, .. } => sought.seek(r, place, &mut false),
@@ -480,11 +482,11 @@ impl Places {
     }
 }
 
-/// The place an entry of a list of places is at: the number its key ends with
+/// The place a row of a type is at: the number its key ends with
 fn place_of(entry: &[u8]) -> Result<u64> {
-    crate::format::key::last_number(entry).map(|place| place as u64).ok_or_else(|| {
-        Error::new(ErrorCode::Corrupted, "An index's entry ends with no place: rebuild() derives it again")
-    })
+    crate::format::key::last_number(entry)
+        .map(|place| place as u64)
+        .ok_or_else(|| Error::new(ErrorCode::Corrupted, "A type's row ends with no place: rebuild() derives it again"))
 }
 
 /// How far apart the places of a list have been, where a read saw them: what says which of several lists holds the
@@ -581,7 +583,7 @@ enum Left {
     Paused,
 }
 
-/// The entries a cost question counts: those whose key is the first of these or after it, and before the second
+/// The keys a cost question counts under: those that are the first of these or after it, and before the second
 type Entries = (Vec<u8>, Vec<u8>);
 
 struct Query<'r, R: Read> {
@@ -2062,7 +2064,7 @@ impl<R: Read> Query<'_, R> {
 
     /// The lists of a type's places that the plan's first `upto` steps are read from as the store holds them, each
     /// standing for its filters. A `where` of a value an index files reads the value's entries in a built index on
-    /// its field alone, and a `withRole` its role's in the role index: one value's entries are keyed by place, so
+    /// its field alone, and a `withRole` its role's in the role index: one value's places are held in order, so
     /// they are in creation order, an entity once. Equalities on every field of an index on several read its
     /// entries for those values as one list (`equal_index`), which stands for them all in place of their own: its
     /// places are among each of theirs
@@ -2202,14 +2204,14 @@ impl<R: Read> Query<'_, R> {
     /// follows from what the read has seen, which the order the filters are written in decides to begin with: so
     /// that order can change what is read, within the bound.
     ///
-    /// A tracked read depends on every entry it read: those of the walked list up to where the read stopped,
-    /// and of each other list the entry at each place sought, with whatever lies between a place sought and the
-    /// place answered, the rest of the list where it answered with none.
+    /// A tracked read depends on every key it read: a list's own key, and each block of its places the read came
+    /// to, with the keys between a block sought and the one that answered, to the end of the list's keys where
+    /// it answered with none; and the row at each place the lists shared.
     ///
     /// A tracked read misses no write that changes what was handed on. Every place up to where the read stopped
-    /// either was handed on, each list's entry there read, or lies between a place some list was sought at and
-    /// the one it answered with, or between two entries walked one after the other: an entity can only come to
-    /// be at a place every list holds by an entry written between two such keys, which were read.
+    /// either was handed on, or was ruled out by a list that answered with a later place or with none: the keys
+    /// that list read cover every place between the one sought and the one answered, so an entity can only come
+    /// to be at a place every list holds by a write to a key that was read.
     ///
     /// `next` is kept at the least place neither handed on nor ruled out, and `read` grows by each entry read: the
     /// read pauses when it reaches what `asks` says to, to be taken up again from `next`
@@ -2274,9 +2276,13 @@ impl<R: Read> Query<'_, R> {
                     }
                 }
                 *next = place + 1;
-                // The entity at the place, where the scope reaches one there: its type's rows say
-                self.count_visit();
-                if let Some(id) = self.at_place(asks.entity_type, place)?
+                // The entity at the place, where the scope reaches one there: its type's rows say, and one they
+                // name is an entity read
+                let found = self.at_place(asks.entity_type, place)?;
+                if found.is_some() {
+                    self.count_visit();
+                }
+                if let Some(id) = found
                     && self.kept(asks.tested, &id)?
                     && !visit(&id)?
                 {
@@ -2795,7 +2801,7 @@ impl<R: Read> Query<'_, R> {
         let (mut more, mut past, mut failed) = (0u64, next.clone(), None);
         self.r.probe_visit_within(next, to, |own, stored| {
             if places {
-                match super::places::count_probed(self.r, own, stored) {
+                match super::places::count_probed(self.r, own, stored, upto - (*so_far + more)) {
                     Ok(held) => more += held,
                     Err(error) => failed = Some(error),
                 }

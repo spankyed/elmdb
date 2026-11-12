@@ -453,10 +453,11 @@ fn a_range_of_numbers_is_read_from_the_index_in_the_order_the_type_was_made() {
         assert_eq!(found.iter().collect::<Vec<_>>(), expected, "{bounds}");
         assert_eq!(visits as usize, expected.len(), "{bounds}: the entries within the bounds are what is read");
     }
-    // The scope's entities: one in the trash is read from the index and left out, or kept with the trash
+    // The scope's entities: one in the trash is a place the index holds where a live plan reads no entity, and
+    // one read with the trash
     write(&db, vec![op(json!({ "op": "trash", "id": all[4] }))]);
     let middle = |field: &str| json!([{ "step": "range", "field": field, "above": 1, "below": 3 }]);
-    assert_eq!(same(&db, "live", middle), (vec![], 1));
+    assert_eq!(same(&db, "live", middle), (vec![], 0));
     assert_eq!(same(&db, "withTrashed", middle), (vec![all[4].clone()], 1));
     assert_eq!(
         same(&db, "trashed", |field| json!([{ "step": "range", "field": field, "atLeast": 0 }])).0,

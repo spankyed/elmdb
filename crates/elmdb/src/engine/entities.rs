@@ -382,7 +382,7 @@ impl ValueIndex {
 /// Where an index files an entity (`ValueIndex::files`)
 #[derive(Debug, Default, PartialEq)]
 pub struct Filed {
-    /// The parts of each of its entries, which the entity's place follows in the entry's key
+    /// The parts of the key each of its entries is filed under, which holds the entity's place
     pub entries: Vec<Vec<Part>>,
     /// Where an index that accounts for its entities files it besides
     pub others: Vec<Other>,

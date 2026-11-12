@@ -100,7 +100,6 @@ pub(super) fn op(json: Json) -> Op {
     serde_json::from_value(json).unwrap()
 }
 
-/// The batch of these ops, at a fixed time
 /// What a value index files under `under` and under every key that starts with it: each key with the id of each
 /// entity filed there, the keys in order and a key's entities by place
 pub(super) fn filed_under(

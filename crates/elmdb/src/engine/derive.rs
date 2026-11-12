@@ -423,17 +423,41 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             let mut scratch = sorted::Scratch::new()?;
             if let Some(found) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
                 let mut filing = places::Sorting::new()?;
-                let mut holders = BTreeMap::new();
                 visit_entities(t, |e| {
                     if ids::type_of(&e.id) != entity_type {
                         return Ok(());
                     }
-                    index_others_into(t, entity_type, &found, &[&e], |key, e| filing.entry(key, e.seq))?;
+                    index_others_into(t, entity_type, &found, &[&e], |key, e| {
+                        entities::key_fits(&key, &e.id, entity_type, name)?;
+                        filing.entry(key, e.seq)
+                    })?;
                     index_entries_into(t, entity_type, &found, &[&e], |key, e| {
-                        buildable_entry(entity_type, &found, &key, &e.id, &mut holders)?;
+                        entities::key_fits(&key, &e.id, entity_type, name)?;
+                        if found.unique {
+                            // Sorted by key and then holder, two entities under one key come one after the other,
+                            // with no map of every value held: by their ids, since a store whose rows don't read
+                            // may have two entities at one place
+                            let holder = [Part::Bytes(key.clone()), Part::String(e.id.clone())];
+                            scratch.push(crate::format::key::encode(&holder), Vec::new())?;
+                        }
                         filing.entry(key, e.seq)
                     })
                 })?;
+                let mut holders = scratch.finish()?;
+                let mut holder: Option<(Vec<u8>, String)> = None;
+                while let Some((order, _)) = holders.next()? {
+                    let mut parts = decode_key(&order)?.into_iter();
+                    let (Some(Part::Bytes(key)), Some(Part::String(id))) = (parts.next(), parts.next()) else {
+                        return Err(Error::new(ErrorCode::Corrupted, "A sorted index holder doesn't read"));
+                    };
+                    if let Some((held, other)) = &holder
+                        && *held == key
+                        && *other != id
+                    {
+                        return Err(unbuildable(entity_type, name, other, &id));
+                    }
+                    holder = Some((key, id));
+                }
                 clear_value_index(t, entity_type, name)?;
                 text::clear(t, entity_type, name)?;
                 filing.finish(|key, value| t.put(&key, &value))?;
