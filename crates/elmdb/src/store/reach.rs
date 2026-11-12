@@ -1,9 +1,9 @@
 //! The pages a database reaches from the meta page LMDB opened it with, read from the file by seeks and never mapped.
 //!
-//! A file shorter than its meta page's pages is healthy when none of the pages the trees reach is past its end: LMDB may
-//! leave the last free pages out of the file, and no read touches them. It is torn when one the trees reach is past the
-//! end, or fails the walk's checks of a page, and then a read of it faults or reads what no commit wrote. The walk tells the two
-//! apart before the store maps or reads anything past the end.
+//! A file shorter than its meta page's pages is healthy when none of the pages the trees reach is past its end: LMDB
+//! may leave the last free pages out of the file, and no read touches them. It is torn when one the trees reach is past
+//! the end, or fails the walk's checks of a page, and then a read of it faults or reads what no commit wrote. The walk
+//! tells the two apart before the store maps or reads anything past the end.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -139,13 +139,14 @@ impl Walk<'_> {
         let count = u32_at_checked(&page, PAGE_HEADER - 4, self.path)? as u64;
         // LMDB's OVPAGES: the pages a value of this size takes, its header included
         let expected = ((PAGE_HEADER - 1 + size) / self.psize + 1) as u64;
-        // LMDB overwrites a value in place by a run at least as long as it needs, and keeps the run's count, so a run may
-        // be longer than the value it holds, never shorter
+        // LMDB overwrites a value in place, within the transaction that wrote its run, by a value that needs no more pages,
+        // and keeps the run's count: a run may be longer than the value it holds, never shorter
         if count < expected {
             return Err(corrupt(
                 self.path,
                 &format!(
-                    "the overflow run at page {pgno} is {count} pages, fewer than the {expected} a value of {size} bytes takes"
+                    "the overflow run at page {pgno} is {count} pages, fewer than the {expected} a value of {size} bytes \
+                     takes"
                 ),
             ));
         }

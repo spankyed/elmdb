@@ -83,7 +83,7 @@ that is the trade the mode states. The replay is LMDB's order of writes as its s
 disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
 itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
-they reach is past the end or is not a page LMDB wrote. A file whose missing pages no tree reaches is healthy, since
+they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
 LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. A torn
 file that is refused counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
 
