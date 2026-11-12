@@ -322,4 +322,10 @@ Apple M1 Pro, 2026-11-12, the machine busy with other work.
 
 The timer's own worst gap on this machine, read while idle at a load of 41 to 43, was 4.9 ms and 5.6 ms. That noise
 explains the 5.8 ms run and about half of the 11.9 ms one; the 16.8 ms run at a load of 69 is not explained by it. The 10
-ms target is not cleanly met at these loads; a quiet-machine reading is needed to claim it. The calling-thread form held the loop for the whole rebuild each time.
+ms target is not cleanly met at these loads.
+
+**A quiet reading, which meets the gate.** The same program, on the same machine, 2026-11-12 at a load of 5 to 6, the
+machine otherwise quiet: the rebuild on the pool held the event loop for at most 2.5 ms in one run and 2.9 ms in the
+other, while the rebuild took 3.6 and 3.7 s; the calling-thread form held it for the whole 3.5 s in both. An idle run of
+the timer at the same load showed one gap of 10.0 ms, so the timer's own noise is of the gate's size even at this load:
+the pool's holds were below it in both rebuild runs. The calling-thread form held the loop for the whole rebuild each time.
