@@ -998,18 +998,19 @@ impl Unit {
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        let changes = finish_commit(
+        // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
+        let landed = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },
-        )?;
+        );
         if let Some(builders) = &self.builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(changes)
+        landed
     }
 
     /// Ends the unit, keeping nothing of it
