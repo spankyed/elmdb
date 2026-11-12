@@ -1909,6 +1909,30 @@ fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destro
     );
 }
 
+#[test]
+fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_entity() {
+    // A grant made before the destroy in the commit is the destroyed entity's `role` field, as the engine names it
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![Step::Grant { id: "Task-1", role: "r1" }, Step::Destroy { id: "Task-1" }],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
 proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
