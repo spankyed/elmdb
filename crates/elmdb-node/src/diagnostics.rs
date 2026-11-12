@@ -20,14 +20,17 @@ static COLLECTOR: OnceLock<Arc<Collector>> = OnceLock::new();
 /// has a collector of another kind
 #[napi(js_name = "collectDiagnostics")]
 pub fn collect_diagnostics() -> napi::Result<()> {
-    if COLLECTOR.get().is_some() {
-        return Ok(());
-    }
-    let collector = Arc::new(Collector::new(KEPT));
-    tracing::subscriber::set_global_default(Arc::clone(&collector))
-        .map_err(|e| napi::Error::from_reason(format!("This process already collects diagnostics: {e}")))?;
-    let _ = COLLECTOR.set(collector);
-    Ok(())
+    let collecting = crate::panics::caught("collectDiagnostics", || {
+        if COLLECTOR.get().is_some() {
+            return Ok(());
+        }
+        let collector = Arc::new(Collector::new(KEPT));
+        tracing::subscriber::set_global_default(Arc::clone(&collector))
+            .map_err(|e| napi::Error::from_reason(format!("This process already collects diagnostics: {e}")))?;
+        let _ = COLLECTOR.set(collector);
+        Ok(())
+    });
+    collecting.unwrap_or_else(|panicked| Err(napi::Error::from_reason(panicked.message)))
 }
 
 #[napi(object)]
@@ -41,7 +44,10 @@ pub struct Diagnostics {
 
 /// What `collectDiagnostics` kept since the last take
 #[napi(js_name = "takeDiagnostics")]
-pub fn take_diagnostics() -> Diagnostics {
-    let taken = COLLECTOR.get().map(|collector| collector.take()).unwrap_or_default();
-    Diagnostics { spans: taken.spans, dropped: taken.dropped as f64 }
+pub fn take_diagnostics() -> napi::Result<Diagnostics> {
+    let taken = crate::panics::caught("takeDiagnostics", || {
+        COLLECTOR.get().map(|collector| collector.take()).unwrap_or_default()
+    });
+    let taken = taken.map_err(|panicked| napi::Error::from_reason(panicked.message))?;
+    Ok(Diagnostics { spans: taken.spans, dropped: taken.dropped as f64 })
 }

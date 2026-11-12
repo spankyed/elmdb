@@ -18,8 +18,6 @@ exclude_globs = [
     # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
     # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
     "crates/elmdb-node/src/lib.rs",
-    # What stops a panic at the binding: reached only through an export, and held by `test/panics.test.mjs`
-    "crates/elmdb-node/src/panics.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
@@ -73,6 +71,13 @@ exclude_re = [
     # The binding's diagnostics experiment: installing elmdb's collector for the process and taking from it, each a call
     # of elmdb's tested Collector that needs Node, which `examples/diagnostics.mjs` runs and cargo-mutants doesn't
     "elmdb-node/src/diagnostics.rs:.*replace (collect_diagnostics|take_diagnostics) -> ",
+    # What stops a panic at the binding, where it needs Node: the panic a test asks each export for, an export's
+    # answer made of a caught panic, and the hold let go as V8 collects it. `test/panics.test.mjs` holds them; what
+    # catches a panic and what a handle that panicked refuses have Rust tests of their own (`panics.rs`)
+    "elmdb-node/src/panics.rs:.* in asked_for",
+    "elmdb-node/src/panics.rs:.*replace asked_for with ",
+    "elmdb-node/src/panics.rs:.*replace (guarded|Health::guarded|Health::unrefused) -> ",
+    "elmdb-node/src/panics.rs:.*replace <impl Drop for Held>::drop with ",
     # A stored value streamed, which every one is with the guard false or the one-call size made 0: the stream
     # decompresses the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
     "values.rs:.*replace match guard size <= ONE_CALL_UP_TO with false in decompress",

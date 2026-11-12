@@ -114,8 +114,8 @@ pub enum ErrorCode {
     /// A call that waits for what a listener of the database is called from was made by that listener: a close,
     /// or on the index builder's thread a wait for its builds
     CallbackActive,
-    /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call did not
-    /// finish, and the process lives
+    /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call may not
+    /// have finished, and the database handle refuses calls with this code until it is closed and opened again
     Panicked,
 }
 

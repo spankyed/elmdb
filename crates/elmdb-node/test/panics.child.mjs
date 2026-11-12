@@ -1,22 +1,24 @@
-// The child of panics.test.mjs: started with ELMDB_TEST_PANICS set, so each export panics the first time it is
-// called. It calls every export the binding declares, expects the panic as an error it can catch, calls it again,
-// and says so on its last line.
+// The child of panics.test.mjs: `node panics.child.mjs <dir> <export>`, started with ELMDB_TEST_PANIC naming the
+// export, which then panics the first time it is called. The child calls it on the database at <dir>, expects the
+// panic as an error it can catch, finds the handle refusing calls after it, closes it, and opens the database again.
+// Its last line says so.
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { Packr } from 'msgpackr';
 
-const { Database, Unit } = createRequire(import.meta.url)('../index.js');
+const { Database } = createRequire(import.meta.url)('../index.js');
 const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
-const schema = {
+const [dir, name] = process.argv.slice(2);
+export const schema = {
   $schema: 'https://elmdb.dev/schema/1.json',
   types: { Note: { fields: { title: { type: 'string' } } } },
 };
-const dir = mkdtempSync(join(tmpdir(), 'elmdb-panics-'));
 const batch = (id) => packr.pack({ ops: [{ op: 'create', type: 'Note', id, fields: { title: id } }], now: 1000 });
 const reads = packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'ids' } } }] });
+const none = Buffer.alloc(0);
+const open = () => Database.open(dir, { schema, syncs: false });
+const ids = (db) => packr.unpack(db.readSync(reads))[0].ids;
 
 /** The error `call` throws, or none */
 const thrown = (call) => {
@@ -28,102 +30,121 @@ const thrown = (call) => {
   return undefined;
 };
 
-/** `call` panics the first time, as an error naming the export, and not the second */
-function panicsOnce(name, call) {
-  const first = thrown(call);
-  assert.equal(first?.code, 'PANICKED', `${name}: ${first}`);
-  assert.match(first.message, new RegExp(`^${name.replace('.', '\\.')} panicked at .*panics\\.rs:\\d+:\\d+: a panic a test asked for`));
-  const second = thrown(call);
-  assert.notEqual(second?.code, 'PANICKED', `${name}, called again: ${second}`);
+/** The panic the export raised: an error naming the export and where it was raised */
+function panicked(error) {
+  assert.equal(error?.code, 'PANICKED', `${name}: ${error}`);
+  assert.match(error.message, new RegExp(`^${name.replaceAll('.', '\\.')} panicked at .*panics\\.rs:\\d+:\\d+: a panic a test asked for\\. `));
 }
 
-/** Every member a class declares has a call here, so a new export is one this test is made to cover */
-function covered(what, prototype, calls) {
-  const declared = Object.getOwnPropertyNames(prototype).filter((name) => name !== 'constructor').sort();
-  assert.deepEqual(Object.keys(calls).sort(), declared, `${what}'s exports`);
+/** A handle that panicked refuses a call that asks something of the engine, saying what to do and what the panic was */
+function refuses(db) {
+  const refused = thrown(() => db.stats());
+  assert.equal(refused?.code, 'PANICKED', `after ${name}: ${refused}`);
+  assert.match(refused.message, /^Database\.stats is refused: this database panicked earlier.*Close it and open it again/);
+  assert.ok(refused.message.includes(`${name} panicked at `), refused.message);
 }
-
-let db;
-panicsOnce('Database.open', () => { db = Database.open(dir, { schema, syncs: false }); });
-
-// A unit's exports first, on a unit begun once `begin` has panicked
-const none = Buffer.alloc(0);
-let unit;
-panicsOnce('Database.begin', () => { unit = db.begin(); });
-const ofUnit = {
-  write: () => unit.write(batch('Note-unit')),
-  setCheckpoint: () => unit.setCheckpoint('reader', Buffer.from('at')),
-  checkpoint: () => unit.checkpoint('reader'),
-  pendingChanges: () => unit.pendingChanges(),
-  changedSince: () => unit.changedSince(['Note'], none, 10),
-  nextSequence: () => unit.nextSequence(),
-  read: () => unit.read(reads),
-  savepoint: () => unit.savepoint(),
-  rollbackTo: () => unit.rollbackTo(1),
-  release: () => unit.release(1),
-  isOpen: () => unit.isOpen,
-  commit: () => unit.commit(),
-  abort: () => unit.abort(),
-};
-covered('Unit', Unit.prototype, ofUnit);
-for (const [name, call] of Object.entries(ofUnit)) panicsOnce(`Unit.${name}`, call);
-assert.equal(unit.isOpen, false, 'the unit committed once its commit had panicked');
 
 const ofDatabase = {
-  path: () => db.path,
-  readOnly: () => db.readOnly,
-  isOpen: () => db.isOpen,
-  schema: () => db.schema,
-  setSchema: () => db.setSchema(schema),
-  openReport: () => db.openReport,
-  syncs: () => db.syncs,
-  write: () => db.write(batch(`Note-${Math.random()}`)),
-  readSync: () => db.readSync(reads),
-  untrack: () => db.untrack(1),
-  hearBuilderCommits: () => db.hearBuilderCommits(() => {}),
-  hearCommitsElsewhere: () => db.hearCommitsElsewhere(() => {}),
-  replacedElsewhere: () => db.replacedElsewhere(),
-  adoptReplacement: () => db.adoptReplacement(0),
-  trackStats: () => db.trackStats(),
-  sequence: () => db.sequence,
-  check: () => db.check(),
-  rebuild: () => db.rebuild(),
-  indexStatus: () => db.indexStatus(),
-  committedElsewhere: () => db.committedElsewhere(),
-  checkpoint: () => db.checkpoint('reader'),
-  changedSince: () => db.changedSince(['Note'], none, 10),
-  waitForIndexBuilds: () => db.waitForIndexBuilds(),
-  purge: () => db.purge({ type: 'Gone' }),
-  renameType: () => db.renameType('Gone', 'Went'),
-  renameField: () => db.renameField('Note', 'gone', 'went'),
-  renameRelation: () => db.renameRelation('gone', 'went'),
-  backup: () => db.backup(join(dir, 'backup')),
-  replaceWith: () => db.replaceWith(join(dir, 'nothing')),
-  stats: () => db.stats(),
-  bulkLoad: () => db.bulkLoad(packr.pack([])),
-  reset: () => db.reset(),
+  path: (db) => db.path,
+  readOnly: (db) => db.readOnly,
+  isOpen: (db) => db.isOpen,
+  schema: (db) => db.schema,
+  setSchema: (db) => db.setSchema(schema),
+  openReport: (db) => db.openReport,
+  syncs: (db) => db.syncs,
+  write: (db) => db.write(batch('Note-lost')),
+  readSync: (db) => db.readSync(reads),
+  read: (db) => db.read(reads),
+  untrack: (db) => db.untrack(1),
+  hearBuilderCommits: (db) => db.hearBuilderCommits(() => {}),
+  hearCommitsElsewhere: (db) => db.hearCommitsElsewhere(() => {}),
+  replacedElsewhere: (db) => db.replacedElsewhere(),
+  adoptReplacement: (db) => db.adoptReplacement(0),
+  trackStats: (db) => db.trackStats(),
+  sequence: (db) => db.sequence,
+  begin: (db) => db.begin(),
+  check: (db) => db.check(),
+  rebuild: (db) => db.rebuild(),
+  indexStatus: (db) => db.indexStatus(),
+  committedElsewhere: (db) => db.committedElsewhere(),
+  checkpoint: (db) => db.checkpoint('reader'),
+  changedSince: (db) => db.changedSince(['Note'], none, 10),
+  waitForIndexBuilds: (db) => db.waitForIndexBuilds(),
+  purge: (db) => db.purge({ type: 'Gone' }),
+  renameType: (db) => db.renameType('Gone', 'Went'),
+  renameField: (db) => db.renameField('Note', 'gone', 'went'),
+  renameRelation: (db) => db.renameRelation('gone', 'went'),
+  backup: (db) => db.backup(join(dir, 'backup')),
+  replaceWith: (db) => db.replaceWith(join(dir, 'nothing')),
+  stats: (db) => db.stats(),
+  bulkLoad: (db) => db.bulkLoad(packr.pack([])),
+  reset: (db) => db.reset(),
+  durable: (db) => db.durable(),
+  close: (db) => db.close(),
 };
-// Those that answer a promise, and the two called before and after the rest
-const apart = { begin: true, read: true, durable: true, close: true };
-covered('Database', Database.prototype, { ...ofDatabase, ...apart });
-for (const [name, call] of Object.entries(ofDatabase)) panicsOnce(`Database.${name}`, call);
+const ofUnit = {
+  write: (unit) => unit.write(batch('Note-unit')),
+  setCheckpoint: (unit) => unit.setCheckpoint('reader', Buffer.from('at')),
+  checkpoint: (unit) => unit.checkpoint('reader'),
+  pendingChanges: (unit) => unit.pendingChanges(),
+  changedSince: (unit) => unit.changedSince(['Note'], none, 10),
+  nextSequence: (unit) => unit.nextSequence(),
+  read: (unit) => unit.read(reads),
+  savepoint: (unit) => unit.savepoint(),
+  rollbackTo: (unit) => unit.rollbackTo(1),
+  release: (unit) => unit.release(1),
+  commit: (unit) => unit.commit(),
+  abort: (unit) => unit.abort(),
+  isOpen: (unit) => unit.isOpen,
+};
 
-// A promise's work is done on a thread of the pool: the call panics once on this thread, then its work once there,
-// which rejects the promise, and then it answers
-for (const [name, call] of [['read', () => db.read(reads)], ['durable', () => db.durable()]]) {
-  assert.equal(thrown(call)?.code, 'PANICKED', name);
-  const rejected = await call().then(() => undefined, (error) => error);
-  assert.equal(rejected?.code, 'PANICKED', `${name} on the pool: ${rejected}`);
-  assert.match(rejected.message, new RegExp(`^Database\\.${name}, on a thread of the pool, panicked at `));
-  await call();
+const [of, member, pool] = name.match(/^(Database|Unit)\.(\w+)(, on a thread of the pool,)?$/).slice(1);
+let db;
+if (name === 'Database.open') {
+  // No handle is made by an open that panics
+  panicked(thrown(open));
+} else if (of === 'Database') {
+  db = open();
+  const call = ofDatabase[member];
+  assert.ok(call, `${name} has no call in this test`);
+  if (pool) {
+    // The work of a promise is done on a thread of the pool, where its panic rejects the promise
+    panicked(await call(db).then(() => undefined, (error) => error));
+    // And the next call is refused where it is made, before any promise
+    assert.match(thrown(() => call(db))?.message ?? '', /^Database\.\w+ is refused/);
+  } else {
+    panicked(thrown(() => call(db)));
+  }
+  refuses(db);
+  // Its path and whether it is open are still answered, and it closes
+  assert.ok(db.path.endsWith(basename(dir)), db.path);
+  assert.equal(db.isOpen, true);
+  db.close();
+  assert.equal(db.isOpen, false);
+} else {
+  db = open();
+  const unit = db.begin();
+  const call = ofUnit[member];
+  assert.ok(call, `${name} has no call in this test`);
+  // Something for the unit to lose, where its own write is not the call that panics
+  if (member !== 'write') unit.write(batch('Note-in-the-unit'));
+  panicked(thrown(() => call(unit)));
+  // The unit is ended by the panic, or by the next call on it where the call that panicked asked nothing of it
+  assert.ok(['CLOSED', 'PANICKED'].includes(thrown(() => unit.commit())?.code));
+  assert.equal(unit.isOpen, false);
+  refuses(db);
+  // The close is not refused for an open unit
+  db.close();
 }
 
-// The database is whole: a write lands, a read answers it, and a check finds nothing
-db.write(batch('Note-after'));
-const [answer] = packr.unpack(db.readSync(reads));
-assert.ok(answer.ids.includes('Note-after'));
-assert.ok(db.check().differences.length === 0);
-panicsOnce('Database.close', () => db.close());
-assert.equal(db.isOpen, false);
-rmSync(dir, { recursive: true, force: true });
-console.log('every export panicked once, and the process lives');
+// The database is whole: it opens, none of a unit's writes or of a write that panicked is there, a write lands and
+// a read answers it, and a check finds nothing
+db = open();
+assert.deepEqual(ids(db), ['Note-kept']);
+const unit = db.begin();
+unit.write(batch('Note-after'));
+assert.deepEqual(packr.unpack(unit.read(reads))[0].ids, ['Note-kept', 'Note-after']);
+unit.abort();
+assert.equal(db.check().differences.length, 0);
+db.close();
+console.log(`${name} panicked, and the process lives`);

@@ -466,3 +466,37 @@ fn a_writing_handle_keeps_the_lock_lmdb_holds_on_its_lock_file() {
     });
     assert_eq!(holder, std::process::id().to_string(), "the next opener would otherwise take itself for the first");
 }
+
+#[test]
+fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_written_and_closed() {
+    use crate::failpoints::{self, points};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let task = |id: &str| vec![json!({ "op": "create", "type": "Task", "id": id })];
+    for point in [points::WRITE_HELD, points::UNIT_RESERVED, points::UNIT_COMMITTING] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, task("Task-before")).unwrap();
+        failpoints::run_once_here(point, || panic!("a panic the test raised"));
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            if point == points::WRITE_HELD {
+                write(&db, task("Task-lost")).unwrap();
+            } else {
+                let mut unit = db.begin().unwrap();
+                unit.write(&batch(task("Task-lost"))).unwrap();
+                unit.commit(false).unwrap();
+            }
+        }));
+        assert!(unwound.is_err() && !failpoints::is_armed_here(point), "{point}: the panic was raised there");
+        // The write transaction, the unit's place and the gate were let go as the panic unwound: a unit begins, a
+        // write lands, what the panic interrupted is not there, and the database closes and opens again
+        let mut unit = db.begin().unwrap_or_else(|error| panic!("{point}: {error}"));
+        unit.write(&batch(task("Task-unit"))).unwrap();
+        unit.commit(false).unwrap();
+        write(&db, task("Task-after")).unwrap();
+        assert!(super::row(&db, "Task-lost").is_none(), "{point}");
+        assert!(db.check().unwrap().is_clean(), "{point}");
+        db.close().unwrap_or_else(|error| panic!("{point}: {error}"));
+        let again = open(&dir);
+        assert!(super::row(&again, "Task-after").is_some() && super::row(&again, "Task-before").is_some(), "{point}");
+    }
+}

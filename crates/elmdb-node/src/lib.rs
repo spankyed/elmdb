@@ -1,7 +1,7 @@
 //! The Node binding: elmdb's API for JavaScript, over N-API. Every failure elmdb reports throws an `Error` whose `code`
 //! is an `ErrorCode`; an argument of the wrong JavaScript type is refused by N-API before elmdb sees it, with N-API's
-//! own code (`InvalidArg`, `NumberExpected`, …). Every export runs its work under `guarded`, so a panic in elmdb is
-//! thrown as `PANICKED` and never unwinds into Node (`panics.rs`).
+//! own code (`InvalidArg`, `NumberExpected`, …). Every export runs its work where a panic is caught, so a panic in
+//! elmdb is thrown as `PANICKED`, and the handle it was raised through refuses calls after it (`panics.rs`).
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -12,7 +12,7 @@ mod exit;
 mod panics;
 mod process;
 
-use panics::{caught, guarded};
+use panics::{Health, Held, guarded};
 
 /// An elmdb code as the status of a JavaScript error, which N-API hands JavaScript as `error.code`
 pub struct Code(&'static str);
@@ -91,7 +91,9 @@ pub struct BuilderCommit {
 /// An open database: one directory holding one LMDB environment
 #[napi]
 pub struct Database {
-    inner: std::sync::Arc<elmdb::Database>,
+    inner: Held,
+    /// Whether a call through this handle has panicked, after which it refuses calls (`panics.rs`)
+    health: Health,
 }
 
 #[napi]
@@ -125,29 +127,29 @@ impl Database {
             };
             let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
             exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
-            Ok(Self { inner })
+            Ok(Self { inner: Held::new(inner), health: Health::default() })
         })
     }
 
     #[napi(getter)]
     pub fn path(&self) -> Result<String, Code> {
-        guarded("Database.path", || Ok(self.inner.path().display().to_string()))
+        self.health.unrefused("Database.path", || Ok(self.inner.path().display().to_string()))
     }
 
     #[napi(getter)]
     pub fn read_only(&self) -> Result<bool, Code> {
-        guarded("Database.readOnly", || Ok(self.inner.is_read_only()))
+        self.health.unrefused("Database.readOnly", || Ok(self.inner.is_read_only()))
     }
 
     #[napi(getter)]
     pub fn is_open(&self) -> Result<bool, Code> {
-        guarded("Database.isOpen", || Ok(self.inner.is_open()))
+        self.health.unrefused("Database.isOpen", || Ok(self.inner.is_open()))
     }
 
     /// The schema the database holds, in its canonical form, or `null` when none was ever given
     #[napi(getter, ts_return_type = "Schema | null")]
     pub fn schema(&self) -> Result<Option<serde_json::Value>, Code> {
-        guarded("Database.schema", || {
+        self.health.guarded("Database.schema", || {
             Ok({
                 self.inner.schema().map(|s| serde_json::from_str(&s.canonical()).expect("a canonical schema is JSON"))
             })
@@ -158,7 +160,7 @@ impl Database {
     /// Refused while a unit is open, in a read-only database, and for a change opening refuses
     #[napi(ts_args_type = "schema: Schema", ts_return_type = "SchemaChange[]")]
     pub fn set_schema(&self, schema: serde_json::Value) -> Result<serde_json::Value, Code> {
-        guarded("Database.setSchema", || {
+        self.health.guarded("Database.setSchema", || {
             let schema = elmdb::schema::Schema::from_json(&schema).map_err(to_js)?;
             let changes = self.inner.set_schema(schema).map_err(to_js)?;
             Ok(serde_json::to_value(changes).expect("schema changes serialize"))
@@ -168,7 +170,7 @@ impl Database {
     /// What opening did: `{ schemaChanges: [{ path, change, effect }] }`
     #[napi(getter, ts_return_type = "{ schemaChanges: SchemaChange[] }")]
     pub fn open_report(&self) -> Result<serde_json::Value, Code> {
-        guarded("Database.openReport", || {
+        self.health.guarded("Database.openReport", || {
             Ok(serde_json::json!({ "schemaChanges": self.inner.open_report().schema_changes }))
         })
     }
@@ -176,14 +178,14 @@ impl Database {
     /// Group commit's syncs so far
     #[napi(getter)]
     pub fn syncs(&self) -> Result<f64, Code> {
-        guarded("Database.syncs", || self.inner.syncs().map(|n| n as f64).map_err(to_js))
+        self.health.guarded("Database.syncs", || self.inner.syncs().map(|n| n as f64).map_err(to_js))
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
     /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
     #[napi]
     pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
-        guarded("Database.write", || {
+        self.health.guarded("Database.write", || {
             answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
         })
     }
@@ -192,15 +194,20 @@ impl Database {
     /// answer per read
     #[napi]
     pub fn read_sync<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
-        guarded("Database.readSync", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
+        self.health.guarded("Database.readSync", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
     /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read(&self, reads: Buffer) -> Result<AsyncTask<ReadTask>, Code> {
-        guarded("Database.read", || {
+        self.health.guarded("Database.read", || {
             Ok({
-                AsyncTask::new(ReadTask { db: std::sync::Arc::clone(&self.inner), reads: reads.to_vec(), failed: None })
+                AsyncTask::new(ReadTask {
+                    db: self.inner.again(),
+                    health: self.health.clone(),
+                    reads: reads.to_vec(),
+                    failed: None,
+                })
             })
         })
     }
@@ -208,7 +215,7 @@ impl Database {
     /// Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after
     #[napi]
     pub fn untrack(&self, token: f64) -> Result<(), Code> {
-        guarded("Database.untrack", || {
+        self.health.guarded("Database.untrack", || {
             // A token is a u32, which a JS number holds exactly; any other number names no token
             if !(token.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&token)) {
                 return Err(napi::Error::new(
@@ -229,7 +236,7 @@ impl Database {
         &self,
         listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
     ) -> Result<(), Code> {
-        guarded("Database.hearBuilderCommits", || {
+        self.health.guarded("Database.hearBuilderCommits", || {
             let tell = listener
                 .build_threadsafe_function()
                 .callee_handled::<false>()
@@ -251,7 +258,7 @@ impl Database {
     /// second being refused. It keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: () => void")]
     pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, (), ()>) -> Result<(), Code> {
-        guarded("Database.hearCommitsElsewhere", || {
+        self.health.guarded("Database.hearCommitsElsewhere", || {
             let tell = listener
                 .build_threadsafe_function()
                 .callee_handled::<false>()
@@ -269,7 +276,7 @@ impl Database {
     /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
     #[napi]
     pub fn replaced_elsewhere(&self) -> Result<Option<f64>, Code> {
-        guarded("Database.replacedElsewhere", || {
+        self.health.guarded("Database.replacedElsewhere", || {
             Ok(self.inner.replaced_elsewhere().map_err(to_js)?.map(|epoch| epoch as f64))
         })
     }
@@ -278,13 +285,13 @@ impl Database {
     /// nothing, when another has landed since
     #[napi]
     pub fn adopt_replacement(&self, epoch: f64) -> Result<bool, Code> {
-        guarded("Database.adoptReplacement", || self.inner.adopt_replacement(epoch as u64).map_err(to_js))
+        self.health.guarded("Database.adoptReplacement", || self.inner.adopt_replacement(epoch as u64).map_err(to_js))
     }
 
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
     #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
     pub fn track_stats(&self) -> Result<serde_json::Value, Code> {
-        guarded("Database.trackStats", || {
+        self.health.guarded("Database.trackStats", || {
             Ok({
                 let (owners, keys, ranges) = self.inner.track_stats();
                 serde_json::json!({ "owners": owners, "keys": keys, "ranges": ranges })
@@ -296,20 +303,22 @@ impl Database {
     /// exists
     #[napi(getter)]
     pub fn sequence(&self) -> Result<f64, Code> {
-        guarded("Database.sequence", || self.inner.sequence().map(|n| n as f64).map_err(to_js))
+        self.health.guarded("Database.sequence", || self.inner.sequence().map(|n| n as f64).map_err(to_js))
     }
 
     /// Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
     /// (`UNIT_OPEN`), and writes go through the unit
     #[napi]
     pub fn begin(&self) -> Result<Unit, Code> {
-        guarded("Database.begin", || self.inner.begin().map(|inner| Unit { inner: Some(inner) }).map_err(to_js))
+        self.health.guarded("Database.begin", || {
+            self.inner.begin().map(|inner| Unit { inner: Some(inner), health: self.health.clone() }).map_err(to_js)
+        })
     }
 
     /// Compares derived data with primary data and every row with the schema's rules
     #[napi(ts_return_type = "CheckReport")]
     pub fn check(&self) -> Result<serde_json::Value, Code> {
-        guarded("Database.check", || {
+        self.health.guarded("Database.check", || {
             let report = self.inner.check().map_err(to_js)?;
             Ok(serde_json::to_value(report).expect("a report serializes"))
         })
@@ -318,7 +327,7 @@ impl Database {
     /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's
     #[napi]
     pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
-        guarded("Database.rebuild", || {
+        self.health.guarded("Database.rebuild", || {
             let one = match (entity_type.as_deref(), index.as_deref()) {
                 (Some(entity_type), Some(index)) => Some((entity_type, index)),
                 (None, None) => None,
@@ -336,7 +345,7 @@ impl Database {
     /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
     #[napi(ts_return_type = "IndexStatus[]")]
     pub fn index_status(&self) -> Result<serde_json::Value, Code> {
-        guarded("Database.indexStatus", || {
+        self.health.guarded("Database.indexStatus", || {
             let status = self.inner.index_status().map_err(to_js)?;
             Ok(serde_json::to_value(status).expect("a status serializes"))
         })
@@ -345,13 +354,13 @@ impl Database {
     /// Whether another handle has committed since this one last asked, or since it opened; never for this handle's own
     #[napi]
     pub fn committed_elsewhere(&self) -> Result<bool, Code> {
-        guarded("Database.committedElsewhere", || self.inner.committed_elsewhere().map_err(to_js))
+        self.health.guarded("Database.committedElsewhere", || self.inner.committed_elsewhere().map_err(to_js))
     }
 
     /// The checkpoint named `name`, as the latest commit left it
     #[napi]
     pub fn checkpoint<'env>(&self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
-        guarded("Database.checkpoint", || {
+        self.health.guarded("Database.checkpoint", || {
             self.inner.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
         })
     }
@@ -366,7 +375,7 @@ impl Database {
         from: Buffer,
         limit: u32,
     ) -> Result<BufferSlice<'env>, Code> {
-        guarded("Database.changedSince", || {
+        self.health.guarded("Database.changedSince", || {
             answer(env, &self.inner.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
         })
     }
@@ -374,13 +383,13 @@ impl Database {
     /// Blocks until every index waiting to be built is built or has failed
     #[napi]
     pub fn wait_for_index_builds(&self) -> Result<(), Code> {
-        guarded("Database.waitForIndexBuilds", || self.inner.wait_for_index_builds().map_err(to_js))
+        self.health.guarded("Database.waitForIndexBuilds", || self.inner.wait_for_index_builds().map_err(to_js))
     }
 
     /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`
     #[napi]
     pub fn purge(&self, what: PurgeTarget) -> Result<(), Code> {
-        guarded("Database.purge", || {
+        self.health.guarded("Database.purge", || {
             use elmdb::engine::admin::Purge;
             let target = match (what.entity_type, what.field, what.relation_kind, what.role) {
                 (Some(entity_type), Some(field), None, None) => Purge::Field { entity_type, field },
@@ -400,41 +409,41 @@ impl Database {
 
     #[napi]
     pub fn rename_type(&self, from: String, to: String) -> Result<(), Code> {
-        guarded("Database.renameType", || self.inner.rename_type(&from, &to).map_err(to_js))
+        self.health.guarded("Database.renameType", || self.inner.rename_type(&from, &to).map_err(to_js))
     }
 
     #[napi]
     pub fn rename_field(&self, entity_type: String, from: String, to: String) -> Result<(), Code> {
-        guarded("Database.renameField", || self.inner.rename_field(&entity_type, &from, &to).map_err(to_js))
+        self.health.guarded("Database.renameField", || self.inner.rename_field(&entity_type, &from, &to).map_err(to_js))
     }
 
     #[napi]
     pub fn rename_relation(&self, from: String, to: String) -> Result<(), Code> {
-        guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
+        self.health.guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
     }
 
     /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
     #[napi]
     pub fn backup(&self, target: String) -> Result<(), Code> {
-        guarded("Database.backup", || self.inner.backup(target).map_err(to_js))
+        self.health.guarded("Database.backup", || self.inner.backup(target).map_err(to_js))
     }
 
     /// Every entry replaced by another database's primary data, derived data rebuilt under this schema
     #[napi]
     pub fn replace_with(&self, source: String) -> Result<(), Code> {
-        guarded("Database.replaceWith", || self.inner.replace_with(source).map_err(to_js))
+        self.health.guarded("Database.replaceWith", || self.inner.replace_with(source).map_err(to_js))
     }
 
     /// Every entry removed but the database's format and schema
     #[napi]
     pub fn reset(&self) -> Result<(), Code> {
-        guarded("Database.reset", || self.inner.reset().map_err(to_js))
+        self.health.guarded("Database.reset", || self.inner.reset().map_err(to_js))
     }
 
     /// What the database holds: entities per type and field, relations per kind, entries per index, its sizes
     #[napi(ts_return_type = "Stats")]
     pub fn stats(&self) -> Result<serde_json::Value, Code> {
-        guarded("Database.stats", || {
+        self.health.guarded("Database.stats", || {
             let stats = self.inner.stats().map_err(to_js)?;
             Ok(serde_json::to_value(stats).expect("stats serialize"))
         })
@@ -444,18 +453,18 @@ impl Database {
     /// value outside the value spec is refused all the same
     #[napi]
     pub fn bulk_load(&self, loads: Buffer) -> Result<(), Code> {
-        guarded("Database.bulkLoad", || self.inner.bulk_load_bytes(&loads).map_err(to_js))
+        self.health.guarded("Database.bulkLoad", || self.inner.bulk_load_bytes(&loads).map_err(to_js))
     }
 
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
     /// the database is closed
     #[napi(ts_return_type = "Promise<void>")]
     pub fn durable(&self) -> Result<AsyncTask<DurableTask>, Code> {
-        guarded("Database.durable", || {
+        self.health.guarded("Database.durable", || {
             Ok({
                 let task = match self.inner.durable() {
-                    Ok(durable) => DurableTask { durable: Some(durable), failed: None },
-                    Err(error) => DurableTask { durable: None, failed: Some(error) },
+                    Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
+                    Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
                 };
                 AsyncTask::new(task)
             })
@@ -465,13 +474,14 @@ impl Database {
     /// Syncs what is owed and releases the environment; closing a closed database does nothing
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
-        guarded("Database.close", || self.inner.close().map_err(to_js))
+        self.health.unrefused("Database.close", || self.inner.close().map_err(to_js))
     }
 }
 
 /// `read()`'s promise, answered on a thread of the pool; a failure becomes an error with elmdb's code on the JS thread
 pub struct ReadTask {
-    db: std::sync::Arc<elmdb::Database>,
+    db: Held,
+    health: Health,
     reads: Vec<u8>,
     failed: Option<elmdb::Error>,
 }
@@ -482,13 +492,12 @@ impl Task for ReadTask {
 
     fn compute(&mut self) -> napi::Result<Vec<u8>> {
         let (db, reads) = (&self.db, &self.reads);
-        caught("Database.read, on a thread of the pool,", || db.read_bytes(reads)).and_then(|read| read).map_err(
-            |error| {
-                let reason = error.message.clone();
-                self.failed = Some(error);
-                napi::Error::from_reason(reason)
-            },
-        )
+        let read = self.health.caught("Database.read, on a thread of the pool,", || db.read_bytes(reads));
+        read.and_then(|read| read).map_err(|error| {
+            let reason = error.message.clone();
+            self.failed = Some(error);
+            napi::Error::from_reason(reason)
+        })
     }
 
     fn resolve(&mut self, env: Env, answer: Vec<u8>) -> napi::Result<BufferSlice<'static>> {
@@ -507,6 +516,7 @@ impl Task for ReadTask {
 /// with elmdb's code on the JS thread, in `reject`
 pub struct DurableTask {
     durable: Option<elmdb::Durable>,
+    health: Health,
     failed: Option<elmdb::Error>,
 }
 
@@ -519,13 +529,12 @@ impl Task for DurableTask {
             return Err(napi::Error::from_reason(failed.message.clone()));
         }
         let Some(durable) = self.durable.take() else { return Ok(()) };
-        caught("Database.durable, on a thread of the pool,", || durable.wait()).and_then(|waited| waited).map_err(
-            |error| {
-                let reason = error.message.clone();
-                self.failed = Some(error);
-                napi::Error::from_reason(reason)
-            },
-        )
+        let waited = self.health.caught("Database.durable, on a thread of the pool,", || durable.wait());
+        waited.and_then(|waited| waited).map_err(|error| {
+            let reason = error.message.clone();
+            self.failed = Some(error);
+            napi::Error::from_reason(reason)
+        })
     }
 
     fn resolve(&mut self, _env: Env, (): ()) -> napi::Result<()> {
@@ -544,11 +553,38 @@ impl Task for DurableTask {
 #[napi]
 pub struct Unit {
     inner: Option<elmdb::Unit>,
+    /// Its database handle's, which a panic in the unit is a panic of
+    health: Health,
 }
 
 impl Unit {
     fn open(&mut self) -> Result<&mut elmdb::Unit, Code> {
         self.inner.as_mut().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))
+    }
+
+    /// Runs an export's work on the unit. Once its handle has panicked, in this call or another, the unit is ended,
+    /// keeping none of its writes: what a panic interrupted may be half of a batch
+    fn run<T>(&mut self, export: &'static str, work: impl FnOnce(&mut Self) -> Result<T, Code>) -> Result<T, Code> {
+        let health = self.health.clone();
+        let ran = health.guarded(export, || work(self));
+        if health.panicked() {
+            self.end();
+        }
+        ran
+    }
+
+    /// Ends the unit where a panic in ending it is caught
+    fn end(&mut self) {
+        if let Some(unit) = self.inner.take() {
+            let _ = panics::caught("ending a unit", move || drop(unit));
+        }
+    }
+}
+
+impl Drop for Unit {
+    /// A unit V8 collects while it is open is aborted, in a finalizer a panic would unwind out of into Node
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -558,27 +594,27 @@ impl Unit {
     /// bytes of `{ results: OpResult[] }`
     #[napi]
     pub fn write<'env>(&mut self, env: &'env Env, batch: Buffer) -> Result<BufferSlice<'env>, Code> {
-        guarded("Unit.write", || answer(env, &self.open()?.write_bytes(&batch).map_err(to_js)?))
+        self.run("Unit.write", |unit| answer(env, &unit.open()?.write_bytes(&batch).map_err(to_js)?))
     }
 
     /// Records `value` as the checkpoint `name`, committing with this unit or not at all
     #[napi]
     pub fn set_checkpoint(&mut self, name: String, value: Buffer) -> Result<(), Code> {
-        guarded("Unit.setCheckpoint", || self.open()?.set_checkpoint(&name, &value).map_err(to_js))
+        self.run("Unit.setCheckpoint", |unit| unit.open()?.set_checkpoint(&name, &value).map_err(to_js))
     }
 
     /// The checkpoint named `name`, as this unit sees it
     #[napi]
     pub fn checkpoint<'env>(&mut self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
-        guarded("Unit.checkpoint", || {
-            self.open()?.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
+        self.run("Unit.checkpoint", |unit| {
+            unit.open()?.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
         })
     }
 
     /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
     #[napi]
     pub fn pending_changes<'env>(&mut self, env: &'env Env) -> Result<BufferSlice<'env>, Code> {
-        guarded("Unit.pendingChanges", || answer(env, &self.open()?.pending_changes_bytes().map_err(to_js)?))
+        self.run("Unit.pendingChanges", |unit| answer(env, &unit.open()?.pending_changes_bytes().map_err(to_js)?))
     }
 
     /// `Database.changedSince` read in the unit, before its own writes are stamped
@@ -590,47 +626,47 @@ impl Unit {
         from: Buffer,
         limit: u32,
     ) -> Result<BufferSlice<'env>, Code> {
-        guarded("Unit.changedSince", || {
-            answer(env, &self.open()?.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
+        self.run("Unit.changedSince", |unit| {
+            answer(env, &unit.open()?.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
         })
     }
 
     /// The sequence this unit commits as, which what it writes is stamped with
     #[napi]
     pub fn next_sequence(&mut self) -> Result<f64, Code> {
-        guarded("Unit.nextSequence", || Ok(self.open()?.next_sequence().map_err(to_js)? as f64))
+        self.run("Unit.nextSequence", |unit| Ok(unit.open()?.next_sequence().map_err(to_js)? as f64))
     }
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes
     #[napi]
     pub fn read<'env>(&mut self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
-        guarded("Unit.read", || answer(env, &self.open()?.read_bytes(&reads).map_err(to_js)?))
+        self.run("Unit.read", |unit| answer(env, &unit.open()?.read_bytes(&reads).map_err(to_js)?))
     }
 
     /// Opens a savepoint, answering its depth
     #[napi]
     pub fn savepoint(&mut self) -> Result<u32, Code> {
-        guarded("Unit.savepoint", || self.open()?.savepoint().map(|d| d as u32).map_err(to_js))
+        self.run("Unit.savepoint", |unit| unit.open()?.savepoint().map(|d| d as u32).map_err(to_js))
     }
 
     /// Undoes everything since the savepoint at `depth`, closing it
     #[napi]
     pub fn rollback_to(&mut self, depth: u32) -> Result<(), Code> {
-        guarded("Unit.rollbackTo", || self.open()?.rollback_to(depth as usize).map_err(to_js))
+        self.run("Unit.rollbackTo", |unit| unit.open()?.rollback_to(depth as usize).map_err(to_js))
     }
 
     /// Closes the savepoint at `depth`, keeping its writes
     #[napi]
     pub fn release(&mut self, depth: u32) -> Result<(), Code> {
-        guarded("Unit.release", || self.open()?.release(depth as usize).map_err(to_js))
+        self.run("Unit.release", |unit| unit.open()?.release(depth as usize).map_err(to_js))
     }
 
     /// Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it
     #[napi]
     pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
-        guarded("Unit.commit", || {
+        self.run("Unit.commit", |unit| {
             let unit =
-                self.inner.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;
+                unit.inner.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;
             let changes = unit.commit(durable.unwrap_or(false)).map_err(to_js)?;
             answer(env, &rmp_serde::to_vec_named(&changes).expect("a change set serializes"))
         })
@@ -639,8 +675,8 @@ impl Unit {
     /// Ends the unit, keeping nothing of it
     #[napi]
     pub fn abort(&mut self) -> Result<(), Code> {
-        guarded("Unit.abort", || {
-            if let Some(mut unit) = self.inner.take() {
+        self.run("Unit.abort", |unit| {
+            if let Some(mut unit) = unit.inner.take() {
                 unit.abort();
             }
             Ok(())
@@ -649,6 +685,6 @@ impl Unit {
 
     #[napi(getter)]
     pub fn is_open(&self) -> Result<bool, Code> {
-        guarded("Unit.isOpen", || Ok(self.inner.as_ref().is_some_and(elmdb::Unit::is_open)))
+        self.health.unrefused("Unit.isOpen", || Ok(self.inner.as_ref().is_some_and(elmdb::Unit::is_open)))
     }
 }

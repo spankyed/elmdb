@@ -293,12 +293,16 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
-A panic in each export is caught (`panics.test.mjs`): a child process started with `ELMDB_TEST_PANICS` set, which
-has each export panic the first time it is called, calls every member the binding's classes have, by a table the
-test fails without an entry of for each. Each throws `PANICKED` once and then does its work, a promise's call once
-on the calling thread and once on the pool's, and at the end a write lands, a read answers it, `check()` is clean
-and the child exits with 0. The variable is read once, as the addon first runs an export, and nothing but that test
-sets it.
+A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
+factory, and the work two exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
+without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
+a call, still answers its path and whether it is open, and closes; a unit a panic was raised in has ended; and the
+database opened again holds what was committed before and none of what the unit or the call wrote, takes a write,
+and passes `check()`. The variable is read once, as the addon first runs an export; a value naming no export asks
+for nothing; and nothing but that test sets it. That panic is raised at the export's door. One raised inside the
+engine, with the write transaction held, a unit's place reserved, or a unit's commit under way, is the engine's
+own test (`engine/tests/lifecycle.rs`): after each the database takes a unit and a write, and closes.
 
 An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
 over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
