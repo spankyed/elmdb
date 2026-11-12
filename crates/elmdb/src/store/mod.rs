@@ -67,6 +67,9 @@ pub struct StoreOptions {
     pub read_only: bool,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once
     pub syncs: bool,
+    /// Each commit synced by LMDB as it is made, its pages before the meta page that names them: a commit that
+    /// returned is on disk, and no group commit runs
+    pub sync_each_commit: bool,
     pub sync_idle: Duration,
     pub sync_interval: Duration,
     /// The map's size at open; by default `initial_map_size` of the file
@@ -78,6 +81,7 @@ impl Default for StoreOptions {
         Self {
             read_only: false,
             syncs: true,
+            sync_each_commit: false,
             sync_idle: Duration::from_millis(100),
             sync_interval: Duration::from_millis(1000),
             map_size_bytes: None,
@@ -154,6 +158,8 @@ pub(crate) struct RankPlans {
 pub struct Store {
     path: PathBuf,
     read_only: bool,
+    /// Each commit is synced as it is made, with no group commit (`StoreOptions::sync_each_commit`)
+    sync_each_commit: bool,
     env: Env<WithoutTls>,
     db: Db,
     gate: Arc<RecursiveRwLock<()>>,
@@ -293,8 +299,10 @@ impl Store {
             let map_size =
                 if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
             builder.max_dbs(8).map_size(map_size);
-            // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
-            // flushed by group commit's syncs, and a read-only environment is never written
+            // SAFETY: the flags say when LMDB syncs, and nothing else about its files: with NO_SYNC and NO_META_SYNC off,
+            // LMDB syncs a commit's pages before writing the meta page that names them, which is what the sync-each-commit
+            // mode relies on, and with NO_SYNC on, group commit's syncs are what flush a commit (`committed`). A read-only
+            // environment is never written, so its flags are none of these
             unsafe {
                 builder.flags(flags);
             }
@@ -303,7 +311,13 @@ impl Store {
             unsafe { builder.open(&canonical) }
         };
         let env =
-            open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }).map_err(|e| match e {
+            open(match (options.read_only, options.sync_each_commit) {
+                (true, _) => EnvFlags::READ_ONLY,
+                // LMDB's own order: a commit's pages, a sync, then the meta page that names them, synced as written
+                (false, true) => EnvFlags::empty(),
+                (false, false) => EnvFlags::NO_SYNC,
+            })
+            .map_err(|e| match e {
                 heed::Error::Io(ref io) if options.read_only && io.kind() == std::io::ErrorKind::PermissionDenied => {
                     Error::new(
                         ErrorCode::Io,
@@ -330,7 +344,7 @@ impl Store {
         let writers = writers::Writers::open(&canonical, options.read_only)?;
         let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
         let gate = Arc::new(RecursiveRwLock::new(()));
-        let commit = (!options.read_only && options.syncs).then(|| {
+        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
                 Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
@@ -354,6 +368,8 @@ impl Store {
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
+            // A read-only store makes no commit, so the mode is none of its concern
+            sync_each_commit: options.sync_each_commit,
             env,
             db,
             gate,
@@ -789,6 +805,14 @@ impl Store {
                 commit.durable().wait()?;
             }
         }
+        // LMDB's meta page, the commit's point, is written with O_DSYNC, which on Apple doesn't flush the drive's cache: a
+        // full sync (F_FULLFSYNC, which LMDB's own sync makes of its data file on Apple) does, and a commit that returned
+        // is then on disk. Elsewhere LMDB's sync of the meta page is the flush
+        // mutant-skip: replace && with || in Store::committed
+        // Off Apple the extra sync adds a flush and changes no answer, and no test observes a flush's count
+        if self.sync_each_commit && cfg!(target_os = "macos") {
+            self.env.force_sync()?;
+        }
         Ok(())
     }
 
@@ -868,6 +892,19 @@ impl Store {
     /// Whether more than half the map is used, which a unit about to open grows it for
     fn map_half_used(&self) -> bool {
         self.map_short_of(2)
+    }
+
+    /// The flags the environment was opened with, which say when LMDB syncs (`EnvFlags`)
+    #[cfg(test)]
+    pub(crate) fn env_flags(&self) -> u32 {
+        self.env.get_flags().expect("the environment's flags read")
+    }
+
+    /// The size of a page of the data file, which LMDB writes whole
+    #[cfg(test)]
+    pub(crate) fn page_size(&self) -> usize {
+        let _gate = self.gate();
+        self.env.unnamed_database_stat().page_size as usize
     }
 
     /// Whether `times` what the map has in use is more than the map

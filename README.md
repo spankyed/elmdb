@@ -94,6 +94,10 @@ It uses N-API, so a Node or Electron upgrade needs no rebuild.
 **Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` syncs before it
 returns. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it.
 
+**Power loss:** by default a commit that returned can be lost if the machine loses power before its sync, about a second
+after it. Open with `syncEachCommit: true` to sync every commit as it is made, so a commit that returned survives a power
+loss; each commit then costs its own sync.
+
 **Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
 refused.
 

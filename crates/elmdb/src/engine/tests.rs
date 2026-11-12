@@ -16,6 +16,7 @@ mod maintenance;
 mod model;
 mod ordered;
 mod plans;
+mod power_loss;
 mod rank_bound;
 mod rank_index;
 mod ranks;

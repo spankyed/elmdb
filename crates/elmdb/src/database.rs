@@ -23,6 +23,10 @@ pub struct OpenOptions {
     pub schema: Option<Schema>,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once, for a test's temporary directory
     pub syncs: bool,
+    /// Every commit synced as it is made, so that one that returned survives the machine losing power, at the price of a
+    /// sync per commit (`docs/architecture/engine.md`, Durability). It syncs whatever `syncs` says, group commit and its
+    /// timings are then unused, and it is off for a read-only database, which is never written
+    pub sync_each_commit: bool,
     pub sync_idle_ms: u64,
     pub sync_interval_ms: u64,
     /// The map's size at open; by default twice the data file, and 64 MiB at least
@@ -35,6 +39,7 @@ impl Default for OpenOptions {
             read_only: false,
             schema: None,
             syncs: true,
+            sync_each_commit: false,
             sync_idle_ms: 100,
             sync_interval_ms: 1000,
             map_size_bytes: None,
@@ -120,6 +125,7 @@ impl Database {
             StoreOptions {
                 read_only: options.read_only,
                 syncs: options.syncs,
+                sync_each_commit: options.sync_each_commit,
                 sync_idle: Duration::from_millis(options.sync_idle_ms),
                 sync_interval: Duration::from_millis(options.sync_interval_ms),
                 map_size_bytes: options.map_size_bytes,
@@ -269,8 +275,8 @@ impl Database {
             .ok_or_else(|| Error::new(ErrorCode::Closed, format!("The database at {} is closed", self.path.display())))
     }
 
-    /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, or when
-    /// syncs are off or the database is read-only
+    /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, when
+    /// syncs are off or the database is read-only, or when each commit is synced as it is made (`sync_each_commit`)
     pub fn durable(&self) -> Result<Durable> {
         Ok(self.store()?.durable().unwrap_or_else(Durable::resolved))
     }

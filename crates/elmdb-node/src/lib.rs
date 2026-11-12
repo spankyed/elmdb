@@ -66,6 +66,10 @@ pub struct OpenOptions {
     pub schema: Option<serde_json::Value>,
     /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory
     pub syncs: Option<bool>,
+    /// Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
+    /// sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
+    /// commits are synced in groups, a moment after they return
+    pub sync_each_commit: Option<bool>,
     pub sync_idle_ms: Option<f64>,
     pub sync_interval_ms: Option<f64>,
     pub map_size_bytes: Option<f64>,
@@ -150,6 +154,7 @@ impl Database {
                 read_only: None,
                 schema: None,
                 syncs: None,
+                sync_each_commit: None,
                 sync_idle_ms: None,
                 sync_interval_ms: None,
                 map_size_bytes: None,
@@ -163,6 +168,7 @@ impl Database {
                 read_only: options.read_only.unwrap_or(false),
                 schema,
                 syncs: options.syncs.unwrap_or(true),
+                sync_each_commit: options.sync_each_commit.unwrap_or(false),
                 sync_idle_ms: whole("syncIdleMs", options.sync_idle_ms, 0.0)?.unwrap_or(defaults.sync_idle_ms),
                 sync_interval_ms: whole("syncIntervalMs", options.sync_interval_ms, 0.0)?
                     .unwrap_or(defaults.sync_interval_ms),
