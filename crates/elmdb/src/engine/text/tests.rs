@@ -1563,6 +1563,78 @@ fn a_page_of_a_search_is_cut_past_its_own_cursor_when_a_step_below_it_sought_one
 }
 
 #[test]
+fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_only_what_it_hands_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut indexes = message_text();
+    indexes["bySender"] = json!({ "kind": "value", "fields": ["sender"] });
+    indexes["byAt"] = json!({ "kind": "value", "fields": ["at"] });
+    let options = OpenOptions { schema: Some(schema_with(indexes)), syncs: false, ..Default::default() };
+    let db = Database::open(dir.path(), options).unwrap();
+    let id = |i: usize| format!("Message-{i:02}");
+    // Forty messages holding the word, each longer than the one before and so ranked after it, every second one
+    // of a sender; the first two are in the trash
+    let messages = (0..40).map(|i| {
+        let sender = if i % 2 == 0 { "a" } else { "b" };
+        let fields = json!({ "text": format!("lmdb{}", " filler".repeat(i)), "sender": sender, "at": i });
+        create("Message", &id(i), fields)
+    });
+    write(&db, messages.collect());
+    write(&db, (0..2).map(|i| json!({ "op": "trash", "id": id(i) })).collect());
+    let lmdb = json!({ "step": "search", "query": "lmdb", "options": { "fuzzy": false } });
+    let from = json!({ "step": "where", "field": "sender", "value": "a" });
+    let ids = |range: std::iter::StepBy<std::ops::Range<usize>>| json!(range.map(id).collect::<Vec<_>>());
+    let answer = json!({ "answer": "ids" });
+    // The sender's nineteen live messages are the set searched: the best three are read, and no other
+    let best = visited(&db, "live", json!([from, lmdb, limit(3)]), answer.clone());
+    assert_eq!(best, (json!({ "kind": "ids", "ids": ids((2..8).step_by(2)) }), 3));
+    // A filter with no index is tested against each entity the sender's list holds, and the search runs among
+    // those kept: the same answer, the nineteen read to make the set
+    let texted = json!({ "step": "has", "field": "text" });
+    let among = visited(&db, "live", json!([from, texted, lmdb, limit(3)]), answer.clone());
+    assert_eq!(among, (best.0.clone(), 19 + 3));
+    // With a range its index reads, in either order, and every match: those of the sender from the twentieth on
+    let late = json!({ "step": "range", "field": "at", "atLeast": 20 });
+    for steps in [json!([from, late, lmdb]), json!([late, from, lmdb])] {
+        let found = visited(&db, "live", steps.clone(), answer.clone());
+        assert_eq!(found, (json!({ "kind": "ids", "ids": ids((20..40).step_by(2)) }), 10), "{steps}");
+    }
+    // The scope's entities: the one of the sender's in the trash alone, or first among them all
+    let trashed = visited(&db, "trashed", json!([from, lmdb]), answer.clone());
+    assert_eq!(trashed, (json!({ "kind": "ids", "ids": [id(0)] }), 1));
+    let all = visited(&db, "withTrashed", json!([from, lmdb, limit(2)]), answer.clone());
+    assert_eq!(all, (json!({ "kind": "ids", "ids": ids((0..4).step_by(2)) }), 2));
+    // The first, and whether there is one; and a sender no message has, for whom nothing is read
+    let first = visited(&db, "live", json!([from, lmdb]), json!({ "answer": "first" }));
+    assert_eq!((first.0["id"].clone(), first.1), (json!(id(2)), 1));
+    let nobody = json!({ "step": "where", "field": "sender", "value": "z" });
+    assert_eq!(visited(&db, "live", json!([nobody, lmdb]), answer.clone()), (json!({ "kind": "ids", "ids": [] }), 0));
+    // The hits are scored as among any set: a set's places change no score
+    let hits = |steps: Json| visited(&db, "live", steps, json!({ "answer": "hits" })).0;
+    assert_eq!(hits(json!([from, lmdb, limit(5)])), hits(json!([from, texted, lmdb, limit(5)])));
+    // Explained, the search's stage says which indexes made its set, that they were read in common, how many
+    // places they were handed and how many the set holds. Each list is asked for its first place; the range's
+    // twenty are walked; and the sender's list is sought at the first of them and at each the sender doesn't
+    // hold, ten, the place it answers with being the one asked for next
+    let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message"] },
+        "steps": [from, late, lmdb], "terminal": answer });
+    let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+    let stage = &explained["stages"][3];
+    assert_eq!(stage["stage"], "search", "{explained}");
+    let said = [&stage["index"], &stage["set"], &stage["places"], &stage["within"], &stage["visited"]];
+    assert_eq!(
+        said,
+        [&json!("bySender, byAt"), &json!("and"), &json!(2 + 20 + 11), &json!(10), &json!(10)],
+        "{explained}"
+    );
+    assert!(explained["stages"][1].get("index").is_none() && explained["stages"][2].get("index").is_none());
+    // A filter no stage would take is refused as its stage refuses it
+    let nobodys = json!({ "step": "withRole", "role": "nobody" });
+    let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message"] },
+        "steps": [from, nobodys, lmdb], "terminal": answer });
+    assert_eq!(read(&db, json!({ "read": "query", "plan": plan })).unwrap_err().code, ErrorCode::UnknownRole);
+}
+
+#[test]
 fn a_search_paged_by_any_size_hands_on_each_match_once_in_the_whole_search_s_order() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

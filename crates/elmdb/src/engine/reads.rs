@@ -571,6 +571,9 @@ struct Asks<'a> {
     tested: &'a [usize],
     /// How many entries the read may have read before it pauses
     pause_at: u64,
+    /// Where the places are kept, for a read that takes them as a set: no entity is read at one, and none is
+    /// handed on
+    kept: Option<&'a RefCell<RoaringTreemap>>,
 }
 
 /// How a read of the places some lists hold in common left off (`Query::common`)
@@ -743,6 +746,15 @@ impl Best {
 type Fixed = rustc_hash::FxBuildHasher;
 
 impl<R: Read> Query<'_, R> {
+    /// The leading filters were handed this many places more, each walked or sought: counted for the plan, and for
+    /// the stage running when the read is explained
+    fn handed(&self, places: u64) {
+        self.places.set(self.places.get() + places);
+        if let Some(stages) = self.stages {
+            stages.handed(places);
+        }
+    }
+
     /// One entity read from the store, by the start or by a step reading an index or walking a type
     fn count_visit(&self) {
         self.visited.set(self.visited.get() + 1);
@@ -1450,7 +1462,15 @@ impl<R: Read> Query<'_, R> {
     ) -> Result<bool> {
         let raw = text::search::parse(query);
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
-        let (types, among) = self.searched(before)?;
+        // The filters a type start begins with are the set it searches within, where their indexes read them all
+        let sets = self.filtered_sets(before)?;
+        let (types, among) = match &sets {
+            Some(sets) => (sets.iter().map(|(entity_type, _)| entity_type.clone()).collect(), None),
+            None => self.searched(before)?,
+        };
+        let set_of = |entity_type: &str| {
+            sets.as_ref().and_then(|sets| sets.iter().find(|(of, _)| of == entity_type).map(|(_, set)| set))
+        };
         // Before an `after` it hands on only its matches past the cursor, and says so once the stages before it have
         // run: one of those that sought to a cursor of its own said so of itself
         if cursor.is_some() {
@@ -1480,7 +1500,8 @@ impl<R: Read> Query<'_, R> {
             // Whichever match comes first is the answer, so none is scored and each index is read only if those
             // before it matched nothing
             for (entity_type, text_index) in &indexes {
-                let (matches, ids) = self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?;
+                let (matches, ids) =
+                    self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?;
                 for seq in &matches.found {
                     self.count_visit();
                     let Some(id) = self.matched_entity(entity_type, ids.as_ref(), seq)? else { continue };
@@ -1507,7 +1528,8 @@ impl<R: Read> Query<'_, R> {
         let mut own = None;
         if let Some((slot, seq)) = at {
             let (entity_type, text_index) = &indexes[slot];
-            let held = self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?;
+            let held =
+                self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?;
             if !held.0.found.contains(seq) {
                 return Ok(true);
             }
@@ -1517,7 +1539,9 @@ impl<R: Read> Query<'_, R> {
         for (slot, (entity_type, text_index)) in indexes.iter().enumerate() {
             searched.push(match own.take_if(|(of, _)| *of == slot) {
                 Some((_, held)) => held,
-                None => self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?,
+                None => {
+                    self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?
+                }
             });
         }
         // A tie is broken by the set's own order, or by the types' and then by creation's
@@ -1571,11 +1595,12 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// What a query matches in one of the indexes a search reads, with the id at each place of the set searched among
-    /// that is of the index's type. From a type the matches are among the places the plan's scope holds, and no ids
-    /// are read
+    /// that is of the index's type. From a type the matches are among the places the plan's scope holds, or those
+    /// of them in `set`, and no ids are read
     fn matches_in<'a>(
         &self,
         among: Option<&[String]>,
+        set: Option<&RoaringTreemap>,
         entity_type: &'a str,
         text_index: &'a TextIndex,
         raw: &[RawClause],
@@ -1588,11 +1613,21 @@ impl<R: Read> Query<'_, R> {
             }
             None => None,
         };
-        let (within, live) = match &ids {
-            Some(ids) => (Some(ids.keys().copied().collect::<RoaringTreemap>()), false),
-            None => self.searched_places(entity_type)?,
+        let held;
+        let (within, live) = match (&ids, set) {
+            (Some(ids), _) => {
+                held = Some(ids.keys().copied().collect::<RoaringTreemap>());
+                (held.as_ref(), false)
+            }
+            // A set is of the scope's places already
+            (None, Some(set)) => (Some(set), false),
+            (None, None) => {
+                let (places, live) = self.searched_places(entity_type)?;
+                held = places;
+                (held.as_ref(), live)
+            }
         };
-        let matches = text::search::matches(self.r, entity_type, text_index, raw, options, within.as_ref(), live)?;
+        let matches = text::search::matches(self.r, entity_type, text_index, raw, options, within, live)?;
         Ok((matches, ids))
     }
 
@@ -1607,6 +1642,70 @@ impl<R: Read> Query<'_, R> {
             Some(ids) => Ok(ids.get(&seq).cloned()),
             None => self.at_place(entity_type, seq),
         }
+    }
+
+    /// The places the plan's first `before` steps keep, for each of a type start's types that has any, when those
+    /// steps are the filters the start begins with and an index reads every one of them in every type: the places
+    /// their lists hold in common (`common`), of the entities the scope reaches. No entity is read to make them. None
+    /// when a filter has no list in some type, which is then tested against each entity as the set is collected
+    fn filtered_sets(&self, before: usize) -> Result<Option<Vec<(String, RoaringTreemap)>>> {
+        let Some(types) = self.start_types() else { return Ok(None) };
+        if before == 0 || before != self.filters {
+            return Ok(None);
+        }
+        self.filters_taken(before)?;
+        let mut sets = Vec::new();
+        for entity_type in types {
+            let Some(mut set) = self.filtered_places(before, entity_type)? else { return Ok(None) };
+            if self.plan.scope != Scope::WithTrashed {
+                let mut trashed = RoaringTreemap::new();
+                self.r.visit(&keys::type_range(true, entity_type), |key, _| {
+                    trashed.extend(keys::place_of(key));
+                    true
+                })?;
+                if self.plan.scope == Scope::Live {
+                    set -= trashed;
+                } else {
+                    set &= trashed;
+                }
+            }
+            if let Some(stages) = self.stages {
+                stages.ran_within(set.len());
+            }
+            if !set.is_empty() {
+                sets.push((entity_type.clone(), set));
+            }
+        }
+        Ok(Some(sets))
+    }
+
+    /// The places of a type every one of the plan's first `upto` steps keeps, read from their lists and from the
+    /// ranges among them, each read whole: none when a step has no list, or no step has one
+    fn filtered_places(&self, upto: usize, entity_type: &str) -> Result<Option<RoaringTreemap>> {
+        let mut lists = self.listed(upto, entity_type)?;
+        for ranged in self.ranges_of(upto, entity_type)? {
+            let list = self.read_range(ranged)?;
+            lists
+                .retain(|other| other.covers.is_empty() || !other.covers.iter().all(|step| list.covers.contains(step)));
+            lists.push(list);
+        }
+        if !(0..upto).all(|at| lists.iter().any(|list| list.covers.contains(&at))) {
+            return Ok(None);
+        }
+        let kept = RefCell::new(RoaringTreemap::new());
+        let asks = Asks { entity_type, tested: &[], pause_at: u64::MAX, kept: Some(&kept) };
+        let (mut next, mut read) = (0, 0);
+        if let Some(stages) = self.stages {
+            for index in lists.iter().filter_map(|list| list.index.as_deref()) {
+                stages.reads_index(index);
+            }
+            if lists.len() > 1 {
+                stages.read_in_common();
+            }
+        }
+        self.common(&mut lists, &asks, &mut next, &mut read, &mut |_| Ok(true))?;
+        self.handed(read);
+        Ok(Some(kept.into_inner()))
     }
 
     /// The places of a type a search from it reads, as those to search among and whether its trash is left out: all
@@ -1953,7 +2052,7 @@ impl<R: Read> Query<'_, R> {
     fn filtered_of(&self, upto: usize, entity_type: &str, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
         let mut read = 0u64;
         let ended = self.filtered_from(upto, entity_type, after, &mut read, visit);
-        self.places.set(self.places.get() + read);
+        self.handed(read);
         ended
     }
 
@@ -1999,6 +2098,9 @@ impl<R: Read> Query<'_, R> {
                 for index in lists.iter().filter_map(|list| list.index.as_deref()) {
                     stages.reads_index(index);
                 }
+                if lists.len() > 1 {
+                    stages.read_in_common();
+                }
             }
             let pause_at = if ranged.is_empty() { u64::MAX } else { ask_at };
             if lists.is_empty() {
@@ -2021,7 +2123,7 @@ impl<R: Read> Query<'_, R> {
                 let Some(place) = paused else { return Ok(true) };
                 next = place + 1;
             } else {
-                let asks = Asks { entity_type, tested: &tested, pause_at };
+                let asks = Asks { entity_type, tested: &tested, pause_at, kept: None };
                 match self.common(&mut lists, &asks, &mut next, read, visit)? {
                     Left::Stopped => return Ok(false),
                     Left::Ended => return Ok(true),
@@ -2289,6 +2391,10 @@ impl<R: Read> Query<'_, R> {
                     }
                 }
                 *next = place + 1;
+                if let Some(kept) = asks.kept {
+                    kept.borrow_mut().insert(place);
+                    return Ok(true);
+                }
                 // The entity at the place, where the scope reaches one there: its type's rows say, and one they
                 // name is an entity read
                 let found = self.at_place(asks.entity_type, place)?;
@@ -3486,6 +3592,11 @@ struct Stages {
     wants: RefCell<Vec<Option<String>>>,
     /// Per `search` stage: how many of its matches it held at once to rank them
     held: RefCell<Vec<Option<u64>>>,
+    /// Per stage that read lists of places: how many places it was handed, each walked or sought; whether it read
+    /// the places several lists hold in common; and for a search, how many places the set it ran within holds
+    places: Vec<Cell<u64>>,
+    common: RefCell<Vec<bool>>,
+    within: RefCell<Vec<Option<u64>>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
@@ -3528,6 +3639,9 @@ impl Stages {
             building: RefCell::new(vec![false; n]),
             wants: RefCell::new(vec![None; n]),
             held: RefCell::new(vec![None; n]),
+            places: (0..n).map(|_| Cell::new(0)).collect(),
+            common: RefCell::new(vec![false; n]),
+            within: RefCell::new(vec![None; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -3595,6 +3709,23 @@ impl Stages {
         self.held.borrow_mut()[self.running.get()] = Some(matches as u64);
     }
 
+    /// The stage running was handed this many places of lists more
+    fn handed(&self, places: u64) {
+        let at = self.running.get();
+        self.places[at].set(self.places[at].get() + places);
+    }
+
+    /// The stage running read the places several lists hold in common
+    fn read_in_common(&self) {
+        self.common.borrow_mut()[self.running.get()] = true;
+    }
+
+    /// The stage running, a search, ran within a set of this many places more
+    fn ran_within(&self, places: u64) {
+        let within = &mut self.within.borrow_mut()[self.running.get()];
+        *within = Some(within.unwrap_or(0) + places);
+    }
+
     fn rank_error(&self, stage: usize, error: f64) {
         self.errors.borrow_mut()[stage] = Some(error);
     }
@@ -3627,6 +3758,8 @@ impl Stages {
         let building = self.building.borrow();
         let wants = self.wants.borrow();
         let held = self.held.borrow();
+        let common = self.common.borrow();
+        let within = self.within.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -3647,7 +3780,10 @@ impl Stages {
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
-                + u32::from(held[at].is_some());
+                + u32::from(held[at].is_some())
+                + u32::from(self.places[at].get() > 0)
+                + u32::from(common[at])
+                + u32::from(within[at].is_some());
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -3690,6 +3826,18 @@ impl Stages {
             if let Some(held) = held[at] {
                 w.str("held");
                 w.uint(held);
+            }
+            if common[at] {
+                w.str("set");
+                w.str("and");
+            }
+            if self.places[at].get() > 0 {
+                w.str("places");
+                w.uint(self.places[at].get());
+            }
+            if let Some(within) = within[at] {
+                w.str("within");
+                w.uint(within);
             }
             if let Some((neighbours, candidates, edges)) = compared[at] {
                 w.str("neighbours");

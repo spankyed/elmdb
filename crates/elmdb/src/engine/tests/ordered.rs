@@ -901,7 +901,8 @@ fn explain_names_the_index_an_order_and_a_range_read() {
         stages(json!([{ "step": "range", "field": "n", "atLeast": 3 }])),
         vec![
             json!({ "stage": "types", "visited": 0, "kept": 0 }),
-            json!({ "stage": "range", "index": "byN", "visited": 4, "kept": 4 }),
+            // Its four places are read from the index, and then walked as a list
+            json!({ "stage": "range", "index": "byN", "places": 4 + 4, "visited": 4, "kept": 4 }),
             json!({ "stage": "ids", "visited": 4, "kept": 4 }),
         ]
     );
@@ -918,7 +919,7 @@ fn explain_names_the_index_an_order_and_a_range_read() {
     );
     assert_eq!(
         stages(json!([{ "step": "range", "field": "m", "atLeast": 3 }]))[1],
-        json!({ "stage": "range", "index": "none: walks the type", "visited": 18, "kept": 4 })
+        json!({ "stage": "range", "index": "none: walks the type", "places": 18, "visited": 18, "kept": 4 })
     );
 }
 
