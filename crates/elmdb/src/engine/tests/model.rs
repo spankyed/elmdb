@@ -2330,6 +2330,39 @@ fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refused_by_both()
     );
 }
 
+#[test]
+fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_the_engine_does() {
+    // The engine refuses a rename onto an edge of the new kind before its commit, so the refusal armed for the next commit
+    // stays armed: the create after the failed rename is the one refused, by both
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "tags", target: "Task-2" },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let steps = [
+        Step::RefuseNext,
+        Step::RenameRelation { from: "refs", to: "tags" },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("y"))]) },
+    ];
+    for step in steps {
+        reference.outcome = model.step(&step);
+        reference.model = model.clone();
+        engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+            engine,
+            &reference,
+            Aimed { step, aimed: false },
+        );
+    }
+    assert!(reference.outcome.is_err(), "the create after the failed rename is refused, as the armed refusal says");
+}
+
 proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
