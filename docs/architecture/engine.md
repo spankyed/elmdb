@@ -200,7 +200,7 @@ A plan is a scope, a start, steps and a terminal:
   whichever way: groups more densely linked inside than out, each connected, largest first; a higher `resolution`
   (1.0) finds smaller ones and 0 leaves each component whole; Leiden's order is drawn from `seed` (0), so a seed answers
   the same for the same data on every platform; at most `iterations` (100) rounds; an edge of a kind declared weighted
-  counts by its weight unless `weights` is false; a negative resolution or no iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `hits` (what a search, a rank or a `similar` found in each entity).
+  counts by its weight unless `weights` is false; a negative resolution or no iterations is refused, `BATCH_INVALID`), `groupBy` (ids by value, or with `counts` how many), `least` and `greatest` (`{ kind, id, value }`: the entity whose `field` is least or greatest in the order `orderBy` sorts it in, among those holding a value for it, the first of equal values in the plan's order; `id` and `value` are `null` when none holds one), `sum` (`{ kind, sum, n }`: the numbers the field holds over the set and how many entities hold one, refused with `VALUE_INVALID` for a value that isn't a number or a sum past what a number holds), `hits` (what a search, a rank or a `similar` found in each entity).
 
 A plan pulls ids through its steps one at a time, so `first`, `exists`, `firstRow` and `limit` stop once they have
 their answer, and a live type's `count` is read off its counter. The planner makes these choices, none of which changes
