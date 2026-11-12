@@ -180,15 +180,25 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
         let clash = relations::with_identity(t, def, &stored.source, to, &stored.target, &key, None)?;
         let group = by_ends.entry((stored.source.clone(), stored.target.clone())).or_default();
         let twin = group.iter().any(|other| relations::same_key(other, &key));
-        if clash.is_some() || twin {
+        let identity =
+            if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
+        if clash.is_some() {
             return Err(Error::new(
                 ErrorCode::DuplicateEdge,
                 format!(
-                    "renameRelation({from:?} to {to:?}): an edge of kind {to} already joins {} to {}{}, and the rename would \
-                     make a second: remove one of them first",
-                    stored.source,
-                    stored.target,
-                    if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) }
+                    "renameRelation({from:?} to {to:?}): an edge of kind {to} already joins {} to {}{identity}, and the \
+                     rename would make a second: remove one of them first",
+                    stored.source, stored.target
+                ),
+            ));
+        }
+        if twin {
+            return Err(Error::new(
+                ErrorCode::DuplicateEdge,
+                format!(
+                    "renameRelation({from:?} to {to:?}): two edges of kind {from} join {} to {}{identity} that kind {to} \
+                     would hold as one, and the rename would make one identity of two: remove one of them first",
+                    stored.source, stored.target
                 ),
             ));
         }

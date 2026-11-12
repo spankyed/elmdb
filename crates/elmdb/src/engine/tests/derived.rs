@@ -573,6 +573,32 @@ fn rename_relation_refuses_an_edge_that_would_make_a_second_of_the_new_kind_and_
 }
 
 #[test]
+fn rename_relation_moves_same_keyed_edges_between_different_ends_without_refusing() {
+    // Two edges of one key value are one identity only between the same ends: between different ends they rename fine
+    let keyed = |key: Json| json!({ "cardinality": "many-to-many", "info": { "type": "object", "optional": true }, "key": key });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "relations": { "old": keyed(json!(["a"])), "fresh": keyed(json!(["a"])) },
+        "types": { "Note": { "fields": { "title": { "type": "string", "optional": true } } } }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-3", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1 } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-3", "info": { "a": 1 } }),
+        ],
+    )
+    .unwrap();
+    db.rename_relation("old", "fresh").expect("the same key between different ends is one identity each");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn renaming_a_kind_to_itself_moves_nothing_and_refuses_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
