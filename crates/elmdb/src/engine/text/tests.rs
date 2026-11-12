@@ -1661,6 +1661,18 @@ fn a_search_after_filters_their_indexes_read_runs_within_their_places_and_reads_
         "{explained}"
     );
     assert!(explained["stages"][1].get("index").is_none() && explained["stages"][2].get("index").is_none());
+    // Each stage is whole, the search's with what it adds, and the answer is the plain read's
+    let stages = explained["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 5, "{explained}");
+    assert!(stages.iter().all(|stage| stage["kept"].is_number() && stage["ms"].is_number()), "{explained}");
+    assert_eq!(explained["answer"]["ids"], ids((20..40).step_by(2)));
+    // One list alone is no set of several: the sender's twenty places are walked, and nineteen are live
+    let plan = json!({ "scope": "live", "start": { "from": "types", "types": ["Message"] },
+        "steps": [from, lmdb], "terminal": answer });
+    let explained = read(&db, json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+    let stage = &explained["stages"][2];
+    assert!(stage.get("set").is_none(), "{explained}");
+    assert_eq!([&stage["index"], &stage["places"], &stage["within"]], [&json!("bySender"), &json!(20), &json!(19)]);
     // Whatever the plan answers, and from whichever types, it answers what the search among the entities the
     // filters keep answers. Two messages of one text tie, and are in the order they were made either way
     write(&db, (40..42).map(|i| create("Message", &id(i), json!({ "text": "lmdb tied", "sender": "a" }))).collect());
