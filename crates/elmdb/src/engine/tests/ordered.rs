@@ -394,8 +394,6 @@ fn a_page_of_a_value_s_holders_is_sought_in_the_index_or_the_walk() {
                 let (page, visits) = visited(&db, plan("live", &types, json!(paged)));
                 let rest = rest_after(&all_of, cursor);
                 assert_eq!(page, rest[..rest.len().min(2)], "{what}, {types:?}, after {cursor}");
-                // A filter before an index is read from it only when every type has one, which Other hasn't
-                let sought = sought && (types.len() == 1 || !what.ends_with("after a filter"));
                 if sought && what != "a walk of the type" && !rest.is_empty() {
                     // The page's two, the trashed entity it passes over, and those a filter leaves out between them:
                     // never the holders before the cursor, of which the last has nine

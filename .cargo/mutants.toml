@@ -43,8 +43,8 @@ exclude_re = [
     "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
     # within's guard: the DFA is built for the distance within asks, and reports Exact only up to its own maximum
     "search.rs:.*replace match guard d <= distance with true in within",
-    # walk_type merges the trash into the live range by place, and no two entities share a place
-    "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
+    # walk_places merges the trash into the live range by place, and no two entities share a place
+    "reads.rs:.*replace < with <= in Query<'_, R>::walk_places",
     # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",

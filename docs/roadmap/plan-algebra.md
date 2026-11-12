@@ -22,9 +22,32 @@ An order or a range under equalities is read from an index on the equalities' fi
 such index an `orderBy` before a `limit` walks its order and tests the filters while that costs less than sorting
 what they keep, which it learns by counting the entries the filters would read as it goes.
 
-What the planner still does not do: choose which of two indexed filters drives (the first wins, whichever is smaller),
-intersect two indexes rather than check one per match, or run a search inside a filter's set when the filter comes
-first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
+Since then a type start's leading filters are read as the places their indexes hold in common, each index's
+entries for a value a list in place order: one list is walked and its places sought in the others, so what is read
+is bounded by the shortest whichever filter is written first, and nothing is counted to choose among them
+(`../architecture/engine.md`, Reads: plans). That answers what the first phase below was for without its `d/xn` key.
+
+The reading of The measurements below, taken again as a disposable program through `Database::read_bytes`: 100,000
+tasks, `status` `open` for every second, `prio` `high` for every fifth, so every tenth holds both, each field in an
+index of its own; a release build on an Apple M1 Pro, 2026-11-11, medians of seven. `session/filter-access` at
+`d814908`, at a load of 7, counts each index no further than 1,024 entries, which both hold more than, and so reads
+the first written. `session/leapfrog-filters` at `e304d23`, at a load of 6 to 14, reads the places both hold.
+
+| The read | One index read | The places in common |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 61.8 ms | 18.3 ms |
+| `where(prio).where(status)`, every id | 26.3 ms | 18.0 ms |
+| `where(status).where(prio)`, the first | 60.3 µs | 8.2 µs |
+| `where(status)`, the first | 5.1 µs | 5.1 µs |
+| `where(prio)`, every id | 14.3 ms | 14.3 ms |
+
+In this data the order written no longer matters, and a first over two filters costs 1.6 times a first over one,
+where counting the two indexes cost twelve times. Every id of the two together still costs more than every id of
+the smaller alone, a place sought in the other list for each of its twenty thousand: that is what the lists as
+bitmaps are for. No row here reads a range, the trash, three lists or lists whose places come in runs.
+
+What the planner still does not do: read those lists as bitmaps, a seek a place where a block would be an AND, or run
+a search inside a filter's set when the filter comes first. A walked entity is tested by reading its record and the filters' fields; with filters as sets of places, below,
 the test is a lookup in a set.
 
 ## The measurements
