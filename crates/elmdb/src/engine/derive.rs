@@ -443,6 +443,10 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         filing.entry(key, e.seq)
                     })
                 })?;
+                clear_value_index(t, entity_type, name)?;
+                text::clear(t, entity_type, name)?;
+                filing.finish(|key, value| t.put(&key, &value))?;
+                // Two holders of one key fail the rebuild after its writes, which the unit then leaves unmade
                 let mut holders = scratch.finish()?;
                 let mut holder: Option<(Vec<u8>, String)> = None;
                 while let Some((order, _)) = holders.next()? {
@@ -458,9 +462,6 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     }
                     holder = Some((key, id));
                 }
-                clear_value_index(t, entity_type, name)?;
-                text::clear(t, entity_type, name)?;
-                filing.finish(|key, value| t.put(&key, &value))?;
             } else if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
                 let mut text = text::Entries::new(entity_type, &found)?;
                 visit_entities(t, |e| {

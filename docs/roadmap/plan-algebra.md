@@ -67,6 +67,24 @@ of its own, the median of 300. An Apple M1 Pro, 2026-11-11, at a load of 15 to 3
 A bitmap saves under a megabyte of a million entities' indexes, so the blocks hold distances alone. A value every
 entity holds its own costs what it did: a key for each.
 
+The reading above taken again with the places in blocks, the same program and machine, 2026-11-11, at a load of 7:
+`main` at `d5e8e08` and `session/value-blocks`, one run after the other.
+
+| The read | A key an entity | Places in blocks |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 19.3 ms | 7.0 ms |
+| `where(prio).where(status)`, every id | 18.8 ms | 6.8 ms |
+| `where(status).where(prio)`, the first | 8.1 µs | 11.6 µs |
+| `where(status)`, every id | 35.1 ms | 28.0 ms |
+| `where(status)`, the first | 4.9 µs | 7.2 µs |
+| `where(prio)`, every id | 13.8 ms | 11.5 ms |
+| `where(status).where(owner)`, an owner of 100 none of them open | 0.064 ms | 0.184 ms |
+
+Every id of the two together costs less than every id of the smaller alone did, a place sought being found in the
+block already held. A first costs two keys more than it did, the value's own and the entity's row. The last row is
+what the blocks cost: a hundred places a thousand apart are each sought in a block of their own, which is read and
+its 256 places decoded for the one, 1.8 µs where a key sought was 0.6.
+
 What the planner still does not do: run a search inside a filter's set when the filter comes first, or read `lacks`
 from the list an index keeps of the entities without a value. A walked entity is tested by reading its record and the
 filters' fields.

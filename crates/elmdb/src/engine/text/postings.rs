@@ -569,6 +569,34 @@ pub struct Sought {
     /// but these are among them
     run: Vec<u64>,
     covers: Option<(u64, u64)>,
+    /// The key the term's blocks begin after
+    low: Vec<u8>,
+}
+
+/// Reads into `run` the places of the block `stored` at `key`, and answers the first and the last place of its
+/// range. A block that doesn't hold `holding` is left unread, and answers none
+fn block_into(
+    key: &[u8],
+    stored: &[u8],
+    fields: usize,
+    holding: Option<u64>,
+    run: &mut Vec<u64>,
+) -> Result<Option<(u64, u64)>> {
+    let start = keys::place_of(key).ok_or_else(corrupt)?;
+    let (&level, mut rest) = stored.split_first().ok_or_else(corrupt)?;
+    let level = u32::from(level);
+    let size = range(start, level)?;
+    if holding.is_some_and(|place| !together(start, place, level)) {
+        return Ok(None);
+    }
+    let count = varint(&mut rest)?;
+    // A range starts at a multiple of its size, so its last place is no more than a u64 holds
+    let end = start + (size - 1);
+    run.clear();
+    for entry in each_entry(rest, Held { count, start, end }, fields) {
+        run.push(entry?.0);
+    }
+    Ok(Some((start, end)))
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -580,7 +608,8 @@ enum Own {
 
 impl Sought {
     pub fn new(term: Term) -> Self {
-        Sought { term, own: None, run: Vec::new(), covers: None }
+        let (low, _) = crate::format::key::prefix_range(&term.blocks);
+        Sought { term, own: None, run: Vec::new(), covers: None, low }
     }
 
     /// A term whose own key holds `stored`, which a walk of the keys it is among has read already
@@ -647,39 +676,36 @@ impl Sought {
     /// Reads the block that answers for `place`: the one it is in, or with none the first after it, which answers
     /// for every place from `place` to its last. False when the term has no block so late
     fn read(&mut self, r: &impl Read, place: u64) -> Result<bool> {
-        let at = self.term.block(place);
-        let (low, _) = crate::format::key::prefix_range(&self.term.blocks);
-        let mut past = at.clone();
+        let mut past = self.term.block(place);
+        let from = past.len();
         past.push(0);
+        let fields = self.term.fields;
+        let run = &mut self.run;
         let mut found = None;
-        r.visit_back_within(&low, &past, |key, stored| {
-            found = Some(Block::read(key, stored));
+        r.visit_back_within(&self.low, &past, |key, stored| {
+            found = Some(block_into(key, stored, fields, Some(place), run));
             false
         })?;
-        let (block, first) = match found.transpose()?.filter(|block| block.holds(place)) {
-            Some(block) => {
-                let first = block.start;
-                (block, first)
+        if let Some(covers) = found.transpose()?.flatten() {
+            self.covers = Some(covers);
+            return Ok(true);
+        }
+        let mut found = None;
+        r.visit_from(&self.term.blocks, &past[..from], |key, stored| {
+            found = Some(block_into(key, stored, fields, None, run));
+            false
+        })?;
+        match found.transpose()?.flatten() {
+            Some((_, last)) => {
+                self.covers = Some((place, last));
+                Ok(true)
             }
             None => {
-                let mut found = None;
-                r.visit_from(&self.term.blocks, &at, |key, stored| {
-                    found = Some(Block::read(key, stored));
-                    false
-                })?;
-                match found.transpose()? {
-                    Some(block) => (block, place),
-                    None => {
-                        self.run.clear();
-                        self.covers = Some((place, u64::MAX));
-                        return Ok(false);
-                    }
-                }
+                self.run.clear();
+                self.covers = Some((place, u64::MAX));
+                Ok(false)
             }
-        };
-        self.run = block.entries(self.term.fields)?.into_iter().map(|(held, _)| held).collect();
-        self.covers = Some((first, block.start + (block.size - 1)));
-        Ok(true)
+        }
     }
 }
 
