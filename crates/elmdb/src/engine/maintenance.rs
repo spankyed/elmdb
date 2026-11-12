@@ -275,10 +275,11 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
             .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")))?;
         *stats.relations.entry(stored.kind).or_default() += 1;
     }
-    for (key, _) in r.scan(&Prefix::Index.key().to_vec())? {
+    // An index's entries: the places filed under each of its keys
+    for (key, stored) in r.scan(&Prefix::Index.key().to_vec())? {
         let parts = decode_key(&key)?;
         if let (Some(Part::String(t)), Some(Part::String(i))) = (parts.get(1), parts.get(2)) {
-            *stats.indexes.entry(format!("{t}.{i}")).or_default() += 1;
+            *stats.indexes.entry(format!("{t}.{i}")).or_default() += super::places::count(r, &key, &stored)?;
         }
     }
     for prefix in Prefix::ALL {

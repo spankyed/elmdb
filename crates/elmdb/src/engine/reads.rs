@@ -30,6 +30,8 @@ use super::{ids, ranks, relations, values};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Visited {
     pub entities: u64,
+    /// The places of lists and of rows its leading filters were handed, each one walked or sought
+    pub places: u64,
 }
 
 /// Runs reads, writing each answer into one msgpack array
@@ -414,50 +416,34 @@ const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
 /// How many keys between two a read has counted, and the key its count of the rest goes on from
 type Counted = (u64, Vec<u8>);
 
-/// One list of a type's places in creation order, each with its entity's id: what a filter's index holds for the
-/// value it asks of, the type's trash, or what a range's index held, read and put in that order (`Query::filtered`)
+/// One list of a type's places in creation order: what a value index files under the value a filter asks of, the
+/// type's trash, or what a range's index held, read and put in that order (`Query::filtered`). The entity at a
+/// place is the one its type's rows name there
 enum Places {
-    /// The store's entries whose key starts with `under`, which end before `to`: each key ends with its entity's
-    /// place and holds its id
-    Stored { under: Vec<u8>, to: Vec<u8> },
+    /// The places a value index files under the key `own` (`engine/places.rs`), read a key of them at a time
+    Filed { own: Vec<u8>, sought: text::postings::Sought },
+    /// A type's rows whose key starts with `under`, which end before `to`: each key ends with its entity's place
+    Rows { under: Vec<u8>, to: Vec<u8> },
     /// Places read from the store and sorted, and how many of them a seek has left behind
-    Held { places: Vec<(u64, String)>, passed: usize },
-}
-
-/// An entity's id as a list of places holds it: as the store wrote it, or read already
-enum Named<'a> {
-    Stored(&'a [u8]),
-    Held(&'a str),
-}
-
-impl Named<'_> {
-    fn id(&self) -> Result<String> {
-        Ok(match self {
-            Named::Stored(bytes) => values::decode(bytes)?.as_str().unwrap_or_default().to_owned(),
-            Named::Held(id) => (*id).to_owned(),
-        })
-    }
+    Held { places: Vec<u64>, passed: usize },
 }
 
 impl Places {
-    fn stored(under: Vec<u8>) -> Self {
+    fn filed(own: Vec<u8>) -> Self {
+        let sought = text::postings::Sought::new(super::places::term(own.clone()));
+        Places::Filed { own, sought }
+    }
+
+    fn rows(under: Vec<u8>) -> Self {
         let (_, to) = prefix_range(&under);
-        Places::Stored { under, to }
+        Places::Rows { under, to }
     }
 
-    /// The keys the list's entries lie between, for a list the store holds
-    fn keys(&self) -> Option<Entries> {
-        match self {
-            Places::Stored { under, to } => Some((prefix_range(under).0, to.clone())),
-            Places::Held { .. } => None,
-        }
-    }
-
-    /// The first place the list holds that is `place` or after it: one entry read from the store, at the key the
-    /// place would have. A list is sought at places that only grow
+    /// The first place the list holds that is `place` or after it
     fn seek(&mut self, r: &impl Read, place: u64) -> Result<Option<u64>> {
         match self {
-            Places::Stored { under, to } => {
+            Places::Filed { sought, .. } => sought.seek(r, place, &mut false),
+            Places::Rows { under, to } => {
                 let mut found = None;
                 r.visit_within(&crate::format::key::with_number(under, place as f64), to, |entry, _| {
                     found = Some(place_of(entry));
@@ -466,24 +452,25 @@ impl Places {
                 found.transpose()
             }
             Places::Held { places, passed } => {
-                *passed += places[*passed..].partition_point(|(held, _)| *held < place);
-                Ok(places.get(*passed).map(|(held, _)| *held))
+                *passed += places[*passed..].partition_point(|held| *held < place);
+                Ok(places.get(*passed).copied())
             }
         }
     }
 
-    /// Hands `each` the list's places from `place` on, in order, each with its entity's id, until it answers false:
-    /// one walk of the store's entries, which reads no further than it is taken. False when `each` stopped it
-    fn from(&self, r: &impl Read, place: u64, each: &mut dyn FnMut(u64, Named<'_>) -> Result<bool>) -> Result<bool> {
+    /// Hands `each` the list's places from `place` on, in order, until it answers false: the store is read as the
+    /// walk comes to it, and no further than it is taken. False when `each` stopped it
+    fn from(&mut self, r: &impl Read, place: u64, each: &mut dyn FnMut(u64) -> Result<bool>) -> Result<bool> {
         match self {
-            Places::Stored { under, to } => walk(
+            Places::Filed { sought, .. } => super::places::from(r, sought, place, each),
+            Places::Rows { under, to } => walk(
                 |entry| r.visit_within(&crate::format::key::with_number(under, place as f64), to, entry),
-                |entry, id| each(place_of(entry)?, Named::Stored(id)),
+                |entry, _| each(place_of(entry)?),
             ),
             Places::Held { places, .. } => {
-                let first = places.partition_point(|(held, _)| *held < place);
-                for (held, id) in &places[first..] {
-                    if !each(*held, Named::Held(id))? {
+                let first = places.partition_point(|held| *held < place);
+                for held in &places[first..] {
+                    if !each(*held)? {
                         return Ok(false);
                     }
                 }
@@ -545,8 +532,8 @@ impl Listed {
         Listed { places, index, covers, spread: Spread::default(), last: None }
     }
 
-    /// The first place the list holds that is `place` or after it. The store is read, and `read` grows by one, unless
-    /// the last place sought was no later and what it found no earlier: nothing lies between those two
+    /// The first place the list holds that is `place` or after it. The list is sought, and `read` grows by one,
+    /// unless the last place sought was no later and what it found no earlier: nothing lies between those two
     fn ask(&mut self, r: &impl Read, place: u64, read: &mut u64) -> Result<Option<u64>> {
         if let Some((sought, found)) = self.last
             && sought <= place
@@ -576,12 +563,10 @@ struct Ranged {
 
 /// What a read of the places some lists hold in common does with each (`Query::common`)
 struct Asks<'a> {
+    /// The type the places are of
+    entity_type: &'a str,
     /// The steps of the filters tested against the entity at each
     tested: &'a [usize],
-    /// Whether the entity is asked of the scope: the lists don't say it reaches each
-    admit: bool,
-    /// Whether the entity is counted as read: no list counted its own as it was read
-    count: bool,
     /// How many entries the read may have read before it pauses
     pause_at: u64,
 }
@@ -603,6 +588,8 @@ struct Query<'r, R: Read> {
     r: &'r R,
     plan: &'r Plan,
     visited: Cell<u64>,
+    /// The places the leading filters were handed (`Visited::places`)
+    places: Cell<u64>,
     /// What each stage did, for a read asked to explain itself
     stages: Option<&'r Stages>,
     /// What the plan's search found in each entity, with the index it searched, for the `hits` terminal
@@ -655,9 +642,8 @@ enum Scored {
 
 type Visit<'a> = dyn FnMut(&str) -> Result<bool> + 'a;
 
-/// What an index's entries are handed to as they are read: the id each holds, encoded as the entry holds it, and
-/// false to stop the read
-type Entry<'a> = dyn FnMut(&[u8]) -> Result<bool> + 'a;
+/// What the places an index files are handed to as they are read, each an entity's: false to stop the read
+type Entry<'a> = dyn FnMut(u64) -> Result<bool> + 'a;
 
 /// A search's match as it is ranked: its score; what breaks a tie, its place in the set searched among, or its
 /// type's among the types searched and then its own in creation order; and which of the indexes searched it is of
@@ -1237,7 +1223,9 @@ impl<R: Read> Query<'_, R> {
                         }
                         None => Begin::First,
                     };
-                    return self.in_order(&ordered, *descending, begin, &mut |id| self.hand(id, visit));
+                    return self.in_order(&ordered, *descending, begin, &mut |place| {
+                        self.hand(ordered.entity_type, place, visit)
+                    });
                 }
                 self.note_wanted(upto, before, name)?;
                 let ids = self.collect(before)?;
@@ -1961,25 +1949,39 @@ impl<R: Read> Query<'_, R> {
     /// holds, its rows being no fewer: the one holding the fewest, each counted to twice as far until one is
     /// known to
     fn filtered_of(&self, upto: usize, entity_type: &str, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
+        let mut read = 0u64;
+        let ended = self.filtered_from(upto, entity_type, after, &mut read, visit);
+        self.places.set(self.places.get() + read);
+        ended
+    }
+
+    /// `filtered_of`, adding to `read` each place it is handed: one walked, one sought, one of a range read
+    fn filtered_from(
+        &self,
+        upto: usize,
+        entity_type: &str,
+        after: Option<u64>,
+        read: &mut u64,
+        visit: &mut Visit<'_>,
+    ) -> Result<bool> {
         let mut lists = self.listed(upto, entity_type)?;
         let mut ranged = self.ranges_of(upto, entity_type)?;
         let trash = self.plan.scope == Scope::Trashed;
         if trash && !lists.is_empty() {
-            lists.insert(0, Listed::new(Places::stored(keys::type_range(true, entity_type)), None, Vec::new()));
+            lists.insert(0, Listed::new(Places::rows(keys::type_range(true, entity_type)), None, Vec::new()));
         }
-        // The least place not yet handed on or ruled out, and how many entries this read has read
+        // The least place not yet handed on or ruled out
         let mut next = after.map_or(0, |place| place + 1);
-        let mut read = 0u64;
         let mut ask_at = RANGE_ASKED;
         // A range's entries are of every entity, so a plan of the trash reads none it hasn't paid for
-        self.read_ranges(&mut lists, &mut ranged, &mut read, if trash { 0 } else { RANGE_ASKED })?;
+        self.read_ranges(&mut lists, &mut ranged, read, if trash { 0 } else { RANGE_ASKED })?;
         if !trash && !self.stops_early() {
             // Counted to twice as far each time, until the one holding the fewest is known, and so read: one
             // range alone is the fewest
             let mut upto = RANGE_ASKED;
             while lists.is_empty() && ranged.len() > 1 {
                 upto *= 2;
-                self.read_ranges(&mut lists, &mut ranged, &mut read, upto)?;
+                self.read_ranges(&mut lists, &mut ranged, read, upto)?;
             }
             if lists.is_empty() && !ranged.is_empty() {
                 lists.push(self.read_range(ranged.remove(0))?);
@@ -2000,12 +2002,12 @@ impl<R: Read> Query<'_, R> {
             if lists.is_empty() {
                 let (mut stopped, mut paused) = (false, None);
                 self.walk_places(entity_type, next.checked_sub(1), &mut |place, id| {
-                    read += 1;
+                    *read += 1;
                     if self.kept(&tested, id)? && !visit(id)? {
                         stopped = true;
                         return Ok(false);
                     }
-                    if read >= pause_at {
+                    if *read >= pause_at {
                         paused = Some(place);
                         return Ok(false);
                     }
@@ -2017,20 +2019,15 @@ impl<R: Read> Query<'_, R> {
                 let Some(place) = paused else { return Ok(true) };
                 next = place + 1;
             } else {
-                // A range's entries were counted as they were read, each an entity the scope reaches, as the
-                // trash's rows are
-                let held = lists.iter().any(|list| matches!(list.places, Places::Held { .. }));
-                // mutant-skip: replace && with \|\| in Query<'_, R>::filtered_of
-                // The scope asked of an entity a list vouches for answers that it reaches it
-                let asks = Asks { tested: &tested, admit: !trash && !held, count: !held, pause_at };
-                match self.common(&mut lists, &asks, &mut next, &mut read, visit)? {
+                let asks = Asks { entity_type, tested: &tested, pause_at };
+                match self.common(&mut lists, &asks, &mut next, read, visit)? {
                     Left::Stopped => return Ok(false),
                     Left::Ended => return Ok(true),
                     Left::Paused => {}
                 }
             }
-            self.read_ranges(&mut lists, &mut ranged, &mut read, 0)?;
-            while ask_at <= read {
+            self.read_ranges(&mut lists, &mut ranged, read, 0)?;
+            while ask_at <= *read {
                 ask_at *= 2;
             }
         }
@@ -2086,7 +2083,7 @@ impl<R: Read> Query<'_, R> {
             };
             let Some(index) = index_on(self.r, entity_type, name) else { continue };
             let under = keys::index_range(entity_type, &index, std::slice::from_ref(&part));
-            lists.push(Listed::new(Places::stored(under), Some(index), vec![at]));
+            lists.push(Listed::new(Places::filed(under), Some(index), vec![at]));
         }
         if let Some(together) = self.equal_index(entity_type, &equals)? {
             lists.retain(|list| !list.covers.iter().all(|step| together.covers.contains(step)));
@@ -2117,7 +2114,7 @@ impl<R: Read> Query<'_, R> {
             let Some((index, mut parts)) = self.order_index(entity_type, &leading, last)? else { continue };
             parts.push(all[before.len()].2.clone());
             let under = keys::index_range(entity_type, &index, &parts);
-            found = Some(Listed::new(Places::stored(under), Some(index), all.iter().map(|(at, _, _)| *at).collect()));
+            found = Some(Listed::new(Places::filed(under), Some(index), all.iter().map(|(at, _, _)| *at).collect()));
         }
         Ok(found)
     }
@@ -2158,7 +2155,7 @@ impl<R: Read> Query<'_, R> {
         loop {
             let mut fewest: Option<(usize, u64)> = None;
             for (at, range) in ranged.iter().enumerate() {
-                let held = self.counted_within(&range.from, &range.to, upto)?;
+                let held = self.counted_within(&range.from, &range.to, upto, true)?;
                 if held < upto && fewest.is_none_or(|(_, fewer)| held < fewer) {
                     fewest = Some((at, held));
                 }
@@ -2173,23 +2170,17 @@ impl<R: Read> Query<'_, R> {
         }
     }
 
-    /// The entities that an index's entries for a range name, those the scope reaches, as a list of their places:
-    /// every entry is read, each counted as an entity read
+    /// The places an index files under the values of a range, as a list of them in order: the places under each
+    /// value are read, and no entity
     fn read_range(&self, ranged: Ranged) -> Result<Listed> {
-        let mut places: Vec<(u64, String)> = Vec::new();
-        walk(
-            |each| self.r.visit_within(&ranged.from, &ranged.to, each),
-            |_, id| {
-                let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
-                self.count_visit();
-                if let Some(place) = self.admitted(&id)? {
-                    places.push((place, id));
-                }
-                Ok(true)
-            },
-        )?;
-        // No two entities share a place
-        places.sort_unstable_by_key(|(place, _)| *place);
+        let mut places: Vec<u64> = Vec::new();
+        super::places::visit(self.r, &ranged.from, &ranged.to, false, &mut |_, place| {
+            places.push(place);
+            Ok(true)
+        })?;
+        // An entity under several of the values, as one holding a list of them is, is at one place
+        places.sort_unstable();
+        places.dedup();
         Ok(Listed::new(Places::Held { places, passed: 0 }, Some(ranged.index), ranged.covers))
     }
 
@@ -2253,7 +2244,7 @@ impl<R: Read> Query<'_, R> {
             let mut passed = 0;
             let mut spread = walked.spread;
             let from = *next;
-            let ran_out = walked.places.from(self.r, from, &mut |place, named| {
+            let ran_out = walked.places.from(self.r, from, &mut |place| {
                 *read += 1;
                 spread.saw(from, place);
                 if place < *next {
@@ -2283,11 +2274,12 @@ impl<R: Read> Query<'_, R> {
                     }
                 }
                 *next = place + 1;
-                let id = named.id()?;
-                if asks.count {
-                    self.count_visit();
-                }
-                if (!asks.admit || self.admits(&id)?) && self.kept(asks.tested, &id)? && !visit(&id)? {
+                // The entity at the place, where the scope reaches one there: its type's rows say
+                self.count_visit();
+                if let Some(id) = self.at_place(asks.entity_type, place)?
+                    && self.kept(asks.tested, &id)?
+                    && !visit(&id)?
+                {
                     left = Some(Left::Stopped);
                     return Ok(false);
                 }
@@ -2387,12 +2379,14 @@ impl<R: Read> Query<'_, R> {
         Ok(self.admitted(cursor)?.map(|seq| (at, seq)))
     }
 
-    /// Hands on the entity an index's entry names, counted as read, when the scope reaches it; false when `visit`
-    /// stopped the walk
-    fn hand(&self, id: &[u8], visit: &mut Visit<'_>) -> Result<bool> {
-        let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
+    /// Hands on the entity of a type at a place an index names, counted as read, when the scope reaches one there;
+    /// false when `visit` stopped the walk
+    fn hand(&self, entity_type: &str, place: u64, visit: &mut Visit<'_>) -> Result<bool> {
         self.count_visit();
-        if self.admits(&id)? { visit(&id) } else { Ok(true) }
+        match self.at_place(entity_type, place)? {
+            Some(id) => visit(&id),
+            None => Ok(true),
+        }
     }
 
     /// The one type whose entities a plan reads in an order from an index: the start's, for a plan of the live or of
@@ -2481,12 +2475,8 @@ impl<R: Read> Query<'_, R> {
             if !super::derive::is_built(self.r, entity_type, index)? {
                 continue;
             }
-            let mut unordered = false;
-            self.r.visit(&keys::index_others(Prefix::IndexUnordered, entity_type, index, &leading), |_, _| {
-                unordered = true;
-                false
-            })?;
-            if !unordered {
+            // The key the entities it doesn't order under those values are filed under, which is there while any is
+            if !self.r.contains(&keys::index_others(Prefix::IndexUnordered, entity_type, index, &leading))? {
                 return Ok(Some((index.clone(), leading)));
             }
         }
@@ -2551,17 +2541,17 @@ impl<R: Read> Query<'_, R> {
             Some(part) => {
                 let mut parts = ordered.leading.clone();
                 parts.push(part);
-                Begin::PastEntry(keys::index_entry(ordered.entity_type, &ordered.index, &parts, seq))
+                Begin::PastEntry(keys::index_range(ordered.entity_type, &ordered.index, &parts), seq)
             }
             None => Begin::PastWithout(seq),
         }))
     }
 
     /// A type's entities in a field's order, read from its index as `ordered` found they can be: `each` is handed
-    /// the id every entry holds as the entry is read, of whatever entity, so one stopping the walk leaves the rest
-    /// unread, and what it is handed is what was read (`hand` keeps those the scope reaches). Ascending, the entries from the least, then the
-    /// entities without a value; descending, those first, then the values from the greatest, each value's entities
-    /// in place order, as a sort that keeps ties does. A page begins past its cursor, sought and not walked to
+    /// the place of every entity the index files as its place is read, so one stopping the walk leaves the rest
+    /// unread (`hand` keeps those the scope reaches). Ascending, the values from the least, then the entities
+    /// without a value; descending, those first, then the values from the greatest, each value's entities in place
+    /// order, as a sort that keeps ties does. A page begins past its cursor, sought and not walked to
     fn in_order(&self, ordered: &Ordered<'_>, descending: bool, begin: Begin, each: &mut Entry<'_>) -> Result<bool> {
         if let Some(stages) = self.stages {
             stages.reads_index(&ordered.index);
@@ -2569,22 +2559,26 @@ impl<R: Read> Query<'_, R> {
         if !descending {
             let from = match begin {
                 Begin::PastWithout(place) => return self.without_value(ordered, Some(place), each),
-                Begin::PastEntry(entry) => past(entry),
+                Begin::PastEntry(own, place) => {
+                    // The rest of the cursor's value, then the values above it
+                    if !self.places_after(&own, Some(place), each)? {
+                        return Ok(false);
+                    }
+                    past(own)
+                }
                 Begin::First => ordered.from.clone(),
             };
-            if !self.entries_up(ordered, &from, each)? {
+            if !super::places::visit(self.r, &from, &ordered.to, false, &mut |_, place| each(place))? {
                 return Ok(false);
             }
             return self.without_value(ordered, None, each);
         }
-        let before = if let Begin::PastEntry(entry) = begin {
+        let before = if let Begin::PastEntry(own, place) = begin {
             // The rest of the cursor's value, then the values below it
-            let value = value_of(&entry).to_vec();
-            let from = past(entry);
-            if !walk(|entry| self.r.visit_from(&value, &from, entry), |_, id| each(id))? {
+            if !self.places_after(&own, Some(place), each)? {
                 return Ok(false);
             }
-            prefix_range(&value).0
+            own
         } else {
             let after = match begin {
                 Begin::PastWithout(place) => Some(place),
@@ -2595,57 +2589,22 @@ impl<R: Read> Query<'_, R> {
             }
             ordered.to.clone()
         };
-        self.entries_down(ordered, before, each)
+        // By value from the greatest, and one value's in place order, as an order that keeps ties has them
+        super::places::visit(self.r, &ordered.from, &before, true, &mut |_, place| each(place))
     }
 
-    /// The entities an ordered read's entries name, from the key `from` up to where the read ends, in key order: by
-    /// value, and one value's in place order; false when `each` stopped the walk
-    fn entries_up(&self, ordered: &Ordered<'_>, from: &[u8], each: &mut Entry<'_>) -> Result<bool> {
-        walk(|entry| self.r.visit_within(from, &ordered.to, entry), |_, id| each(id))
-    }
-
-    /// The entities an ordered read's entries name, from the last entry before the key `before` down to where the
-    /// read begins: by value from the greatest, and one value's in place order, as an order that keeps ties has
-    /// them. The entries are read backwards, each handed on once the entry before it shows its value is its alone;
-    /// a value several entities hold is read forwards from its first entry, and the walk back goes on from there.
-    /// False when `each` stopped the walk
-    fn entries_down(&self, ordered: &Ordered<'_>, mut before: Vec<u8>, each: &mut Entry<'_>) -> Result<bool> {
-        loop {
-            // The entry read last, which the next says whether to hand on
-            let mut held: Option<(Vec<u8>, Vec<u8>)> = None;
-            let mut shared = false;
-            let mut go = true;
-            walk(
-                |entry| self.r.visit_back_within(&ordered.from, &before, entry),
-                |key, id| {
-                    if let Some((above, entity)) = &held {
-                        if value_of(above) == value_of(key) {
-                            shared = true;
-                            return Ok(false);
-                        }
-                        go = each(entity)?;
-                        if !go {
-                            return Ok(false);
-                        }
-                    }
-                    held = Some((key.to_vec(), id.to_vec()));
-                    Ok(true)
-                },
-            )?;
-            if !go {
-                return Ok(false);
-            }
-            let Some((key, id)) = held else { return Ok(true) };
-            if !shared {
-                // The read's first entry, with none before it
-                return each(&id);
-            }
-            let value = value_of(&key).to_vec();
-            if !walk(|entry| self.r.visit(&value, entry), |_, id| each(id))? {
-                return Ok(false);
-            }
-            before = prefix_range(&value).0;
-        }
+    /// The places filed under the key `own`, in order, all of them or those past the place `after`, sought and
+    /// not walked to. False when `each` stopped the walk
+    fn places_after(&self, own: &[u8], after: Option<u64>, each: &mut Entry<'_>) -> Result<bool> {
+        let mut sought = text::postings::Sought::new(super::places::term(own.to_vec()));
+        let from = match after {
+            Some(after) => match after.checked_add(1) {
+                Some(from) => from,
+                None => return Ok(true),
+            },
+            None => 0,
+        };
+        super::places::from(self.r, &mut sought, from, each)
     }
 
     /// The entities without a value in an ordered read's field, in place order, all of them or those past the place
@@ -2655,8 +2614,7 @@ impl<R: Read> Query<'_, R> {
             return Ok(true);
         }
         let without = keys::index_others(Prefix::IndexWithout, ordered.entity_type, &ordered.index, &ordered.leading);
-        let from = after.map(|after| past(keys::place_under(&without, after))).unwrap_or_default();
-        walk(|entry| self.r.visit_from(&without, &from, entry), |_, id| each(id))
+        self.places_after(&without, after, each)
     }
 
     /// How many ids the first `upto` steps hand on
@@ -2685,10 +2643,10 @@ impl<R: Read> Query<'_, R> {
             let (among, live) = self.searched_places(t)?;
             let (from, to) = limits.keys(t, &index, &[]);
             let mut places = RoaringTreemap::new();
-            self.r.visit_within(&from, &to, |key, _| {
+            super::places::visit(self.r, &from, &to, false, &mut |_, place| {
                 self.count_visit();
-                places.extend(keys::place_of(key));
-                true
+                places.insert(place);
+                Ok(true)
             })?;
             if let Some(among) = among {
                 places &= among;
@@ -2769,7 +2727,7 @@ impl<R: Read> Query<'_, R> {
         self.in_order(&ordered, descending, begin, &mut |entry| {
             // Every entry read is counted, one of an entity the scope doesn't reach too: it cost the same
             read += 1;
-            let wanted = self.hand(entry, &mut |id| {
+            let wanted = self.hand(entity_type, entry, &mut |id| {
                 if self.passes(upto, id)? {
                     found.push(id.to_owned());
                 }
@@ -2797,9 +2755,13 @@ impl<R: Read> Query<'_, R> {
     fn filters_read_fewer(&self, entity_type: &str, than: u64) -> Result<bool> {
         let listed = self.listed(self.filters, entity_type)?;
         let mut any = false;
-        for (from, to) in listed.iter().filter_map(|list| list.places.keys()) {
+        let owns = listed.iter().filter_map(|list| match &list.places {
+            Places::Filed { own, .. } => Some((own.clone(), past(own.clone()))),
+            _ => None,
+        });
+        for (from, to) in owns {
             any = true;
-            if self.counted_within(&from, &to, than)? < than {
+            if self.counted_within(&from, &to, than, true)? < than {
                 return Ok(true);
             }
         }
@@ -2815,17 +2777,39 @@ impl<R: Read> Query<'_, R> {
         }
         // A walk of both reads the trash's rows too
         let (from, to) = prefix_range(&keys::type_range(true, entity_type));
-        let trashed = self.counted_within(&from, &to, than.saturating_sub(live))?;
+        let trashed = self.counted_within(&from, &to, than.saturating_sub(live), false)?;
         Ok(live.saturating_add(trashed) < than)
     }
 
-    /// How many entries have a key that is `from` or after it and before `to`, counted no further than `upto` and
-    /// on from where this read's last count of them stopped: a question asked again of more entries counts each
-    /// key once over all its askings
-    fn counted_within(&self, from: &[u8], to: &[u8], upto: u64) -> Result<u64> {
+    /// How many places the value keys that are `from` or after it and before `to` hold between them, or with
+    /// `places` unset how many keys there are, each a row: counted no further than `upto`, and on from where this
+    /// read's last count of them stopped, so a question asked again of more counts each key once over all its
+    /// askings
+    fn counted_within(&self, from: &[u8], to: &[u8], upto: u64, places: bool) -> Result<u64> {
         let mut counted = self.counted.borrow_mut();
         let (so_far, next) = counted.entry((from.to_vec(), to.to_vec())).or_insert_with(|| (0, from.to_vec()));
-        let (more, past) = self.r.probe_within(next, to, upto.saturating_sub(*so_far))?;
+        if *so_far >= upto {
+            return Ok(*so_far);
+        }
+        // A key's places are counted whole, so the count may pass `upto` by what the last key read holds
+        let (mut more, mut past, mut failed) = (0u64, next.clone(), None);
+        self.r.probe_visit_within(next, to, |own, stored| {
+            if places {
+                match super::places::count_probed(self.r, own, stored) {
+                    Ok(held) => more += held,
+                    Err(error) => failed = Some(error),
+                }
+            } else {
+                more += 1;
+            }
+            past.clear();
+            past.extend_from_slice(own);
+            past.push(0);
+            failed.is_none() && *so_far + more < upto
+        })?;
+        if let Some(error) = failed {
+            return Err(error);
+        }
         *so_far += more;
         *next = past;
         Ok(*so_far)
@@ -3062,6 +3046,7 @@ impl<R: Read> Query<'_, R> {
             r: self.r,
             plan: &plan,
             visited: Cell::new(0),
+            places: Cell::new(0),
             stages: None,
             hits: RefCell::default(),
             backward_hop: Cell::new(None),
@@ -3077,6 +3062,7 @@ impl<R: Read> Query<'_, R> {
         };
         query.pull(1, &mut |_| Ok(true))?;
         self.visited.set(self.visited.get() + query.visited.get());
+        self.places.set(self.places.get() + query.places.get());
         let scores: HashMap<String, f64, Fixed> =
             query.hits.into_inner().into_iter().map(|(id, (hit, _))| (id, hit.score)).collect();
         let (error, step) = ranks::reported(def.tolerance, scores.len() as u64);
@@ -3818,11 +3804,6 @@ fn past(mut key: Vec<u8>) -> Vec<u8> {
     key
 }
 
-/// An index entry's key less the place it ends with: what the key of every entry of its value starts with
-fn value_of(entry: &[u8]) -> &[u8] {
-    &entry[..entry.len().saturating_sub(9)]
-}
-
 /// Where the walk of the type at `at` among a start's types begins, for a page whose cursor is at `from`, its type's
 /// place among them and its own: `None` for a type before the cursor's, which the page is past; past the cursor's
 /// place in its own type; and from the first entity in a type after it, as in every type when there is no cursor
@@ -3838,7 +3819,8 @@ fn starts_past(from: Option<(usize, u64)>, at: usize) -> Option<Option<u64>> {
 /// the index or its place among the entities without a value
 enum Begin {
     First,
-    PastEntry(Vec<u8>),
+    /// Past the place among those filed under the key
+    PastEntry(Vec<u8>, u64),
     PastWithout(u64),
 }
 
@@ -4190,6 +4172,7 @@ fn query_with(
         r,
         plan,
         visited: Cell::new(0),
+        places: Cell::new(0),
         stages,
         hits: RefCell::new(HashMap::default()),
         backward_hop: Cell::new(None),
@@ -4522,6 +4505,7 @@ fn query_with(
         }
     }
     visited.entities += q.visited.get();
+    visited.places += q.places.get();
     Ok(())
 }
 

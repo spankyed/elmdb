@@ -102,18 +102,8 @@ pub fn field_names(entity_type: &str) -> Vec<u8> {
     })
 }
 
-/// An index entry: the type, the index, the key's parts, and the entity's place
-pub fn index_entry(entity_type: &str, index: &str, parts: &[crate::format::key::Part], seq: u64) -> Vec<u8> {
-    with(Prefix::Index, |w| {
-        w.string(entity_type).string(index);
-        for p in parts {
-            w.part(p);
-        }
-        w.number(seq as f64);
-    })
-}
-
-/// Every entry of an index under these leading parts
+/// The key a value index files entities under for these parts, which every key of it under them as leading parts
+/// starts with
 pub fn index_range(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
     with(Prefix::Index, |w| {
         w.string(entity_type).string(index);
@@ -162,6 +152,25 @@ pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
         index_others(Prefix::IndexWithout, entity_type, index, &[]),
         index_others(Prefix::IndexUnordered, entity_type, index, &[]),
     ]
+}
+
+/// The key the blocks of a value's places are under, for a value whose own key is `own`: the same parts under the
+/// tag for the blocks of its kind, `d/x`'s, `d/xw`'s or `d/xu`'s. A block's key is this and where it starts
+/// (`place_under`)
+pub fn index_blocks(own: &[u8]) -> Vec<u8> {
+    let kinds = [
+        (Prefix::Index, Prefix::IndexPlaces),
+        (Prefix::IndexWithout, Prefix::IndexWithoutPlaces),
+        (Prefix::IndexUnordered, Prefix::IndexUnorderedPlaces),
+    ];
+    for (of, blocks) in kinds {
+        if let Some(parts) = own.strip_prefix(of.key().to_vec().as_slice()) {
+            let mut key = blocks.key().to_vec();
+            key.extend_from_slice(parts);
+            return key;
+        }
+    }
+    unreachable!("a value index's key")
 }
 
 /// That an index of a type is built

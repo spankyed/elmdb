@@ -172,10 +172,8 @@ fn after(id: &str) -> Json {
 /// The ids an index that accounts for every entity files under `prefix`, in place order
 fn filed(db: &Database, prefix: Prefix, entity_type: &str, index: &str) -> Vec<String> {
     db.snapshot(|s| {
-        Ok(s.scan(&keys::index_others(prefix, entity_type, index, &[]))?
-            .into_iter()
-            .map(|(_, id)| rmpv::decode::read_value(&mut &id[..]).unwrap().as_str().unwrap().to_owned())
-            .collect())
+        let under = keys::index_others(prefix, entity_type, index, &[]);
+        Ok(super::filed_under(s, entity_type, &under).into_iter().map(|(_, id)| id).collect())
     })
     .unwrap()
 }
@@ -759,7 +757,7 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
     // without a value; and the short code's and the roles' file none
     assert_eq!(filed(&db, Prefix::IndexWithout, "Item", "byTag").len(), 7);
     assert!(filed(&db, Prefix::IndexUnordered, "Item", "byTag").is_empty());
-    let every = db.snapshot(|s| Ok(s.scan(&Prefix::IndexWithout.key().to_vec())?.len())).unwrap();
+    let every = db.snapshot(|s| Ok(super::filed_under(s, "Item", &Prefix::IndexWithout.key().to_vec()).len())).unwrap();
     assert_eq!(every, 2 + 7, "byN's two and byTag's seven");
 
     write(&db, vec![set("Item-none", 1.into())]);
@@ -939,9 +937,9 @@ fn a_tracked_order_is_touched_by_what_would_change_its_page_and_by_nothing_past_
     track(json!([order("n", false), after(&all[1]), limit(1)]), 3);
     track(json!([{ "step": "range", "field": "n", "atLeast": 6, "atMost": 8 }]), 4);
 
-    // Past the least two and the page and outside the range. The greatest-first order read the value below its
-    // greatest too, which told it the greatest is one entity's
-    assert_eq!(touched(vec![create("Item", "Item-ten", Some(10.into()), &[])]), [2]);
+    // Past the least two and the page, outside the range, and below the greatest, whose key is all the
+    // greatest-first order read
+    assert!(touched(vec![create("Item", "Item-ten", Some(10.into()), &[])]).is_empty());
     // Among the least two, and inside the range
     assert_eq!(touched(vec![create("Item", "Item-six", Some(6.into()), &[])]), [1, 4]);
     // The page after 7 is 9: one between them changes it

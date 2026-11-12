@@ -69,8 +69,9 @@ fn check_reports_damaged_derived_keys_and_rebuild_repairs_them() {
         d.put(txn, &crate::engine::keys::count("Task"), &crate::engine::values::encode(&7.into()))?;
         d.put(
             txn,
-            &crate::engine::keys::index_entry("Task", "a", &[crate::format::key::Part::Number(99.0)], 1),
-            &crate::engine::values::encode(&"Task-1".into()),
+            // One place, the first, under a value no task holds
+            &crate::engine::keys::index_range("Task", "a", &[crate::format::key::Part::Number(99.0)]),
+            &[1, 1],
         )?;
         Ok(())
     });
@@ -300,14 +301,8 @@ fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     // Unbuilt, the index keeps what it files that fits, as a build that failed part way does: the third note,
     // among those without a `more`
     let without = crate::engine::keys::index_others(crate::format::Prefix::IndexWithout, "Note", "trio", &[]);
-    let filed: Vec<String> = db
-        .snapshot(|s| {
-            let ids = s.scan(&without)?.into_iter();
-            Ok(ids
-                .map(|(_, id)| rmpv::decode::read_value(&mut &id[..]).unwrap().as_str().unwrap().to_owned())
-                .collect())
-        })
-        .unwrap();
+    let filed: Vec<String> =
+        db.snapshot(|s| Ok(super::filed_under(s, "Note", &without).into_iter().map(|(_, id)| id).collect())).unwrap();
     assert_eq!(filed, ["Note-3"]);
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");

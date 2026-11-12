@@ -19,6 +19,7 @@ use crate::schema::Schema;
 
 use super::entities::{self, ValueIndex, value_indexes};
 use super::keys;
+use super::places;
 use super::unit::{Read, Txn};
 use super::{ids, relations, text, trigram, values, vector};
 
@@ -50,31 +51,34 @@ fn visit_entities(r: &impl Read, mut each: impl FnMut(Entity) -> Result<()>) -> 
     })
 }
 
+/// Hands `file` each key the index files each of these entities under as an entry, with the entity: the place
+/// is the entity's
 fn index_entries_into(
     r: &impl Read,
     entity_type: &str,
     index: &ValueIndex,
     of: &[&Entity],
-    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+    mut file: impl FnMut(Vec<u8>, &Entity) -> Result<()>,
 ) -> Result<()> {
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        for parts in index.files(&fields).entries {
-            emit(keys::index_entry(entity_type, &index.name, &parts, e.seq), values::encode(&e.id.as_str().into()))?;
+        for key in index.files(&fields).entry_keys(entity_type, &index.name) {
+            file(key, e)?;
         }
     }
     Ok(())
 }
 
-/// What an index that accounts for its entities holds besides its entries: each of these entities it files among
-/// those without a value in its last field, or among those holding a value it doesn't order (`ValueIndex::files`)
+/// What an index that accounts for its entities holds besides its entries: each key it files each of these
+/// entities under among those without a value in its last field, or among those holding a value it doesn't order
+/// (`ValueIndex::files`)
 fn index_others_into(
     r: &impl Read,
     entity_type: &str,
     index: &ValueIndex,
     of: &[&Entity],
-    mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>,
+    mut file: impl FnMut(Vec<u8>, &Entity) -> Result<()>,
 ) -> Result<()> {
     if !index.accounts() {
         return Ok(());
@@ -82,36 +86,32 @@ fn index_others_into(
     for e in of {
         let fields: Vec<Option<Value>> =
             index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
-        for other in index.files(&fields).others {
-            emit(other.key(entity_type, &index.name, e.seq), values::encode(&e.id.as_str().into()))?;
+        for key in index.files(&fields).other_keys(entity_type, &index.name) {
+            file(key, e)?;
         }
     }
     Ok(())
 }
 
-/// Refuses what would keep a build of a value index from finishing: an entry whose key LMDB can't store
-/// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`)
+/// Refuses what would keep a build of a value index from finishing: values whose key LMDB can't store
+/// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`). `own` is the key
+/// the entity `id` is filed under as an entry
 fn buildable_entry(
     entity_type: &str,
     index: &ValueIndex,
-    key: &[u8],
-    id: &[u8],
+    own: &[u8],
+    id: &str,
     holders: &mut BTreeMap<Vec<u8>, String>,
 ) -> Result<()> {
-    let id = values::decode(id)?.as_str().unwrap_or_default().to_owned();
-    entities::key_fits(key, &id, entity_type, &index.name)?;
+    entities::key_fits(own, id, entity_type, &index.name)?;
     if !index.unique {
         return Ok(());
     }
-    let mut parts = decode_key(key)?;
-    parts.drain(..3);
-    parts.pop();
-    let key = crate::format::key::encode(&parts);
-    match holders.get(&key) {
-        Some(other) if *other != id => return Err(unbuildable(entity_type, &index.name, other, &id)),
+    match holders.get(own) {
+        Some(other) if other != id => return Err(unbuildable(entity_type, &index.name, other, id)),
         Some(_) => {}
         None => {
-            holders.insert(key, id);
+            holders.insert(own.to_vec(), id.to_owned());
         }
     }
     Ok(())
@@ -122,6 +122,20 @@ fn unbuildable(entity_type: &str, name: &str, one: &str, other: &str) -> Error {
         ErrorCode::Unique,
         format!("The unique index {entity_type}.{name} can't be built: {one} and {other} hold the same values"),
     )
+}
+
+/// Removes every key of a value index: its entries, what it files besides them, and the blocks of each. The key
+/// of the entities an index on one field holds without a value is the range's own first key, which no key under it
+/// is
+pub fn clear_value_index(t: &mut Txn<'_, '_>, entity_type: &str, name: &str) -> Result<()> {
+    for range in keys::value_index_ranges(entity_type, name) {
+        t.clear_prefix(&range)?;
+        if t.contains(&range)? {
+            t.del(&range)?;
+        }
+        t.clear_prefix(&keys::index_blocks(&range))?;
+    }
+    Ok(())
 }
 
 /// Whether an index of a type is built: its marker is there
@@ -152,8 +166,10 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     for (t, of) in &by_type {
         for index in value_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                index_entries_into(r, t, &index, of, &mut emit)?;
-                index_others_into(r, t, &index, of, &mut emit)?;
+                let mut filing = places::Sorting::new()?;
+                index_entries_into(r, t, &index, of, |key, e| filing.entry(key, e.seq))?;
+                index_others_into(r, t, &index, of, |key, e| filing.entry(key, e.seq))?;
+                filing.finish(&mut emit)?;
             }
         }
         let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
@@ -204,7 +220,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 21] = [
+const COMPARED: [Prefix; 24] = [
     Prefix::Live,
     Prefix::Changed,
     Prefix::Trashed,
@@ -212,8 +228,11 @@ const COMPARED: [Prefix; 21] = [
     Prefix::RelationCount,
     Prefix::FieldName,
     Prefix::Index,
+    Prefix::IndexPlaces,
     Prefix::IndexWithout,
+    Prefix::IndexWithoutPlaces,
     Prefix::IndexUnordered,
+    Prefix::IndexUnorderedPlaces,
     Prefix::Out,
     Prefix::In,
     Prefix::Between,
@@ -229,10 +248,13 @@ const COMPARED: [Prefix; 21] = [
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 12] = [
+const PER_INDEX: [Prefix; 15] = [
     Prefix::Index,
+    Prefix::IndexPlaces,
     Prefix::IndexWithout,
+    Prefix::IndexWithoutPlaces,
     Prefix::IndexUnordered,
+    Prefix::IndexUnorderedPlaces,
     Prefix::TextTerm,
     Prefix::TextBlock,
     Prefix::TextDocument,
@@ -400,55 +422,21 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             // replacement atomic, including a late uniqueness, scratch or graph failure.
             let mut scratch = sorted::Scratch::new()?;
             if let Some(found) = value_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
-                let mut others = sorted::Scratch::new()?;
+                let mut filing = places::Sorting::new()?;
+                let mut holders = BTreeMap::new();
                 visit_entities(t, |e| {
                     if ids::type_of(&e.id) != entity_type {
                         return Ok(());
                     }
-                    index_others_into(t, entity_type, &found, &[&e], |key, value| others.push(key, value))?;
-                    index_entries_into(t, entity_type, &found, &[&e], |key, value| {
-                        entities::key_fits(&key, &e.id, entity_type, name)?;
-                        if found.unique {
-                            // Include the holder in the sort key: distinct entities with the same stored sequence
-                            // must not be collapsed by last-insert-wins before uniqueness is checked.
-                            let mut order = decode_key(&key)?;
-                            order.pop();
-                            order.push(Part::String(e.id.clone()));
-                            scratch.push(crate::format::key::encode(&order), key)
-                        } else {
-                            scratch.push(key, value)
-                        }
+                    index_others_into(t, entity_type, &found, &[&e], |key, e| filing.entry(key, e.seq))?;
+                    index_entries_into(t, entity_type, &found, &[&e], |key, e| {
+                        buildable_entry(entity_type, &found, &key, &e.id, &mut holders)?;
+                        filing.entry(key, e.seq)
                     })
                 })?;
-                let mut entries = scratch.finish()?;
-                let mut others = others.finish()?;
-                for range in keys::value_index_ranges(entity_type, name) {
-                    t.clear_prefix(&range)?;
-                }
+                clear_value_index(t, entity_type, name)?;
                 text::clear(t, entity_type, name)?;
-                while let Some((key, value)) = others.next()? {
-                    t.put(&key, &value)?;
-                }
-                let mut holder: Option<(Vec<u8>, String)> = None;
-                while let Some((order, value)) = entries.next()? {
-                    if found.unique {
-                        let mut parts = decode_key(&order)?;
-                        let Some(Part::String(id)) = parts.pop() else {
-                            return Err(Error::new(ErrorCode::Corrupted, "A sorted index holder doesn't read"));
-                        };
-                        let group = crate::format::key::encode(&parts);
-                        if let Some((previous, other)) = &holder
-                            && *previous == group
-                            && *other != id
-                        {
-                            return Err(unbuildable(entity_type, name, other, &id));
-                        }
-                        t.put(&value, &values::encode(&id.as_str().into()))?;
-                        holder = Some((group, id));
-                    } else {
-                        t.put(&order, &value)?;
-                    }
-                }
+                filing.finish(|key, value| t.put(&key, &value))?;
             } else if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
                 let mut text = text::Entries::new(entity_type, &found)?;
                 visit_entities(t, |e| {
@@ -528,32 +516,26 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     let mut holders = BTreeMap::new();
                     // Where it files an entity besides its entries is a key too, and one too long keeps the build
                     // from finishing as an entry's does
-                    let buildable = index_entries_into(t, ty, found, of, |key, value| {
-                        buildable_entry(ty, found, &key, &value, &mut holders)
+                    let buildable = index_entries_into(t, ty, found, of, |key, e| {
+                        buildable_entry(ty, found, &key, &e.id, &mut holders)
                     })
                     .and_then(|()| {
-                        index_others_into(t, ty, found, of, |key, value| {
-                            let id = values::decode(&value)?.as_str().unwrap_or_default().to_owned();
-                            entities::key_fits(&key, &id, ty, &found.name)
-                        })
+                        index_others_into(t, ty, found, of, |key, e| entities::key_fits(&key, &e.id, ty, &found.name))
                     });
                     match buildable {
                         Ok(()) => t.put(&marker, &values::encode(&true.into()))?,
                         Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
                             t.del(&marker)?;
-                            let mut fallback = sorted::Scratch::new()?;
-                            let mut fits = |key: Vec<u8>, value: Vec<u8>| {
-                                if key.len() <= values::MAX_KEY_BYTES {
-                                    fallback.push(key, value)?;
+                            let mut fallback = places::Sorting::new()?;
+                            let mut fits = |key: Vec<u8>, e: &Entity| {
+                                if entities::key_fits(&key, &e.id, ty, &found.name).is_ok() {
+                                    fallback.entry(key, e.seq)?;
                                 }
                                 Ok(())
                             };
                             index_entries_into(t, ty, found, of, &mut fits)?;
                             index_others_into(t, ty, found, of, &mut fits)?;
-                            let mut entries = fallback.finish()?;
-                            while let Some((key, value)) = entries.next()? {
-                                t.put(&key, &value)?;
-                            }
+                            fallback.finish(|key, value| t.put(&key, &value))?;
                         }
                         Err(e) => return Err(e),
                     }
@@ -655,28 +637,24 @@ pub fn build_chunk(
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
         let filed = index.files(&fields);
-        for parts in &filed.entries {
+        for key in filed.entry_keys(entity_type, name) {
             if index.unique {
-                let mut holder = None;
-                t.visit(&keys::index_range(entity_type, name, parts), |_, v| {
-                    holder = values::decode(v).ok().and_then(|v| v.as_str().map(str::to_owned));
-                    // mutant-skip: replace == with != in build_chunk
-                    // build_chunk's unique check skips the entity's own entry: a write checks a unique value against
-                    // the rows while the index is unbuilt, so an entity's own entry and another's for the same value
-                    // are never both in the index
-                    holder.as_deref() == Some(id.as_str())
-                })?;
-                if let Some(other) = holder.filter(|h| h != id) {
-                    return Err(unbuildable(entity_type, name, &other, id));
+                // A write checks a unique value against the rows while the index is unbuilt, so another entity
+                // filed under the values here is one the build can't go on past
+                for place in &places::under(t, &key)? {
+                    if place != *seq
+                        && let Some((other, _)) = entities::at_place(t, entity_type, place)?
+                    {
+                        return Err(unbuildable(entity_type, name, &other, id));
+                    }
                 }
             }
-            let key = keys::index_entry(entity_type, name, parts, *seq);
             entities::key_fits(&key, id, entity_type, name)?;
-            t.put(&key, &values::encode(&id.as_str().into()))?;
+            places::file(t, key, *seq)?;
         }
-        for key in filed.other_keys(entity_type, name, *seq) {
+        for key in filed.other_keys(entity_type, name) {
             entities::key_fits(&key, id, entity_type, name)?;
-            t.put(&key, &values::encode(&id.as_str().into()))?;
+            places::file(t, key, *seq)?;
         }
         last = *seq;
     }

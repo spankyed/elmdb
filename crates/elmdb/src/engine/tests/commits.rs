@@ -26,8 +26,8 @@ fn committed_operations_notify_before_reporting_a_failed_sync() {
         let db = open(&dir);
         write(&db, vec![json!({"op":"create","type":"Task","id":"Task-1","fields":{"a":1}})]).unwrap();
         if operation == "rebuild" {
-            let seq = db.snapshot(|s| super::entities::record(s, "Task-1").map(|r| r.unwrap().seq)).unwrap();
-            let key = crate::engine::keys::index_entry("Task", "a", &[crate::format::key::Part::Number(1.0)], seq);
+            // The places the index files under the value, the task's among them
+            let key = crate::engine::keys::index_range("Task", "a", &[crate::format::key::Part::Number(1.0)]);
             db.store()
                 .unwrap()
                 .write(

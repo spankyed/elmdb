@@ -19,6 +19,7 @@ mod keys;
 pub mod maintenance;
 pub(crate) mod mirror;
 mod numbering;
+mod places;
 pub mod plan;
 mod ranks;
 mod reads;
@@ -194,14 +195,19 @@ pub(crate) fn drop_index_data(
             continue;
         }
         if let ["types", entity_type, "indexes", index] = parts.as_slice() {
-            for range in keys::value_index_ranges(entity_type, index) {
-                let (low, high) = crate::format::key::prefix_range(&range);
-                let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
-                let doomed: Vec<Vec<u8>> =
-                    db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
-                for key in doomed {
-                    db.delete(txn, &key)?;
+            // Each range of a value index's keys, the blocks of their places, and the key that is a range's own first:
+            // an index on one field keeps the entities without a value under it
+            for own in keys::value_index_ranges(entity_type, index) {
+                for under in [own.clone(), keys::index_blocks(&own)] {
+                    let (low, high) = crate::format::key::prefix_range(&under);
+                    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                    let doomed: Vec<Vec<u8>> =
+                        db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                    for key in doomed {
+                        db.delete(txn, &key)?;
+                    }
                 }
+                db.delete(txn, &own)?;
             }
             for range in keys::text_index_ranges(entity_type, index) {
                 let (low, high) = crate::format::key::prefix_range(&range);
