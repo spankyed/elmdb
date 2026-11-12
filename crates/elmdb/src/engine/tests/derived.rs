@@ -573,6 +573,50 @@ fn rename_relation_refuses_an_edge_that_would_make_a_second_of_the_new_kind_and_
 }
 
 #[test]
+fn renaming_a_kind_to_itself_moves_nothing_and_refuses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "refs", "target": "Note-2" }),
+        ],
+    )
+    .unwrap();
+    db.rename_relation("refs", "refs").expect("a kind renamed to itself is a no-op");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_relation_refuses_two_moving_edges_that_would_be_one_identity_in_the_new_kind() {
+    // Under the old kind's key, (a 1, b "x") and (a 1.0, b "y") are two edges; under the new kind's key, a alone, the
+    // same value, so renaming both would leave one identity twice
+    let keyed = |key: Json| json!({ "cardinality": "many-to-many", "info": { "type": "object", "optional": true }, "key": key });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "relations": { "old": keyed(json!(["a", "b"])), "fresh": keyed(json!(["a"])) },
+        "types": { "Note": { "fields": { "title": { "type": "string", "optional": true } } } }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1, "b": "x" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1.0, "b": "y" } }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_relation("old", "fresh").unwrap_err();
+    assert_eq!(error.code, ErrorCode::DuplicateEdge, "{error}");
+    assert!(db.check().unwrap().is_clean(), "a refused rename leaves the graph as it was");
+}
+
+#[test]
 fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();

@@ -333,7 +333,7 @@ pub fn key_values(def: &RelationDef, info: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
-fn same_key(a: &[Value], b: &[Value]) -> bool {
+pub(super) fn same_key(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
 }
 

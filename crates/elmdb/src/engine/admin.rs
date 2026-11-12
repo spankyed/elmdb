@@ -165,16 +165,21 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
 /// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
+    if from == to {
+        return Ok(());
+    }
     let moving: Vec<(String, relations::Stored)> =
         all_relations(t)?.into_iter().filter(|(_, stored)| stored.kind == from).collect();
-    // Refused before anything moves: an edge of the new kind with the same ends and key would make two edges one
-    // identity, which a link refuses too
+    // Refused before anything moves: an edge of the new kind with the same ends and key would be one identity twice, as
+    // an update of an edge onto another's identity is refused. Two moving edges that would be one identity are refused
+    // the same way, compared by the identity's own equality among those with the same ends
     let def = t.schema.relations.get(to).expect("declared above");
-    let mut seen = std::collections::BTreeSet::new();
+    let mut by_ends: std::collections::BTreeMap<(String, String), Vec<Vec<rmpv::Value>>> = Default::default();
     for (_, stored) in &moving {
         let key = relations::key_values(def, stored.info.as_ref());
         let clash = relations::with_identity(t, def, &stored.source, to, &stored.target, &key, None)?;
-        let twin = !seen.insert((stored.source.clone(), stored.target.clone(), format!("{key:?}")));
+        let group = by_ends.entry((stored.source.clone(), stored.target.clone())).or_default();
+        let twin = group.iter().any(|other| relations::same_key(other, &key));
         if clash.is_some() || twin {
             return Err(Error::new(
                 ErrorCode::DuplicateEdge,
@@ -187,6 +192,7 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
                 ),
             ));
         }
+        group.push(key);
     }
     for (id, stored) in moving {
         relations::remove(t, &id)?;
