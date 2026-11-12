@@ -1681,6 +1681,149 @@ fn effects_in(
     }
 }
 
+/// One relation as the engine's change set names it: an edge made, unlinked, rekeyed or moved, by its kind and ends. A relation
+/// the commit made and unlinked again is one entry with both flags, as the engine reports it
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Rel {
+    kind: String,
+    source: String,
+    target: String,
+    linked: bool,
+    unlinked: bool,
+    changed: bool,
+    /// The ends a moved relation had before the commit
+    moved_from: Option<(String, String)>,
+    /// The key of a keyed edge, which tells two of the same ends apart. Internal to the replay: the engine's report has
+    /// no key, so it is cleared before the comparison
+    n: Option<u8>,
+    /// The key a rekey gave the edge, which is what the entry's key becomes. Internal to the replay
+    to_n: Option<u8>,
+}
+
+impl Rel {
+    fn new(kind: &str, source: &str, target: &str) -> Rel {
+        Rel {
+            kind: kind.to_owned(),
+            source: source.to_owned(),
+            target: target.to_owned(),
+            linked: false,
+            unlinked: false,
+            changed: false,
+            moved_from: None,
+            n: None,
+            to_n: None,
+        }
+    }
+}
+
+/// The relations a committed step made, in the order of the engine's report. Replayed as `effects_in` replays the entities
+fn relations_of(step: &Step, before: &Model) -> Vec<Rel> {
+    let mut current = before.clone();
+    let mut rels = Vec::new();
+    rel_effects_in(&mut current, step, &mut rels).expect("a committed step applies");
+    for rel in &mut rels {
+        rel.n = None;
+        rel.to_n = None;
+    }
+    rels.sort();
+    rels
+}
+
+fn rel_effects_in(current: &mut Model, step: &Step, rels: &mut Vec<Rel>) -> Result<(), Refusal> {
+    match step {
+        Step::Unit { steps, throws, .. } => {
+            let saved = current.clone();
+            let mut inner = Vec::new();
+            let outcome = steps.iter().try_for_each(|member| rel_effects_in(current, member, &mut inner));
+            if outcome.is_err() || *throws {
+                *current = saved;
+                return Ok(());
+            }
+            for rel in inner {
+                push_rel(rels, rel);
+            }
+            Ok(())
+        }
+        leaf => {
+            let previous = current.clone();
+            current.apply(leaf)?;
+            let events = match leaf {
+                Step::MoveRelation { id, kind, target, to } => {
+                    let mut rel = Rel::new(kind, id, to);
+                    rel.changed = true;
+                    rel.moved_from = Some((id.to_string(), target.to_string()));
+                    vec![rel]
+                }
+                Step::Rekey { id, target, from, to } => {
+                    let mut rel = Rel::new(KEYED, id, target);
+                    rel.changed = true;
+                    rel.n = Some(*from);
+                    rel.to_n = Some(*to);
+                    vec![rel]
+                }
+                _ => edge_diff(&previous, current),
+            };
+            for rel in events {
+                push_rel(rels, rel);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The links and unlinks between two states: an edge added is a relation made, one removed a relation unlinked
+fn edge_diff(before: &Model, after: &Model) -> Vec<Rel> {
+    let mut out = Vec::new();
+    for (source, kind, target) in after.edges.difference(&before.edges) {
+        let mut rel = Rel::new(kind, source, target);
+        rel.linked = true;
+        out.push(rel);
+    }
+    for (source, kind, target) in before.edges.difference(&after.edges) {
+        let mut rel = Rel::new(kind, source, target);
+        rel.unlinked = true;
+        out.push(rel);
+    }
+    for (source, target, n) in after.keyed.difference(&before.keyed) {
+        let mut rel = Rel::new(KEYED, source, target);
+        rel.linked = true;
+        rel.n = Some(*n);
+        out.push(rel);
+    }
+    for (source, target, n) in before.keyed.difference(&after.keyed) {
+        let mut rel = Rel::new(KEYED, source, target);
+        rel.unlinked = true;
+        rel.n = Some(*n);
+        out.push(rel);
+    }
+    out
+}
+
+/// Records a relation event: an unlink of a relation the commit already has an entry for, linked or rekeyed or moved, is
+/// folded into that entry; anything else is an entry of its own
+fn push_rel(rels: &mut Vec<Rel>, rel: Rel) {
+    // A link makes a relation of its own; an unlink or a rekey is the same relation as an entry it follows, for the same ends
+    if !rel.linked
+        && rel.moved_from.is_none()
+        && let Some(open) = rels.iter_mut().find(|r| {
+            !r.unlinked && r.kind == rel.kind && r.source == rel.source && r.target == rel.target && r.n == rel.n
+        })
+    {
+        open.unlinked |= rel.unlinked;
+        open.changed |= rel.changed;
+        if rel.to_n.is_some() {
+            open.n = rel.to_n;
+        }
+        return;
+    }
+    // An entry carries the key its edge has after the commit, so an event later in the commit finds it by that key
+    let mut rel = rel;
+    if let Some(to) = rel.to_n.take() {
+        rel.n = Some(to);
+    }
+    rels.push(rel);
+}
+
 /// The fields and roles a write names, whether or not its value changed: the engine reports each one it wrote. A grant of a
 /// role the entity holds, or a revoke of one it lacks, writes nothing
 fn writes_of(step: &Step, previous: &Model) -> BTreeMap<String, Change> {
@@ -1801,6 +1944,23 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
     match got {
         Ok(Some(commit)) => {
             let (changes, ends) = effects_of(step, &engine.before, &after);
+            let mut reported: Vec<Rel> = commit
+                .relations
+                .values()
+                .map(|r| Rel {
+                    kind: r.kind.clone(),
+                    source: r.source.clone(),
+                    target: r.target.clone(),
+                    linked: r.linked,
+                    unlinked: r.unlinked,
+                    changed: r.changed,
+                    moved_from: r.moved_from.as_ref().map(|e| (e.source.clone(), e.target.clone())),
+                    n: None,
+                    to_n: None,
+                })
+                .collect();
+            reported.sort();
+            assert_eq!(reported, relations_of(step, &engine.before), "{step:?}: the relations the commit reported");
             assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
             engine.sequence = commit.sequence;
             // A reader from the commit before the first after a reset reads what changed since the reset
