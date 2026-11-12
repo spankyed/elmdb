@@ -391,10 +391,15 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.write(batch, durable?)` applies a batch as one unit. A unit can also stay open across calls, as a caller's
+`db.write(batch, durable?)` applies a batch as one unit, on a thread of the pool, answering a promise; `db.writeSync` is
+the same on the calling thread. Writes in flight together are applied one at a time, in no fixed order, so a caller
+awaits a write before one that depends on it. A database's check, rebuild and backup likewise run on the pool, and
+their `…Sync` forms on the calling thread. A refusal made before any work begins (a rebuild naming only a type, a
+handle that has panicked) throws at the call; any other failure rejects the promise with its code. A close waits for
+the operations in flight, as it always has for a read. A unit can also stay open across calls, as a caller's
 transaction running its own code between writes needs: `db.begin()` opens one, `unit.write(batch)` applies a batch in
 it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends it. One unit is open at a time,
-and while it is `db.write` refuses (`UNIT_OPEN`): its writes go through the unit. The unit's write transaction belongs
+and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the unit. The unit's write transaction belongs
 to the thread that began it. A unit opening on a map more than half used grows the map first, since an open unit can't
 grow it. A background index build waits for an open unit to end, woken when it does, and goes on from where it
 stopped; so does any other write but the unit's.
