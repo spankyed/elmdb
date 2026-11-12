@@ -48,7 +48,9 @@ test('every answer in bytes is memory V8 allocated, which freeing calls nothing 
     answered.push(name);
   };
 
-  owned('Database.write', db.write(create('Note-1')));
+  owned('Database.writeSync', db.writeSync(create('Note-1')));
+  // On a thread of the pool, the answer is copied the same way once it is handed back
+  owned('Database.write', await db.write(create('Note-3')));
   owned('Database.readSync', db.readSync(count));
   owned('Database.read', await db.read(count));
   owned('Database.changedSince', db.changedSince(['Note'], since, 100));
@@ -62,5 +64,5 @@ test('every answer in bytes is memory V8 allocated, which freeing calls nothing 
   owned('Unit.commit', unit.commit());
   owned('Database.checkpoint', db.checkpoint('reader'));
   assert.deepEqual(answered.sort(), answeringBytes(), 'an export that answers bytes is held to none of this');
-  assert.equal(answered.length, 11);
+  assert.equal(answered.length, 12);
 });

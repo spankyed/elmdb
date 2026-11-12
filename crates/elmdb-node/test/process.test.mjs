@@ -203,7 +203,7 @@ test('a commit from another process wakes a listener, and a killed writer leaves
       const { Database } = require(${JSON.stringify(loader)});
       const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
       const other = Database.open(${JSON.stringify(dir)}, { syncs: false, schema: ${JSON.stringify(schema)} });
-      other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
+      other.writeSync(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
       ${then}
     `;
     const heard = new Promise((resolve) => (woken = resolve));
@@ -239,7 +239,7 @@ test('a reset from another process wakes a listener, refuses commits here until 
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const write = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  const write = (id) => db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
   write('Task-a');
   const woken = new Promise((resolve) => db.hearCommitsElsewhere(resolve));
 
@@ -271,7 +271,7 @@ test('a reader reads what another process changed since its position, and a unit
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const create = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  const create = (id) => db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
   create('Task-mine');
   const read = (from) => packr.unpack(db.changedSince(['Task'], packr.pack(from), 100));
   const cursor = read({ sequence: 0 }).next;
@@ -280,7 +280,7 @@ test('a reader reads what another process changed since its position, and a unit
     const { Database } = require(${JSON.stringify(loader)});
     const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
     const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
-    other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
+    other.writeSync(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
     other.close();
   `);
   const changed = read(cursor);

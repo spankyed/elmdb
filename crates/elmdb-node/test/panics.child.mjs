@@ -53,6 +53,7 @@ const ofDatabase = {
   openReport: (db) => db.openReport,
   syncs: (db) => db.syncs,
   write: (db) => db.write(batch('Note-lost')),
+  writeSync: (db) => db.writeSync(batch('Note-lost')),
   readSync: (db) => db.readSync(reads),
   read: (db) => db.read(reads),
   untrack: (db) => db.untrack(1),
@@ -64,7 +65,9 @@ const ofDatabase = {
   sequence: (db) => db.sequence,
   begin: (db) => db.begin(),
   check: (db) => db.check(),
+  checkSync: (db) => db.checkSync(),
   rebuild: (db) => db.rebuild(),
+  rebuildSync: (db) => db.rebuildSync(),
   indexStatus: (db) => db.indexStatus(),
   committedElsewhere: (db) => db.committedElsewhere(),
   checkpoint: (db) => db.checkpoint('reader'),
@@ -75,6 +78,7 @@ const ofDatabase = {
   renameField: (db) => db.renameField('Note', 'gone', 'went'),
   renameRelation: (db) => db.renameRelation('gone', 'went'),
   backup: (db) => db.backup(join(dir, 'backup')),
+  backupSync: (db) => db.backupSync(join(dir, 'backup')),
   replaceWith: (db) => db.replaceWith(join(dir, 'nothing')),
   stats: (db) => db.stats(),
   bulkLoad: (db) => db.bulkLoad(packr.pack([])),
@@ -149,6 +153,6 @@ const unit = db.begin();
 unit.write(batch('Note-after'));
 assert.deepEqual(packr.unpack(unit.read(reads))[0].ids, ['Note-kept', 'Note-after']);
 unit.abort();
-assert.equal(db.check().differences.length, 0);
+assert.equal(db.checkSync().differences.length, 0);
 db.close();
 console.log(`${name} panicked, and the process lives`);

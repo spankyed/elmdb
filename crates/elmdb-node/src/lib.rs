@@ -9,9 +9,11 @@ use napi_derive::napi;
 #[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 mod exit;
+mod jobs;
 mod panics;
 mod process;
 
+use jobs::Job;
 use panics::{Health, Held, guarded};
 
 /// An elmdb code as the status of a JavaScript error, which N-API hands JavaScript as `error.code`
@@ -102,6 +104,18 @@ pub struct Database {
 /// it has ended
 type UnitSlot = std::rc::Rc<std::cell::RefCell<Option<elmdb::Unit>>>;
 
+/// The type and index a rebuild names: both, or neither for every index
+fn rebuild_target(entity_type: Option<String>, index: Option<String>) -> Result<Option<(String, String)>, Code> {
+    match (entity_type, index) {
+        (Some(entity_type), Some(index)) => Ok(Some((entity_type, index))),
+        (None, None) => Ok(None),
+        _ => Err(napi::Error::new(
+            Code("BATCH_INVALID"),
+            "rebuild takes both a type and an index, or neither for every index".to_owned(),
+        )),
+    }
+}
+
 /// Ends the unit in a slot, keeping none of its writes, where a panic in ending it is caught
 fn end_unit(slot: &UnitSlot) {
     // Nothing borrows the slot as this runs: an export's borrow ends with its work, panicking or not, and no
@@ -128,6 +142,20 @@ impl Database {
         let ran = self.health.unrefused(export, work);
         self.end_unit_once_panicked();
         ran
+    }
+
+    /// A job on the database, on a thread of the pool, answering what `work` answers as `convert` makes it
+    fn job<T, V>(
+        &self,
+        export: &'static str,
+        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
+        convert: fn(&Env, T) -> napi::Result<V>,
+    ) -> AsyncTask<Job<T, V>>
+    where
+        T: Send + 'static,
+        V: ToNapiValue + TypeName,
+    {
+        AsyncTask::new(Job::new(self.inner.again(), self.health.clone(), export, work, convert))
     }
 
     fn end_unit_once_panicked(&self) {
@@ -225,10 +253,34 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
-    #[napi]
-    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
+    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
+    /// the pool, so the event loop isn't held while it runs. Writes that are in flight at once are applied one at a time
+    /// in no fixed order, so await a write before one that depends on it; one is refused while a unit is open
+    #[napi(ts_return_type = "Promise<Buffer>")]
+    pub fn write(
+        &self,
+        batch: Buffer,
+        durable: Option<bool>,
+    ) -> Result<AsyncTask<Job<Vec<u8>, BufferSlice<'static>>>, Code> {
         self.guarded("Database.write", || {
+            let batch = batch.to_vec();
+            Ok(self.job(
+                "Database.write, on a thread of the pool,",
+                move |db| db.write_bytes(&batch, durable.unwrap_or(false)),
+                jobs::bytes,
+            ))
+        })
+    }
+
+    /// `write` on this thread, held until the batch is applied
+    #[napi]
+    pub fn write_sync<'env>(
+        &self,
+        env: &'env Env,
+        batch: Buffer,
+        durable: Option<bool>,
+    ) -> Result<BufferSlice<'env>, Code> {
+        self.guarded("Database.writeSync", || {
             answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
         })
     }
@@ -360,30 +412,49 @@ impl Database {
         })
     }
 
-    /// Compares derived data with primary data and every row with the schema's rules
-    #[napi(ts_return_type = "CheckReport")]
-    pub fn check(&self) -> Result<serde_json::Value, Code> {
+    /// Compares derived data with primary data and every row with the schema's rules, on a thread of the pool
+    #[napi(ts_return_type = "Promise<CheckReport>")]
+    pub fn check(&self) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
         self.guarded("Database.check", || {
+            Ok(self.job(
+                "Database.check, on a thread of the pool,",
+                |db| db.check().map(|report| serde_json::to_value(report).expect("a report serializes")),
+                jobs::value,
+            ))
+        })
+    }
+
+    /// `check` on this thread
+    #[napi(ts_return_type = "CheckReport")]
+    pub fn check_sync(&self) -> Result<serde_json::Value, Code> {
+        self.guarded("Database.checkSync", || {
             let report = self.inner.check().map_err(to_js)?;
             Ok(serde_json::to_value(report).expect("a report serializes"))
         })
     }
 
-    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's
-    #[napi]
-    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
+    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
+    /// thread of the pool, as a write is
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<AsyncTask<Job<(), ()>>, Code> {
         self.guarded("Database.rebuild", || {
-            let one = match (entity_type.as_deref(), index.as_deref()) {
-                (Some(entity_type), Some(index)) => Some((entity_type, index)),
-                (None, None) => None,
-                _ => {
-                    return Err(napi::Error::new(
-                        Code("BATCH_INVALID"),
-                        "rebuild takes both a type and an index, or neither for every index".to_owned(),
-                    ));
-                }
-            };
-            self.inner.rebuild(one).map_err(to_js)
+            let one = rebuild_target(entity_type, index)?;
+            Ok(self.job(
+                "Database.rebuild, on a thread of the pool,",
+                move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
+                jobs::nothing,
+            ))
+        })
+    }
+
+    /// `rebuild` on this thread
+    #[napi]
+    pub fn rebuild_sync(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
+        self.guarded("Database.rebuildSync", || {
+            let one = rebuild_target(entity_type, index)?;
+            self.inner
+                .rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str())))
+                .map_err(to_js)
         })
     }
 
@@ -467,10 +538,19 @@ impl Database {
         self.guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
     }
 
-    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
+    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
+    /// the pool
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn backup(&self, target: String) -> Result<AsyncTask<Job<(), ()>>, Code> {
+        self.guarded("Database.backup", || {
+            Ok(self.job("Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing))
+        })
+    }
+
+    /// `backup` on this thread
     #[napi]
-    pub fn backup(&self, target: String) -> Result<(), Code> {
-        self.guarded("Database.backup", || self.inner.backup(target).map_err(to_js))
+    pub fn backup_sync(&self, target: String) -> Result<(), Code> {
+        self.guarded("Database.backupSync", || self.inner.backup(target).map_err(to_js))
     }
 
     /// Every entry replaced by another database's primary data, derived data rebuilt under this schema

@@ -135,8 +135,8 @@ function elmdb() {
   const bestAfter = (text, cursor) => [search(text, false), { step: 'after', id: cursor }, { step: 'limit', n: 10 }];
   return {
     text: true,
-    load: (notes) => db.write(packr.pack({ ops: notes.map(create) })),
-    create: (one) => db.write(packr.pack({ ops: [create(one)] })),
+    load: (notes) => db.writeSync(packr.pack({ ops: notes.map(create) })),
+    create: (one) => db.writeSync(packr.pack({ ops: [create(one)] })),
     settle: () => db.waitForIndexBuilds(),
     best: (text, fuzzy = false) => query([search(text, fuzzy), { step: 'limit', n: 10 }], { answer: 'ids' }).ids,
     // How many entities the plan visited to answer the best ten
@@ -165,13 +165,13 @@ function elmdb() {
       };
     },
     check: () => {
-      const report = db.check();
+      const report = db.checkSync();
       assert.deepEqual([report.differences.length, report.violations.length], [0, 0], 'elmdb: check() found a difference');
     },
-    rebuild: () => db.rebuild(),
+    rebuild: () => db.rebuildSync(),
     bytes: () => statSync(join(dir, 'data.mdb')).size,
     compacted: () => {
-      db.backup(join(root, 'elmdb-compacted'));
+      db.backupSync(join(root, 'elmdb-compacted'));
       return statSync(join(root, 'elmdb-compacted', 'data.mdb')).size;
     },
     close: () => db.close(),

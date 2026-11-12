@@ -25,7 +25,7 @@ function seeded(t) {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-panics-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, syncs: false });
-  db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-kept', fields: { title: 'kept' } }], now: 1000 }));
+  db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-kept', fields: { title: 'kept' } }], now: 1000 }));
   db.close();
   return dir;
 }
@@ -41,6 +41,10 @@ const exports = [
   ...members(Unit.prototype).map((name) => `Unit.${name}`),
   'Database.read, on a thread of the pool,',
   'Database.durable, on a thread of the pool,',
+  'Database.write, on a thread of the pool,',
+  'Database.check, on a thread of the pool,',
+  'Database.rebuild, on a thread of the pool,',
+  'Database.backup, on a thread of the pool,',
 ];
 
 test('a panic in each export is an error with a code of its own, and the process lives', (t) => {
