@@ -3940,6 +3940,9 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::StrongComponents { .. } => "strongComponents",
         Terminal::Communities { .. } => "communities",
         Terminal::GroupBy { .. } => "groupBy",
+        Terminal::Least { .. } => "least",
+        Terminal::Greatest { .. } => "greatest",
+        Terminal::Sum { .. } => "sum",
         Terminal::Hits { .. } => "hits",
     }
 }
@@ -4581,6 +4584,71 @@ fn query_with(
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, *weights)?;
             let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
             write_groups("communities", &ids, &groups, false, &mut w);
+        }
+        Terminal::Least { field: name } | Terminal::Greatest { field: name } => {
+            let greatest = matches!(plan.terminal, Terminal::Greatest { .. });
+            let ids = q.collect(last)?;
+            let collator = collator(&r.schema().collation)?;
+            // The first of equal values in the plan's order stays: a value replaces the best only when it is past it
+            let mut best: Option<(SortKey, String, Value)> = None;
+            for id in ids {
+                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                let key = sort_key(Some(&value));
+                let past = match &best {
+                    None => true,
+                    Some((held, _, _)) => {
+                        let order = compare(&collator, &key, held);
+                        if greatest { order == Ordering::Greater } else { order == Ordering::Less }
+                    }
+                };
+                if past {
+                    best = Some((key, id, value));
+                }
+            }
+            w.map(3);
+            w.kind(if greatest { "greatest" } else { "least" });
+            match &best {
+                Some((_, id, _)) => {
+                    w.str("id");
+                    w.str(id);
+                }
+                None => {
+                    w.str("id");
+                    w.nil();
+                }
+            }
+            w.str("value");
+            match &best {
+                Some((_, _, value)) => w.raw(&values::encode(value)),
+                None => w.nil(),
+            }
+        }
+        Terminal::Sum { field: name } => {
+            let ids = q.collect(last)?;
+            let (mut sum, mut n) = (0.0_f64, 0u64);
+            for id in ids {
+                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                let Some(number) = values::as_number(&value) else {
+                    return Err(Error::new(
+                        ErrorCode::ValueInvalid,
+                        format!("sum({name}) needs a number, and {id} holds {} in it", json_text(&value)),
+                    ));
+                };
+                sum += number;
+                n += 1;
+            }
+            if !sum.is_finite() {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!("sum({name}) is past what a number holds: the values added up to {sum}"),
+                ));
+            }
+            w.map(3);
+            w.kind("sum");
+            w.str("sum");
+            rmp::encode::write_f64(w.0, sum).expect("a Vec");
+            w.str("n");
+            w.uint(n);
         }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;
