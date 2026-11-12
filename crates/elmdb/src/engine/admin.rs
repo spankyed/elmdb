@@ -165,12 +165,33 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
 /// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
-    for (id, stored) in all_relations(t)? {
-        if stored.kind == from {
-            relations::remove(t, &id)?;
-            let moved = relations::Stored { kind: to.to_owned(), ..stored };
-            relations::restore(t, &id, &moved)?;
+    let moving: Vec<(String, relations::Stored)> =
+        all_relations(t)?.into_iter().filter(|(_, stored)| stored.kind == from).collect();
+    // Refused before anything moves: an edge of the new kind with the same ends and key would make two edges one
+    // identity, which a link refuses too
+    let def = t.schema.relations.get(to).expect("declared above");
+    let mut seen = std::collections::BTreeSet::new();
+    for (_, stored) in &moving {
+        let key = relations::key_values(def, stored.info.as_ref());
+        let clash = relations::with_identity(t, def, &stored.source, to, &stored.target, &key, None)?;
+        let twin = !seen.insert((stored.source.clone(), stored.target.clone(), format!("{key:?}")));
+        if clash.is_some() || twin {
+            return Err(Error::new(
+                ErrorCode::DuplicateEdge,
+                format!(
+                    "renameRelation({from:?} to {to:?}): an edge of kind {to} already joins {} to {}{}, and the rename would \
+                     make a second: remove one of them first",
+                    stored.source,
+                    stored.target,
+                    if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) }
+                ),
+            ));
         }
+    }
+    for (id, stored) in moving {
+        relations::remove(t, &id)?;
+        let moved = relations::Stored { kind: to.to_owned(), ..stored };
+        relations::restore(t, &id, &moved)?;
     }
     Ok(())
 }

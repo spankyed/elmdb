@@ -542,6 +542,37 @@ fn purge_and_rename_field_refuse_the_engine_s_own_fields() {
 }
 
 #[test]
+fn rename_relation_refuses_an_edge_that_would_make_a_second_of_the_new_kind_and_moves_nothing() {
+    // An edge of the new kind with the same ends is one identity already; renaming onto it would leave two, which the
+    // engine's check reports and a link would refuse
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": "x" } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2", "fields": { "a": "x" } }),
+        ],
+    )
+    .unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-2" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_relation("refs", "tags").unwrap_err();
+    assert_eq!(error.code, ErrorCode::DuplicateEdge, "{error}");
+    assert!(error.message.contains("Task-1") && error.message.contains("Task-2"), "{error}");
+    assert!(db.check().unwrap().is_clean(), "a refused rename leaves the graph as it was");
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "tags", "target": "Task-2" })]).unwrap();
+    db.rename_relation("refs", "tags").expect("with no edge of the new kind joining the ends, the rename goes through");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();

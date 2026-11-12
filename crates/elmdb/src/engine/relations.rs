@@ -339,7 +339,7 @@ fn same_key(a: &[Value], b: &[Value]) -> bool {
 
 /// The edge of `kind` from `source` to `target` holding `key` other than `except`: the one a link to that identity
 /// updates, and the one a move onto it would duplicate
-fn with_identity(
+pub(super) fn with_identity(
     t: &impl Read,
     def: &RelationDef,
     source: &str,
