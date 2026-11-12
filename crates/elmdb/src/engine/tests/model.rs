@@ -1802,6 +1802,18 @@ fn edge_diff(before: &Model, after: &Model) -> Vec<Rel> {
 /// Records a relation event: an unlink of a relation the commit already has an entry for, linked or rekeyed or moved, is
 /// folded into that entry; anything else is an entry of its own
 fn push_rel(rels: &mut Vec<Rel>, rel: Rel) {
+    // A move is the same relation as the entry holding its pre-move ends, and that entry keeps the ends it began with
+    if let Some((from_source, from_target)) = rel.moved_from.clone()
+        && let Some(open) = rels.iter_mut().find(|r| {
+            !r.unlinked && r.kind == rel.kind && r.source == from_source && r.target == from_target && r.n == rel.n
+        })
+    {
+        open.source = rel.source;
+        open.target = rel.target;
+        open.changed = true;
+        open.moved_from.get_or_insert((from_source, from_target));
+        return;
+    }
     // A link makes a relation of its own; an unlink or a rekey is the same relation as an entry it follows, for the same ends
     if !rel.linked
         && rel.moved_from.is_none()
@@ -2170,6 +2182,39 @@ fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_
                 throws: false,
                 durable: false,
             },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_first_ends() {
+    // The engine names a relation moved twice in one commit once, changed, at its last ends and with the ends it began with
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-4", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::MoveRelation { id: "Task-1", kind: "refs", target: "Task-2", to: "Task-3" },
+            Step::MoveRelation { id: "Task-1", kind: "refs", target: "Task-3", to: "Task-4" },
         ],
         throws: false,
         durable: false,
