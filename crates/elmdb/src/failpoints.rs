@@ -68,6 +68,8 @@ pub(crate) mod points {
     pub const WRITE_HELD: &str = "store::write_held";
     /// Runs as a unit is begun, once its place is reserved and before it takes the write transaction
     pub const UNIT_RESERVED: &str = "store::unit_reserved";
+    /// Runs as a unit is begun, once it holds the write transaction and before the unit is made
+    pub const UNIT_HELD: &str = "engine::unit_held";
     /// Runs in a unit's commit, once the commit has taken the unit's transaction
     pub const UNIT_COMMITTING: &str = "engine::unit_committing";
     /// Runs once a backup's compacted copy is complete, before it is published

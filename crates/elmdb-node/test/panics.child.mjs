@@ -107,6 +107,9 @@ if (name === 'Database.open') {
   db = open();
   const call = ofDatabase[member];
   assert.ok(call, `${name} has no call in this test`);
+  // A unit open as the database's call panics, which the panic ends: no call is made on it
+  const unit = member === 'begin' ? undefined : db.begin();
+  unit?.write(batch('Note-in-the-unit'));
   if (pool) {
     // The work of a promise is done on a thread of the pool, where its panic rejects the promise
     panicked(await call(db).then(() => undefined, (error) => error));
@@ -116,11 +119,12 @@ if (name === 'Database.open') {
     panicked(thrown(() => call(db)));
   }
   refuses(db);
-  // Its path and whether it is open are still answered, and it closes
+  // Its path and whether it is open are still answered, and it closes, its unit having ended
   assert.ok(db.path.endsWith(basename(dir)), db.path);
   assert.equal(db.isOpen, true);
   db.close();
   assert.equal(db.isOpen, false);
+  assert.equal(unit?.isOpen ?? false, false);
 } else {
   db = open();
   const unit = db.begin();
@@ -129,9 +133,9 @@ if (name === 'Database.open') {
   // Something for the unit to lose, where its own write is not the call that panics
   if (member !== 'write') unit.write(batch('Note-in-the-unit'));
   panicked(thrown(() => call(unit)));
-  // The unit is ended by the panic, or by the next call on it where the call that panicked asked nothing of it
-  assert.ok(['CLOSED', 'PANICKED'].includes(thrown(() => unit.commit())?.code));
+  // The panic ended the unit, and a call on it is refused as any of its handle is
   assert.equal(unit.isOpen, false);
+  assert.equal(thrown(() => unit.commit())?.code, 'PANICKED');
   refuses(db);
   // The close is not refused for an open unit
   db.close();

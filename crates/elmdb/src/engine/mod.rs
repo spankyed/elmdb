@@ -738,12 +738,16 @@ impl Database {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
         let held = self.schema_guard();
         let store = self.store()?;
+        // The unit's place is let go if no unit comes of it, refused or panicking, once the transaction and its
+        // holds, declared after it, have gone
+        let mut place = Place { store: &store, taken: false };
         let (txn, gate, writer) = store.begin()?;
+        place.taken = true;
+        run_point!(UNIT_HELD);
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
             writer.release();
-            store.end_unit();
             return Err(error);
         }
         let schema = Arc::clone(&held);
@@ -754,7 +758,6 @@ impl Database {
                 drop(txn);
                 drop(gate);
                 writer.release();
-                store.end_unit();
                 return Err(error);
             }
         };
@@ -762,11 +765,15 @@ impl Database {
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
         let logging = !self.tracks.lock().is_empty();
+        let (tracks, schemas) = (Arc::clone(&self.tracks), self.observing_schema());
+        // From here the unit holds the place, and ends it
+        place.taken = false;
+        drop(place);
         Ok(Unit {
             txn: Some(txn),
             state: UnitState::new(logging),
-            tracks: Arc::clone(&self.tracks),
-            schemas: self.observing_schema(),
+            tracks,
+            schemas,
             poisoned: None,
             gate: Some(gate),
             writer: Some(writer),
@@ -776,6 +783,20 @@ impl Database {
             ended: false,
             _thread: PhantomData,
         })
+    }
+}
+
+/// A unit's place in the store while the unit is being made: ended when dropped while taken
+struct Place<'a> {
+    store: &'a Store,
+    taken: bool,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        if self.taken {
+            self.store.end_unit();
+        }
     }
 }
 

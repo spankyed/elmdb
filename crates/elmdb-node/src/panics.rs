@@ -230,6 +230,24 @@ mod tests {
         assert!(error.message.contains(": a panic that says nothing. "), "{}", error.message);
         let error = caught("a close", || std::panic::resume_unwind(Box::new("again"))).unwrap_err();
         assert!(error.message.starts_with("a close panicked: again. "), "{}", error.message);
+        // Where a panic caught elsewhere was raised is not where the next one was
+        keep_locations();
+        assert!(catch_unwind(|| panic!("caught elsewhere")).is_err());
+        let error = caught("a close", || std::panic::resume_unwind(Box::new("later"))).unwrap_err();
+        assert!(error.message.starts_with("a close panicked: later. "), "{}", error.message);
+    }
+
+    #[test]
+    fn a_hold_let_go_closes_its_database_once_the_last_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || elmdb::Database::open(dir.path(), elmdb::OpenOptions { syncs: false, ..Default::default() });
+        let held = Held::new(Arc::new(open().unwrap()));
+        let again = held.again();
+        assert_eq!(again.path(), held.path());
+        drop(held);
+        assert_eq!(open().err().map(|error| error.code), Some(elmdb::ErrorCode::AlreadyOpen), "one hold is left");
+        drop(again);
+        assert!(open().is_ok());
     }
 
     #[test]

@@ -694,14 +694,22 @@ rejects the promise of a call whose work is on a thread of the pool. Left to unw
 the process; caught, the process lives. What the panic left in memory is not known, so:
 
 - **The handle refuses calls after it**, with `PANICKED` and the first panic's message, but `close`, `path`,
-  `readOnly` and `isOpen`. A unit the handle had open is ended, keeping none of its writes: what a panic
-  interrupted may be half of a batch.
+  `readOnly`, `isOpen` and a unit's `isOpen`. The unit the handle had open is ended by the call that panicked,
+  keeping none of its writes, whether the panic was in the unit or in the database: what a panic interrupted may be
+  half of a batch. A panic on a thread of the pool is the handle's too, and its unit is ended by the next call on
+  the handle or the unit.
 - **What was committed is kept.** A transaction a panic unwinds through is aborted, and a unit's place, the write
-  transaction and the gate are let go as it unwinds (`Store::begin`, `Unit::commit`): the handle closed and the
+  transaction and the gate are let go as it unwinds (`Store::begin`, `Database::begin`, `Unit::commit`): the handle closed and the
   database opened again is a database as any other. A panic raised after a commit landed leaves the commit made,
   so the error says the call may not have finished, not that it didn't.
-- **A close that panics too** leaves the database open in the process, as one that failed does, until the process
-  ends: a later open of its path there is refused, `ALREADY_OPEN`.
+- **A close of such a handle closes it** where the panic was raised at an export's door or in a read or a write,
+  which hold none of the locks a close takes. A close that panics itself throws `PANICKED`: where it had taken
+  the store, the store is let go as the panic unwinds and the database is closed; where it had not, the database
+  stays open until its handle is collected or the process ends, a later open of its path refused
+  (`ALREADY_OPEN`), and `isOpen` may throw too.
+- **A panic on one of elmdb's own threads**, the index builder's or the sync's, is not a call's and marks no
+  handle: a listener's is caught there (`CALLBACK_PANICKED`), and any other ends the thread, which the close
+  that joins it then reports as its own panic.
 
 What V8 collects, an unclosed database or an open unit, and the closes the binding makes as an environment or the
 process ends, are dropped where a panic is caught as well. In Rust a panic unwinds to the caller, as any does.

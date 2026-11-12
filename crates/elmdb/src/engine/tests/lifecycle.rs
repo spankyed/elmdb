@@ -472,7 +472,7 @@ fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_writ
     use crate::failpoints::{self, points};
     use std::panic::{AssertUnwindSafe, catch_unwind};
     let task = |id: &str| vec![json!({ "op": "create", "type": "Task", "id": id })];
-    for point in [points::WRITE_HELD, points::UNIT_RESERVED, points::UNIT_COMMITTING] {
+    for point in [points::WRITE_HELD, points::UNIT_RESERVED, points::UNIT_HELD, points::UNIT_COMMITTING] {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
         write(&db, task("Task-before")).unwrap();
