@@ -97,7 +97,8 @@ don't blindly retry it.
 
 **Off the calling thread:** `db.write`, `db.check`, `db.rebuild` and `db.backup` run on a thread of the pool and answer a
 promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and
-`db.backupSync` are the blocking forms. Await a write before one that depends on it.
+`db.backupSync` are the blocking forms. Await a write before one that depends on it. A close waits for an operation that
+is running, so one made during a long rebuild holds the event loop until it ends.
 
 **Power loss:** by default a commit that returned can be lost if the machine loses power before its sync, about a second
 after it. Open with `syncEachCommit: true` to sync every commit as it is made, so a commit that returned survives a power

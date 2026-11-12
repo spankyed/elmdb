@@ -507,6 +507,7 @@ impl Database {
     ) -> Result<()> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = now_ms();
         let (waiting, mut commit) = store.write_committed(
             |txn, db| {
@@ -529,7 +530,7 @@ impl Database {
         }
         drop(schema);
         self.finish_admin_commit(&store, commit)?;
-        if let Some(builders) = self.builders()? {
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
         Ok(())
@@ -695,6 +696,7 @@ impl Database {
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
         let ((results, changes, written, waiting), commit) = store.write_committed(
@@ -715,7 +717,7 @@ impl Database {
         )?;
         drop(schema);
         let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
-        if let Some(builders) = self.builders()? {
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
         Ok((results, changes))

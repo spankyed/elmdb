@@ -1,7 +1,8 @@
 //! Work done on a thread of the pool, answered on the event loop: a write, a check, a rebuild or a backup, which can take
-//! as long as the database is large. A job holds its own hold on the database, so the close that runs after it has
-//! started waits for it, as one of `read()`'s does, and a panic in its work is the handle's, as a read's is
-//! (`panics.rs`). A failure is elmdb's, and reaches JavaScript with its code, as `reject` makes it.
+//! as long as the database is large. A job holds its own hold on the database. A close waits for a job that is running;
+//! one still queued when the close takes the database runs against no store and rejects with `CLOSED`, having written
+//! nothing. A panic in a job's work is the handle's, as a read's is (`panics.rs`). A failure is elmdb's, and reaches
+//! JavaScript with its code, as `reject` makes it.
 
 use napi::bindgen_prelude::*;
 use napi::{Env, Task};

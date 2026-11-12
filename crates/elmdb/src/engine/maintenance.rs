@@ -339,7 +339,7 @@ impl Database {
         if !store.adopt_replacement(epoch)? {
             return Ok(false);
         }
-        if let Some(builders) = self.builders()? {
+        if let Some(builders) = self.builders_of(std::sync::Arc::clone(&store))? {
             builders.queue(super::remaining_indexes(&store, &self.schema_guard())?);
         }
         Ok(true)

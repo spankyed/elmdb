@@ -50,13 +50,16 @@ test('a write answers a promise of what the blocking write answers, and the writ
   assert.equal(packr.unpack(db.readSync(count))[0].n, 3);
 });
 
-test('a write runs off the thread that asked: the call returns before it is applied', async (t) => {
+test('a write runs off the thread that asked: an event-loop turn comes before its answer', async (t) => {
   const { db } = open(t);
-  let applied = false;
-  const pending = db.write(create('Note-1', 'one')).then(() => { applied = true; });
-  assert.equal(applied, false, 'the call returned before the batch was applied');
+  // A batch that takes longer than a turn of the loop. Its answer can't come before a turn that was asked for first
+  // unless the write ran on another thread: a blocking write answers before any turn is taken
+  const ops = Array.from({ length: 5000 }, (_, i) => ({ op: 'create', type: 'Note', id: `Note-${i}`, fields: { title: `t ${i}` } }));
+  const order = [];
+  const pending = db.write(packr.pack({ ops, now: 1000 })).then(() => order.push('answer'));
+  setImmediate(() => order.push('turn'));
   await pending;
-  assert.equal(applied, true);
+  assert.deepEqual(order, ['turn', 'answer']);
 });
 
 test('a rebuild of a large database leaves the event loop turning until it answers', async (t) => {
@@ -64,8 +67,7 @@ test('a rebuild of a large database leaves the event loop turning until it answe
   fill(db, 20000);
   let settled = false;
   const rebuilding = db.rebuild().then(() => { settled = true; });
-  // The call returned before the rebuild began to be answered, and timers keep firing while it runs
-  assert.equal(settled, false);
+  // Timers keep firing while the rebuild runs: the loop turns many times before the rebuild's answer
   let turns = 0;
   while (!settled) {
     await new Promise((resolve) => setImmediate(resolve));
