@@ -168,6 +168,11 @@ export interface OpenOptions {
   schema?: Schema
   /** Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory */
   syncs?: boolean
+  /**
+   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the cost of
+   * a sync a commit; off by default, where commits are synced in groups, a moment after they return
+   */
+  syncEachCommit?: boolean
   syncIdleMs?: number
   syncIntervalMs?: number
   mapSizeBytes?: number
