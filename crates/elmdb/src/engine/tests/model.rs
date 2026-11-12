@@ -1553,6 +1553,8 @@ struct Change {
     /// The roles the entity holds differ: a grant or a revoke, which the engine names as its `role` field
     roles: bool,
     fields: BTreeSet<String>,
+    /// Destroyed and made again within the commit: named with only what was done to the one made. Internal to the replay
+    replaced: bool,
 }
 
 /// The model's changes between two of its states, each entity the commit changed, with the fields whose values differ
@@ -1611,6 +1613,7 @@ fn changes_of(changes: &ChangeSet) -> BTreeMap<String, Change> {
                 restored: e.restored,
                 roles: e.fields.iter().any(|f| f == "role"),
                 fields: without_engine_fields(e.fields.iter().cloned().collect()),
+                replaced: false,
             };
             (id.clone(), change)
         })
@@ -1626,6 +1629,9 @@ fn effects_of(step: &Step, before: &Model, after: &Model) -> (BTreeMap<String, C
     let mut changes = BTreeMap::new();
     let mut ends = BTreeSet::new();
     effects_in(&mut current, step, &mut changes, &mut ends).expect("a committed step applies");
+    for change in changes.values_mut() {
+        change.replaced = false;
+    }
     // A write that changes nothing the engine names (an upsert of no fields) leaves no entry
     changes.retain(|_, change| *change != Change::default());
     // An entity the commit found and left destroyed is named as destroyed alone, though a unit made it again on the way
@@ -1732,7 +1738,9 @@ fn written_ends(step: &Step) -> BTreeSet<String> {
 fn merge(into: &mut BTreeMap<String, Change>, from: BTreeMap<String, Change>) {
     for (id, later) in from {
         match into.get_mut(&id) {
-            Some(earlier) if later.created && earlier.destroyed => *earlier = later,
+            Some(earlier) if later.replaced || (later.created && earlier.destroyed) => {
+                *earlier = Change { replaced: true, ..later };
+            }
             Some(earlier) => {
                 earlier.created |= later.created;
                 earlier.destroyed |= later.destroyed;
@@ -1971,6 +1979,38 @@ fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_en
     let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
     let step = Step::Unit {
         steps: vec![Step::Grant { id: "Task-1", role: "r1" }, Step::Destroy { id: "Task-1" }],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_it() {
+    // The engine names a destroyed-and-made entity with only what was done to the one made: the fields an enclosing unit
+    // wrote before the nested unit's destroy are not among them
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Set { id: "Task-1", key: "c", value: json!("y") },
+            Step::Unit {
+                steps: vec![Step::Destroy { id: "Task-1" }, Step::Upsert { id: "Task-1", fields: BTreeMap::new() }],
+                throws: false,
+                durable: false,
+            },
+        ],
         throws: false,
         durable: false,
     };
