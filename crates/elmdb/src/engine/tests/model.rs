@@ -705,10 +705,8 @@ impl Model {
             return Ok(());
         }
         if let Step::RenameRelation { from, to } = step {
-            if std::mem::take(&mut self.refuse_next) {
-                return Err("the store refused the commit");
-            }
-            // An edge of the new kind joining the ends of a moving edge would be one identity twice: refused, nothing moves
+            // An edge of the new kind joining the ends of a moving edge would be one identity twice: refused, nothing moves.
+            // The engine refuses that before its commit, so an armed refusal stays armed for the next commit
             let moving: Vec<(String, String, String)> =
                 self.edges.iter().filter(|(_, kind, _)| kind.as_str() == *from).cloned().collect();
             if moving
@@ -716,6 +714,9 @@ impl Model {
                 .any(|(source, _, target)| self.edges.contains(&(source.clone(), to.to_string(), target.clone())))
             {
                 return Err("an edge of the new kind joins the ends");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
             }
             self.pending.clear();
             for (source, kind, target) in moving {
