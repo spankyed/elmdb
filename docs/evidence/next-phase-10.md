@@ -1,7 +1,7 @@
 # Phase 10 of goal-elmdb-next: the designs and their readings
 
 2026-10-28, elmdb `6fdb065`, apack `a983092538`. Each design is its roadmap document, "Status: designed", with its
-format, API, risks and phases: `docs/roadmap/plan-algebra.md`, `change-log.md`, `incremental-views.md`,
+format, API, risks and phases: `docs/archive/roadmap/plan-algebra.md` (since built), `change-log.md`, `incremental-views.md`,
 `javascript-boundary.md` and `value-dictionaries.md`. The readings below are what they rest on; those already recorded
 by Phases 3, 4, 6 and 9 are cited where they are.
 

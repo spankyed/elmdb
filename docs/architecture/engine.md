@@ -219,7 +219,9 @@ an answer:
     before can be in them all, and the walk goes on to that. A place carries no id: the entity at a place the
     lists share is read from its type's rows there, which is the one read that counts among a plan's visits, and
     the filters with no list are tested against it. A type with no list has its rows walked and every filter
-    tested. Equalities on every field of an index on several fields read its places under those values as one list in
+    tested. A `lacks` of a field with a built index on it alone reads the entities the index files as without a
+    value (`format.md`, `d/xw`), a list too, and is still tested against each: the index files there an entity
+    whose field is null as one that holds none. Equalities on every field of an index on several fields read its places under those values as one list in
     place of their own, the index on the most fields, while it holds no entity it doesn't order under the values
     of the fields before its last: `where owner = 9` and `where rank = 3` read an index on `[owner, rank]`.
   - **What that reads.** Nothing is counted to choose among lists. What is read is bounded by the shortest list
@@ -328,6 +330,13 @@ an answer:
   no order to seek in, so it ranks the cursor among its matches and hands on those ranked past it (`search.md`,
   Text search as built): its page reads the entities it holds, though every match is scored. After any other stage,
   `after` passes over the ids up to the cursor as they come.
+- **A search after a type start's filters runs within their places.** When the steps before a `search` are the
+  filters a type start begins with, and a list reads every one of them in every start type, a range's among them
+  read whole, the places those lists hold in common are the set the search runs within, less the trash's for a
+  live plan and only the trash's for a plan of it. No entity is read to make the set, the search's ties are
+  broken by the types' order and then creation's, as the set's own order would break them, and a type the filters
+  keep nothing of is not searched. A filter with no list has the filters read as any are, each entity they keep
+  read, and the search runs among those.
 - **A search is asked for no more than its answer takes.** A `limit` straight after a `search`, or after the `after`
   straight after it, asks it for its best that many, which it keeps as it scores and no others; `first` and
   `firstRow` ask for the best one, and `exists` for any one, which straight after the search it answers from the
@@ -358,6 +367,9 @@ engine writes, whose order an index's entries have, and each equality is of a fi
 So does a `range` the `orderBy` after it reads between. A `search` stage says how many of its matches it `held` to
 rank them: every one, or those ranked past a page's cursor, and of either no more than it was asked for; none when it
 was asked for any one. A search that held every match before a `limit` further on is one a filter stands between.
+A stage that read lists of places, or walked a type's rows, says how many `places` it was handed, each one walked
+or sought; `set: "and"` when it read the places several lists hold in common; and a `search` that ran within its
+filters' places names their indexes as its `index` and says how many places it ran `within`.
 EXPLAIN times each crossing between stages, so its `ms` is the explained read's, a little above the plain one's.
 
 A read takes an idle read transaction while it is still the last commit's snapshot (its id the environment's last

@@ -9,7 +9,7 @@ only for demonstrated costly queries. Reduce visited entries, materialized rows 
 while preserving the exact query contract. No speculative optimizer rewrite is scheduled.
 
 The existing [engine contract](../../architecture/engine.md#reads-plans) and
-[plan algebra](../../roadmap/plan-algebra.md) document built behavior: an indexed filter among leading filters can
+[plan algebra](plan-algebra.md) document built behavior: an indexed filter among leading filters can
 drive a type start, matching entries stream to early terminals/limits, bounded sorting retains top-k,
 and row projections return requested fields. First prove whether an affected plan already uses these
 capabilities before changing execution. Existing completed work is not reopened by this plan.
