@@ -88,6 +88,10 @@ pub fn visit(
     let mut outcome = Ok(true);
     let mut key_by_key = |own: &[u8], stored: &[u8]| {
         let step = (|| {
+            // A key holding its own places, as most of a range's do, is read where it is
+            if let Some(went_on) = postings::each_own(stored, &mut |place| each(own, place))? {
+                return Ok(went_on);
+            }
             let mut sought = postings::Sought::stored(term(own.to_vec()), stored)?;
             self::from(r, &mut sought, 0, &mut |place| each(own, place))
         })();

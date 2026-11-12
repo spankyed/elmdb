@@ -215,6 +215,18 @@ fn own_entries(stored: &[u8]) -> Result<Option<(Held, &[u8])>> {
     })
 }
 
+/// Hands `each` the places a list's own key holds as `stored`, in order, until it answers false: whether it went
+/// through them all. None for a list in blocks, which holds none of its own
+pub fn each_own(stored: &[u8], each: &mut dyn FnMut(u64) -> Result<bool>) -> Result<Option<bool>> {
+    let Some((held, bytes)) = own_entries(stored)? else { return Ok(None) };
+    for entry in each_entry(bytes, held, 0) {
+        if !each(entry?.0)? {
+            return Ok(Some(false));
+        }
+    }
+    Ok(Some(true))
+}
+
 /// How many places the range of a block at `start` covers, two to the `level`: one a place can be in, that starts at
 /// a multiple of its size
 fn range(start: u64, level: u32) -> Result<u64> {
