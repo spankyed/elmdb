@@ -80,10 +80,11 @@ before whole; every such file must open, pass `check()`, and hold the commit bef
 pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
 only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
 that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
-disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files crash the reader itself: LMDB
-maps a file whose meta page names pages past its end, and touching one is a SIGBUS, which the replay counts as a file that
-didn't survive. elmdb doesn't check a file's length before mapping it, so that open crashes where it should refuse; a
-follow-up, not this mode's. A child that reads a file and says nothing fails the test.
+disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
+itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` checks
+the length first: a writable open extends a short file with zeros, so a page the tree uses that no commit wrote reads as
+corrupt, and a read-only open refuses the file. A torn file that is refused, or whose missing pages read as corrupt,
+counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
 
 ## Failpoints
 
