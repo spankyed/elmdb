@@ -333,13 +333,13 @@ pub fn key_values(def: &RelationDef, info: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
-fn same_key(a: &[Value], b: &[Value]) -> bool {
+pub(super) fn same_key(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
 }
 
 /// The edge of `kind` from `source` to `target` holding `key` other than `except`: the one a link to that identity
 /// updates, and the one a move onto it would duplicate
-fn with_identity(
+pub(super) fn with_identity(
     t: &impl Read,
     def: &RelationDef,
     source: &str,

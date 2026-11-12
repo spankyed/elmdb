@@ -165,12 +165,49 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
 /// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
-    for (id, stored) in all_relations(t)? {
-        if stored.kind == from {
-            relations::remove(t, &id)?;
-            let moved = relations::Stored { kind: to.to_owned(), ..stored };
-            relations::restore(t, &id, &moved)?;
+    if from == to {
+        return Ok(());
+    }
+    let moving: Vec<(String, relations::Stored)> =
+        all_relations(t)?.into_iter().filter(|(_, stored)| stored.kind == from).collect();
+    // Refused before anything moves: an edge of the new kind with the same ends and key would be one identity twice, as
+    // an update of an edge onto another's identity is refused. Two moving edges that would be one identity are refused
+    // the same way, compared by the identity's own equality among those with the same ends
+    let def = t.schema.relations.get(to).expect("declared above");
+    let mut by_ends: std::collections::BTreeMap<(String, String), Vec<Vec<rmpv::Value>>> = Default::default();
+    for (_, stored) in &moving {
+        let key = relations::key_values(def, stored.info.as_ref());
+        let clash = relations::with_identity(t, def, &stored.source, to, &stored.target, &key, None)?;
+        let group = by_ends.entry((stored.source.clone(), stored.target.clone())).or_default();
+        let twin = group.iter().any(|other| relations::same_key(other, &key));
+        let identity =
+            if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
+        if clash.is_some() {
+            return Err(Error::new(
+                ErrorCode::DuplicateEdge,
+                format!(
+                    "renameRelation({from:?} to {to:?}): an edge of kind {to} already joins {} to {}{identity}, and the \
+                     rename would make a second: remove one of them first",
+                    stored.source, stored.target
+                ),
+            ));
         }
+        if twin {
+            return Err(Error::new(
+                ErrorCode::DuplicateEdge,
+                format!(
+                    "renameRelation({from:?} to {to:?}): two edges of kind {from} join {} to {}{identity} that kind {to} \
+                     would hold as one, and the rename would make one identity of two: remove one of them first",
+                    stored.source, stored.target
+                ),
+            ));
+        }
+        group.push(key);
+    }
+    for (id, stored) in moving {
+        relations::remove(t, &id)?;
+        let moved = relations::Stored { kind: to.to_owned(), ..stored };
+        relations::restore(t, &id, &moved)?;
     }
     Ok(())
 }

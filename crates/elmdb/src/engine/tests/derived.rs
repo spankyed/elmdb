@@ -542,6 +542,107 @@ fn purge_and_rename_field_refuse_the_engine_s_own_fields() {
 }
 
 #[test]
+fn rename_relation_refuses_an_edge_that_would_make_a_second_of_the_new_kind_and_moves_nothing() {
+    // An edge of the new kind with the same ends is one identity already; renaming onto it would leave two, which the
+    // engine's check reports and a link would refuse
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": "x" } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2", "fields": { "a": "x" } }),
+        ],
+    )
+    .unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "link", "source": "Task-1", "kind": "tags", "target": "Task-2" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_relation("refs", "tags").unwrap_err();
+    assert_eq!(error.code, ErrorCode::DuplicateEdge, "{error}");
+    assert!(error.message.contains("Task-1") && error.message.contains("Task-2"), "{error}");
+    assert!(db.check().unwrap().is_clean(), "a refused rename leaves the graph as it was");
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "tags", "target": "Task-2" })]).unwrap();
+    db.rename_relation("refs", "tags").expect("with no edge of the new kind joining the ends, the rename goes through");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_relation_moves_same_keyed_edges_between_different_ends_without_refusing() {
+    // Two edges of one key value are one identity only between the same ends: between different ends they rename fine
+    let keyed = |key: Json| json!({ "cardinality": "many-to-many", "info": { "type": "object", "optional": true }, "key": key });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "relations": { "old": keyed(json!(["a"])), "fresh": keyed(json!(["a"])) },
+        "types": { "Note": { "fields": { "title": { "type": "string", "optional": true } } } }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-3", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1 } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-3", "info": { "a": 1 } }),
+        ],
+    )
+    .unwrap();
+    db.rename_relation("old", "fresh").expect("the same key between different ends is one identity each");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn renaming_a_kind_to_itself_moves_nothing_and_refuses_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "refs", "target": "Note-2" }),
+        ],
+    )
+    .unwrap();
+    db.rename_relation("refs", "refs").expect("a kind renamed to itself is a no-op");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_relation_refuses_two_moving_edges_that_would_be_one_identity_in_the_new_kind() {
+    // Under the old kind's key, (a 1, b "x") and (a 1.0, b "y") are two edges; under the new kind's key, a alone, the
+    // same value, so renaming both would leave one identity twice
+    let keyed = |key: Json| json!({ "cardinality": "many-to-many", "info": { "type": "object", "optional": true }, "key": key });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "relations": { "old": keyed(json!(["a", "b"])), "fresh": keyed(json!(["a"])) },
+        "types": { "Note": { "fields": { "title": { "type": "string", "optional": true } } } }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }),
+            json!({ "op": "create", "type": "Note", "id": "Note-2", "fields": { "title": "t" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1, "b": "x" } }),
+            json!({ "op": "link", "source": "Note-1", "kind": "old", "target": "Note-2", "info": { "a": 1.0, "b": "y" } }),
+        ],
+    )
+    .unwrap();
+    let error = db.rename_relation("old", "fresh").unwrap_err();
+    assert_eq!(error.code, ErrorCode::DuplicateEdge, "{error}");
+    assert!(db.check().unwrap().is_clean(), "a refused rename leaves the graph as it was");
+}
+
+#[test]
 fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
