@@ -31,9 +31,11 @@ time, so a write a later member reverts is still named, as the engine names it. 
 relations, and the ends of the edges it changed beyond what `changedSince` names. After every step, `changedSince` from
 the start must name each entity still there with the sequence of its last change, the ends of a changed edge included,
 and the entities destroyed and not made again; a commit's sequence must increase. The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
-set. A reader from before it is told `changedSince` is incomplete; one from the commit before the first after it reads
-what changed since, checked against the model. Not checked yet: `replaceWith`, `renameType`, and the renames and purge,
-which need the database reopened under another schema.
+set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
+from the commit before the first after it reads what changed since, checked against the model. The boundary itself, the
+reader one sequence below the reset, is checked by a deterministic test, since a rebuild between the two can take a
+sequence. Not checked yet: `replaceWith`, `renameType`, and the renames and purge, which need the database reopened
+under another schema.
 
 It runs in two places:
 
