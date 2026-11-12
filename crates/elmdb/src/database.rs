@@ -23,9 +23,9 @@ pub struct OpenOptions {
     pub schema: Option<Schema>,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once, for a test's temporary directory
     pub syncs: bool,
-    /// Every commit synced as it is made, so that one that returned survives the machine losing power, at the cost
-    /// of a sync a commit (`docs/architecture/engine.md`, Durability). Group commit's syncs and their timings are
-    /// then unused
+    /// Every commit synced as it is made, so that one that returned survives the machine losing power, at the price of a
+    /// sync per commit (`docs/architecture/engine.md`, Durability). It syncs whatever `syncs` says, group commit and its
+    /// timings are then unused, and it is off for a read-only database, which is never written
     pub sync_each_commit: bool,
     pub sync_idle_ms: u64,
     pub sync_interval_ms: u64,
@@ -275,8 +275,8 @@ impl Database {
             .ok_or_else(|| Error::new(ErrorCode::Closed, format!("The database at {} is closed", self.path.display())))
     }
 
-    /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, or when
-    /// syncs are off or the database is read-only
+    /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, when
+    /// syncs are off or the database is read-only, or when each commit is synced as it is made (`sync_each_commit`)
     pub fn durable(&self) -> Result<Durable> {
         Ok(self.store()?.durable().unwrap_or_else(Durable::resolved))
     }

@@ -167,9 +167,19 @@ fn a_commit_synced_as_it_is_made_survives_a_power_loss_at_any_write_after_it() {
     assert!(tried > 6 * COMMITS, "{tried} files tried");
 }
 
-/// `held`, asked of a child of this test binary: a file whose pages are of different commits may be one LMDB
-/// reads past the end of, which ends the process reading it, and that is a file that didn't survive
-fn held_apart(image: &[u8]) -> Result<Model, String> {
+/// What a child that reads a file a power loss left says of it: what it holds, or why it refused it
+enum Read {
+    Holds(Model),
+    Refused(String),
+    /// The reader was killed by a signal before it said anything: LMDB mapped a file whose meta page names pages past its
+    /// end, and touched one (SIGBUS). elmdb doesn't check a file's length before mapping it, so the open itself crashes
+    Crashed(String),
+}
+
+/// `held`, asked of a child of this test binary, and a file whose pages are of different commits may be one LMDB reads
+/// past the end of: the child says, as its last line, what it holds or refuses, and anything else (a crash, a child
+/// that ran no test) fails this test rather than counting as a file that didn't survive
+fn held_apart(image: &[u8]) -> Read {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
     std::fs::write(&path, image).unwrap();
@@ -179,12 +189,17 @@ fn held_apart(image: &[u8]) -> Result<Model, String> {
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&child.stdout);
-    match said.lines().find_map(|line| line.strip_prefix("held ")) {
-        Some(model) if child.status.success() => Ok(serde_json::from_str(model).unwrap()),
-        _ => Err(said
-            .lines()
-            .find_map(|line| line.strip_prefix("refused "))
-            .map_or_else(|| format!("the process reading it ended: {}", child.status), str::to_owned)),
+    let verdict = said.lines().rev().find_map(|line| {
+        line.strip_prefix("held ")
+            .map(|model| Read::Holds(serde_json::from_str(model).unwrap()))
+            .or_else(|| line.strip_prefix("refused ").map(|why| Read::Refused(why.to_owned())))
+    });
+    match (verdict, child.status.code()) {
+        (Some(verdict), Some(0)) => verdict,
+        // Killed by a signal, after the child started: the file was read, and it crashed the reader
+        (None, None) => Read::Crashed(format!("{}", child.status)),
+        // The child exited without a verdict, or without success: it did not run the reader
+        _ => panic!("the child reading the file did not say what it holds: {} {said}", child.status),
     }
 }
 
@@ -220,8 +235,8 @@ fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
     // With every page on disk it is the last commit's
     assert!(survives(held(last, COMMITS), &models, COMMITS));
     // The pages written since the sync are of every commit, and nothing orders them on disk: with some of them
-    // there and the rest not, a meta page among them, the file is no commit's at all. It doesn't open, or opens
-    // to what `check()` refuses, or to tasks no commit left
+    // there and the rest not, the file is some commit's only by chance. Some such files don't open, or hold tasks no
+    // commit left
     let pages = written(synced, last, page);
     let (meta, data): (Vec<usize>, Vec<usize>) = pages.iter().partition(|&&at| at < 2);
     assert!(!meta.is_empty() && data.len() > 8, "{pages:?}");
@@ -236,16 +251,19 @@ fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
                 some.push(at);
             }
         }
-        let held = held_apart(&with(synced, last, &some, page));
-        if !models.contains(held.as_ref().unwrap_or(&Model::from([(String::new(), String::new())]))) {
-            lost.push(held.err().unwrap_or_else(|| "tasks no commit left".to_owned()));
+        match held_apart(&with(synced, last, &some, page)) {
+            Read::Holds(model) if models.contains(&model) => {}
+            Read::Holds(_) => lost.push("tasks no commit left".to_owned()),
+            Read::Refused(why) => lost.push(why),
+            Read::Crashed(how) => lost.push(format!("crashed the reader: {how}")),
         }
     }
     assert!(!lost.is_empty(), "every file of some of the pages was some commit's");
+    // Refused as LMDB refuses a file it can't read, or holding no commit's tasks: a loss of some pages is not survived
 }
 
 #[test]
-fn the_mode_asks_lmdb_for_a_sync_as_each_commit_is_made_and_the_default_for_none() {
+fn the_mode_asks_lmdb_for_each_commit_sync_and_the_grouped_mode_for_none() {
     // The flags the environment opened with say when LMDB syncs: the grouped mode syncs none of a commit, and
     // syncs each commit as it is made only with the flags off
     let (no_sync, meta_sync) = (heed::EnvFlags::NO_SYNC.bits(), heed::EnvFlags::NO_META_SYNC.bits());

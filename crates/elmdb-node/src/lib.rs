@@ -66,8 +66,9 @@ pub struct OpenOptions {
     pub schema: Option<serde_json::Value>,
     /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory
     pub syncs: Option<bool>,
-    /// Sync every commit as it is made, so that one that returned survives the machine losing power, at the cost of
-    /// a sync a commit; off by default, where commits are synced in groups, a moment after they return
+    /// Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
+    /// sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
+    /// commits are synced in groups, a moment after they return
     pub sync_each_commit: Option<bool>,
     pub sync_idle_ms: Option<f64>,
     pub sync_interval_ms: Option<f64>,

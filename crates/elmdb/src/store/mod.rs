@@ -158,6 +158,8 @@ pub(crate) struct RankPlans {
 pub struct Store {
     path: PathBuf,
     read_only: bool,
+    /// Each commit is synced as it is made, with no group commit (`StoreOptions::sync_each_commit`)
+    sync_each_commit: bool,
     env: Env<WithoutTls>,
     db: Db,
     gate: Arc<RecursiveRwLock<()>>,
@@ -297,9 +299,10 @@ impl Store {
             let map_size =
                 if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
             builder.max_dbs(8).map_size(map_size);
-            // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
-            // flushed by group commit's syncs or, with none of these flags, by LMDB as each is made, and a read-only
-            // environment is never written
+            // SAFETY: the flags say when LMDB syncs, and nothing else about its files: with NO_SYNC and NO_META_SYNC off,
+            // LMDB syncs a commit's pages before writing the meta page that names them, which is what the sync-each-commit
+            // mode relies on, and with NO_SYNC on, group commit's syncs are what flush a commit (`committed`). A read-only
+            // environment is never written, so its flags are none of these
             unsafe {
                 builder.flags(flags);
             }
@@ -365,6 +368,7 @@ impl Store {
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
+            sync_each_commit: options.sync_each_commit && !options.read_only,
             env,
             db,
             gate,
@@ -799,6 +803,12 @@ impl Store {
             if durable {
                 commit.durable().wait()?;
             }
+        }
+        // LMDB's meta page, the commit's point, is written with O_DSYNC, which on Apple doesn't flush the drive's cache: a
+        // full sync (F_FULLFSYNC, which LMDB's own sync makes of its data file on Apple) does, and a commit that returned
+        // is then on disk. Elsewhere LMDB's sync of the meta page is the flush
+        if self.sync_each_commit && cfg!(target_os = "macos") {
+            self.env.force_sync()?;
         }
         Ok(())
     }

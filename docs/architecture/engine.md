@@ -452,7 +452,9 @@ all of them on `NOT_DURABLE`. Native watches have already been finalized. apack 
 
 `syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made,
 its pages before the meta page that names them, so a commit that returned survives the machine losing power, and no
-group commit runs. A write's `durable` and `durable()` then answer at once, since each commit was synced. The price is a
+group commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
+LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and `durable()`
+then answer at once, since each commit was synced. The price is a
 sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
 rounds), a commit took 0.03 ms in the grouped default, where the timer merges its syncs, and 4.0 to 4.8 ms with each
 commit synced, `syncEachCommit` and a durable write alike. The default is the grouped mode, where a commit that returned
