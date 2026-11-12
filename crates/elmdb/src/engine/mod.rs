@@ -529,11 +529,12 @@ impl Database {
             commit.synced = store.committed(true);
         }
         drop(schema);
-        self.finish_admin_commit(&store, commit)?;
+        // As in `write`: queued before a failed sync is reported, the commit having landed
+        let landed = self.finish_admin_commit(&store, commit);
         if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(())
+        landed
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
@@ -716,11 +717,12 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
+        // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
+        let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
         if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok((results, changes))
+        Ok((results, landed?))
     }
 
     /// Runs `f` on a read snapshot of the last commit

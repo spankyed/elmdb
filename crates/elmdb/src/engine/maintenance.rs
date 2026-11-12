@@ -339,8 +339,11 @@ impl Database {
         if !store.adopt_replacement(epoch)? {
             return Ok(false);
         }
+        // The schema's guard is let go before the builders take their own read of it: a second read on one thread waits
+        // for a writer that is parked, which would be this thread's own wait
+        let owed = super::remaining_indexes(&store, &self.schema_guard())?;
         if let Some(builders) = self.builders_of(std::sync::Arc::clone(&store))? {
-            builders.queue(super::remaining_indexes(&store, &self.schema_guard())?);
+            builders.queue(owed);
         }
         Ok(true)
     }

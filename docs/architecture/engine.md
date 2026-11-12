@@ -395,8 +395,8 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 the same on the calling thread. Writes in flight together are applied one at a time, in no fixed order, so a caller
 awaits a write before one that depends on it. A database's check, rebuild and backup likewise run on the pool, and their
 `…Sync` forms on the calling thread. A refusal made before any work begins (a rebuild naming only a type, a handle that
-has panicked, or a call on a closed database) throws at the call in the blocking forms and rejects the promise in the
-others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
+has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
+promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
 loop is held by a close made during one. An operation still queued when the close takes the database rejects with
 `CLOSED` and writes nothing, and a write whose commit has landed is answered as made, not `CLOSED`. A queued job waits
 on a thread of the pool, which Node shares with its file system work, so long jobs or several queued writes can delay

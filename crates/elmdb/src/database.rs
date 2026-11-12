@@ -428,9 +428,12 @@ impl Database {
                         if !at_exit
                             && let Ok(Some(builders)) = self.builders()
                             && let Ok(store) = self.store()
-                            && let Ok(owed) = crate::engine::remaining_indexes(&store, &self.engine_schema.read())
                         {
-                            builders.queue(owed);
+                            // The schema's read is let go before the builders queue, which reads it too
+                            let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read());
+                            if let Ok(owed) = owed {
+                                builders.queue(owed);
+                            }
                         }
                         return Ok(false);
                     }
