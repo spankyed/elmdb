@@ -151,7 +151,7 @@ enum Step {
     Rebuild {
         index: Option<(&'static str, &'static str)>,
     },
-    /// Every entity, edge and derived row removed, the schema kept: the database as it was when created with its schema
+    /// Every entity, edge and derived row removed; the schema, the meta data and the sequence counter are kept
     Reset,
 }
 
