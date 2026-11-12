@@ -826,7 +826,6 @@ fn apply_in(unit: &mut crate::Unit, step: &Step) -> Result<(), crate::Error> {
     }
 }
 
-/// Applies a step at the top
 /// Runs one step on the engine: the change set of the commit it made, or `None` when it made none
 fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
     match step {
@@ -1512,6 +1511,8 @@ struct Engine {
     since: Since,
     /// The entities of `Task` and `Note`, which `changed_since` is asked about
     types: Vec<String>,
+    /// The sequence of the last commit the engine reported
+    sequence: u64,
 }
 
 /// What `changed_since` answers from position zero: each entity still there with the sequence of its last change, and
@@ -1589,9 +1590,7 @@ fn changes_of(changes: &ChangeSet) -> BTreeMap<String, Change> {
                 destroyed: e.destroyed,
                 trashed: e.trashed,
                 restored: e.restored,
-                // A destroyed entity's roles are not compared: a grant made in the commit before its destroy is named as
-                // its `role` field, and the model sees the entity only before and after
-                roles: !e.destroyed && e.fields.iter().any(|f| f == "role"),
+                roles: e.fields.iter().any(|f| f == "role"),
                 fields: without_engine_fields(e.fields.iter().cloned().collect()),
             };
             (id.clone(), change)
@@ -1610,9 +1609,11 @@ fn effects_of(step: &Step, before: &Model, after: &Model) -> (BTreeMap<String, C
     effects_in(&mut current, step, &mut changes, &mut ends).expect("a committed step applies");
     // A write that changes nothing the engine names (an upsert of no fields) leaves no entry
     changes.retain(|_, change| *change != Change::default());
-    // A destroyed entity's roles are not compared, as `changes_of` leaves them out of the engine's
-    for change in changes.values_mut().filter(|c| c.destroyed) {
-        change.roles = false;
+    // An entity the commit found and left destroyed is named as destroyed alone, though a unit made it again on the way
+    for (id, change) in changes.iter_mut() {
+        if before.entities.contains_key(id) && change.created && change.destroyed {
+            change.created = false;
+        }
     }
     assert!(
         current.entities == after.entities && current.edges == after.edges && current.keyed == after.keyed,
@@ -1679,7 +1680,6 @@ fn writes_of(step: &Step, previous: &Model) -> BTreeMap<String, Change> {
         },
         Step::RemoveValue { id, key, value } => match held(id, key) {
             Some(Json::Array(items)) if items.contains(value) => field(id, vec![key]),
-            Some(current) if current == value => field(id, vec![key]),
             _ => BTreeMap::new(),
         },
         Step::Create { id, fields } | Step::Upsert { id, fields } => field(id, fields.keys().copied().collect()),
@@ -1764,6 +1764,8 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
     match got {
         Ok(Some(commit)) => {
             let (changes, ends) = effects_of(step, &engine.before, &after);
+            assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+            engine.sequence = commit.sequence;
             assert_eq!(changes_of(commit), changes, "{step:?}: the change set the commit reported");
             engine.since.record(commit.sequence, &changes);
             // An end the step left destroyed is not stamped: its destruction is the change
@@ -1791,6 +1793,7 @@ fn assert_since(engine: &Engine, step: &Step) {
         .db
         .changed_since(&engine.types, &crate::engine::changed::Position::default(), 1_000_000)
         .expect("changed_since answers");
+    assert_eq!(got.ids.len(), got.sequences.len(), "each changed entity has the sequence of its last change");
     let ids: BTreeMap<String, u64> = got.ids.iter().cloned().zip(got.sequences.iter().copied()).collect();
     assert_eq!(got.ids.len(), ids.len(), "each changed entity is named once");
     assert_eq!(
@@ -1818,6 +1821,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             before: Model::default(),
             since: Since::default(),
             types: vec!["Task".to_owned(), "Note".to_owned()],
+            sequence: 0,
         };
         for step in &reference.prelude {
             let got = run(&engine.db, step);
@@ -1874,6 +1878,35 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         let report = engine.db.check().unwrap();
         assert!(report.is_clean(), "check() after the workload: {report:?}");
     }
+}
+
+#[test]
+fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destroyed_alone() {
+    // The engine names an entity the commit found and left destroyed as destroyed alone, though the commit made it again
+    // on the way; the model's union of the members' changes must say so too
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Destroy { id: "Task-1" },
+            Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("y"))]) },
+            Step::Destroy { id: "Task-1" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
 }
 
 proptest_state_machine::prop_state_machine! {
