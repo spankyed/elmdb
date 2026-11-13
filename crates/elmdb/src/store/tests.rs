@@ -983,6 +983,23 @@ fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_s
 }
 
 #[test]
+fn a_reset_s_checkpoint_is_refused_while_a_unit_is_open_and_runs_once_it_has_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
+    // Refused, on the thread that holds the unit's turn: a checkpoint that went on to wait its turn would wait for good
+    let refused = store.recycle_reset_pages().unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnitOpen, "{refused}");
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    store.recycle_reset_pages().unwrap();
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+}
+
+#[test]
 fn a_commit_is_synced_on_its_own_once_writes_pause() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(

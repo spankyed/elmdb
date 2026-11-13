@@ -878,13 +878,20 @@ impl Store {
     /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
     pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
         self.check_writable()?;
-        if self.unit_is_open() {
-            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
-        }
-        let _guard = self.gate();
-        let _writer = self.writers.hold()?;
-        self.drop_idle();
-        let mut txn = self.env.write_txn()?;
+        // Claimed under the unit's lock, as a write claims its own: a unit that began between a check and the claim
+        // would keep the writer's turn for as long as it is open, and this would wait for it with the gate held
+        let (txn, held) = self
+            .unit
+            .claim_writer(|| {
+                let guard = self.gate();
+                let writer = self.writers.hold()?;
+                self.drop_idle();
+                Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
+            })
+            .map_err(|_| Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"))??;
+        // Declared after its holds, so it ends before they are let go
+        let _held = held;
+        let mut txn = txn;
         let key = meta_key(meta::SEQUENCE);
         let value = self
             .db
