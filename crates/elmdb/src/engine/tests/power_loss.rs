@@ -171,15 +171,15 @@ fn a_commit_synced_as_it_is_made_survives_a_power_loss_at_any_write_after_it() {
 enum Read {
     Holds(Model),
     Refused(String),
-    /// The reader was killed by a signal before it said anything: LMDB mapped a file whose meta page names pages past its
-    /// end, and touched one (SIGBUS). `Store::open` refuses such a file before it reads a page, so a crash here means that
-    /// check did not run
+    /// The reader was killed by a signal before it said anything, as when LMDB maps a file whose meta page names pages
+    /// past its end and touches one (SIGBUS). `Store::open` refuses such a file before it reads a page, so a reader that
+    /// crashed is one that check did not stop: the caller fails on it
     Crashed(String),
 }
 
-/// `held`, asked of a child of this test binary, and a file whose pages are of different commits may be one LMDB reads
-/// past the end of: the child says, as its last line, what it holds or refuses, and anything else (a crash, a child
-/// that ran no test) fails this test rather than counting as a file that didn't survive
+/// `held`, asked of a child of this test binary, since a file whose pages are of different commits may be one LMDB
+/// reads past the end of: the child says, as its last line, what it holds or refuses. A child that ran no test fails
+/// here, and one that crashed is answered as that, for the caller to fail on
 fn held_apart(image: &[u8]) -> Read {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
@@ -258,7 +258,9 @@ fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
             Read::Holds(model) if models.contains(&model) => {}
             Read::Holds(_) => lost.push("tasks no commit left".to_owned()),
             Read::Refused(why) => lost.push(why),
-            Read::Crashed(how) => lost.push(format!("crashed the reader: {how}")),
+            // A file that didn't survive is refused or read as it is, and never ends the process that reads it: a
+            // crash is the open's check of a file short of its pages letting one through, and no loss to count
+            Read::Crashed(how) => panic!("a file a power loss could leave crashed its reader ({how}), pages {some:?}"),
         }
     }
     assert!(!lost.is_empty(), "every file of some of the pages was some commit's");

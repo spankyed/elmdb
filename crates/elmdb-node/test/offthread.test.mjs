@@ -66,15 +66,26 @@ test('a rebuild of a large database leaves the event loop turning until it answe
   const { db } = open(t);
   fill(db, 20000);
   let settled = false;
+  const began = performance.now();
   const rebuilding = db.rebuild().then(() => { settled = true; });
-  // Timers keep firing while the rebuild runs: the loop turns many times before the rebuild's answer
-  let turns = 0;
+  // The loop keeps turning while the rebuild runs: the longest it goes without a turn is a small part of the rebuild,
+  // where a rebuild that did its work on the loop's thread, at any point before its answer, would hold it for most of it
+  let [turns, last, longest] = [0, began, 0];
   while (!settled) {
     await new Promise((resolve) => setImmediate(resolve));
+    const now = performance.now();
+    longest = Math.max(longest, now - last);
+    last = now;
     turns++;
   }
   await rebuilding;
+  const took = performance.now() - began;
   assert.ok(turns > 1, `the event loop turned ${turns} times while the rebuild ran`);
+  // Half the rebuild, or 50 ms where the rebuild is too short for half of it to tell a held loop from a busy machine
+  assert.ok(
+    longest < Math.max(took / 2, 50),
+    `the event loop went ${longest.toFixed(1)} ms without a turn, of the ${took.toFixed(1)} ms the rebuild took`,
+  );
   assert.equal(db.checkSync().differences.length, 0);
 });
 
