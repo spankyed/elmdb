@@ -1467,6 +1467,40 @@ fn a_file_names_its_own_page_size_whatever_the_host_is() {
 }
 
 #[test]
+fn the_walk_counts_the_main_tree_as_lmdb_counts_its_trees() {
+    // The walk's count of the main tree, its sub-database and overflow runs must equal LMDB's own counts of the two trees
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    for n in 0..300u32 {
+        put(&store, &format!("key-{n:04}"), &[7u8; 1500]).unwrap();
+    }
+    put(&store, "big", &vec![9u8; 200_000]).unwrap();
+    let data = dir.path().join("data.mdb");
+    let txn = super::read_txn(&store.env).unwrap();
+    let main = store.env.unnamed_database_stat();
+    let named = store.db.main.stat(&txn).unwrap();
+    let lmdb = main.branch_pages
+        + main.leaf_pages
+        + main.overflow_pages
+        + named.branch_pages
+        + named.leaf_pages
+        + named.overflow_pages;
+    let info = store.env.info();
+    let mut file = std::fs::File::open(&data).unwrap();
+    let psize = super::page_size_of(&mut file, &data).unwrap();
+    let walked = super::reach::main_tree_pages(
+        &mut file,
+        psize,
+        info.last_page_number as u64 + 1,
+        info.last_txn_id as u64,
+        &data,
+    )
+    .unwrap();
+    assert!(named.overflow_pages > 0, "the big value is on overflow pages, so the check covers them");
+    assert_eq!(walked, lmdb, "the walk counts the main tree as LMDB does: main {main:?}, named {named:?}");
+}
+
+#[test]
 fn the_page_size_read_from_a_real_file_is_the_one_lmdb_uses() {
     // The reader is checked against the page size LMDB reports for the open environment, not only a hand-built header
     let dir = tempfile::tempdir().unwrap();
