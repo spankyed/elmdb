@@ -28,11 +28,12 @@ struct Waiting {
 /// A database's writes off the thread that asks for them, applied in the order they were asked for.
 ///
 /// A write waits for the one before it, and for the write lock while another process holds it. As jobs of the pool
-/// each write in flight holds a thread while it waits, and the pool starts them in no order: by default four writes
-/// waiting are every thread the pool has, and the file reads, lookups and hashes Node asks of the pool wait behind
-/// them. Here they wait in a queue, and one job of the pool at a time applies them in order until none waits, so the
-/// writes of a database hold one thread of the pool however many are in flight. A job of the pool is what a
-/// process's exit waits for: `process.exit()` applies what was asked for before it ends, as it does every job
+/// each write in flight holds a thread while it waits, and which of them takes the write lock next is no order: by
+/// default four writes waiting are every thread the pool has, and the file reads, lookups and hashes Node asks of the
+/// pool wait behind them. Here they wait in a queue, and one job of the pool at a time applies them in order until
+/// none waits, so the writes of a database handle hold one thread of the pool however many are in flight, for as
+/// long as they keep coming. A job of the pool is what a process's exit waits for: `process.exit()` applies what was
+/// asked for before it ends, as it does every job
 #[derive(Default)]
 pub struct Writes {
     waiting: Arc<Mutex<Waiting>>,
@@ -61,7 +62,8 @@ impl Writes {
         V: ToNapiValue + 'static,
     {
         // Held from before the job is asked for until the write is in the queue: the job, which takes it to look
-        // for a write, finds this one
+        // for a write, finds this one. Nothing called under it calls back into this handle but a hook on asynchronous
+        // work that writes to it, which would wait on itself
         let mut waiting = locked(&self.waiting);
         if !waiting.draining {
             // Its promise answers nothing anyone waits for: each write settles its own

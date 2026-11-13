@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -152,7 +152,7 @@ test('writes in flight at once are applied in the order they were asked for', as
 });
 
 test('writes waiting their turn behind a rebuild hold one thread of the pool between them', async (t) => {
-  const { db, dir } = open(t);
+  const { db } = open(t);
   fill(db, 20000);
   // A rebuild, and behind it three times as many writes as the pool has threads: each waits for the rebuild to end
   const threads = Number(process.env.UV_THREADPOOL_SIZE) || 4;
@@ -161,12 +161,32 @@ test('writes waiting their turn behind a rebuild hold one thread of the pool bet
   const rebuilding = db.rebuild().then(() => { rebuilt = performance.now() - began; });
   const writes = Array.from({ length: 3 * threads }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`)));
   // What Node asks of the pool is answered while they wait: each a job of its own, the writes would hold every thread
-  // until the rebuild ended, and this would wait behind them
-  await stat(dir);
+  // until the rebuild ended, and this would wait behind them. Random bytes are always the pool's to make, where a
+  // file's are the kernel's on some systems
+  await new Promise((resolve, reject) => randomBytes(8, (error) => (error ? reject(error) : resolve())));
   const answered = performance.now() - began;
   assert.equal(rebuilt, false, `the pool answered ${answered.toFixed(1)} ms in, after the rebuild ended at ${rebuilt} ms`);
   await Promise.all([rebuilding, ...writes]);
   assert.equal(packr.unpack(db.readSync(count))[0].n, 20000 + 3 * threads);
+});
+
+test('writes waiting when a close takes the database reject as closed, the ones behind none that landed', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-offthread-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const db = Database.open(dir, { schema, syncs: false });
+  // Eight writes asked for and the database closed in the same turn: the close waits for one that is running, and
+  // each still waiting then finds no database. In the order asked, those applied come before those refused
+  const asked = Array.from({ length: 8 }, (_, i) => db.write(create(`Note-${i}`, `title ${i}`)));
+  db.close();
+  const settled = await Promise.allSettled(asked);
+  const applied = settled.filter((one) => one.status === 'fulfilled').length;
+  for (const [i, one] of settled.entries()) {
+    assert.equal(one.status, i < applied ? 'fulfilled' : 'rejected', `write ${i} of ${applied} applied`);
+    if (one.status === 'rejected') assert.equal(one.reason.code, 'CLOSED');
+  }
+  const again = Database.open(dir, { schema, syncs: false });
+  t.after(() => again.close());
+  assert.equal(packr.unpack(again.readSync(count))[0].n, applied);
 });
 
 test('a write and a rebuild, in flight together, both land and the database checks clean', async (t) => {
