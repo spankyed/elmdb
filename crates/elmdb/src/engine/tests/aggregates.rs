@@ -264,3 +264,155 @@ fn a_sum_past_what_a_number_holds_is_refused_as_it_passes_not_as_it_ends() {
     assert_eq!(error.code, ErrorCode::ValueInvalid, "{}", error.message);
     assert!(error.message.contains("passes what a number holds"), "{}", error.message);
 }
+
+/// `open`'s schema with an index on `price` and one on `qty` then `price`
+fn open_indexed(dir: &tempfile::TempDir) -> Database {
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": { "Item": {
+            "fields": {
+                "price": { "type": "number", "optional": true },
+                "qty": { "type": "integer", "optional": true },
+                "name": { "type": "string", "optional": true },
+                "rank": { "type": "any", "optional": true }
+            },
+            "indexes": {
+                "byPrice": { "kind": "value", "fields": ["price"] },
+                "byQtyPrice": { "kind": "value", "fields": ["qty", "price"] },
+                "byName": { "kind": "value", "fields": ["name"] },
+                "byRank": { "kind": "value", "fields": ["rank"] }
+            }
+        } }
+    });
+    Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(Schema::from_json(&schema).unwrap()), syncs: false, ..Default::default() },
+    )
+    .unwrap()
+}
+
+/// The stages of a plan's explained read, without their times
+fn stages(db: &Database, plan: Json) -> Vec<Json> {
+    let reads = Reads {
+        reads: vec![serde_json::from_value(json!({ "read": "query", "explain": true, "plan": plan })).unwrap()],
+        track: None,
+    };
+    let bytes = db.read(&reads).unwrap();
+    let answers = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    answers[0]["stages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|stage| {
+            let mut stage = stage.clone();
+            stage.as_object_mut().unwrap().remove("ms");
+            stage
+        })
+        .collect()
+}
+
+#[test]
+fn least_and_greatest_read_from_an_index_answer_what_reading_the_set_answers() {
+    let (plain_dir, indexed_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (plain, indexed) = (open(&plain_dir), open_indexed(&indexed_dir));
+    for db in [&plain, &indexed] {
+        stocked(db);
+        // More ties, at the least and at the greatest price, a boolean and a number in one field, and entities in the
+        // trash at both ends: the first of the least and of the greatest prices, and the least and greatest alone
+        let item = |i: usize, fields: Json| json!({ "op": "create", "type": "Item", "id": format!("Item-{i}"), "fields": fields });
+        write(
+            db,
+            vec![
+                item(9, json!({ "price": 0.5, "qty": 2, "rank": 4 })),
+                item(10, json!({ "price": 9.0, "qty": 2, "rank": true })),
+                item(11, json!({ "price": 9.0, "qty": 1, "rank": false })),
+                item(12, json!({ "price": 0.25, "qty": 3, "rank": 4 })),
+                item(13, json!({ "price": 12.0, "qty": 3, "rank": -1 })),
+                item(14, json!({ "price": -0.0, "qty": 4 })),
+                item(15, json!({ "price": 0.0, "qty": 4 })),
+            ],
+        )
+        .unwrap();
+        write(db, ["Item-7", "Item-2", "Item-12", "Item-13"].map(|id| json!({ "op": "trash", "id": id })).to_vec())
+            .unwrap();
+    }
+    let filters = [
+        json!([]),
+        json!([{ "step": "where", "field": "qty", "value": 1 }]),
+        json!([{ "step": "where", "field": "qty", "value": 2 }]),
+        json!([{ "step": "where", "field": "qty", "value": 3 }]),
+        json!([{ "step": "where", "field": "qty", "value": 4 }]),
+        json!([{ "step": "where", "field": "qty", "value": 7 }]),
+        json!([{ "step": "range", "field": "price", "atLeast": 2.0, "below": 9.0 }]),
+        json!([{ "step": "range", "field": "price", "above": 0.5, "atMost": 9.0 }]),
+        json!([{ "step": "where", "field": "qty", "value": 1 }, { "step": "range", "field": "price", "atLeast": 2.0 }]),
+        json!([{ "step": "range", "field": "price", "atLeast": 100.0 }]),
+        // What no index reads in the field's order: another field's filter, and an order before it
+        json!([{ "step": "where", "field": "name", "value": "kiwi" }]),
+        json!([{ "step": "orderBy", "field": "name", "descending": true }]),
+    ];
+    let mut read_from_an_index = 0;
+    for scope in ["live", "withTrashed", "trashed"] {
+        for steps in &filters {
+            for field in ["price", "rank", "name", "qty"] {
+                for answer in ["least", "greatest"] {
+                    let asked = plan(scope, steps.clone(), json!({ "answer": answer, "field": field }));
+                    let (from_set, from_index) = (read(&plain, asked.clone()), read(&indexed, asked.clone()));
+                    match (from_set, from_index) {
+                        (Ok(from_set), Ok(from_index)) => assert_eq!(from_index, from_set, "{asked}"),
+                        (Err(from_set), Err(from_index)) => assert_eq!(from_index.code, from_set.code, "{asked}"),
+                        (from_set, from_index) => {
+                            panic!("{asked}: {from_set:?} of the set, {from_index:?} of an index")
+                        }
+                    }
+                    let terminal = stages(&indexed, asked).pop().unwrap();
+                    read_from_an_index += usize::from(terminal.get("index").is_some());
+                }
+            }
+        }
+    }
+    // Of the 288 reads, those of a set an index orders by the field were read from it: live and with the trash, of
+    // `price` under no filter, each of the five equalities on `qty`, the three ranges and the equality with a range
+    // (ten sets, two answers, two scopes), and of `rank`, which holds booleans and numbers, under no filter. A name
+    // is a string, which no index reads in the collation's order, and no index's last field is `qty`
+    assert_eq!(read_from_an_index, 40 + 4);
+}
+
+#[test]
+fn least_and_greatest_read_from_an_index_read_one_entry_and_those_of_entities_out_of_scope_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_indexed(&dir);
+    stocked(&db);
+    let explained =
+        |steps: Json, answer: &str| stages(&db, plan("live", steps, json!({ "answer": answer, "field": "price" })));
+    // Nine items, and one entry read whichever end is asked for
+    for answer in ["least", "greatest"] {
+        assert_eq!(
+            explained(json!([]), answer),
+            vec![
+                json!({ "stage": "types", "visited": 0, "kept": 0 }),
+                json!({ "stage": answer, "index": "byPrice", "visited": 1, "kept": 1 }),
+            ]
+        );
+    }
+    // Under an equality the index of both fields is read, and within a range the index's entries for it
+    let of_one = explained(json!([{ "step": "where", "field": "qty", "value": 1 }]), "greatest");
+    assert_eq!(of_one.last().unwrap(), &json!({ "stage": "greatest", "index": "byQtyPrice", "visited": 1, "kept": 1 }));
+    let within = explained(json!([{ "step": "range", "field": "price", "atLeast": 1.0, "below": 6.0 }]), "greatest");
+    assert_eq!(within.last().unwrap(), &json!({ "stage": "greatest", "index": "byPrice", "visited": 1, "kept": 1 }));
+    // The two greatest in the trash: their entries are read and passed over, and the third is the answer
+    write(&db, vec![json!({ "op": "trash", "id": "Item-2" }), json!({ "op": "trash", "id": "Item-5" })]).unwrap();
+    assert_eq!(
+        explained(json!([]), "greatest").last().unwrap(),
+        &json!({ "stage": "greatest", "index": "byPrice", "visited": 3, "kept": 1 })
+    );
+    assert_eq!(
+        read(&db, plan("live", json!([]), json!({ "answer": "greatest", "field": "price" }))).unwrap(),
+        json!({ "kind": "greatest", "id": "Item-0", "value": 5.0 })
+    );
+    // None holding a value: nothing kept
+    assert_eq!(
+        explained(json!([{ "step": "range", "field": "price", "atLeast": 100.0 }]), "least").last().unwrap(),
+        &json!({ "stage": "least", "index": "byPrice", "visited": 0, "kept": 0 })
+    );
+}

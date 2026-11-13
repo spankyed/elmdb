@@ -2740,6 +2740,28 @@ impl<R: Read> Query<'_, R> {
         super::places::visit(self.r, &ordered.from, &before, true, &mut |_, place| each(place))
     }
 
+    /// The entity an ordered read's index files first among those holding a value, or (`greatest`) the first in place
+    /// order of those under its greatest value: what `least` and `greatest` answer of the set, read as the stage
+    /// `stage`. An entry of an entity the scope doesn't reach is passed over, so the read is of one entry more for
+    /// each of those before the answer
+    fn extreme(&self, ordered: &Ordered<'_>, greatest: bool, stage: usize) -> Result<Option<String>> {
+        let _stage = self.stages.map(|stages| stages.enter(stage));
+        if let Some(stages) = self.stages {
+            stages.reads_index(&ordered.index);
+        }
+        let mut found = None;
+        // By value from the least or from the greatest, and one value's entities in place order either way
+        super::places::visit(self.r, &ordered.from, &ordered.to, greatest, &mut |_, place| {
+            self.count_visit();
+            found = self.at_place(ordered.entity_type, place)?;
+            Ok(found.is_none())
+        })?;
+        if let (Some(stages), Some(_)) = (self.stages, &found) {
+            stages.kept(stage);
+        }
+        Ok(found)
+    }
+
     /// The places filed under the key `own`, in order, all of them or those past the place `after`, sought and
     /// not walked to. False when `each` stopped the walk
     fn places_after(&self, own: &[u8], after: Option<u64>, each: &mut Entry<'_>) -> Result<bool> {
@@ -3871,8 +3893,9 @@ impl Stages {
             w.str("visited");
             w.uint(received + self.read[at].get());
             w.str("kept");
-            // The terminal keeps what it answers: what the last step handed it
-            w.uint(if at == n - 1 { received } else { self.kept[at].get() });
+            // The terminal keeps what it answers: what the last step handed it, and what it read from the store
+            // itself, the entity `least` or `greatest` found in an index
+            w.uint(if at == n - 1 { received + self.kept[at].get() } else { self.kept[at].get() });
             w.str("ms");
             rmp::encode::write_f64(w.0, ms(self.nanos[at].get())).expect("a Vec");
         }
@@ -4602,39 +4625,46 @@ fn query_with(
         }
         Terminal::Least { field: name } | Terminal::Greatest { field: name } => {
             let greatest = matches!(plan.terminal, Terminal::Greatest { .. });
-            let ids = q.collect(last)?;
-            let collator = collator(&r.schema().collation)?;
-            // The first of equal values in the plan's order stays: a value replaces the best only when it is past it
-            let mut best: Option<(SortKey, String, Value)> = None;
-            for id in ids {
-                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
-                let key = sort_key(Some(&value));
-                let past = match &best {
-                    None => true,
-                    Some((held, _, _)) => {
-                        let order = compare(&collator, &key, held);
-                        if greatest { order == Ordering::Greater } else { order == Ordering::Less }
+            // A set an index reads in the field's order, as an `orderBy` of it would be read, is answered by the
+            // index's first entry or its last, and nothing else of the set is read. Any other set is read whole
+            let best = match q.ordered(last, name)? {
+                Some(ordered) => match q.extreme(&ordered, greatest, last + 1)? {
+                    Some(id) => get_value(r, &id, name)?.map(|value| (id, value)),
+                    None => None,
+                },
+                None => {
+                    let ids = q.collect(last)?;
+                    let collator = collator(&r.schema().collation)?;
+                    // The first of equal values in the plan's order stays: a value replaces the best only when it is
+                    // past it
+                    let mut best: Option<(SortKey, String, Value)> = None;
+                    for id in ids {
+                        let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                        let key = sort_key(Some(&value));
+                        let past = match &best {
+                            None => true,
+                            Some((held, _, _)) => {
+                                let order = compare(&collator, &key, held);
+                                if greatest { order == Ordering::Greater } else { order == Ordering::Less }
+                            }
+                        };
+                        if past {
+                            best = Some((key, id, value));
+                        }
                     }
-                };
-                if past {
-                    best = Some((key, id, value));
+                    best.map(|(_, id, value)| (id, value))
                 }
-            }
+            };
             w.map(3);
             w.kind(if greatest { "greatest" } else { "least" });
+            w.str("id");
             match &best {
-                Some((_, id, _)) => {
-                    w.str("id");
-                    w.str(id);
-                }
-                None => {
-                    w.str("id");
-                    w.nil();
-                }
+                Some((id, _)) => w.str(id),
+                None => w.nil(),
             }
             w.str("value");
             match &best {
-                Some((_, _, value)) => w.raw(&values::encode(value)),
+                Some((_, value)) => w.raw(&values::encode(value)),
                 None => w.nil(),
             }
         }
