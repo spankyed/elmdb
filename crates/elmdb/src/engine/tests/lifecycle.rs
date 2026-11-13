@@ -607,7 +607,7 @@ fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for
         })
     };
     has_landed.recv_timeout(Duration::from_secs(10)).expect("the first write's commit landed");
-    // A second writer, on another thread, reaches the store, finds LMDB's lock free, and still waits its turn
+    // A second writer, on another thread, reaches the store and waits its turn, though LMDB's lock is free by now
     let (at_the_store, is_at_the_store) = mpsc::channel();
     let (done, is_done) = mpsc::channel();
     let second = {

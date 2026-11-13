@@ -6,7 +6,7 @@
 //! good. Linux and Windows keep LMDB's robust mutexes, which the system releases, and need none of this.
 //!
 //! So on macOS a writer first takes an exclusive lock on `writer.lock` in the database's directory, a lock the kernel
-//! releases however its holder ends, and keeps it until its transaction has ended. Whoever holds it knows no live elmdb
+//! releases however its holder ends, and keeps it past the end of its transaction. Whoever holds it knows no live elmdb
 //! writer is inside a transaction, so LMDB's semaphore taken then was taken by one that died, and is released before the
 //! transaction begins. A writer waiting for another waits on the file lock rather than inside LMDB, so one already
 //! waiting when the holder dies is let go by the kernel too.

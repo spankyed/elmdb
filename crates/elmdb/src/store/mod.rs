@@ -932,9 +932,10 @@ impl Store {
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
-                        // What the unit touched is added at its commit to what is deposited by then, a replacement
-                        // made in it among that: what a write refused before it left goes now. Nor can a replacement
-                        // that failed before committing vouch for this unit
+                        // A unit's commit adds what it touched to whatever is deposited then, so what a refused or
+                        // failed write left is dropped here, as a write's start drops it; the edges one left are
+                        // replaced by the unit's own at its commit. Nor can a replacement that failed before
+                        // committing vouch for this unit
                         *self.touched.lock() = None;
                         self.replacing.store(0, Ordering::Release);
                         return Ok((txn, guard, writer));
