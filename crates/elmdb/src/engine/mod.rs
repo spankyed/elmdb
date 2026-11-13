@@ -24,6 +24,7 @@ pub mod plan;
 mod ranks;
 mod reads;
 mod relations;
+mod sum;
 mod text;
 pub mod tracking;
 mod trigram;
