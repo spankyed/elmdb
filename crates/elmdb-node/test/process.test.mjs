@@ -215,7 +215,11 @@ test('a commit from another process wakes a listener, and a killed writer leaves
         if (code) reject(new Error(errors));
       });
     });
+    const exited = new Promise((resolve) => child.on('exit', resolve));
     await Promise.race([heard, refused]);
+    // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
+    // commits, before it closes, and Windows removes no file a process holds open
+    await exited;
   };
 
   await writeElsewhere('Task-a', 'other.close();');
