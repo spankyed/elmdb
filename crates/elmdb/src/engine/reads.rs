@@ -2741,11 +2741,10 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// The entity an ordered read's index files first among those holding a value, or (`greatest`) the first in place
-    /// order of those under its greatest value: what `least` and `greatest` answer of the set, read as the stage
-    /// `stage`. An entry of an entity the scope doesn't reach is passed over, so the read is of one entry more for
-    /// each of those before the answer
+    /// order of those under its greatest value: what `least` and `greatest` answer of the set, read by the terminal,
+    /// the stage `stage` and the one running. An entry of an entity the scope doesn't reach is passed over, so the
+    /// read is of one entry more for each of those before the answer
     fn extreme(&self, ordered: &Ordered<'_>, greatest: bool, stage: usize) -> Result<Option<String>> {
-        let _stage = self.stages.map(|stages| stages.enter(stage));
         if let Some(stages) = self.stages {
             stages.reads_index(&ordered.index);
         }
@@ -4626,7 +4625,8 @@ fn query_with(
         Terminal::Least { field: name } | Terminal::Greatest { field: name } => {
             let greatest = matches!(plan.terminal, Terminal::Greatest { .. });
             // A set an index reads in the field's order, as an `orderBy` of it would be read, is answered by the
-            // index's first entry or its last, and nothing else of the set is read. Any other set is read whole
+            // first entry under the index's least value or under its greatest, and nothing else of the set is read.
+            // Any other set is read whole
             let best = match q.ordered(last, name)? {
                 Some(ordered) => match q.extreme(&ordered, greatest, last + 1)? {
                     Some(id) => get_value(r, &id, name)?.map(|value| (id, value)),
@@ -4670,10 +4670,8 @@ fn query_with(
         }
         Terminal::Sum { field: name } => {
             let ids = q.collect(last)?;
-            // The total, and what its additions rounded off (Neumaier's sum): each addition's error is kept and
-            // added at the end, so the answer is the nearest number to the true sum, or next to it, however many
-            // values there are and whatever their sizes, where adding them up one by one loses a little at each
-            let (mut total, mut lost, mut n) = (0.0_f64, 0.0_f64, 0u64);
+            // Kept exactly and rounded once (`sum.rs`): the nearest number to the sum, whatever the set's order
+            let (mut sum, mut n, mut within) = (super::sum::Sum::default(), 0u64, true);
             for id in ids {
                 let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
                 let Some(number) = values::as_number(&value) else {
@@ -4685,24 +4683,18 @@ fn query_with(
                         ),
                     ));
                 };
-                let next = total + number;
-                // The larger of the two keeps its digits in the addition, and the smaller loses those the result
-                // has no room for: subtracting the larger back out leaves what was kept of the smaller
-                lost += if total.abs() >= number.abs() { (total - next) + number } else { (number - next) + total };
-                total = next;
+                // Past what a number holds there is nothing to add to: the rest are read for a value that is no
+                // number, which is refused first, and the sum is refused after them
+                within = within && sum.add(number);
                 n += 1;
             }
-            // A total past what a number holds stays past it whatever is added after (infinity and a number make
-            // infinity, and the two infinities no number), so this one check refuses every sum that passed it on the
-            // way, even where a later value would have brought it back: near the largest number the answer can
-            // depend on the order of the set
-            let sum = total + lost;
-            if !sum.is_finite() {
+            if !within {
                 return Err(Error::new(
                     ErrorCode::ValueInvalid,
                     format!("sum({name}) passes what a number holds: sum fewer or smaller values of {name}"),
                 ));
             }
+            let sum = sum.total();
             w.map(3);
             w.kind("sum");
             w.str("sum");
