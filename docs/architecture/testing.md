@@ -363,9 +363,10 @@ and 19 of 200 runs of the Windows job's benchmark command died, and with copies 
 promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
 refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
 after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
-threads, a file `stat` asked of the pool is answered before the rebuild ends. `exit.test.mjs` asks forty writes of a
-child process that then calls `process.exit()`: all forty are there. Each `…Sync` form is the blocking one the rest
-of the suite calls.
+threads, random bytes asked of the pool are answered before the rebuild ends. Writes asked for in the turn a database
+is closed reject as closed, the ones behind none that landed. `exit.test.mjs` asks a rebuild and forty writes behind
+it of a child process that then calls `process.exit()`: all forty are there and the rebuild ran to its end. Each
+`…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms
 
