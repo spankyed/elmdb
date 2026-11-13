@@ -723,25 +723,38 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
             .expect("the relation the refusal names");
         let error = db.rename_relation(from, to).unwrap_err();
         assert_eq!(error.code, code, "{from} to {to} over {links:?}: {error}");
-        let head = format!(
-            "renameRelation({from:?} to {to:?}): the relation {named}, from {source} to {target}, can't be of kind {to}, \
-             and nothing was moved. A link of it is refused: \""
-        );
-        assert!(error.message.starts_with(&head), "{error}");
         assert_eq!(super::edges(&db), before, "{from} to {to}: no edge moved");
         assert!(db.check().unwrap().is_clean(), "{from} to {to}: a refused rename leaves the graph as it was");
-        // What to do: of a count or a cycle, with the relation or with another; of any other rule, with the relation
-        let advice = match code {
-            ErrorCode::Cardinality | ErrorCode::Cycle => format!(
-                "\". Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
-                 already or of kind {from} with it, then rename again"
+        // The relation, the rule as a link is told it, and what to do. A count or a cycle is of the relation beside
+        // others, of the kind already or moved before it, any of which may be the one to remove; any other rule is of
+        // the relation alone
+        let (as_a_link, to_do) = match code {
+            ErrorCode::Cardinality | ErrorCode::Cycle => (
+                format!(
+                    "Beside the relations of kind {to} and those of kind {from} moved before it, a link of it would be \
+                     refused"
+                ),
+                format!(
+                    "Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
+                     already or of kind {from} with it"
+                ),
             ),
-            _ => "\". Remove or change that relation, then rename again".to_owned(),
+            _ => ("A link of it is refused".to_owned(), "Remove or change that relation".to_owned()),
         };
-        assert!(error.message.ends_with(&advice), "{error}");
-        if code == ErrorCode::Endpoint {
-            assert!(error.message.contains("\"A pins relation doesn't join a Task to a Task\""), "{error}");
-        }
+        let head = format!(
+            "renameRelation({from:?} to {to:?}): the relation {named}, from {source} to {target}, can't be of kind {to}, \
+             and nothing was moved. {as_a_link}: \""
+        );
+        assert!(error.message.starts_with(&head), "{error}");
+        assert!(error.message.ends_with(&format!("\". {to_do}, then rename again")), "{error}");
+        let rule = match (code, source, target) {
+            (ErrorCode::Endpoint, ..) => "A pins relation doesn't join a Task to a Task",
+            (ErrorCode::Cardinality, "Task-2", "Task-3") => {
+                "Task-3 already has a parent_of source, and a parent_of target has one; unlink it first"
+            }
+            _ => "",
+        };
+        assert!(error.message.contains(&format!("\"{rule}")), "{error}");
     }
     // Edges the new kind can hold move, and are held to its rules from then on as any of its edges are
     let dir = tempfile::tempdir().unwrap();
@@ -816,21 +829,23 @@ fn rename_relation_refuses_what_a_load_brought_that_no_link_of_the_new_kind_is_g
     .unwrap();
     let before = relations(&db);
     let reported = db.check().unwrap();
-    assert!(!reported.is_clean());
+    let subjects: Vec<&str> = reported.violations.iter().map(|v| v.subject.as_str()).collect();
+    assert_eq!(subjects, ["p/r Relation-light", "p/r Relation-own"], "{reported:?}");
     // Into a kind whose weights are read, the weight is held to a link's range
     let error = db.rename_relation("tags", "weighs").unwrap_err();
     assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
     let told = "renameRelation(\"tags\" to \"weighs\"): the relation Relation-light, from Task-1 to Task-2, can't be of \
                 kind weighs, and nothing was moved. A link of it is refused: \"A weighs relation's weight is a number \
-                from 0 to 2^960, and was given -1\". Remove or change that relation, then rename again";
+                from 0 to 2^960, and was given -1\". Remove that relation, or load it again with a weight in that range, \
+                then rename again";
     assert_eq!(error.message, told);
     // No kind joins an entity to itself
     let error = db.rename_relation("blocks", "refs").unwrap_err();
     assert_eq!(error.code, ErrorCode::SelfLink, "{error}");
-    assert!(
-        error.message.contains("the relation Relation-own, from Task-1 to Task-1, can't be of kind refs"),
-        "{error}"
-    );
+    let told = "renameRelation(\"blocks\" to \"refs\"): the relation Relation-own, from Task-1 to Task-1, can't be of \
+                kind refs, and nothing was moved. A link of it is refused: \"Task-1 can't be linked to itself (refs)\". \
+                Remove or change that relation, then rename again";
+    assert_eq!(error.message, told);
     assert_eq!(relations(&db), before, "neither rename moved an edge");
     assert_eq!(db.check().unwrap(), reported);
     // Into a kind that reads no weight, the weight goes as it is
@@ -866,6 +881,15 @@ fn rename_relation_holds_an_edge_to_a_one_to_one_kind_and_to_info_a_kind_require
         write(&db, links.clone()).unwrap();
         let error = db.rename_relation("plain", to).unwrap_err();
         assert_eq!(error.code, code, "plain to {to} over {links:?}: {error}");
+        if code == ErrorCode::RequiredField {
+            let (named, _) = relations(&db).pop().unwrap();
+            let told = format!(
+                "renameRelation(\"plain\" to \"noted\"): the relation {named}, from Note-1 to Note-2, can't be of kind \
+                 noted, and nothing was moved. A link of it is refused: \"A noted relation's info is required\". Remove \
+                 or change that relation, then rename again"
+            );
+            assert_eq!(error.message, told);
+        }
         assert!(db.check().unwrap().is_clean(), "plain to {to}");
         assert!(super::edges(&db).iter().all(|edge| edge.contains("|plain|")), "plain to {to}: no edge moved");
     }

@@ -179,8 +179,8 @@ violations identify the element path. Strings inside `object` and `any` remain o
 - `weighted: true`: each edge of this kind has a weight, a number from 0 to 2^960 (so no sum of weights reaches
   infinity), 1 when a link gives none. A weight that isn't one, or a weight on a kind not declared weighted, is refused
   (`VALUE_INVALID`); a weight an edge holds already stays with it when `renameRelation` moves it to a kind not
-  declared weighted, where nothing reads it. Linking a pair again with another weight replaces the edge's; a keyed kind's edges of one pair
-  add their weights in a rank. `rank` and `communities` read it (`engine.md`, Reads: plans).
+  declared weighted, where nothing reads it. Linking a pair again with another weight replaces the edge's; a keyed
+  kind's edges of one pair add their weights in a rank. `rank` and `communities` read it (`engine.md`, Reads: plans).
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.
 

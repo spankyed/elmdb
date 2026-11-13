@@ -178,19 +178,33 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     let schema = t.schema;
     let def = schema.relations.get(to).expect("declared above");
     // What a rule of the new kind refuses, of one relation: the rule as a link of the kind is told it, and what to do.
-    // A count of far ends and a cycle are broken by two relations or more, the others of the kind already or moving to
-    // it with this one; every other rule by the one relation alone
+    // A count of far ends and a cycle are broken by two relations or more, the others of the kind already or moved to
+    // it before this one, so the link refused is one made beside those; every other rule is broken by the relation
+    // alone. A weight out of a link's range came by a load, and no write gives a relation another where its kind
+    // holds none
     let refused = |id: &str, stored: &relations::Stored, rule: Error| {
-        let beside = if matches!(rule.code, ErrorCode::Cardinality | ErrorCode::Cycle) {
-            format!(", or one it can't be of kind {to} beside, which is of that kind already or of kind {from} with it")
-        } else {
-            String::new()
+        let (as_a_link, to_do) = match rule.code {
+            ErrorCode::Cardinality | ErrorCode::Cycle => (
+                format!(
+                    "Beside the relations of kind {to} and those of kind {from} moved before it, a link of it would be \
+                     refused"
+                ),
+                format!(
+                    "Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
+                     already or of kind {from} with it"
+                ),
+            ),
+            ErrorCode::ValueInvalid => (
+                "A link of it is refused".to_owned(),
+                "Remove that relation, or load it again with a weight in that range".to_owned(),
+            ),
+            _ => ("A link of it is refused".to_owned(), "Remove or change that relation".to_owned()),
         };
         Error::new(
             rule.code,
             format!(
                 "renameRelation({from:?} to {to:?}): the relation {id}, from {} to {}, can't be of kind {to}, and nothing \
-                 was moved. A link of it is refused: \"{}\". Remove or change that relation{beside}, then rename again",
+                 was moved. {as_a_link}: \"{}\". {to_do}, then rename again",
                 stored.source, stored.target, rule.message
             ),
         )
