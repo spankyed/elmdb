@@ -205,6 +205,25 @@ fn reset_elsewhere(dir: &tempfile::TempDir) {
     assert!(status.success(), "the resetting process failed");
 }
 
+/// Replaces every row of the database in `dir` with the one in `source`, from a process of its own
+fn replace_elsewhere(dir: &tempfile::TempDir, source: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_replaces_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_REPLACE_DB", dir.path())
+        .env("ELMDB_REPLACE_FROM", source.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the replacing process failed");
+}
+
 const A_TASK: fn(&str) -> serde_json::Value =
     |id| json!({ "op": "create", "type": "Task", "id": id, "fields": { "title": "t" } });
 
@@ -229,25 +248,48 @@ fn a_replace_with_in_another_process_refuses_commits_here_as_a_reset_does() {
     }
     let db = open(&dir);
     write(&db, vec![A_TASK("Task-1")]).unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            "engine::tests::lifecycle::child_replaces_the_database",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("ELMDB_REPLACE_DB", dir.path())
-        .env("ELMDB_REPLACE_FROM", source.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "the replacing process failed");
+    replace_elsewhere(&dir, &source);
     let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
     assert_eq!(db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code, ErrorCode::DataReplaced);
     assert!(db.adopt_replacement(epoch).unwrap());
     write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn a_unit_stamps_only_what_it_wrote_after_a_write_refused_for_a_replacement() {
+    use crate::engine::changed::Position;
+    // Tasks keep a change order, so a commit stamps the Tasks its write touched
+    let open = |dir: &tempfile::TempDir| {
+        let mut json = super::schema_json();
+        json["types"]["Task"]["changeOrder"] = json!(true);
+        let schema = crate::schema::Schema::from_json(&json).unwrap();
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
+    };
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-1")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    replace_elsewhere(&dir, &source);
+    // A write of Task-1 is refused as it commits, having told the store what it touched
+    let retitled = json!({ "op": "set", "id": "Task-1", "fields": { "title": "refused" } });
+    assert_eq!(db.write(&batch(vec![retitled]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert!(db.adopt_replacement(epoch).unwrap());
+    let before = db.sequence().unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-2")])).unwrap();
+    unit.commit(false).unwrap();
+    let changed = db.changed_since(&["Task".to_owned()], &Position { sequence: before, after: None }, 10).unwrap();
+    assert_eq!(
+        changed.ids,
+        ["Task-2"],
+        "the unit's commit moved what the unit wrote, and not what the refused write did"
+    );
+    assert_eq!(super::row(&db, "Task-1").unwrap()["title"], "t");
 }
 
 #[test]
@@ -531,4 +573,65 @@ fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is()
     .expect("a read-only open refuses the cut file");
     assert_eq!(read_only.code, ErrorCode::Corrupted, "{read_only}");
     assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2 / 4096 * 4096, "the file is left as it was");
+}
+
+#[test]
+fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for() {
+    use crate::failpoints::{self, points};
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id });
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+    // The mirror holds the store's edges as of now, the lists of the two entities the writes link from among them, so
+    // each commit after is applied to it
+    let mirror = db.store().unwrap().mirror();
+    let at = db.sequence().unwrap();
+    mirror.lock().at(at);
+    for id in ["Task-1", "Task-2"] {
+        db.snapshot(|s| mirror.lock().visit_far_ends(s, at, id, true, "refs", |_, _| {})).unwrap();
+    }
+    assert_eq!(mirror.lock().held(), 2);
+    let link = |source: &str, target: &str| json!({ "op": "link", "source": source, "kind": "refs", "target": target });
+    // The first writer's commit lands, which lets LMDB's write lock go, and it stops there, before the store has
+    // handed its edges to the mirror
+    let (landed, has_landed) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let first = {
+        let (db, edge) = (std::sync::Arc::clone(&db), link("Task-1", "Task-2"));
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::COMMIT_LANDED, move || {
+                landed.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            write(&db, vec![edge]).unwrap();
+        })
+    };
+    has_landed.recv_timeout(Duration::from_secs(10)).expect("the first write's commit landed");
+    // A second writer, on another thread, reaches the store and waits its turn, though LMDB's lock is free by now
+    let (at_the_store, is_at_the_store) = mpsc::channel();
+    let (done, is_done) = mpsc::channel();
+    let second = {
+        let (db, edge) = (std::sync::Arc::clone(&db), link("Task-2", "Task-3"));
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::WRITE_RESERVATION, move || at_the_store.send(()).unwrap());
+            write(&db, vec![edge]).unwrap();
+            done.send(()).unwrap();
+        })
+    };
+    is_at_the_store.recv_timeout(Duration::from_secs(10)).expect("the second write reached the store");
+    assert!(
+        is_done.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the second write committed while the first had yet to account for its own"
+    );
+    go_on.send(()).unwrap();
+    is_done.recv_timeout(Duration::from_secs(10)).expect("the second write goes on once the first is done");
+    first.join().unwrap();
+    second.join().unwrap();
+    // Each commit reached the mirror in its order, with its own edges: the mirror is at the last, and the lists it
+    // held are the store's, which `check()` compares
+    assert_eq!(mirror.lock().sequence(), Some(db.sequence().unwrap()));
+    assert_eq!(mirror.lock().held(), 2, "no commit emptied it");
+    assert_eq!(super::edges(&db), ["Task-1|refs|Task-2", "Task-2|refs|Task-3"]);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
 }

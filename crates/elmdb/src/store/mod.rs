@@ -268,7 +268,8 @@ pub struct Store {
     replacing: AtomicU64,
     /// Tells other processes of commits here, and this one of theirs
     pub(crate) wake: wake::Wake,
-    /// What a writer takes before LMDB's write lock, so one a dead writer left held is let go
+    /// What a writer takes before LMDB's write lock: its turn among this process's writers, kept until its commit is
+    /// accounted for, and on macOS a file lock, so a write lock a dead writer left held is let go
     writers: writers::Writers,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
@@ -767,7 +768,9 @@ impl Store {
         drop(accounted);
         self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
-        // Still this process's one writer, so commits reach the mirror in their order
+        run_point!(COMMIT_LANDED);
+        // LMDB's lock went with the commit, and the writer's hold is kept until this returns (`writers.rs`): still
+        // this process's one writer, so commits reach the mirror in their order, each with the edges it deposited
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
         // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died
@@ -926,13 +929,21 @@ impl Store {
     /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
     pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
         self.check_writable()?;
-        if self.unit_is_open() {
-            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
-        }
-        let _guard = self.gate();
-        let _writer = self.writers.hold()?;
-        self.drop_idle();
-        let mut txn = self.env.write_txn()?;
+        // Claimed under the unit's lock, as a write claims its own: a unit that began between a check and the claim
+        // would keep the writer's turn for as long as it is open, and this would wait for it with the gate held
+        let (txn, held) = self
+            .unit
+            .claim_writer(|| {
+                let guard = self.gate();
+                let writer = self.writers.hold()?;
+                run_point!(RESET_CLAIMING);
+                self.drop_idle();
+                Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
+            })
+            .map_err(|_| Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"))??;
+        // Declared after its holds, so it ends before they are let go
+        let _held = held;
+        let mut txn = txn;
         let key = meta_key(meta::SEQUENCE);
         let value = self
             .db
@@ -963,24 +974,31 @@ impl Store {
         // Let go when the unit doesn't begin, whether it is refused or what begins it panics
         let reserved = Reserved(self);
         let begun = (|| {
-            run_point!(UNIT_RESERVED);
             if self.map_half_used() {
                 self.grow()?;
             }
+            run_point!(UNIT_RESERVED);
             loop {
                 let guard = self.gate.read_arc();
                 let writer = self.writers.hold()?;
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
-                        // A replacement that failed before committing can't vouch for this unit
+                        // A unit's commit adds what it touched to whatever is deposited then, so what a refused or
+                        // failed write left is dropped here, as a write's start drops it; the edges one left are
+                        // replaced by the unit's own at its commit. Nor can a replacement that failed before
+                        // committing vouch for this unit
+                        *self.touched.lock() = None;
                         self.replacing.store(0, Ordering::Release);
                         return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first
+                    // transaction's hold on it goes first, and the writer's turn with it: adopting waits for this
+                    // process's reads to end, and on macOS the turn keeps the file lock other processes' writers
+                    // wait for
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        drop(guard);
+                        drop((guard, writer));
+                        run_point!(UNIT_MAP_GROWN);
                         self.adopt_map_size()?;
                     }
                     Err(e) => return Err(e.into()),

@@ -817,7 +817,8 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
-    /// The writer's hold on the write transaction, let go once the transaction has ended (`store/writers.rs`)
+    /// The writer's hold on the write transaction, let go once the transaction has ended and the store has accounted
+    /// for its commit (`store/writers.rs`)
     writer: Option<crate::store::WriterLock>,
     schema: Arc<EngineSchema>,
     schemas: Arc<RwLock<Arc<EngineSchema>>>,

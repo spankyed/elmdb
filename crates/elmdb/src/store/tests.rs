@@ -939,6 +939,82 @@ fn a_read_adopts_the_map_another_process_grew_the_file_past() {
 }
 
 #[test]
+fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_size() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let small = 1 << 20;
+    let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap());
+    put(&store, "a", b"1").unwrap();
+    // The unit has reserved its place, with room in the map as it is, when another process writes past the map
+    let path = dir.path().to_path_buf();
+    failpoints::run_once_here(points::UNIT_RESERVED, move || {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+            .env("ELMDB_GROW_DB", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child's write failed");
+    });
+    // It finds the map grown as it takes the write transaction, and goes on to adopt the size, which takes the gate
+    // for writing and so waits for this process's reads. It keeps no turn while it waits: on macOS the turn keeps
+    // the file lock other processes' writers wait for
+    let free = Rc::new(Cell::new(None));
+    failpoints::run_once_here(points::UNIT_MAP_GROWN, {
+        let (store, free) = (Arc::clone(&store), Rc::clone(&free));
+        move || free.set(Some(store.writers.turn_is_free()))
+    });
+    let (txn, gate, writer) = store.begin().unwrap();
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    assert_eq!(free.get(), Some(true), "whether the unit found the map grown, and its turn free by then");
+    assert!(store.map_size() > small, "the unit adopted the map the other process grew");
+}
+
+// The slot's lock is the models' own under Loom and Shuttle, which ask the slot's decisions and not this
+#[cfg(not(any(loom, shuttle)))]
+#[test]
+fn a_reset_s_checkpoint_takes_its_turn_where_no_unit_can_reserve_its_place() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    put(&store, "a", b"1").unwrap();
+    // A unit that reserved its place between the checkpoint's look at the slot and its turn would keep the turn for
+    // as long as it stayed open, with the checkpoint waiting for it: the turn is taken with the slot's lock held
+    let claimed = Rc::new(Cell::new(None));
+    failpoints::run_once_here(points::RESET_CLAIMING, {
+        let (store, claimed) = (Arc::clone(&store), Rc::clone(&claimed));
+        move || claimed.set(Some(store.unit.is_being_claimed()))
+    });
+    store.recycle_reset_pages().unwrap();
+    assert_eq!(claimed.get(), Some(true), "whether the checkpoint took its turn, and under the slot's lock");
+}
+
+#[test]
+fn a_reset_s_checkpoint_is_refused_while_a_unit_is_open_and_runs_once_it_has_ended() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (txn, gate, writer) = store.begin().unwrap();
+    // Refused, on the thread that holds the unit's turn: a checkpoint that went on to wait its turn would wait for good
+    let refused = store.recycle_reset_pages().unwrap_err();
+    assert_eq!(refused.code, ErrorCode::UnitOpen, "{refused}");
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    store.recycle_reset_pages().unwrap();
+    assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
+}
+
+#[test]
 fn a_commit_is_synced_on_its_own_once_writes_pause() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(

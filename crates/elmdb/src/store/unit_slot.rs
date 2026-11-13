@@ -37,6 +37,13 @@ impl UnitSlot {
         Ok(taken)
     }
 
+    /// Whether a writer is being claimed, or the slot is otherwise being asked, right now: a test's check of where a
+    /// writer is taken
+    #[cfg(all(test, not(any(loom, shuttle))))]
+    pub(crate) fn is_being_claimed(&self) -> bool {
+        self.open.try_lock().is_err()
+    }
+
     /// The unit ended, committed or not: whoever waits for the writer hears of it
     pub(crate) fn release(&self) {
         *self.open.lock().expect("the unit's lock is never poisoned") = false;
