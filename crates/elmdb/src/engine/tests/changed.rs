@@ -128,6 +128,21 @@ fn a_reset_makes_a_reader_from_before_it_incomplete_and_one_from_before_its_next
 }
 
 #[test]
+fn a_rebuild_takes_a_sequence_and_stamps_no_entity() {
+    // A rebuild between a reset and the next commit can take a sequence, and a reader from before the rebuild reads
+    // nothing it changed
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1")]).unwrap();
+    let before = db.sequence().unwrap();
+    db.rebuild(None).unwrap();
+    assert!(db.sequence().unwrap() > before, "the rebuild consumed a sequence");
+    let changed = since(&db, &from(before), 100);
+    assert_eq!(changed.ids, Vec::<String>::new(), "a rebuild stamps no entity");
+    assert!(changed.complete);
+}
+
+#[test]
 fn a_write_moves_what_it_wrote_to_its_commit_and_a_reader_reads_only_that() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

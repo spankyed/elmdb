@@ -54,6 +54,18 @@ pub(super) fn reach(file: &mut File, psize: usize, pages: u64, txnid: u64, path:
     Ok(Reach { missing: None, highest: walk.highest })
 }
 
+/// The pages the main tree reaches, its sub-databases and overflow runs included, counted as the walk reaches them. Checks
+/// the walk against LMDB's own counts of the trees in tests
+#[cfg(test)]
+pub(super) fn main_tree_pages(file: &mut File, psize: usize, pages: u64, txnid: u64, path: &Path) -> Result<usize> {
+    let (_, main) = roots(file, psize, txnid, path)?;
+    let mut walk = Walk { file, psize, pages, path, seen: vec![false; pages as usize], highest: 0 };
+    if let Some(missing) = walk.tree(main)? {
+        return Err(corrupt(path, &format!("reaches page {missing} past its end")));
+    }
+    Ok(walk.seen.iter().filter(|seen| **seen).count())
+}
+
 /// The roots of the two trees of the meta page written by `txnid`. Either meta page may be torn; the one LMDB chose names
 /// the transaction, and the other is read only to find it
 fn roots(file: &mut File, psize: usize, txnid: u64, path: &Path) -> Result<(u64, u64)> {
