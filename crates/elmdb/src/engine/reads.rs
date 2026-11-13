@@ -4298,7 +4298,6 @@ pub fn collator(collation: &str) -> Result<icu_collator::CollatorBorrowed<'stati
         .map_err(|e| Error::new(ErrorCode::SchemaInvalid, format!("No collation for \"{collation}\": {e}")))
 }
 
-/// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
 /// What kind of value `v` is, in words a message can name it by
 fn value_kind(v: &Value) -> &'static str {
     match v {
@@ -4314,6 +4313,7 @@ fn value_kind(v: &Value) -> &'static str {
     }
 }
 
+/// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
 fn json_text(v: &Value) -> String {
     match v {
         Value::Nil => "null".to_owned(),
