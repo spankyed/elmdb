@@ -4670,7 +4670,10 @@ fn query_with(
         }
         Terminal::Sum { field: name } => {
             let ids = q.collect(last)?;
-            let (mut sum, mut n) = (0.0_f64, 0u64);
+            // The total, and what its additions rounded off (Neumaier's sum): each addition's error is kept and
+            // added at the end, so the answer is the nearest number to the true sum, or next to it, however many
+            // values there are and whatever their sizes, where adding them up one by one loses a little at each
+            let (mut total, mut lost, mut n) = (0.0_f64, 0.0_f64, 0u64);
             for id in ids {
                 let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
                 let Some(number) = values::as_number(&value) else {
@@ -4682,11 +4685,18 @@ fn query_with(
                         ),
                     ));
                 };
-                sum += number;
+                let next = total + number;
+                // The larger of the two keeps its digits in the addition, and the smaller loses those the result
+                // has no room for: subtracting the larger back out leaves what was kept of the smaller
+                lost += if total.abs() >= number.abs() { (total - next) + number } else { (number - next) + total };
+                total = next;
                 n += 1;
             }
-            // The running total is checked as it is added: one that passes what a number holds is refused, even where a
-            // later value would bring it back, so near the largest number the answer can depend on the order of the set
+            // A total past what a number holds stays past it whatever is added after (infinity and a number make
+            // infinity, and the two infinities no number), so this one check refuses every sum that passed it on the
+            // way, even where a later value would have brought it back: near the largest number the answer can
+            // depend on the order of the set
+            let sum = total + lost;
             if !sum.is_finite() {
                 return Err(Error::new(
                     ErrorCode::ValueInvalid,

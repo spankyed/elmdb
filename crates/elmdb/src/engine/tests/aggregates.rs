@@ -265,6 +265,40 @@ fn a_sum_past_what_a_number_holds_is_refused_as_it_passes_not_as_it_ends() {
     assert!(error.message.contains("passes what a number holds"), "{}", error.message);
 }
 
+#[test]
+fn a_sum_keeps_what_each_addition_rounds_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let item =
+        |i: usize, fields: Json| json!({ "op": "create", "type": "Item", "id": format!("Item-{i}"), "fields": fields });
+    let sum = |steps: Json| {
+        read(&db, plan("live", steps, json!({ "answer": "sum", "field": "price" }))).unwrap()["sum"].clone()
+    };
+    // Ten tenths are one: added one by one they come to 0.9999999999999999
+    write(&db, (0..10).map(|i| item(i, json!({ "price": 0.1, "qty": 1 }))).collect()).unwrap();
+    assert_eq!((0..10).fold(0.0, |total, _| total + 0.1), 0.9999999999999999_f64);
+    assert_eq!(sum(json!([])), json!(1.0));
+    // A one between a large number and its opposite is what is left of the three: added one by one the one is lost to
+    // the large number, whichever of the two is the larger as it is added
+    write(
+        &db,
+        vec![
+            item(10, json!({ "price": 1e16, "qty": 2 })),
+            item(11, json!({ "price": 1.0, "qty": 2 })),
+            item(12, json!({ "price": -1e16, "qty": 2 })),
+            item(13, json!({ "price": 1.0, "qty": 3 })),
+            item(14, json!({ "price": 1e16, "qty": 3 })),
+            item(15, json!({ "price": -1e16, "qty": 3 })),
+        ],
+    )
+    .unwrap();
+    assert_eq!(1e16 + 1.0 - 1e16, 0.0);
+    assert_eq!(sum(json!([{ "step": "where", "field": "qty", "value": 2 }])), json!(1.0));
+    assert_eq!(sum(json!([{ "step": "where", "field": "qty", "value": 3 }])), json!(1.0));
+    // And of all sixteen, three
+    assert_eq!(sum(json!([])), json!(3.0));
+}
+
 /// `open`'s schema with an index on `price` and one on `qty` then `price`
 fn open_indexed(dir: &tempfile::TempDir) -> Database {
     let schema = json!({
