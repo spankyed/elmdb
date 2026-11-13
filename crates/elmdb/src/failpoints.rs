@@ -62,12 +62,25 @@ pub(crate) mod points {
     pub const STAMP: &str = "store::stamp";
     /// Writing the reset checkpoint fails
     pub const RESET_CHECKPOINT: &str = "store::reset_checkpoint";
+    /// Runs in a reset's checkpoint, once it has its turn to write and before it takes the write transaction
+    pub const RESET_CLAIMING: &str = "store::reset_claiming";
+    /// Runs in an open once it holds the snapshot the data file's trees are read at, before it reads that commit's
+    /// meta page from the file
+    pub const OPEN_SNAPSHOT: &str = "store::open_snapshot";
+    /// Runs in an open once the data file's trees have been read, before a file found short is extended
+    pub const OPEN_WALKED: &str = "store::open_walked";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
+    /// Runs once a commit has landed and LMDB's write lock has gone with it, before the store hands the commit's
+    /// edges to the mirror
+    pub const COMMIT_LANDED: &str = "store::commit_landed";
     /// Runs in a write, once it holds the write transaction and before its work
     pub const WRITE_HELD: &str = "store::write_held";
-    /// Runs as a unit is begun, once its place is reserved and before it takes the write transaction
+    /// Runs as a unit is begun, once its place is reserved and its map has room, before it takes the write transaction
     pub const UNIT_RESERVED: &str = "store::unit_reserved";
+    /// Runs as a unit is begun, once it has found the map grown by another process and let its holds go, before it
+    /// adopts the size
+    pub const UNIT_MAP_GROWN: &str = "store::unit_map_grown";
     /// Runs as a unit is begun, once it holds the write transaction and before the unit is made
     pub const UNIT_HELD: &str = "engine::unit_held";
     /// Runs in a unit's commit, once the commit has taken the unit's transaction

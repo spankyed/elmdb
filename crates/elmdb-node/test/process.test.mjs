@@ -181,15 +181,19 @@ if (process.platform !== 'win32') {
 }
 
 /**
- * Waits for `promise` with the event loop held open. A listener for other processes' commits doesn't hold it, so a
- * wait for its wake alone would let the loop, and the test, end before the wake comes
+ * Waits for `promise` with the event loop held open, for half a minute at most. A listener for other processes'
+ * commits doesn't hold the loop, so a wait for its wake alone would let the loop, and the test, end before the wake
+ * comes; and a wake that never comes fails the test here, not when its job is given up on
  */
 async function held(promise) {
-  const holding = setInterval(() => {}, 1000);
+  let late;
+  const never = new Promise((_, reject) => {
+    late = setTimeout(() => reject(new Error('no wake came in thirty seconds')), 30_000);
+  });
   try {
-    return await promise;
+    return await Promise.race([promise, never]);
   } finally {
-    clearInterval(holding);
+    clearTimeout(late);
   }
 }
 
@@ -223,17 +227,28 @@ test('a commit from another process wakes a listener, and a killed writer leaves
     const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'ignore', 'pipe'] });
     let errors = '';
     child.stderr.on('data', (chunk) => (errors += chunk));
+    // Its end, once its error stream has closed: how it ended, by a code or by a signal
+    const ended = new Promise((resolve) => child.on('close', (code, signal) => resolve(code ?? signal)));
+    // How a child told to kill itself ends: by the signal, or on Windows with the code a killed process leaves
+    const asAsked = (how) => (killed ? how === 'SIGKILL' || (process.platform === 'win32' && how === 1) : how === 0);
+    // An end that was not asked for wrote nothing to wait for a wake of. Only that settles this: a wait for the wake
+    // ends by the wake, never by the child ending as it was asked to
     const refused = new Promise((_, reject) => {
-      child.on('exit', (code) => {
-        if (code) reject(new Error(errors));
+      ended.then((how) => {
+        if (!asAsked(how)) reject(new Error(`the child ended by ${how}: ${errors}`));
       });
     });
-    const exited = new Promise((resolve) => child.on('exit', resolve));
-    await held(Promise.race([heard, refused]));
+    try {
+      await held(Promise.race([heard, refused]));
+    } catch (error) {
+      // One still running when the wait gave up would keep this process, and its job, from ending
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      throw error;
+    }
     // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
-    // commits, before it closes, and Windows removes no file a process holds open. One that wasn't killed closed
-    const code = await exited;
-    if (!killed) assert.equal(code, 0, errors);
+    // commits, before it closes, and Windows removes no file a process holds open
+    const how = await ended;
+    assert.ok(asAsked(how), `the child ended by ${how}: ${errors}`);
   };
 
   await writeElsewhere('Task-a', 'other.close();');

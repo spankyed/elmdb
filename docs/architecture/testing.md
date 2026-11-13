@@ -103,8 +103,12 @@ disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some
 itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
 they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
-LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. A torn
-file that is refused counts as a file that didn't survive.
+LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. Other
+processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
+that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
+landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
+only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
+torn file that is refused counts as a file that didn't survive.
 
 A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
 aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
