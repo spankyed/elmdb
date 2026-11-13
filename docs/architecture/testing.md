@@ -106,6 +106,11 @@ they reach is past the end or has a page without its own number and a tree page'
 LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. A torn
 file that is refused counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
 
+A file torn within its length can end its reader as well: LMDB aborts the process on a page that is no page of the
+tree it is in. One of the grouped mode's replayed files did on Linux (CI, 2026-11-13, `SIGABRT`), and none on Apple
+silicon, whose pages are larger. The replay counts such a file as one that didn't survive, with how its reader ended,
+and fails on a reader ended by the fault of a read past the file's end, which the open's check is there to stop.
+
 ## Failpoints
 
 A fault a test injects — a commit refused as on a full disk, a failed sync, a pause before a read takes its snapshot,

@@ -471,8 +471,9 @@ may be lost to a power loss until its sync, a moment later. More than the last c
 the pages and meta pages written between two syncs, so a loss can leave a meta page on disk without all the pages it
 names, and both meta pages may be of commits since the sync. The file is then no commit's, a `durable` commit's
 neither: its sync covered the file as it was, not what later commits wrote over. Such a file is refused at open
-(`CORRUPTED`) where its trees reach past its end (`store/reach.rs`), and may otherwise read wrongly; the remedy is a
-backup. A test replays the loss in both modes (`testing.md`, Power loss).
+(`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may read wrongly, or
+end the process that reads it: LMDB aborts on a page that is no page of the tree it is in. The remedy is a backup. A
+test replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent

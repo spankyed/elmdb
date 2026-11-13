@@ -102,8 +102,8 @@ is running, so one made during a long rebuild holds the event loop until it ends
 
 **Power loss:** by default commits are synced in groups, about a second apart. If the machine loses power between two
 syncs, the commits since the last sync can be lost, and the file can be left holding part of a commit, since nothing
-orders what is written between syncs: such a file may be refused when it is opened (`CORRUPTED`) or read wrongly, every
-earlier commit with it, and the remedy is a backup. A write's `durable: true` waits for its sync; it doesn't keep a
+orders what is written between syncs: such a file may be refused when it is opened (`CORRUPTED`), read wrongly, or end
+the process that reads it, every earlier commit with it, and the remedy is a backup. A write's `durable: true` waits for its sync; it doesn't keep a
 later commit from leaving the file that way. Open with `syncEachCommit: true` to sync every commit as it is made, its
 pages before the page that names them, so a commit that returned survives a power loss and the file stays whole; each
 commit then costs its own sync.
