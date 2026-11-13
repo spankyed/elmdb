@@ -449,6 +449,19 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
     Ok(())
 }
 
+/// Moves a relation to the kind `def` declares as `kind`, keeping its id, its ends and its place, held to that
+/// kind's rules as a link of it is: what its info and its weight may be, the types it joins, how many edges an end may
+/// have, and no cycle. The rules are read against the kind's edges as they are, those moved before this one among
+/// them, so a run of moves is refused at the first edge the new kind can't hold beside the others. An admin rename's
+/// move, between two kinds
+pub fn rekind(t: &mut Txn<'_, '_>, relation: &str, stored: Stored, def: &RelationDef, kind: &str) -> Result<()> {
+    check_info(def, kind, stored.info.as_ref())?;
+    weight_of(def, kind, stored.weight)?;
+    check_rules(t, def, kind, &stored.source, &stored.target, None)?;
+    remove(t, relation)?;
+    restore(t, relation, &Stored { kind: kind.to_owned(), ..stored })
+}
+
 /// Removes the relation; an id no relation has is ignored
 pub fn remove(t: &mut Txn<'_, '_>, relation: &str) -> Result<()> {
     let Some(stored) = get(t, relation)? else { return Ok(()) };

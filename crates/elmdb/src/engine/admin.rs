@@ -162,7 +162,10 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
     Ok(())
 }
 
-/// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends
+/// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends. Refused, with
+/// nothing moved, when the new kind couldn't hold the edges: one that would be a second of an identity, and one the
+/// kind's rules refuse a link of (its info or weight, the types it joins, an end with more edges than the kind's
+/// cardinality lets it have, a cycle in a kind declared acyclic)
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
     if from == to {
@@ -173,7 +176,9 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     // Refused before anything moves: an edge of the new kind with the same ends and key would be one identity twice, as
     // an update of an edge onto another's identity is refused. Two moving edges that would be one identity are refused
     // the same way, compared by the identity's own equality among those with the same ends
-    let def = t.schema.relations.get(to).expect("declared above");
+    // The schema outlives the unit's borrow of it, so the kind's rules are read while its edges are written
+    let schema = t.schema;
+    let def = schema.relations.get(to).expect("declared above");
     let mut by_ends: std::collections::BTreeMap<(String, String), Vec<Vec<rmpv::Value>>> = Default::default();
     for (_, stored) in &moving {
         let key = relations::key_values(def, stored.info.as_ref());
@@ -205,9 +210,16 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
         group.push(key);
     }
     for (id, stored) in moving {
-        relations::remove(t, &id)?;
-        let moved = relations::Stored { kind: to.to_owned(), ..stored };
-        relations::restore(t, &id, &moved)?;
+        let (source, target) = (stored.source.clone(), stored.target.clone());
+        relations::rekind(t, &id, stored, def, to).map_err(|refused| {
+            Error::new(
+                refused.code,
+                format!(
+                    "renameRelation({from:?} to {to:?}): the edge from {source} to {target} can't be of kind {to}, and                      nothing was moved: {}",
+                    refused.message
+                ),
+            )
+        })?;
     }
     Ok(())
 }

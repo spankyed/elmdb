@@ -643,6 +643,82 @@ fn rename_relation_refuses_two_moving_edges_that_would_be_one_identity_in_the_ne
 }
 
 #[test]
+fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_one_is_refused() {
+    let entity =
+        |id: &str| json!({ "op": "create", "type": id.split('-').next().unwrap(), "id": id, "fields": { "a": "x" } });
+    let link = |source: &str, kind: &str, target: &str| json!({ "op": "link", "source": source, "kind": kind, "target": target });
+    // Each: the edges there are, the rename, and what refuses it. `parent_of` gives a target one source and holds no
+    // cycle; `pins` joins a Note to a Task and gives a source one target; `refs` carries no weight
+    let heavy = json!({ "op": "link", "source": "Task-1", "kind": "weighs", "target": "Task-2", "weight": 3 });
+    let plain = json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2", "info": "plain" });
+    let refused = [
+        (
+            vec![link("Task-1", "refs", "Task-3"), link("Task-2", "refs", "Task-3")],
+            "refs",
+            "parent_of",
+            ErrorCode::Cardinality,
+        ),
+        (
+            vec![link("Task-1", "parent_of", "Task-3"), link("Task-2", "refs", "Task-3")],
+            "refs",
+            "parent_of",
+            ErrorCode::Cardinality,
+        ),
+        (
+            vec![link("Task-1", "refs", "Task-2"), link("Task-2", "refs", "Task-3"), link("Task-3", "refs", "Task-1")],
+            "refs",
+            "parent_of",
+            ErrorCode::Cycle,
+        ),
+        (vec![link("Task-1", "refs", "Task-2")], "refs", "pins", ErrorCode::Endpoint),
+        (
+            vec![link("Note-1", "refs", "Task-1"), link("Note-1", "refs", "Task-2")],
+            "refs",
+            "pins",
+            ErrorCode::Cardinality,
+        ),
+        (vec![heavy], "weighs", "refs", ErrorCode::ValueInvalid),
+        // A keyed kind reads its key from the info's fields, so info that is no map can't be an edge of it
+        (vec![plain], "refs", "cites", ErrorCode::FieldType),
+    ];
+    for (links, from, to, code) in refused {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, ["Task-1", "Task-2", "Task-3", "Task-4", "Note-1"].map(entity).to_vec()).unwrap();
+        write(&db, links.clone()).unwrap();
+        let before = super::edges(&db);
+        let error = db.rename_relation(from, to).unwrap_err();
+        assert_eq!(error.code, code, "{from} to {to} over {links:?}: {error}");
+        assert!(error.message.starts_with(&format!("renameRelation({from:?} to {to:?}): the edge from ")), "{error}");
+        assert!(error.message.contains("nothing was moved"), "{error}");
+        assert_eq!(super::edges(&db), before, "{from} to {to}: no edge moved");
+        assert!(db.check().unwrap().is_clean(), "{from} to {to}: a refused rename leaves the graph as it was");
+    }
+    // Edges the new kind can hold move, and are held to its rules from then on as any of its edges are
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, ["Task-1", "Task-2", "Task-3", "Task-4", "Note-1"].map(entity).to_vec()).unwrap();
+    write(
+        &db,
+        vec![link("Task-1", "refs", "Task-2"), link("Task-1", "refs", "Task-3"), link("Task-2", "refs", "Task-4")],
+    )
+    .unwrap();
+    db.rename_relation("refs", "parent_of").unwrap();
+    assert!(db.check().unwrap().is_clean());
+    let moved = super::edges(&db);
+    assert!(moved.len() == 3 && moved.iter().all(|edge| edge.contains("parent_of")), "{moved:?}");
+    let second_parent = write(&db, vec![link("Task-3", "parent_of", "Task-4")]).unwrap_err();
+    assert_eq!(second_parent.code, ErrorCode::Cardinality, "{second_parent}");
+    let cycle = write(&db, vec![link("Task-4", "parent_of", "Task-1")]).unwrap_err();
+    assert_eq!(cycle.code, ErrorCode::Cycle, "{cycle}");
+    // A weight moves with its edge to a kind that carries one
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "weighs", "target": "Task-2", "weight": 3 })])
+        .unwrap();
+    db.rename_relation("weighs", "rates").unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rename_field_refuses_to_replace_a_value_the_new_name_holds() {
     let dir = tempfile::tempdir().unwrap();
     let mut fields = base_fields();
