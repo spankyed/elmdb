@@ -180,25 +180,33 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     // What a rule of the new kind refuses, of one relation: the rule as a link of the kind is told it, and what to do.
     // A count of far ends and a cycle are broken by two relations or more, the others of the kind already or moved to
     // it before this one, so the link refused is one made beside those; every other rule is broken by the relation
-    // alone. A weight out of a link's range came by a load, and no write gives a relation another where its kind
-    // holds none
+    // alone. A write changes a relation while its kind is declared, and a load whatever its kind; a weight out of a
+    // link's range came by a load, and a load is what gives the relation another. An error that is no rule's, a read
+    // that failed, is answered as it is
+    let change = match schema.relations.contains_key(from) {
+        true => "Remove or change that relation",
+        false => "Remove that relation, or load it again changed",
+    };
     let refused = |id: &str, stored: &relations::Stored, rule: Error| {
         let (as_a_link, to_do) = match rule.code {
             ErrorCode::Cardinality | ErrorCode::Cycle => (
                 format!(
-                    "Beside the relations of kind {to} and those of kind {from} moved before it, a link of it would be \
-                     refused"
+                    "Beside the relations of kind {to} and those of kind {from} the rename moves before it, a link of \
+                     it would be refused"
                 ),
                 format!(
-                    "Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
-                     already or of kind {from} with it"
+                    "{change}, or one it can't be of kind {to} beside, which is of that kind already or of kind \
+                     {from} with it"
                 ),
             ),
             ErrorCode::ValueInvalid => (
                 "A link of it is refused".to_owned(),
                 "Remove that relation, or load it again with a weight in that range".to_owned(),
             ),
-            _ => ("A link of it is refused".to_owned(), "Remove or change that relation".to_owned()),
+            ErrorCode::FieldType | ErrorCode::RequiredField | ErrorCode::SelfLink | ErrorCode::Endpoint => {
+                ("A link of it is refused".to_owned(), change.to_owned())
+            }
+            _ => return rule,
         };
         Error::new(
             rule.code,
