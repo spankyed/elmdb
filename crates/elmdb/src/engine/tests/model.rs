@@ -1843,7 +1843,8 @@ fn rel_effects_in(current: &mut Model, step: &Step, rels: &mut Vec<Rel>) -> Resu
                 Step::MoveRelation { id, kind, target, to } => {
                     let mut rel = Rel::new(kind, id, to);
                     rel.changed = true;
-                    rel.moved_from = Some((id.to_string(), target.to_string()));
+                    // Moved onto the target it has, the relation is changed and has moved from nowhere
+                    rel.moved_from = (to != target).then(|| (id.to_string(), target.to_string()));
                     vec![rel]
                 }
                 Step::Rekey { id, target, from, to } => {
@@ -2336,6 +2337,42 @@ fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_
         &reference,
         Aimed { step, aimed: true },
     );
+}
+
+#[test]
+fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move() {
+    // The workload moves a relation onto any entity, the target it has among them: the engine reports the relation
+    // changed, with no ends it moved from, alone and after a move in the same commit
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-2", kind: "refs", target: "Task-1" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let onto_its_own = Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-1", to: "Task-1" };
+    let moved_then_onto_its_own = Step::Unit {
+        steps: vec![
+            Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-1", to: "Task-3" },
+            Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-3", to: "Task-3" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    for step in [onto_its_own, moved_then_onto_its_own] {
+        reference.outcome = model.step(&step);
+        reference.model = model.clone();
+        engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+            engine,
+            &reference,
+            Aimed { step, aimed: true },
+        );
+    }
 }
 
 #[test]

@@ -108,8 +108,14 @@ processes may be committing as the file is opened: the walk reads one commit's t
 that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
 landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
 only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
-torn file that is refused counts as a file that didn't survive. A child that reads a file and says nothing fails the
-test.
+torn file that is refused counts as a file that didn't survive.
+
+A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
+2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
+such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
+reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
+to half its pages shows it stopping, and on a child that says nothing and ended any other way.
 
 ## Failpoints
 
