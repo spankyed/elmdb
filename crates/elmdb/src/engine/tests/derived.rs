@@ -735,8 +735,8 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
                      it would be refused"
                 ),
                 format!(
-                    "Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
-                     already or of kind {from} with it"
+                    "Remove or change that relation, or do the same to one it can't be of kind {to} beside, which is \
+                     of that kind already or of kind {from} with it"
                 ),
             ),
             _ => ("A link of it is refused".to_owned(), "Remove or change that relation".to_owned()),
@@ -838,8 +838,8 @@ fn rename_relation_refuses_what_a_load_brought_that_no_link_of_the_new_kind_is_g
     assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
     let told = "renameRelation(\"tags\" to \"weighs\"): the relation Relation-light, from Task-1 to Task-2, can't be of \
                 kind weighs, and nothing was moved. A link of it is refused: \"A weighs relation's weight is a number \
-                from 0 to 2^960, and was given -1\". Remove that relation, or load it again with a weight in that range, \
-                then rename again";
+                from 0 to 2^960, and was given -1\". Remove that relation, or bulkLoad it again under its id with a \
+                weight in that range, then rename again";
     assert_eq!(error.message, told);
     // No kind joins an entity to itself
     let error = db.rename_relation("blocks", "refs").unwrap_err();
@@ -860,8 +860,16 @@ fn rename_relation_refuses_what_a_load_brought_that_no_link_of_the_new_kind_is_g
     db.bulk_load(&[load("Relation-light", "refs", "Task-2", Some(2.0))]).unwrap();
     db.rename_relation("refs", "weighs").unwrap();
     assert_eq!((light(&db).kind.as_str(), light(&db).weight), ("weighs", Some(2.0)));
-    write(&db, vec![json!({ "op": "removeRelation", "relation": "Relation-own" })]).unwrap();
+    write(
+        &db,
+        vec![
+            json!({ "op": "removeRelation", "relation": "Relation-own" }),
+            json!({ "op": "link", "source": "Task-2", "kind": "blocks", "target": "Task-1" }),
+        ],
+    )
+    .unwrap();
     db.rename_relation("blocks", "refs").unwrap();
+    assert_eq!(super::edges(&db), ["Task-1|weighs|Task-2", "Task-2|refs|Task-1"]);
     assert!(db.check().unwrap().is_clean());
 }
 
@@ -870,15 +878,21 @@ fn rename_relation_answers_a_read_that_failed_as_it_is_and_not_as_a_rule_of_the_
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id, "fields": { "a": "x" } });
-    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
-    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" })]).unwrap();
+    let link = |source: &str, target: &str| json!({ "op": "link", "source": source, "kind": "refs", "target": target });
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3"), task("Task-4")]).unwrap();
+    // The first moves before the read of the second's fails
+    write(&db, vec![link("Task-3", "Task-4"), link("Task-1", "Task-2")]).unwrap();
     // An entry among Task-2's `parent_of` edges in that holds no relation and far end: the rule that counts a
     // target's sources reads it
     damage(&db, |txn, d| Ok(d.put(txn, &keys::edge(false, "Task-2", "parent_of", 9), &[0xc0])?));
     let error = db.rename_relation("refs", "parent_of").unwrap_err();
     assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
     assert_eq!(error.message, "An edge key's value doesn't read");
-    assert_eq!(super::edges(&db), ["Task-1|refs|Task-2"], "nothing moved");
+    assert_eq!(
+        super::edges(&db),
+        ["Task-1|refs|Task-2", "Task-3|refs|Task-4"],
+        "the edge moved first is of its kind again"
+    );
 }
 
 #[test]
@@ -938,10 +952,15 @@ fn rename_relation_holds_an_edge_to_a_one_to_one_kind_and_to_info_a_kind_require
         "renameRelation(\"plain\" to \"solo\"): the relation {named}, from Note-1 to Note-3, can't be of kind solo, and \
          nothing was moved. Beside the relations of kind solo and those of kind plain the rename moves before it, a link \
          of it would be refused: \"Note-1 already has a solo target, and a solo source has one; unlink it first\". Remove \
-         that relation, or load it again changed, or one it can't be of kind solo beside, which is of that kind already \
-         or of kind plain with it, then rename again"
+         that relation, or bulkLoad it again under its id, changed, or do the same to one it can't be of kind solo \
+         beside, which is of that kind already or of kind plain with it, then rename again"
     );
     assert_eq!(error.message, told);
+    // Which a caller can do: the relation of the undeclared kind removed, the rename goes on
+    write(&db, vec![json!({ "op": "removeRelation", "relation": named })]).unwrap();
+    db.rename_relation("plain", "solo").unwrap();
+    assert_eq!(super::edges(&db), ["Note-1|solo|Note-2"]);
+    assert!(db.check().unwrap().is_clean());
     // Pairs that share no end are a one-to-one kind's to hold
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, schema).unwrap();

@@ -181,11 +181,11 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     // A count of far ends and a cycle are broken by two relations or more, the others of the kind already or moved to
     // it before this one, so the link refused is one made beside those; every other rule is broken by the relation
     // alone. A write changes a relation while its kind is declared, and a load whatever its kind; a weight out of a
-    // link's range came by a load, and a load is what gives the relation another. An error that is no rule's, a read
-    // that failed, is answered as it is
+    // link's range came by a load, and a load gives the relation another whatever its kind. An error that is no
+    // rule's, a read that failed, is answered as it is
     let change = match schema.relations.contains_key(from) {
         true => "Remove or change that relation",
-        false => "Remove that relation, or load it again changed",
+        false => "Remove that relation, or bulkLoad it again under its id, changed",
     };
     let refused = |id: &str, stored: &relations::Stored, rule: Error| {
         let (as_a_link, to_do) = match rule.code {
@@ -195,13 +195,13 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
                      it would be refused"
                 ),
                 format!(
-                    "{change}, or one it can't be of kind {to} beside, which is of that kind already or of kind \
-                     {from} with it"
+                    "{change}, or do the same to one it can't be of kind {to} beside, which is of that kind already \
+                     or of kind {from} with it"
                 ),
             ),
             ErrorCode::ValueInvalid => (
                 "A link of it is refused".to_owned(),
-                "Remove that relation, or load it again with a weight in that range".to_owned(),
+                "Remove that relation, or bulkLoad it again under its id with a weight in that range".to_owned(),
             ),
             ErrorCode::FieldType | ErrorCode::RequiredField | ErrorCode::SelfLink | ErrorCode::Endpoint => {
                 ("A link of it is refused".to_owned(), change.to_owned())
