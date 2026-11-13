@@ -62,6 +62,11 @@ pub(crate) mod points {
     pub const STAMP: &str = "store::stamp";
     /// Writing the reset checkpoint fails
     pub const RESET_CHECKPOINT: &str = "store::reset_checkpoint";
+    /// Runs in an open once it holds the snapshot the data file's trees are read at, before it reads that commit's
+    /// meta page from the file
+    pub const OPEN_SNAPSHOT: &str = "store::open_snapshot";
+    /// Runs in an open once the data file's trees have been read, before a file found short is extended
+    pub const OPEN_WALKED: &str = "store::open_walked";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
     /// Runs in a write, once it holds the write transaction and before its work

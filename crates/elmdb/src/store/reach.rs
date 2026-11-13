@@ -1,13 +1,20 @@
-//! The pages a database reaches from the meta page LMDB opened it with, read from the file by seeks and never mapped.
+//! The pages a database reaches from the meta page of one commit, read from the file by seeks and never mapped.
 //!
 //! A file shorter than its meta page's pages is healthy when none of the pages the trees reach is past its end: LMDB
 //! may leave the last free pages out of the file, and no read touches them. It is torn when one the trees reach is past
 //! the end, or fails the walk's checks of a page, and then a read of it faults or reads what no commit wrote. The walk
 //! tells the two apart before the store maps or reads anything past the end.
+//!
+//! The walk reads the pages of one commit while other processes may be committing, so it reads them under a read
+//! transaction at that commit: LMDB gives none of the pages a snapshot reaches to a later commit while a reader holds
+//! it. A `Meta` borrows the transaction it was read for, and the walk takes a `Meta`, so no walk outlasts its snapshot.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::marker::PhantomData;
 use std::path::Path;
+
+use heed::{RoTxn, WithoutTls};
 
 use crate::error::{Error, ErrorCode, Result};
 
@@ -30,8 +37,18 @@ const DB_ROOT: usize = 40;
 const META_MAGIC: usize = PAGE_HEADER;
 const META_FREE_ROOT: usize = PAGE_HEADER + 24 + DB_ROOT;
 const META_MAIN_ROOT: usize = PAGE_HEADER + 24 + DB_RECORD + DB_ROOT;
-const META_TXNID: usize = PAGE_HEADER + 24 + 2 * DB_RECORD + 8;
+const META_LAST_PAGE: usize = PAGE_HEADER + 24 + 2 * DB_RECORD;
+const META_TXNID: usize = META_LAST_PAGE + 8;
 const META_LEN: usize = META_TXNID + 8;
+
+/// What a commit's meta page names: the roots of its free and main trees, and the last page of the file as it left
+/// it. Held no longer than the read transaction at that commit, which keeps the trees' pages as the commit left them
+pub(super) struct Meta<'snapshot> {
+    free: u64,
+    main: u64,
+    pub(super) last_page: u64,
+    _held: PhantomData<&'snapshot ()>,
+}
 
 /// What the walk found: the first page the trees reach past the end of the file, if any, and the highest page they reach
 /// when none is past it
@@ -40,13 +57,12 @@ pub(super) struct Reach {
     pub(super) highest: u64,
 }
 
-/// Walks the free and main trees of the meta page written by transaction `txnid`, in a file of `pages` whole pages of
-/// `psize` bytes. A page the trees reach that is past the end, or does not carry its own number and a tree page's flags,
-/// is a torn file: the first is named as missing, the second is refused as corrupt
-pub(super) fn reach(file: &mut File, psize: usize, pages: u64, txnid: u64, path: &Path) -> Result<Reach> {
-    let (free, main) = roots(file, psize, txnid, path)?;
+/// Walks the free and main trees a meta page names, in a file of `pages` whole pages of `psize` bytes. A page the trees
+/// reach that is past the end, or does not carry its own number and a tree page's flags, is a torn file: the first is
+/// named as missing, the second is refused as corrupt
+pub(super) fn reach(file: &mut File, psize: usize, pages: u64, meta: &Meta<'_>, path: &Path) -> Result<Reach> {
     let mut walk = Walk { file, psize, pages, path, seen: vec![false; pages as usize], highest: 0 };
-    for root in [free, main] {
+    for root in [meta.free, meta.main] {
         if let Some(missing) = walk.tree(root)? {
             return Ok(Reach { missing: Some(missing), highest: walk.highest });
         }
@@ -58,7 +74,7 @@ pub(super) fn reach(file: &mut File, psize: usize, pages: u64, txnid: u64, path:
 /// the walk against LMDB's own counts of the trees in tests
 #[cfg(test)]
 pub(super) fn main_tree_pages(file: &mut File, psize: usize, pages: u64, txnid: u64, path: &Path) -> Result<usize> {
-    let (_, main) = roots(file, psize, txnid, path)?;
+    let main = meta_of(file, psize, txnid).ok_or_else(|| corrupt(path, "holds no meta page of that transaction"))?.main;
     let mut walk = Walk { file, psize, pages, path, seen: vec![false; pages as usize], highest: 0 };
     if let Some(missing) = walk.tree(main)? {
         return Err(corrupt(path, &format!("reaches page {missing} past its end")));
@@ -66,17 +82,30 @@ pub(super) fn main_tree_pages(file: &mut File, psize: usize, pages: u64, txnid: 
     Ok(walk.seen.iter().filter(|seen| **seen).count())
 }
 
-/// The roots of the two trees of the meta page written by `txnid`. Either meta page may be torn; the one LMDB chose names
-/// the transaction, and the other is read only to find it
-fn roots(file: &mut File, psize: usize, txnid: u64, path: &Path) -> Result<(u64, u64)> {
+/// The meta page of the commit `snapshot` reads at, if the file holds it. Either meta page may be torn, and the two
+/// are written in turn: the commit after the next writes over this one
+pub(super) fn meta<'snapshot>(
+    file: &mut File,
+    psize: usize,
+    snapshot: &'snapshot RoTxn<'_, WithoutTls>,
+) -> Option<Meta<'snapshot>> {
+    meta_of(file, psize, snapshot.id() as u64)
+}
+
+fn meta_of<'snapshot>(file: &mut File, psize: usize, txnid: u64) -> Option<Meta<'snapshot>> {
     for at in [0, psize as u64] {
-        let Some(meta) = read_at(file, at, META_LEN) else { continue };
-        if u32_at(&meta, META_MAGIC) != MAGIC || u64_at(&meta, META_TXNID) != txnid {
+        let Some(page) = read_at(file, at, META_LEN) else { continue };
+        if u32_at(&page, META_MAGIC) != MAGIC || u64_at(&page, META_TXNID) != txnid {
             continue;
         }
-        return Ok((u64_at(&meta, META_FREE_ROOT), u64_at(&meta, META_MAIN_ROOT)));
+        return Some(Meta {
+            free: u64_at(&page, META_FREE_ROOT),
+            main: u64_at(&page, META_MAIN_ROOT),
+            last_page: u64_at(&page, META_LAST_PAGE),
+            _held: PhantomData,
+        });
     }
-    Err(corrupt(path, "holds no meta page with the transaction LMDB opened it at"))
+    None
 }
 
 struct Walk<'a> {
@@ -112,7 +141,7 @@ impl Walk<'_> {
                 ));
             }
             for node in nodes(&page) {
-                let (lo, hi, node_flags, key) = node_head(&page, node)?;
+                let (lo, hi, node_flags, key) = node_head(&page, node, self.path)?;
                 let data = node + 8 + key;
                 if flags & P_BRANCH != 0 {
                     stack.push(lo as u64 | (hi as u64) << 16 | (node_flags as u64) << 32);
@@ -188,7 +217,7 @@ impl Walk<'_> {
         if u64_at_checked(page, 0, self.path)? != pgno || !one_kind {
             return Err(corrupt(
                 self.path,
-                &format!("page {pgno} does not carry its own number and a tree page's kind, so the file is torn there"),
+                &format!("page {pgno} does not carry its own number and a tree page's kind"),
             ));
         }
         Ok(flags)
@@ -203,9 +232,9 @@ fn nodes(page: &[u8]) -> impl Iterator<Item = usize> + '_ {
 }
 
 /// A node's low and high data-size words, its flags and its key size, read from the node's header
-fn node_head(page: &[u8], node: usize) -> Result<(u16, u16, u16, usize)> {
+fn node_head(page: &[u8], node: usize, path: &Path) -> Result<(u16, u16, u16, usize)> {
     if node + 8 > page.len() {
-        return Err(Error::new(ErrorCode::Corrupted, "a node's header runs past its page".to_string()));
+        return Err(corrupt(path, "holds a node whose header runs past its page"));
     }
     Ok((u16_at(page, node), u16_at(page, node + 2), u16_at(page, node + 4), u16_at(page, node + 6) as usize))
 }
@@ -217,8 +246,16 @@ fn read_at(file: &mut File, at: u64, len: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn corrupt(path: &Path, what: &str) -> Error {
-    Error::new(ErrorCode::Corrupted, format!("{} {what}", path.display()))
+/// A file the walk can't read as LMDB wrote it: what it found, and what there is to do about a torn file
+pub(super) fn corrupt(path: &Path, what: &str) -> Error {
+    Error::new(
+        ErrorCode::Corrupted,
+        format!(
+            "{} {what}: a power loss may have left it torn. Restore the database from a backup, or from a copy of the \
+             file that is whole",
+            path.display()
+        ),
+    )
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
