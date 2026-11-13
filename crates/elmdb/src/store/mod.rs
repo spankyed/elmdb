@@ -134,7 +134,8 @@ impl<'a> Opening<'a> {
                 Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                     run_point!(OPEN_MAP_GROWN);
                     // SAFETY: the transaction refused was the open's one, so none is open in this process, which
-                    // LMDB requires, and no other thread holds the environment yet
+                    // LMDB requires, and no other thread holds the environment yet: the open begins its last
+                    // transaction before it starts group commit's thread
                     unsafe { adopt_grown_map(self.env, self.dir, self.read_only) }?;
                 }
                 begun => return Ok(begun?),
@@ -410,7 +411,11 @@ pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutT
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
-    let _reader = read_txn(env)?;
+    registered(env, path, &read_txn(env)?)
+}
+
+/// Whether the lock table registers `_reader`, a read transaction of `env` held while it is asked
+fn registered(env: &Env<WithoutTls>, path: &Path, _reader: &RoTxn<'_, WithoutTls>) -> Result<()> {
     if env.info().number_of_readers == 0 {
         return Err(Error::new(
             ErrorCode::Io,
@@ -496,11 +501,12 @@ impl Store {
         // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
+        run_point!(OPEN_ENV);
+        let opening = Opening { env: &env, dir: &canonical, read_only: options.read_only };
         if options.read_only {
             // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
-            require_registered_reader(&env, &canonical)?;
+            registered(&env, &canonical, &opening.read()?)?;
         }
-        let opening = Opening { env: &env, dir: &canonical, read_only: options.read_only };
         let short = short_of_its_pages(&opening, &mut file, page, &data)?;
         run_point!(OPEN_WALKED);
         let writers = writers::Writers::open(&canonical, options.read_only)?;
@@ -508,14 +514,8 @@ impl Store {
             extend_to_its_pages(&opening, &writers, &file, page)?;
         }
         let db = Self::open_db(&opening, &writers)?;
-        let gate = Arc::new(RecursiveRwLock::new(()));
-        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
-            GroupCommit::start(
-                Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
-                Box::new(SystemClock),
-            )
-        });
+        // Read before group commit's thread is started, the last of the open's transactions: none is begun, and no
+        // map taken at a new size, once another thread holds the environment
         let sequence = {
             let txn = opening.read()?;
             let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
@@ -525,6 +525,14 @@ impl Store {
             let txn = opening.read()?;
             stored_epoch(&txn, db)?
         };
+        let gate = Arc::new(RecursiveRwLock::new(()));
+        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
+            GroupCommit::start(
+                Policy::new(options.sync_idle, options.sync_interval),
+                Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
+                Box::new(SystemClock),
+            )
+        });
         let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);

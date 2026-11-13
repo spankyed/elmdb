@@ -1468,15 +1468,18 @@ fn an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens() {
     use crate::failpoints::{self, points};
     use std::cell::Cell;
     use std::rc::Rc;
-    for read_only in [false, true] {
+    // Grown before the open's first transaction, which for a read-only open is the one its reader is registered by
+    // and for a writable one the snapshot its walk reads at, and grown after the walk, before the databases are opened
+    let cases = [points::OPEN_ENV, points::OPEN_WALKED].into_iter().flat_map(|point| [(point, false), (point, true)]);
+    for (point, read_only) in cases {
         let dir = tempfile::tempdir().unwrap();
         let small = 1 << 20;
         let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap();
         put(&store, "a", b"1").unwrap();
         store.close().unwrap();
-        // The open has read the file's trees in a map of 1 MiB when another process writes some 4 MiB: each
-        // transaction it begins from then on is refused in the map as it was opened, until it takes the new size
-        failpoints::run_once_here(points::OPEN_WALKED, {
+        // The open holds the file in a map of 1 MiB when another process writes some 4 MiB: each transaction it
+        // begins from then on is refused in the map as it was opened, until it takes the new size
+        failpoints::run_once_here(point, {
             let dir = dir.path().to_path_buf();
             move || grow_elsewhere(&dir)
         });
@@ -1486,7 +1489,7 @@ fn an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens() {
             move || found_grown.set(true)
         });
         let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), read_only, ..quiet() })
-            .expect("an open while another process grows the file");
+            .unwrap_or_else(|e| panic!("an open while another process grows the file at {point}: {e}"));
         assert!(found_grown.get(), "the open began a transaction in the map the other process had outgrown");
         assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
         assert!(store.map_size() > small);
