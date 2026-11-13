@@ -99,8 +99,8 @@ don't blindly retry it.
 promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and
 `db.backupSync` are the blocking forms. Writes and rebuilds are applied one at a time in the order you asked for them,
 so a write sees what the one asked before it committed, and however many are waiting on a database they hold one of
-Node's pool threads between them. Durable writes in flight together are synced together and answered once the sync has run. Await a write whose answer
-or failure the next one depends on, and before a blocking call that
+Node's pool threads between them. Durable writes asked for one after another are synced together and answered once the sync has run. Await a write whose
+answer or failure the next one depends on, and before a blocking call that
 must come after it: `writeSync`, `begin` and the other blocking calls don't wait their turn among them. A close waits
 for an operation that is running, so one made during a long rebuild holds the event loop until it ends.
 

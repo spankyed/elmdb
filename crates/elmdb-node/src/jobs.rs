@@ -17,7 +17,7 @@ use crate::to_js;
 
 /// A write as the pool applies it: the work, and the settling of its promise, or for a write that waits for its sync,
 /// the wait and the settling, left for after the writes behind it
-type Queued = Box<dyn FnOnce() -> Option<Synced> + Send>;
+type Queued = (bool, Box<dyn FnOnce() -> Option<Synced> + Send>);
 
 /// The wait for a durable write's sync, and the settling of its promise
 type Synced = Box<dyn FnOnce() + Send>;
@@ -42,9 +42,10 @@ struct Waiting {
 /// long as they keep coming. A job of the pool is what a process's exit waits for: `process.exit()` applies what was
 /// asked for before it ends, as it does every job.
 ///
-/// A durable write is applied with no sync of its own. The job goes on to the writes behind it, and waits for a sync
-/// once none is waiting, or once `SYNCED_TOGETHER` durable writes are: one sync covers every commit before it, so a
-/// burst of durable writes waits for one sync between them, where each applied in its turn would wait for its own
+/// A durable write is applied with no sync of its own. The job goes on to the durable writes straight behind it, and
+/// waits for a sync once the next in the queue is no durable write, or none is, or `SYNCED_TOGETHER` are owed one:
+/// one sync covers every commit before it, so a run of durable writes waits for one sync between them, where each
+/// applied in its turn would wait for its own, and none waits for a rebuild or for writes that asked for no sync
 #[derive(Default)]
 pub struct Writes {
     waiting: Arc<Mutex<Waiting>>,
@@ -56,15 +57,21 @@ fn locked(waiting: &Mutex<Waiting>) -> MutexGuard<'_, Waiting> {
     waiting.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whose write it is: the hold on its database, the handle's health, and the export it is named by when it panics
+pub struct Of {
+    pub db: Held,
+    pub health: Health,
+    pub export: &'static str,
+}
+
 impl Writes {
     /// Queues `work` on the database, answering the promise of what it answers as `convert` makes it of JavaScript's
     /// values: settled on the event loop once the work has run in its turn, or rejected with elmdb's error
     pub fn queue<'env, T, V>(
         &self,
         env: &'env Env,
-        db: Held,
-        health: Health,
-        export: &'static str,
+        Of { db, health, export }: Of,
+        durable: bool,
         work: impl FnOnce(&elmdb::Database) -> elmdb::Result<(T, Option<elmdb::Unsynced>)> + Send + 'static,
         convert: fn(&Env, T) -> napi::Result<V>,
     ) -> napi::Result<Object<'env>>
@@ -83,7 +90,7 @@ impl Writes {
         }
         // Made once there is a job to settle it: a promise no write settles would hold the event loop open
         let (deferred, promise) = env.create_deferred()?;
-        waiting.writes.push_back(Box::new(move || {
+        let write = Box::new(move || {
             let ran = health.caught(export, || work(&db)).and_then(|done| done);
             // The hold is let go on the pool's thread, before the promise is settled on JavaScript's: the last one
             // closes the database
@@ -97,7 +104,9 @@ impl Writes {
             match ran {
                 // Committed, and durable once its sync has run: answered then, after the writes behind it
                 Ok((answer, Some(unsynced))) => Some(Box::new(move || {
-                    let synced = health.caught(export, || unsynced.wait()).and_then(|synced| synced);
+                    // Waited for whatever the handle has been through since: the write is made, and a panic of one
+                    // behind it is not its answer
+                    let synced = health.always(export, || unsynced.wait()).and_then(|synced| synced);
                     settle(synced.map(|()| answer));
                 }) as Synced),
                 Ok((answer, None)) => {
@@ -109,7 +118,8 @@ impl Writes {
                     None
                 }
             }
-        }));
+        });
+        waiting.writes.push_back((durable, write));
         Ok(promise)
     }
 }
@@ -128,7 +138,11 @@ impl Task for Drain {
             // The lock is let go before the write runs: writes are asked for while one is applied
             let next = {
                 let mut waiting = locked(&self.0);
-                let next = match unsynced.len() < SYNCED_TOGETHER {
+                // A write owed a sync is answered before anything but a durable write is applied behind it
+                let together = unsynced.is_empty()
+                    || (unsynced.len() < SYNCED_TOGETHER
+                        && waiting.writes.front().is_some_and(|(durable, _)| *durable));
+                let next = match together {
                     true => waiting.writes.pop_front(),
                     false => None,
                 };
@@ -138,9 +152,9 @@ impl Task for Drain {
                 next
             };
             match next {
-                Some(write) => unsynced.extend(write()),
+                Some((_, write)) => unsynced.extend(write()),
                 None if unsynced.is_empty() => return Ok(()),
-                // The first waits for the sync, which covers the rest
+                // The first asks for a sync and waits for it, which covers the rest
                 None => unsynced.drain(..).for_each(|synced| synced()),
             }
         }

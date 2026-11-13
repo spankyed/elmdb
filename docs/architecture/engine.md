@@ -404,10 +404,11 @@ or not they were awaited, and a caller awaits one whose answer or failure the ne
 these promises: a blocking call made while they wait (`writeSync`, `begin`, `setSchema`, a purge, a load) doesn't wait
 its turn among them, and a write that comes to its turn while a unit is open is refused (`UNIT_OPEN`). A `durable`
 write among them is applied with no sync of its own and answered once a sync has covered it: the job goes on to the
-writes behind it and waits for a sync when none is waiting, or when 64 durable writes are, so a burst of them waits
-for one sync between them. Forty asked for in one turn took 2 syncs and 7 to 9 ms, where as jobs of their own they
-took 19 to 21 syncs and 91 to 118 ms (Apple M1 Pro, 2026-11-13, load 7.5 to 10, five rounds each, the binding built in
-release; `offthread.test.mjs` holds the count of syncs). A database's
+durable writes straight behind it and asks for a sync when the next is no durable write, or none is, or 64 are owed
+one, so a run of them waits for one sync between them, and none waits for a rebuild behind it. Its watches are told
+as it commits, before that sync. Forty asked for in one turn took 1 sync, where as jobs of their own they took 19 to
+21 syncs and 91 to 118 ms (Apple M1 Pro, 2026-11-13, load 7.5 to 10, five rounds, the binding built in release;
+`offthread.test.mjs` holds the count of syncs). A database's
 check and backup read, and each is a job of the pool of its own; every `…Sync` form runs on the calling thread. A
 process that exits by `process.exit()` runs the pool to its end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that
 has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the

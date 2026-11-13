@@ -186,7 +186,13 @@ test('durable writes in flight at once wait for a sync between them, not one eac
   const together = { syncs: db.syncs - before, ms: performance.now() - began };
   const sequences = answers.map((answer) => packr.unpack(answer).sequence);
   assert.deepEqual(sequences, Array.from({ length: 40 }, (_, i) => sequences[0] + i));
-  assert.ok(together.syncs >= 1 && together.syncs <= 4, `forty durable writes in flight took ${together.syncs} syncs`);
+  assert.equal(together.syncs, 1, `forty durable writes in flight took ${together.syncs} syncs`);
+  // One with a rebuild behind it is answered by its own sync, before the rebuild is applied
+  let rebuilt = false;
+  const written = db.write(create('Note-ahead', 'ahead'), true).then(() => rebuilt);
+  const rebuilding = db.rebuild().then(() => { rebuilt = true; });
+  assert.equal(await written, false, 'answered before the rebuild behind it ended');
+  await rebuilding;
   const alone = { syncs: db.syncs, began: performance.now() };
   for (let i = 0; i < 10; i++) await db.write(create(`Note-alone-${i}`, `alone ${i}`), true);
   assert.ok(db.syncs - alone.syncs >= 10, 'each write awaited alone has a sync of its own');

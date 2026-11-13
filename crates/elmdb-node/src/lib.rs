@@ -170,6 +170,7 @@ impl Database {
         &self,
         env: &'env Env,
         export: &'static str,
+        durable: bool,
         work: impl FnOnce(&elmdb::Database) -> elmdb::Result<(T, Option<elmdb::Unsynced>)> + Send + 'static,
         convert: fn(&Env, T) -> napi::Result<V>,
     ) -> Result<Object<'env>, Code>
@@ -178,7 +179,13 @@ impl Database {
         V: ToNapiValue + 'static,
     {
         self.writes
-            .queue(env, self.inner.again(), self.health.clone(), export, work, convert)
+            .queue(
+                env,
+                jobs::Of { db: self.inner.again(), health: self.health.clone(), export },
+                durable,
+                work,
+                convert,
+            )
             .map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
     }
 
@@ -295,7 +302,8 @@ impl Database {
             self.queued(
                 env,
                 "Database.write, on a thread of the pool,",
-                // A durable write's sync is waited for after the writes behind it, one sync between them
+                durable.unwrap_or(false),
+                // A durable write's sync is waited for after the durable writes behind it, one sync between them
                 move |db| match durable.unwrap_or(false) {
                     true => db.write_bytes_unsynced(&batch).map(|(answer, unsynced)| (answer, Some(unsynced))),
                     false => db.write_bytes(&batch, false).map(|answer| (answer, None)),
@@ -480,6 +488,7 @@ impl Database {
             self.queued(
                 env,
                 "Database.rebuild, on a thread of the pool,",
+                false,
                 move |db| {
                     let one = one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()));
                     db.rebuild(one).map(|()| ((), None))
