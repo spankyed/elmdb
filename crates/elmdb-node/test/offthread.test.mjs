@@ -1,9 +1,11 @@
 // Write, check, rebuild and backup run on a thread of the pool, answering a promise: a large rebuild doesn't hold the
-// event loop. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as the promise's rejection with
-// its code; a refusal made before any work starts throws at the call, as it did.
+// event loop. A database's writes and rebuilds are applied in the order they were asked for, by one job of the pool at
+// a time. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as the promise's rejection with its
+// code; a refusal made before any work starts throws at the call, as it did.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -135,7 +137,95 @@ test('a failure is the promise rejecting with elmdb\'s code, and a refusal made 
   assert.ok(Buffer.isBuffer(await db.write(create('Note-2', 'two'))));
 });
 
-test('a write and a rebuild on the pool, in flight together, both land and the database checks clean', async (t) => {
+test('writes in flight at once are applied in the order they were asked for', async (t) => {
+  const { db } = open(t);
+  db.writeSync(create('Note-0', 'made'));
+  const before = packr.unpack(db.writeSync(create('Note-1', 'made'))).sequence;
+  // Sixty writes of one field, none awaited before the next is asked for: each commits straight after the one asked
+  // before it, and the last one asked for is what the note holds
+  const titled = (i) => packr.pack({ ops: [{ op: 'set', id: 'Note-0', fields: { title: `title ${i}` } }], now: 1000 });
+  const asked = Array.from({ length: 60 }, (_, i) => db.write(titled(i)));
+  const sequences = (await Promise.all(asked)).map((answer) => packr.unpack(answer).sequence);
+  assert.deepEqual(sequences, Array.from({ length: 60 }, (_, i) => before + 1 + i));
+  const read = packr.pack({ reads: [{ read: 'row', id: 'Note-0' }] });
+  assert.equal(packr.unpack(db.readSync(read))[0].row.title, 'title 59');
+});
+
+test('writes waiting their turn behind a rebuild hold one thread of the pool between them', async (t) => {
+  const { db } = open(t);
+  fill(db, 20000);
+  // A rebuild, and behind it three times as many writes as the pool has threads: each waits for the rebuild to end
+  const threads = Number(process.env.UV_THREADPOOL_SIZE) || 4;
+  let rebuilt = false;
+  const began = performance.now();
+  const rebuilding = db.rebuild().then(() => { rebuilt = performance.now() - began; });
+  const writes = Array.from({ length: 3 * threads }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`)));
+  // What Node asks of the pool is answered while they wait: each a job of its own, the writes would hold every thread
+  // until the rebuild ended, and this would wait behind them. Random bytes are always the pool's to make, where a
+  // file's are the kernel's on some systems
+  await new Promise((resolve, reject) => randomBytes(8, (error) => (error ? reject(error) : resolve())));
+  const answered = performance.now() - began;
+  assert.equal(rebuilt, false, `the pool answered ${answered.toFixed(1)} ms in, after the rebuild ended at ${rebuilt} ms`);
+  await Promise.all([rebuilding, ...writes]);
+  assert.equal(packr.unpack(db.readSync(count))[0].n, 20000 + 3 * threads);
+});
+
+test('durable writes in flight at once wait for a sync between them, not one each', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-offthread-'));
+  const db = Database.open(dir, { schema });
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  await db.write(create('Note-first', 'first'), true);
+  // Forty durable writes asked for in one turn: applied in order with no sync of their own, and answered once a sync
+  // has covered them. Awaited one at a time, each waits for a sync of its own
+  const before = db.syncs;
+  const began = performance.now();
+  const answers = await Promise.all(Array.from({ length: 40 }, (_, i) => db.write(create(`Note-${i}`, `title ${i}`), true)));
+  const together = { syncs: db.syncs - before, ms: performance.now() - began };
+  const sequences = answers.map((answer) => packr.unpack(answer).sequence);
+  assert.deepEqual(sequences, Array.from({ length: 40 }, (_, i) => sequences[0] + i));
+  // One where the job finds each waiting as it ends the one before; a few where it catches up with the asking
+  assert.ok(together.syncs >= 1 && together.syncs <= 4, `forty durable writes in flight took ${together.syncs} syncs`);
+  // One with a rebuild behind it is answered by its own sync, before the rebuild is applied
+  let rebuilt = false;
+  const written = db.write(create('Note-ahead', 'ahead'), true).then(() => rebuilt);
+  const rebuilding = db.rebuild().then(() => { rebuilt = true; });
+  assert.equal(await written, false, 'answered before the rebuild behind it ended');
+  await rebuilding;
+  const alone = { syncs: db.syncs, began: performance.now() };
+  for (let i = 0; i < 10; i++) await db.write(create(`Note-alone-${i}`, `alone ${i}`), true);
+  assert.ok(db.syncs - alone.syncs >= 10, 'each write awaited alone has a sync of its own');
+  t.diagnostic(`40 in flight: ${together.syncs} syncs, ${together.ms.toFixed(1)} ms; 10 awaited in turn: ${db.syncs - alone.syncs} syncs, ${(performance.now() - alone.began).toFixed(1)} ms`);
+});
+
+test('writes waiting when a close takes the database reject as closed, the ones behind none that landed', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-offthread-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const db = Database.open(dir, { schema, syncs: false });
+  // Eight writes asked for and the database closed in the same turn: the close waits for one that is running, and
+  // each still waiting then finds no database. In the order asked, those applied come before those refused
+  const asked = Array.from({ length: 8 }, (_, i) => db.write(create(`Note-${i}`, `title ${i}`)));
+  db.close();
+  const settled = await Promise.allSettled(asked);
+  const applied = settled.filter((one) => one.status === 'fulfilled').length;
+  for (const [i, one] of settled.entries()) {
+    assert.equal(one.status, i < applied ? 'fulfilled' : 'rejected', `write ${i} of ${applied} applied`);
+    if (one.status === 'rejected') assert.equal(one.reason.code, 'CLOSED');
+  }
+  // Closed before the directory is removed: Windows won't remove a file that is open
+  const again = Database.open(dir, { schema, syncs: false });
+  let held;
+  try {
+    held = packr.unpack(again.readSync(count))[0].n;
+  } finally {
+    again.close();
+  }
+  assert.equal(held, applied);
+});
+
+test('a write and a rebuild, in flight together, both land and the database checks clean', async (t) => {
   const { db } = open(t);
   fill(db, 2000);
   const writes = [];

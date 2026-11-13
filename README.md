@@ -97,8 +97,12 @@ don't blindly retry it.
 
 **Off the calling thread:** `db.write`, `db.check`, `db.rebuild` and `db.backup` run on a thread of the pool and answer a
 promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and
-`db.backupSync` are the blocking forms. Await a write before one that depends on it. A close waits for an operation that
-is running, so one made during a long rebuild holds the event loop until it ends.
+`db.backupSync` are the blocking forms. Writes and rebuilds are applied one at a time in the order you asked for them,
+so a write sees what the one asked before it committed, and however many are waiting on a database they hold one of
+Node's pool threads between them. Durable writes asked for one after another are synced together and answered once the sync has run. Await a write whose
+answer or failure the next one depends on, and before a blocking call that
+must come after it: `writeSync`, `begin` and the other blocking calls don't wait their turn among them. A close waits
+for an operation that is running, so one made during a long rebuild holds the event loop until it ends.
 
 **Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while
 they go on. If the machine loses power between two syncs, the commits since the last sync can be lost. The file can

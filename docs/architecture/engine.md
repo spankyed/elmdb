@@ -397,15 +397,27 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 ## Writes: batches and units
 
 `db.write(batch, durable?)` applies a batch as one unit, on a thread of the pool, answering a promise; `db.writeSync` is
-the same on the calling thread. Writes in flight together are applied one at a time, in no fixed order, so a caller
-awaits a write before one that depends on it. A database's check, rebuild and backup likewise run on the pool, and their
-`…Sync` forms on the calling thread. A refusal made before any work begins (a rebuild naming only a type, a handle that
+the same on the calling thread. Writes in flight together are applied one at a time in the order they were asked for,
+a rebuild among them in its turn: the binding keeps them in the database's queue, and one job of the pool at a time
+applies them until none waits (`elmdb-node/src/jobs.rs`). A write is applied after the ones asked before it whether
+or not they were awaited, and a caller awaits one whose answer or failure the next depends on. The order is among
+these promises: a blocking call made while they wait (`writeSync`, `begin`, `setSchema`, a purge, a load) doesn't wait
+its turn among them, and a write that comes to its turn while a unit is open is refused (`UNIT_OPEN`). A `durable`
+write among them is applied with no sync of its own and answered once a sync has covered it: the job goes on to the
+durable writes straight behind it and asks for a sync when the next is no durable write, or none is, or 64 are owed
+one, so a run of them waits for one sync between them, and none waits for a rebuild behind it. Its watches are told
+as it commits, before that sync. Forty asked for in one turn took 1 sync and 9.9 ms in the binding's test, where as jobs of their
+own they took 19 to 21 syncs and 91 to 118 ms over five rounds (Apple M1 Pro, 2026-11-13, load 7.5 to 10, the binding
+built in release). A job that catches up with the asking syncs more than once; `offthread.test.mjs` holds it to four. A database's
+check and backup read, and each is a job of the pool of its own; every `…Sync` form runs on the calling thread. A
+process that exits by `process.exit()` runs the pool to its end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that
 has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
 promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it,
 so the event loop is held by a close made during one. An operation still queued when the close takes the database
-rejects with `CLOSED` and writes nothing, and a write whose commit has landed is answered as made, not `CLOSED`. A
-queued job waits on a thread of the pool, which Node shares with its file system work, so long jobs or several queued
-writes can delay that work; a caller with a batch that matters to other work uses the blocking form. A unit can also
+rejects with `CLOSED` and writes nothing, and a write whose commit has landed is answered as made, not `CLOSED`.
+However many writes wait, for their turn or for the write lock another process holds, they hold one thread of the
+pool between them, which Node shares with its file system work; a check or a backup holds one for as long as it
+runs. A unit can also
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends
 it. One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the

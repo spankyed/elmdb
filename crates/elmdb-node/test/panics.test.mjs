@@ -33,7 +33,7 @@ function seeded(t) {
 const run = (dir, name, asked) =>
   spawnSync(process.execPath, [child, dir, name], { env: { ...process.env, ELMDB_TEST_PANIC: asked }, encoding: 'utf8' });
 
-// Every member the two classes have, the factory, and the work two of them do on a thread of the pool
+// Every member the two classes have, the factory, and the work six of them do on a thread of the pool
 const members = (prototype) => Object.getOwnPropertyNames(prototype).filter((name) => name !== 'constructor');
 const exports = [
   'Database.open',

@@ -341,7 +341,7 @@ argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
-factory, and the work two exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
 naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
 without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
 a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
@@ -365,7 +365,13 @@ and 19 of 200 runs of the Windows job's benchmark command died, and with copies 
 
 `offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
 promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
-refusal made before the work throws. Each `…Sync` form is the blocking one the rest of the suite calls.
+refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
+after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
+threads, random bytes asked of the pool are answered before the rebuild ends. Forty durable writes asked for in one turn
+are answered by one sync to four, ten awaited in turn by one each, and one with a rebuild behind it before the rebuild. Writes asked for in the turn a database
+is closed reject as closed, the ones behind none that landed. `exit.test.mjs` asks a rebuild and forty writes behind
+it of a child process that then calls `process.exit()`: all forty are there and the rebuild ran to its end. Each
+`…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms
 

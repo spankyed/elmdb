@@ -108,6 +108,60 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   assert.equal(reopened, sequence);
 });
 
+test('a process that exits with writes asked for and not yet answered ends with every one applied', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schema = {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
+  };
+  const packr = new Packr({ useRecords: false, mapsAsObjects: true });
+  const late = Array.from({ length: 40 }, (_, i) => `Note-${20000 + i}`);
+  // A rebuild of 20,000 notes and forty writes behind it, none awaited, and the process told to exit while the
+  // rebuild runs: the pool is run to its end as a process exits, the job applying this database's writes with it, so
+  // each is applied, in the order asked for
+  const child = [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
+    'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
+    "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
+    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncs: false });`,
+    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    'db.rebuild();',
+    `for (const id of ${JSON.stringify(late)}) db.write(batch([id]));`,
+    'process.exit(0);',
+  ].join('\n');
+  execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 60_000 });
+  const db = Database.open(dir, { syncs: false });
+  const last = { start: { from: 'ids', ids: late }, terminal: { answer: 'ids' } };
+  const ids = packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan: last }] })))[0].ids;
+  const clean = db.checkSync().differences.length;
+  db.close();
+  assert.deepEqual(ids, late);
+  assert.equal(clean, 0, 'the rebuild ran to its end');
+});
+
+test('a durable write of a handle nothing else holds is answered once the handle has been collected', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Note: { fields: {} } } };
+  const batch = new Packr({ useRecords: false, mapsAsObjects: true })
+    .pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-1' }], now: 1000 }).toString('base64');
+  // The write holds the last hold on the database once the handle is collected, and its store until its sync has
+  // been waited for: letting the database go first would close it, and wait for the store the write still held
+  const child = [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `let db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)} });`,
+    'db.rebuild();',
+    `const written = db.write(Buffer.from(${JSON.stringify(batch)}, 'base64'), true);`,
+    'db = undefined;',
+    'global.gc();',
+    "written.then(() => process.stdout.write('answered'));",
+  ].join('\n');
+  const said = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 30_000 });
+  assert.equal(said, 'answered');
+});
+
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
