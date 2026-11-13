@@ -409,9 +409,10 @@ one, so a run of them waits for one sync between them, and none waits for a rebu
 as it commits, before that sync. A job that catches up with the asking syncs more than once; `offthread.test.mjs`
 asks for forty behind a rebuild, where all of them wait when the job comes to the first, and holds them to one sync.
 Ten awaited in turn took 10 syncs and 42 to 47 ms over three runs of that test, which prints both counts (Apple M1
-Pro, 2026-11-13, the binding built in release). A database's check and backup read, and each is a job of the pool of its own; every `…Sync`
-form runs on the calling thread. A process that exits by `process.exit()` runs the pool to its end first, so what was
-asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that
+Pro, 2026-11-13, the binding built in release). A database's check and backup read, and each is a job of the pool of
+its own; every `…Sync` form runs on the calling thread. A process that exits by `process.exit()` runs the pool to its
+end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a
+handle that
 has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
 promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it,
 so the event loop is held by a close made during one. An operation still queued when the close takes the database
