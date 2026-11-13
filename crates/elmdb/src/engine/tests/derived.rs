@@ -848,6 +848,7 @@ fn the_edge_mirror_holds_a_loaded_weight_below_zero_as_the_store_does() {
     let reported = db.check().unwrap();
     let subjects: Vec<&str> = reported.violations.iter().map(|v| v.subject.as_str()).collect();
     assert_eq!(subjects, ["p/r Relation-light"], "{reported:?}");
+    assert!(reported.differences.is_empty(), "{reported:?}");
 }
 
 #[test]
