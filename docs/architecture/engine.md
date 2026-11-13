@@ -472,7 +472,14 @@ then answer at once, since each commit was synced. The price is a
 sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
 rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
 4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
-may be lost to a power loss until its sync, a moment later. A test replays the loss (`testing.md`, Power loss).
+may be lost to a power loss until its sync, a moment later. More than the last commits can go with it: nothing orders
+the pages and meta pages written between two syncs, so a loss can leave a meta page on disk without all the pages it
+names, and LMDB opens a file by the newer of its two meta pages, whatever it names. The file is then no commit's, a
+`durable` commit's neither: its sync covered the file as it was, not what later commits wrote over. Such a file is
+refused at open (`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may
+read wrongly or end the process that reads it: LMDB reads a page as it finds it, and where it is built with its
+assertions on, as a debug build is, aborts on one that is no page of the tree it is in. The remedy is a backup. A test
+replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
@@ -615,6 +622,15 @@ unit is open.
   relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves.
+  `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
+  (`FIELD_TYPE`, `REQUIRED_FIELD`), no entity joined to itself (`SELF_LINK`), the types it joins (`ENDPOINT`), how
+  many far ends an end may have (`CARDINALITY`) and, in a kind declared acyclic, no cycle (`CYCLE`), each against
+  the edges the kind holds and those moved before it. A rename the kind refuses moves nothing, and names the
+  relation refused. A weight goes with its edge, to a kind that reads none as well, where it stays in the row as
+  one does whose kind stops being weighted (`schema.md`, Changing a schema); into a kind declared weighted, a
+  weight outside a link's range, which only a load brings, is refused (`VALUE_INVALID`). An edge a looser rule let
+  in before the kind was tightened, which `check()` reports where it is, is refused the same way on its way into a
+  kind with the rule.
   `renameField` refuses the engine's own fields (`RESERVED_FIELD`), and refuses, with nothing moved, while an entity
   holds a value under both names (`SCHEMA_CHANGE_REFUSED`): the move would replace the one the new name holds.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.

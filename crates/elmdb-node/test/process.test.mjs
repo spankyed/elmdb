@@ -180,6 +180,19 @@ if (process.platform !== 'win32') {
   });
 }
 
+/**
+ * Waits for `promise` with the event loop held open. A listener for other processes' commits doesn't hold it, so a
+ * wait for its wake alone would let the loop, and the test, end before the wake comes
+ */
+async function held(promise) {
+  const holding = setInterval(() => {}, 1000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(holding);
+  }
+}
+
 test('a commit from another process wakes a listener, and a killed writer leaves it listening', async (t) => {
   const { Database } = require(loader);
   const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
@@ -197,8 +210,8 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   });
   assert.throws(() => db.hearCommitsElsewhere(() => {}), { code: 'ALREADY_LISTENING' });
 
-  /** Writes a row from a process of its own, which then does `then`, and waits for the wake */
-  const writeElsewhere = async (id, then) => {
+  /** Writes a row from a process of its own, which then does `then`, and waits for the wake and for the process's end */
+  const writeElsewhere = async (id, then, { killed = false } = {}) => {
     const source = `
       const { Database } = require(${JSON.stringify(loader)});
       const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
@@ -215,7 +228,12 @@ test('a commit from another process wakes a listener, and a killed writer leaves
         if (code) reject(new Error(errors));
       });
     });
-    await Promise.race([heard, refused]);
+    const exited = new Promise((resolve) => child.on('exit', resolve));
+    await held(Promise.race([heard, refused]));
+    // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
+    // commits, before it closes, and Windows removes no file a process holds open. One that wasn't killed closed
+    const code = await exited;
+    if (!killed) assert.equal(code, 0, errors);
   };
 
   await writeElsewhere('Task-a', 'other.close();');
@@ -223,7 +241,7 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   assert.ok(first > 0);
   assert.equal(db.committedElsewhere(), true, 'the other process committed');
   assert.equal(db.committedElsewhere(), false, 'and nothing since this asked');
-  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");');
+  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");', { killed: true });
   assert.ok(wakes > first, 'heard the commit of a process that was then killed');
   await writeElsewhere('Task-c', 'other.close();');
 });
@@ -249,7 +267,7 @@ test('a reset from another process wakes a listener, refuses commits here until 
     other.reset();
     other.close();
   `);
-  await woken;
+  await held(woken);
   const epoch = db.replacedElsewhere();
   assert.equal(typeof epoch, 'number');
   assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
