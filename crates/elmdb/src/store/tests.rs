@@ -1464,6 +1464,36 @@ fn a_writable_open_cuts_nothing_another_process_wrote_after_the_file_was_found_s
 }
 
 #[test]
+fn an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    for read_only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let small = 1 << 20;
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap();
+        put(&store, "a", b"1").unwrap();
+        store.close().unwrap();
+        // The open has read the file's trees in a map of 1 MiB when another process writes some 4 MiB: each
+        // transaction it begins from then on is refused in the map as it was opened, until it takes the new size
+        failpoints::run_once_here(points::OPEN_WALKED, {
+            let dir = dir.path().to_path_buf();
+            move || grow_elsewhere(&dir)
+        });
+        let found_grown = Rc::new(Cell::new(false));
+        failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+            let found_grown = Rc::clone(&found_grown);
+            move || found_grown.set(true)
+        });
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), read_only, ..quiet() })
+            .expect("an open while another process grows the file");
+        assert!(found_grown.get(), "the open began a transaction in the map the other process had outgrown");
+        assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+        assert!(store.map_size() > small);
+    }
+}
+
+#[test]
 fn an_open_reads_the_trees_at_a_later_commit_when_its_own_s_meta_page_has_been_written_over() {
     use crate::failpoints::{self, points};
     use std::cell::Cell;
@@ -1522,7 +1552,8 @@ fn a_file_that_holds_every_page_its_meta_page_names_is_not_read_for_its_trees() 
     let mut file = std::fs::File::open(&data).unwrap();
     let page = super::page_size_of(&mut file, &data).unwrap();
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (store.env.info().last_page_number as u64 + 1) * page as u64);
-    assert!(!super::short_of_its_pages(&store.env, &mut file, page, &data).unwrap(), "a whole file is not short");
+    let opening = super::Opening { env: &store.env, dir: store.path(), read_only: false };
+    assert!(!super::short_of_its_pages(&opening, &mut file, page, &data).unwrap(), "a whole file is not short");
 }
 
 #[test]

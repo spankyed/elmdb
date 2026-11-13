@@ -69,6 +69,9 @@ pub(crate) mod points {
     pub const OPEN_SNAPSHOT: &str = "store::open_snapshot";
     /// Runs in an open once the data file's trees have been read, before a file found short is extended
     pub const OPEN_WALKED: &str = "store::open_walked";
+    /// Runs in an open that finds the map grown by another process as it begins a transaction, before it takes the
+    /// map's new size
+    pub const OPEN_MAP_GROWN: &str = "store::open_map_grown";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
     /// Runs once a commit has landed and LMDB's write lock has gone with it, before the store hands the commit's
