@@ -175,9 +175,9 @@ enum Read {
     /// maps a file whose meta page names pages past its end, and touching one is that fault. `Store::open` refuses such
     /// a file before it reads a page, so this is a file that check let through: the caller fails on it
     Faulted(String),
-    /// The reader was ended by LMDB's abort before it said anything, with the last it wrote to its error stream: built
-    /// with its assertions on, as the tests' build is, LMDB aborts on a page that is no page of the tree it is in,
-    /// which a file torn within its length can hold
+    /// The reader was ended by LMDB's abort before it said anything, with the assertion it wrote to its error stream:
+    /// built with its assertions on, as the tests' build is, LMDB aborts on a page that is no page of the tree it is
+    /// in, which a file torn within its length can hold
     Aborted(String),
 }
 
@@ -213,18 +213,22 @@ fn held_apart(image: &[u8]) -> Read {
         .unwrap();
     let said = String::from_utf8_lossy(&child.stdout);
     let verdict = said.lines().rev().find_map(|line| {
+        // On one thread the harness writes the test's name and the child its line after it, on one line
+        let line = line.rsplit_once(" ... ").map_or(line, |(_, said)| said);
         line.strip_prefix("held ")
             .map(|model| Read::Holds(serde_json::from_str(model).unwrap()))
             .or_else(|| line.strip_prefix("refused ").map(|why| Read::Refused(why.to_owned())))
     });
     let errors = String::from_utf8_lossy(&child.stderr);
-    let last = errors.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
-    match (verdict, child.status.code()) {
-        (Some(verdict), Some(0)) => verdict,
-        (None, _) if faulted(&child.status) => Read::Faulted(format!("{}", child.status)),
-        (None, _) if aborted(&child.status) => Read::Aborted(format!("{}: {last}", child.status)),
-        // The child ended without a verdict and by neither: it did not run the reader, or something else ended it
-        _ => panic!("the child reading the file did not say what it holds: {} {said} {last}", child.status),
+    // What LMDB writes before it aborts: the place and the assertion that failed
+    let assertion = errors.lines().find(|line| line.contains("Assertion '"));
+    match (verdict, child.status.code(), assertion) {
+        (Some(verdict), Some(0), _) => verdict,
+        (None, _, _) if faulted(&child.status) => Read::Faulted(format!("{}", child.status)),
+        (None, _, Some(assertion)) if aborted(&child.status) => Read::Aborted(format!("{}: {assertion}", child.status)),
+        // The child ended without a verdict and by neither: it did not run the reader, or something else ended it,
+        // an abort that was none of LMDB's among them
+        _ => panic!("the child reading the file did not say what it holds: {} {said} {errors}", child.status),
     }
 }
 

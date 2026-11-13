@@ -2342,7 +2342,8 @@ fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_
 #[test]
 fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move() {
     // The workload moves a relation onto any entity, the target it has among them: the engine reports the relation
-    // changed, with no ends it moved from, alone and after a move in the same commit
+    // changed and not moved. Alone, and after a link in the same commit, it names no ends it moved from; after a move
+    // in the same commit, the ends that move took it from
     let prelude = vec![
         Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
         Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
@@ -2364,8 +2365,17 @@ fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move(
         throws: false,
         durable: false,
     };
-    for step in [onto_its_own, moved_then_onto_its_own] {
+    let linked_then_onto_its_own = Step::Unit {
+        steps: vec![
+            Step::Link { id: "Task-3", kind: "refs", target: "Task-1" },
+            Step::MoveRelation { id: "Task-3", kind: "refs", target: "Task-1", to: "Task-1" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    for step in [onto_its_own, moved_then_onto_its_own, linked_then_onto_its_own] {
         reference.outcome = model.step(&step);
+        assert_eq!(reference.outcome, Ok(()), "{step:?}");
         reference.model = model.clone();
         engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
             engine,
