@@ -582,9 +582,15 @@ fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for
     let db = std::sync::Arc::new(open(&dir));
     let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id });
     write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
-    // The mirror holds the store's edges as of now, so each commit after is applied to it
+    // The mirror holds the store's edges as of now, the lists of the two entities the writes link from among them, so
+    // each commit after is applied to it
     let mirror = db.store().unwrap().mirror();
-    mirror.lock().at(db.sequence().unwrap());
+    let at = db.sequence().unwrap();
+    mirror.lock().at(at);
+    for id in ["Task-1", "Task-2"] {
+        db.snapshot(|s| mirror.lock().visit_far_ends(s, at, id, true, "refs", |_, _| {})).unwrap();
+    }
+    assert_eq!(mirror.lock().held(), 2);
     let link = |source: &str, target: &str| json!({ "op": "link", "source": source, "kind": "refs", "target": target });
     // The first writer's commit lands, which lets LMDB's write lock go, and it stops there, before the store has
     // handed its edges to the mirror
@@ -601,15 +607,18 @@ fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for
         })
     };
     has_landed.recv_timeout(Duration::from_secs(10)).expect("the first write's commit landed");
-    // A second writer, on another thread, finds LMDB's lock free and still waits its turn
+    // A second writer, on another thread, reaches the store, finds LMDB's lock free, and still waits its turn
+    let (at_the_store, is_at_the_store) = mpsc::channel();
     let (done, is_done) = mpsc::channel();
     let second = {
         let (db, edge) = (std::sync::Arc::clone(&db), link("Task-2", "Task-3"));
         std::thread::spawn(move || {
+            failpoints::run_once_here(points::WRITE_RESERVATION, move || at_the_store.send(()).unwrap());
             write(&db, vec![edge]).unwrap();
             done.send(()).unwrap();
         })
     };
+    is_at_the_store.recv_timeout(Duration::from_secs(10)).expect("the second write reached the store");
     assert!(
         is_done.recv_timeout(Duration::from_millis(300)).is_err(),
         "the second write committed while the first had yet to account for its own"
@@ -618,8 +627,10 @@ fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for
     is_done.recv_timeout(Duration::from_secs(10)).expect("the second write goes on once the first is done");
     first.join().unwrap();
     second.join().unwrap();
-    // Each commit reached the mirror in its order, with its own edges: the mirror is at the last, and holds the store's
+    // Each commit reached the mirror in its order, with its own edges: the mirror is at the last, and the lists it
+    // held are the store's, which `check()` compares
     assert_eq!(mirror.lock().sequence(), Some(db.sequence().unwrap()));
+    assert_eq!(mirror.lock().held(), 2, "no commit emptied it");
     assert_eq!(super::edges(&db), ["Task-1|refs|Task-2", "Task-2|refs|Task-3"]);
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
