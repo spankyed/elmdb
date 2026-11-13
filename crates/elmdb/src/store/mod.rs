@@ -716,7 +716,9 @@ impl Store {
         drop(accounted);
         self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
-        // Still this process's one writer, so commits reach the mirror in their order
+        run_point!(COMMIT_LANDED);
+        // LMDB's lock went with the commit, and the writer's hold is kept until this returns (`writers.rs`): still
+        // this process's one writer, so commits reach the mirror in their order, each with the edges it deposited
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
         // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died

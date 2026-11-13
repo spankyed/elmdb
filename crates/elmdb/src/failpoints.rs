@@ -64,6 +64,9 @@ pub(crate) mod points {
     pub const RESET_CHECKPOINT: &str = "store::reset_checkpoint";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
+    /// Runs once a commit has landed and LMDB's write lock has gone with it, before the store hands the commit's
+    /// edges to the mirror
+    pub const COMMIT_LANDED: &str = "store::commit_landed";
     /// Runs in a write, once it holds the write transaction and before its work
     pub const WRITE_HELD: &str = "store::write_held";
     /// Runs as a unit is begun, once its place is reserved and before it takes the write transaction

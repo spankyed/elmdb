@@ -125,7 +125,8 @@ const UNMODELLED: &[(&str, &str)] = &[
     ("store/sync.rs", "the group commit sync worker, tested by its own deterministic harness (store/sync/tests.rs)"),
     (
         "store/writers.rs",
-        "macOS's writer turn: a file lock across processes and a mutex across threads, tested with real killed processes",
+        "a writer's turn, a mutex across this process's threads, and on macOS a file lock across processes, tested with \
+         real killed processes",
     ),
 ];
 

@@ -10,15 +10,22 @@
 //! writer is inside a transaction, so LMDB's semaphore taken then was taken by one that died, and is released before the
 //! transaction begins. A writer waiting for another waits on the file lock rather than inside LMDB, so one already
 //! waiting when the holder dies is let go by the kernel too.
+//!
+//! On every platform a writer first takes its turn among this process's writers, and keeps it as long: LMDB's lock
+//! is let go as a commit lands, and what the store does with the commit after that is still one writer's at a time.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::Result;
 
-/// A writer's hold on the database's write transaction, kept until it has ended
+/// A writer's hold on the database's write transaction, kept until it has ended and the store has accounted for its
+/// commit
 pub(crate) struct WriterLock {
+    // Field order is drop order: the file's lock goes before the turn, so the next thread here finds the file unlocked
     #[cfg(target_os = "macos")]
     _held: Option<macos::Hold>,
+    _turn: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
 }
 
 impl WriterLock {
@@ -28,6 +35,11 @@ impl WriterLock {
 
 /// What a writer takes before LMDB's write lock
 pub(crate) struct Writers {
+    /// This process's writers, one at a time, each from before it takes the write transaction until it lets its hold
+    /// go. LMDB lets its own lock go as a commit lands, which is before the store has handed the commit's edges to
+    /// the mirror (`Store::commit_txn`): without the turn, the next writer of this process, on another thread, could
+    /// begin, and clear or add to what the first had yet to hand over
+    turn: Arc<parking_lot::Mutex<()>>,
     #[cfg(target_os = "macos")]
     held: Option<macos::Held>,
 }
@@ -36,21 +48,24 @@ impl Writers {
     /// For the environment in `dir`, opened already. A read-only handle never writes and takes nothing
     pub(crate) fn open(dir: &Path, read_only: bool) -> Result<Self> {
         #[cfg(target_os = "macos")]
-        return Ok(Self { held: if read_only { None } else { Some(macos::Held::open(dir)?) } });
+        return Ok(Self { turn: Arc::default(), held: if read_only { None } else { Some(macos::Held::open(dir)?) } });
         #[cfg(not(target_os = "macos"))]
         {
             let _ = (dir, read_only);
-            Ok(Self {})
+            Ok(Self { turn: Arc::default() })
         }
     }
 
-    /// Waits until no other writer is inside a write transaction, freeing LMDB's write lock if one that died left it
-    /// held, and holds that until the returned lock is dropped, after the transaction has ended
+    /// Waits until no other writer of this process holds its turn and, on macOS, until no other process's writer is
+    /// inside a write transaction, freeing LMDB's write lock if one that died left it held. Both are held until the
+    /// returned lock is dropped, after the transaction has ended
     pub(crate) fn hold(&self) -> Result<WriterLock> {
-        #[cfg(target_os = "macos")]
-        return Ok(WriterLock { _held: self.held.as_ref().map(macos::Held::hold).transpose()? });
-        #[cfg(not(target_os = "macos"))]
-        Ok(WriterLock {})
+        let turn = self.turn.lock_arc();
+        Ok(WriterLock {
+            #[cfg(target_os = "macos")]
+            _held: self.held.as_ref().map(macos::Held::hold).transpose()?,
+            _turn: turn,
+        })
     }
 }
 
@@ -93,21 +108,19 @@ mod macos {
     }
 
     pub(super) struct Held {
-        /// `writer.lock`, opened once. A lock is the open file's, so this process's threads take turns on `turn` first
+        /// `writer.lock`, opened once. A lock is the open file's, so this process's threads take their turn first
+        /// (`Writers::turn`): the file's lock keeps processes apart, not threads
         file: Arc<std::fs::File>,
-        turn: Arc<parking_lot::Mutex<()>>,
         semaphore: *mut libc::sem_t,
     }
 
-    /// One writer's turn, with the file locked for it, both given back when dropped
+    /// The file locked for one writer, unlocked when dropped
     pub(super) struct Hold {
         file: Arc<std::fs::File>,
-        _turn: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
     }
 
     impl Drop for Hold {
         fn drop(&mut self) {
-            // Before `_turn` goes, so the next thread here finds the file unlocked
             let _ = self.file.unlock();
         }
     }
@@ -138,13 +151,13 @@ mod macos {
                 .create(true)
                 .truncate(false)
                 .open(dir.join("writer.lock"))?;
-            Ok(Self { file: Arc::new(file), turn: Arc::default(), semaphore })
+            Ok(Self { file: Arc::new(file), semaphore })
         }
 
+        /// Locks the file for a writer that holds this process's turn
         pub(super) fn hold(&self) -> Result<Hold> {
-            let turn = self.turn.lock_arc();
             self.file.lock()?;
-            let hold = Hold { file: Arc::clone(&self.file), _turn: turn };
+            let hold = Hold { file: Arc::clone(&self.file) };
             loop {
                 // SAFETY: the handle was opened in `open` and stays open until drop
                 if unsafe { libc::sem_trywait(self.semaphore) } == 0 {
