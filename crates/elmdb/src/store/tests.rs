@@ -945,63 +945,40 @@ fn a_read_adopts_the_map_another_process_grew_the_file_past() {
 }
 
 #[test]
-fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_waits_to_adopt_the_size() {
+fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_size() {
     use crate::failpoints::{self, points};
-    use std::sync::mpsc;
+    use std::cell::Cell;
+    use std::rc::Rc;
     let dir = tempfile::tempdir().unwrap();
     let small = 1 << 20;
     let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap());
     put(&store, "a", b"1").unwrap();
-    // A unit reserves its place, with room in the map as it is, and stops before it takes the write transaction
-    let (reserved, is_reserved) = mpsc::channel();
-    let (go_on, may_go_on) = mpsc::channel::<()>();
-    let (begun, has_begun) = mpsc::channel();
-    let unit = {
-        let store = Arc::clone(&store);
-        std::thread::spawn(move || {
-            failpoints::run_once_here(points::UNIT_RESERVED, move || {
-                reserved.send(()).unwrap();
-                may_go_on.recv().unwrap();
-            });
-            let (txn, gate, writer) = store.begin().unwrap();
-            txn.abort();
-            drop(gate);
-            writer.release();
-            store.end_unit();
-            begun.send(()).unwrap();
-        })
-    };
-    is_reserved.recv_timeout(Duration::from_secs(10)).expect("the unit reserved its place");
-    // Another process writes past this handle's map, and a reader here holds the gate, as a reset's checkpoint does
-    // before it waits its turn to write
-    let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
-        .env("ELMDB_GROW_DB", dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "the child's write failed");
-    let gate = store.gate();
-    go_on.send(()).unwrap();
-    // The unit takes its turn, finds the map grown, and waits for the gate to adopt its size, its turn let go by then:
-    // the gate's holder gets the turn it waits for
-    std::thread::sleep(Duration::from_millis(300));
-    let (taken, is_taken) = mpsc::channel();
-    let turn = {
-        let store = Arc::clone(&store);
-        std::thread::spawn(move || {
-            let held = store.writers.hold().unwrap();
-            taken.send(()).unwrap();
-            held.release();
-        })
-    };
-    is_taken.recv_timeout(Duration::from_secs(10)).expect("the unit kept its turn while it waited for the gate");
-    assert!(has_begun.try_recv().is_err(), "the unit began with the gate held: it never waited to adopt the map");
+    // The unit has reserved its place, with room in the map as it is, when another process writes past the map
+    let path = dir.path().to_path_buf();
+    failpoints::run_once_here(points::UNIT_RESERVED, move || {
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+            .env("ELMDB_GROW_DB", &path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "the child's write failed");
+    });
+    // It finds the map grown as it takes the write transaction, and goes on to adopt the size, which takes the gate
+    // for writing. A writer that holds the gate and waits its turn, as a reset's checkpoint does, would wait for good
+    // on a unit that kept its turn there
+    let free = Rc::new(Cell::new(None));
+    failpoints::run_once_here(points::UNIT_MAP_GROWN, {
+        let (store, free) = (Arc::clone(&store), Rc::clone(&free));
+        move || free.set(Some(store.writers.turn_is_free()))
+    });
+    let (txn, gate, writer) = store.begin().unwrap();
+    txn.abort();
     drop(gate);
-    has_begun.recv_timeout(Duration::from_secs(10)).expect("the unit began once the gate was let go");
-    unit.join().unwrap();
-    turn.join().unwrap();
+    writer.release();
+    store.end_unit();
+    assert_eq!(free.get(), Some(true), "whether the unit found the map grown, and its turn free by then");
     assert!(store.map_size() > small, "the unit adopted the map the other process grew");
 }
 

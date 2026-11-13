@@ -57,6 +57,12 @@ impl Writers {
         }
     }
 
+    /// Whether no writer of this process holds its turn, for a test of where one is let go
+    #[cfg(test)]
+    pub(crate) fn turn_is_free(&self) -> bool {
+        self.turn.try_lock().is_some()
+    }
+
     /// Waits until no other writer of this process holds its turn and, on macOS, until no other process's writer is
     /// inside a write transaction, freeing LMDB's write lock if one that died left it held. Both are held until the
     /// returned lock is dropped, after the transaction has ended

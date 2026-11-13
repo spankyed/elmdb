@@ -937,6 +937,7 @@ impl Store {
                     // the gate may be waiting for (`recycle_reset_pages`)
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                         drop((guard, writer));
+                        run_point!(UNIT_MAP_GROWN);
                         self.adopt_map_size()?;
                     }
                     Err(e) => return Err(e.into()),
