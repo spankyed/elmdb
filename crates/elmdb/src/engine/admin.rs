@@ -272,7 +272,9 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 /// fields that named it, and the type's sequences. A string field holding an id that isn't a declared `ref` isn't
 /// rewritten. Derived data is rebuilt from what this leaves. `sequence` is the commit's: a reader of what changed in
 /// either type from before it is told to start again, the ids it read having gone and the ones in their place carrying
-/// the stamps those had
+/// the stamps those had. Refused, with nothing moved, when a row the rename writes would break a rule of the schema
+/// under its new name: an entity the new type's fields don't take or that shares a unique value with one of the
+/// type's own, a relation whose kind doesn't join the new type, a `ref` field that doesn't name it
 pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
@@ -286,6 +288,9 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         return Ok(());
     }
     let renamed = |id: &str| moved.iter().find(|(old, _)| old == id).map(|(_, new)| new.clone());
+    // The rows the rename writes, as a rule one breaks names it, by the ids they have once it has: the entities moved,
+    // the relations with an end among them and the entities with a `ref` to one
+    let mut written: std::collections::BTreeSet<String> = moved.iter().map(|(_, new)| new.clone()).collect();
     for (old, new) in &moved {
         if entities::record(t, new)?.is_some() {
             return Err(Error::new(ErrorCode::IdInUse, format!("renameType: {new} exists already")));
@@ -321,6 +326,8 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             };
             let bytes = rmp_serde::to_vec_named(&next).expect("a relation row serializes");
             t.put(&keys::relation(&id), &bytes)?;
+            // A relation is named by its row's key where a rule it breaks is reported
+            written.insert(derive::key_text(&keys::relation(&id)));
             // Its other end may be of a type the rename leaves alone, whose readers are told as a write would tell
             // them: the edge they hold names an id that is gone
             t.event(Event::RelationChanged {
@@ -362,6 +369,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             };
             if next != value {
                 t.put(&keys::value(&id, &name), &values::stored(&next))?;
+                written.insert(id.clone());
                 // A field of another type's entity, written as any write of it is
                 t.event(Event::Field { id, field: name.clone() });
             }
@@ -387,6 +395,35 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
                 t.del(&key)?;
             }
         }
+    }
+    // Each row written is held to the schema's rules as `check()` reads them, from primary data, before any derived
+    // data is rebuilt: a row of another's that broke a rule before the rename is left to `check()`. A rule two rows
+    // break between them names both, and is the rename's when either was written
+    let broken = derive::rule_violations(t)?
+        .into_iter()
+        .find(|violation| violation.subject.split(", ").any(|subject| written.contains(subject)));
+    if let Some(violation) = broken {
+        let was = |new: &str| moved.iter().find(|(_, id)| id == new).map(|(old, _)| old.as_str());
+        // An entity moved is named with the id it has, and a relation as one, where `check()` names its row's key
+        let relation = derive::key_text(&keys::relation(""));
+        let subject: Vec<String> = violation
+            .subject
+            .split(", ")
+            .map(|id| match (was(id), id.strip_prefix(&relation)) {
+                (Some(old), _) => format!("{id} (now {old})"),
+                (None, Some(relation)) => format!("the relation {relation}"),
+                (None, None) => id.to_owned(),
+            })
+            .collect();
+        return Err(Error::new(
+            ErrorCode::SchemaChangeRefused,
+            format!(
+                "renameType({from:?} to {to:?}): renamed, {} {}, which the schema refuses, and nothing was moved. \
+                 Change that row, or what the schema declares of {to}, then rename again",
+                subject.join(", "),
+                violation.message
+            ),
+        ));
     }
     super::changed::replaced(t.txn, t.db, t.schema, Some(&[from, to]), sequence)?;
     derive::rebuild(t, None)

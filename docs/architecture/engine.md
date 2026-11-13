@@ -633,7 +633,7 @@ unit is open.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
-- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves.
+- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when a row it writes would break a rule of the schema under its new name: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` field that doesn't name it. A row it doesn't write is left to `check()`.
   `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
   (`FIELD_TYPE`, `REQUIRED_FIELD`), no entity joined to itself (`SELF_LINK`), the types it joins (`ENDPOINT`), how
   many far ends an end may have (`CARDINALITY`) and, in a kind declared acyclic, no cycle (`CYCLE`), each against
