@@ -942,8 +942,9 @@ impl Store {
                         return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first, and the writer's turn with it, which a writer that holds
-                    // the gate may be waiting for (`recycle_reset_pages`)
+                    // transaction's hold on it goes first, and the writer's turn with it: adopting waits for this
+                    // process's reads to end, and on macOS the turn keeps the file lock other processes' writers
+                    // wait for
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                         drop((guard, writer));
                         run_point!(UNIT_MAP_GROWN);

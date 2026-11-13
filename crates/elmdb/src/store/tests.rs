@@ -966,8 +966,8 @@ fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_s
         assert!(status.success(), "the child's write failed");
     });
     // It finds the map grown as it takes the write transaction, and goes on to adopt the size, which takes the gate
-    // for writing. A writer that holds the gate and waits its turn, as a reset's checkpoint does, would wait for good
-    // on a unit that kept its turn there
+    // for writing and so waits for this process's reads. It keeps no turn while it waits: on macOS the turn keeps
+    // the file lock other processes' writers wait for
     let free = Rc::new(Cell::new(None));
     failpoints::run_once_here(points::UNIT_MAP_GROWN, {
         let (store, free) = (Arc::clone(&store), Rc::clone(&free));
