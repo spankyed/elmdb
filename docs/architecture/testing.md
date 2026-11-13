@@ -40,8 +40,9 @@ then: its edges move, each end stamped with the rename's sequence. A rename onto
 ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
 it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
 and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
-held the field are stamped, and a rename onto a name the entity already holds is refused by both. Not checked yet:
-`renameType`, `replaceWith` and purge, which need a schema that declares their names or reopens the database.
+held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
+`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
+relation kinds and roles have none.
 
 It runs in two places:
 
