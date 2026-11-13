@@ -914,10 +914,10 @@ impl Store {
         // Let go when the unit doesn't begin, whether it is refused or what begins it panics
         let reserved = Reserved(self);
         let begun = (|| {
-            run_point!(UNIT_RESERVED);
             if self.map_half_used() {
                 self.grow()?;
             }
+            run_point!(UNIT_RESERVED);
             loop {
                 let guard = self.gate.read_arc();
                 let writer = self.writers.hold()?;
@@ -929,9 +929,10 @@ impl Store {
                         return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first
+                    // transaction's hold on it goes first, and the writer's turn with it, which a writer that holds
+                    // the gate may be waiting for (`recycle_reset_pages`)
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        drop(guard);
+                        drop((guard, writer));
                         self.adopt_map_size()?;
                     }
                     Err(e) => return Err(e.into()),

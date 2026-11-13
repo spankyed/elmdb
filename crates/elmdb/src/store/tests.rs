@@ -945,6 +945,67 @@ fn a_read_adopts_the_map_another_process_grew_the_file_past() {
 }
 
 #[test]
+fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_waits_to_adopt_the_size() {
+    use crate::failpoints::{self, points};
+    use std::sync::mpsc;
+    let dir = tempfile::tempdir().unwrap();
+    let small = 1 << 20;
+    let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap());
+    put(&store, "a", b"1").unwrap();
+    // A unit reserves its place, with room in the map as it is, and stops before it takes the write transaction
+    let (reserved, is_reserved) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let (begun, has_begun) = mpsc::channel();
+    let unit = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::UNIT_RESERVED, move || {
+                reserved.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            let (txn, gate, writer) = store.begin().unwrap();
+            txn.abort();
+            drop(gate);
+            writer.release();
+            store.end_unit();
+            begun.send(()).unwrap();
+        })
+    };
+    is_reserved.recv_timeout(Duration::from_secs(10)).expect("the unit reserved its place");
+    // Another process writes past this handle's map, and a reader here holds the gate, as a reset's checkpoint does
+    // before it waits its turn to write
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let gate = store.gate();
+    go_on.send(()).unwrap();
+    // The unit takes its turn, finds the map grown, and waits for the gate to adopt its size, its turn let go by then:
+    // the gate's holder gets the turn it waits for
+    std::thread::sleep(Duration::from_millis(300));
+    let (taken, is_taken) = mpsc::channel();
+    let turn = {
+        let store = Arc::clone(&store);
+        std::thread::spawn(move || {
+            let held = store.writers.hold().unwrap();
+            taken.send(()).unwrap();
+            held.release();
+        })
+    };
+    is_taken.recv_timeout(Duration::from_secs(10)).expect("the unit kept its turn while it waited for the gate");
+    assert!(has_begun.try_recv().is_err(), "the unit began with the gate held: it never waited to adopt the map");
+    drop(gate);
+    has_begun.recv_timeout(Duration::from_secs(10)).expect("the unit began once the gate was let go");
+    unit.join().unwrap();
+    turn.join().unwrap();
+    assert!(store.map_size() > small, "the unit adopted the map the other process grew");
+}
+
+#[test]
 fn a_commit_is_synced_on_its_own_once_writes_pause() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(

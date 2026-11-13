@@ -69,7 +69,7 @@ pub(crate) mod points {
     pub const COMMIT_LANDED: &str = "store::commit_landed";
     /// Runs in a write, once it holds the write transaction and before its work
     pub const WRITE_HELD: &str = "store::write_held";
-    /// Runs as a unit is begun, once its place is reserved and before it takes the write transaction
+    /// Runs as a unit is begun, once its place is reserved and its map has room, before it takes the write transaction
     pub const UNIT_RESERVED: &str = "store::unit_reserved";
     /// Runs as a unit is begun, once it holds the write transaction and before the unit is made
     pub const UNIT_HELD: &str = "engine::unit_held";
