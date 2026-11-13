@@ -172,32 +172,36 @@ test('writes waiting their turn behind a rebuild hold one thread of the pool bet
 
 test('durable writes in flight at once wait for a sync between them, not one each', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-offthread-'));
-  const db = Database.open(dir, { schema });
+  // No sync but the ones asked for: group commit's own would be counted among them
+  const db = Database.open(dir, { schema, syncIdleMs: 600_000, syncIntervalMs: 600_000 });
   t.after(() => {
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
+  fill(db, 20000);
   await db.write(create('Note-first', 'first'), true);
-  // Forty durable writes asked for in one turn: applied in order with no sync of their own, and answered once a sync
-  // has covered them. Awaited one at a time, each waits for a sync of its own
+  // Forty durable writes asked for behind a rebuild, so that all forty wait when the job comes to the first: applied
+  // in order with no sync of their own, and answered by the one sync that covers them, the rebuild's own the other
+  // counted. Awaited one at a time, each waits for a sync of its own
   const before = db.syncs;
   const began = performance.now();
-  const answers = await Promise.all(Array.from({ length: 40 }, (_, i) => db.write(create(`Note-${i}`, `title ${i}`), true)));
+  const rebuilt = db.rebuild();
+  const answers = await Promise.all(Array.from({ length: 40 }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`), true)));
   const together = { syncs: db.syncs - before, ms: performance.now() - began };
+  await rebuilt;
   const sequences = answers.map((answer) => packr.unpack(answer).sequence);
   assert.deepEqual(sequences, Array.from({ length: 40 }, (_, i) => sequences[0] + i));
-  // One where the job finds each waiting as it ends the one before; a few where it catches up with the asking
-  assert.ok(together.syncs >= 1 && together.syncs <= 4, `forty durable writes in flight took ${together.syncs} syncs`);
+  assert.equal(together.syncs, 2, `a rebuild and forty durable writes in flight took ${together.syncs} syncs`);
   // One with a rebuild behind it is answered by its own sync, before the rebuild is applied
-  let rebuilt = false;
-  const written = db.write(create('Note-ahead', 'ahead'), true).then(() => rebuilt);
-  const rebuilding = db.rebuild().then(() => { rebuilt = true; });
+  let ended = false;
+  const written = db.write(create('Note-ahead', 'ahead'), true).then(() => ended);
+  const rebuilding = db.rebuild().then(() => { ended = true; });
   assert.equal(await written, false, 'answered before the rebuild behind it ended');
   await rebuilding;
   const alone = { syncs: db.syncs, began: performance.now() };
   for (let i = 0; i < 10; i++) await db.write(create(`Note-alone-${i}`, `alone ${i}`), true);
   assert.ok(db.syncs - alone.syncs >= 10, 'each write awaited alone has a sync of its own');
-  t.diagnostic(`40 in flight: ${together.syncs} syncs, ${together.ms.toFixed(1)} ms; 10 awaited in turn: ${db.syncs - alone.syncs} syncs, ${(performance.now() - alone.began).toFixed(1)} ms`);
+  t.diagnostic(`a rebuild and 40 in flight: ${together.syncs} syncs, ${together.ms.toFixed(1)} ms; 10 awaited in turn: ${db.syncs - alone.syncs} syncs, ${(performance.now() - alone.began).toFixed(1)} ms`);
 });
 
 test('writes waiting when a close takes the database reject as closed, the ones behind none that landed', async (t) => {
