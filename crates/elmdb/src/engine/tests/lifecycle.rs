@@ -205,6 +205,25 @@ fn reset_elsewhere(dir: &tempfile::TempDir) {
     assert!(status.success(), "the resetting process failed");
 }
 
+/// Replaces every row of the database in `dir` with the one in `source`, from a process of its own
+fn replace_elsewhere(dir: &tempfile::TempDir, source: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_replaces_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_REPLACE_DB", dir.path())
+        .env("ELMDB_REPLACE_FROM", source.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the replacing process failed");
+}
+
 const A_TASK: fn(&str) -> serde_json::Value =
     |id| json!({ "op": "create", "type": "Task", "id": id, "fields": { "title": "t" } });
 
@@ -229,25 +248,48 @@ fn a_replace_with_in_another_process_refuses_commits_here_as_a_reset_does() {
     }
     let db = open(&dir);
     write(&db, vec![A_TASK("Task-1")]).unwrap();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--ignored",
-            "--exact",
-            "engine::tests::lifecycle::child_replaces_the_database",
-            "--nocapture",
-            "--test-threads=1",
-        ])
-        .env("ELMDB_REPLACE_DB", dir.path())
-        .env("ELMDB_REPLACE_FROM", source.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "the replacing process failed");
+    replace_elsewhere(&dir, &source);
     let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
     assert_eq!(db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code, ErrorCode::DataReplaced);
     assert!(db.adopt_replacement(epoch).unwrap());
     write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn a_unit_stamps_only_what_it_wrote_after_a_write_refused_for_a_replacement() {
+    use crate::engine::changed::Position;
+    // Tasks keep a change order, so a commit stamps the Tasks its write touched
+    let open = |dir: &tempfile::TempDir| {
+        let mut json = super::schema_json();
+        json["types"]["Task"]["changeOrder"] = json!(true);
+        let schema = crate::schema::Schema::from_json(&json).unwrap();
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
+    };
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-1")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    replace_elsewhere(&dir, &source);
+    // A write of Task-1 is refused as it commits, having told the store what it touched
+    let retitled = json!({ "op": "set", "id": "Task-1", "fields": { "title": "refused" } });
+    assert_eq!(db.write(&batch(vec![retitled]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert!(db.adopt_replacement(epoch).unwrap());
+    let before = db.sequence().unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-2")])).unwrap();
+    unit.commit(false).unwrap();
+    let changed = db.changed_since(&["Task".to_owned()], &Position { sequence: before, after: None }, 10).unwrap();
+    assert_eq!(
+        changed.ids,
+        ["Task-2"],
+        "the unit's commit moved what the unit wrote, and not what the refused write did"
+    );
+    assert_eq!(super::row(&db, "Task-1").unwrap()["title"], "t");
 }
 
 #[test]
