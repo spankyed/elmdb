@@ -103,9 +103,14 @@ threads between them. Await a write whose answer or failure the next one depends
 must come after it: `writeSync`, `begin` and the other blocking calls don't wait their turn among them. A close waits
 for an operation that is running, so one made during a long rebuild holds the event loop until it ends.
 
-**Power loss:** by default a commit that returned can be lost if the machine loses power before its sync, about a second
-after it. Open with `syncEachCommit: true` to sync every commit as it is made, so a commit that returned survives a power
-loss; each commit then costs its own sync.
+**Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while
+they go on. If the machine loses power between two syncs, the commits since the last sync can be lost. The file can
+also be left holding part of a commit, since nothing orders what is written between syncs: it may then be refused when
+it is opened (`CORRUPTED`), read wrongly, or end the process that reads it, and every earlier commit is lost with it.
+The remedy is a backup. A write's `durable: true` waits for its sync; it doesn't keep a later commit from leaving the
+file that way. Open with `syncEachCommit: true` to sync every commit as it is made, its pages before the page that
+names them, so a commit that returned survives a power loss and the file stays whole; each commit then costs its own
+sync.
 
 **Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
 refused.
