@@ -2034,11 +2034,14 @@ fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
 }
 
 /// Records the model's state after a step, comparing the change set the engine made with the change the model's states
-/// name, and what `changed_since` answers from the start with what the changes so far say
-fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model) {
+/// name, and what `changed_since` answers from the start with what the changes so far say. `quiet` is the database's
+/// sequence as the step began, with the rank index's builder idle: a rename reports no sequence, and its commit is
+/// the one after that. The database's own sequence by now may be past it, by a commit of the builder's the rename
+/// gave work to
+fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model, quiet: u64) {
     if let (Step::RenameField { from, .. }, Ok(_)) = (step, got) {
         // A field rename commits, consuming a sequence even when no entity held the field; it stamps the entities that did
-        let sequence = engine.db.sequence().expect("the sequence reads");
+        let sequence = quiet + 1;
         assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
         engine.sequence = sequence;
         let holders: Vec<String> = engine
@@ -2062,9 +2065,9 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
         return;
     }
     if let (Step::RenameRelation { from, .. }, Ok(_)) = (step, got) {
-        // A rename commits no change set and reports no sequence: the database's own is the commit's. It stamps the ends
-        // of each edge it moved, and the ends are alive
-        let sequence = engine.db.sequence().expect("the sequence reads");
+        // A rename commits no change set and reports no sequence: its commit is the one after the database's as the
+        // step began. It stamps the ends of each edge it moved, and the ends are alive
+        let sequence = quiet + 1;
         assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
         engine.sequence = sequence;
         let moved: Vec<(String, String)> = engine
@@ -2198,16 +2201,21 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             replaced_at: None,
         };
         for step in &reference.prelude {
+            let quiet = engine.db.sequence().expect("the sequence reads");
             let got = run(&engine.db, step);
             assert!(got.is_ok(), "the prelude's {step:?}: {got:?}");
             let mut after = engine.before.clone();
             after.step(step).expect("the prelude creates each id once");
-            track(&mut engine, step, &got, after);
+            track(&mut engine, step, &got, after, quiet);
         }
         engine
     }
 
     fn apply(mut engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
+        // Read with the builder idle, so that the step's commit is the next: the builder commits what a step before
+        // gave it to do, and is waited for here whether or not the invariants after that step were
+        engine.db.wait_for_index_builds().expect("the builder's drain ends");
+        let quiet = engine.db.sequence().expect("the sequence reads");
         let got = run(&engine.db, &transition.step);
         assert_eq!(
             got.is_ok(),
@@ -2216,7 +2224,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             transition.step,
             reference.outcome
         );
-        track(&mut engine, &transition.step, &got, reference.model.clone());
+        track(&mut engine, &transition.step, &got, reference.model.clone(), quiet);
         engine
     }
 
@@ -2337,6 +2345,33 @@ fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_
         &reference,
         Aimed { step, aimed: true },
     );
+}
+
+#[test]
+fn a_rename_is_tracked_at_its_own_commit_though_the_builder_has_committed_since() {
+    // A rename reports no sequence, and gives the rank index's builder work it commits by itself: by the time the
+    // step is tracked the database's sequence may be the builder's, a commit past the one that stamped the ends
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+        Step::Link { id: "Task-2", kind: "refs", target: "Task-3" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    engine.db.wait_for_index_builds().unwrap();
+    let quiet = engine.db.sequence().unwrap();
+    let step = Step::RenameRelation { from: "refs", to: "tags" };
+    let got = run(&engine.db, &step);
+    engine.db.wait_for_index_builds().unwrap();
+    assert_eq!(engine.db.sequence().unwrap(), quiet + 2, "the rename's commit, and the builder's after it");
+    model.step(&step).expect("the model renames");
+    track(&mut engine, &step, &got, model, quiet);
 }
 
 #[test]
