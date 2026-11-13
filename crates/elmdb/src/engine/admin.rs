@@ -273,9 +273,10 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 /// rewritten. Derived data is rebuilt from what this leaves. `sequence` is the commit's: a reader of what changed in
 /// either type from before it is told to start again, the ids it read having gone and the ones in their place carrying
 /// the stamps those had. A relation's info declared a `ref` is rewritten as a field is. Refused, with nothing moved,
-/// when the rename would leave a rule of the schema broken that wasn't before it: an entity the new type's fields
-/// don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new
-/// type, a `ref` that doesn't name it
+/// when `check()` would report of what the rename leaves a rule it didn't report before: an entity the new type's
+/// fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the
+/// new type, a `ref` that doesn't name it or that names a moved entity where it is declared for neither type, and a
+/// rule a load left broken that names a moved entity
 pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
@@ -292,18 +293,23 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
     // The rules rows break as the rename finds them, which it leaves to `check()`
     let broken_before: std::collections::HashSet<(String, String)> =
         derive::rule_violations(t)?.into_iter().map(|violation| (violation.subject, violation.message)).collect();
-    // Whether a value type is a `ref` that may name an entity of the type, or a list of them
-    let names =
-        |v: &ValueType| matches!(v, ValueType::Ref { to: targets } if targets.iter().any(|x| x == to || x == from));
-    let refers = |v: &ValueType| names(v) || matches!(v, ValueType::List { of } if names(of));
-    // A `ref`'s value, or a list's, with each id of the type as the rename leaves it
-    let rewritten = |value: &Value| {
-        let rewrite = |v: &Value| v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone());
-        match value {
-            Value::Array(items) => Value::Array(items.iter().map(rewrite).collect()),
-            v => rewrite(v),
+    // Whether a value type is a `ref` that may name an entity of the type, or a list of them, however deep
+    fn refers(v: &ValueType, from: &str, to: &str) -> bool {
+        match v {
+            ValueType::Ref { to: targets } => targets.iter().any(|x| x == to || x == from),
+            ValueType::List { of } => refers(of, from, to),
+            _ => false,
         }
-    };
+    }
+    let refers = |v: &ValueType| refers(v, from, to);
+    // A `ref`'s value, or a list's, with each id of the type as the rename leaves it
+    fn rewritten(value: &Value, renamed: &dyn Fn(&str) -> Option<String>) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(|item| rewritten(item, renamed)).collect()),
+            v => v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone()),
+        }
+    }
+    let rewritten = |value: &Value| rewritten(value, &renamed);
     for (old, new) in &moved {
         if entities::record(t, new)?.is_some() {
             return Err(Error::new(ErrorCode::IdInUse, format!("renameType: {new} exists already")));
@@ -404,8 +410,10 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         }
     }
     // What the rename leaves is held to the schema's rules as `check()` reads them, from primary data, before any
-    // derived data is rebuilt: a rule broken now that wasn't as the rename began is the rename's, only it having
-    // written since. A row moved that broke a rule under its old name breaks it under another id, and is held to it
+    // derived data is rebuilt: what it would report now and didn't, in the same words, as the rename began. Only the
+    // rename has written since, so a rule newly broken is its doing; and a rule a load left broken is reported in
+    // other words once an entity it names has another id, so that one is held to as well, the rename having no way
+    // to tell it from its own
     let broken = derive::rule_violations(t)?
         .into_iter()
         .find(|violation| !broken_before.contains(&(violation.subject.clone(), violation.message.clone())));

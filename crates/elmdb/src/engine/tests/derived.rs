@@ -1205,6 +1205,21 @@ fn rename_type_refuses_a_rename_whose_rows_the_schema_refuses_under_the_new_name
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");
     assert_eq!(broken(&db), ["Task-3", "p/r Relation-own"], "what was broken before, and nothing more");
+    // A rule a load left broken that names a moved entity is reported in other words once the entity has another
+    // id, and the rename is held to it: an edge from a Page to itself
+    db.bulk_load(&[Load::Relation {
+        id: "Relation-self".into(),
+        kind: "blocks".into(),
+        source: "Page-1".into(),
+        target: "Page-1".into(),
+        info: None,
+        weight: None,
+    }])
+    .unwrap();
+    let error = db.rename_type("Page", "Note").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+    assert!(error.message.contains("the relation Relation-self a blocks relation links Note-1 to itself"), "{error}");
+    assert!(row(&db, "Page-1").is_some());
     // A row of a type the schema doesn't declare is changed by a load, which the refusal says
     db.bulk_load(&[Load::Entity { id: "Old-1".into(), fields: Default::default(), trashed: false }]).unwrap();
     let error = db.rename_type("Old", "Memo").unwrap_err();
