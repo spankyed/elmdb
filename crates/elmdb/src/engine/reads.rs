@@ -4683,8 +4683,8 @@ fn query_with(
                         ),
                     ));
                 };
-                // Past what a number holds there is nothing to add to: the rest are read for a value that is no
-                // number, which is refused first, and the sum is refused after them
+                // Once an addition has passed what a number holds there is nothing to add to: the rest are read for
+                // a value that is no number, which is refused first, and the sum is refused after them
                 within = within && sum.add(number);
                 n += 1;
             }

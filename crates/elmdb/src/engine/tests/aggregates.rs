@@ -263,6 +263,11 @@ fn a_sum_past_what_a_number_holds_is_refused_as_it_passes_not_as_it_ends() {
     let error = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "price" }))).unwrap_err();
     assert_eq!(error.code, ErrorCode::ValueInvalid, "{}", error.message);
     assert!(error.message.contains("passes what a number holds"), "{}", error.message);
+    // A value that is no number, after the ones that pass it, is what is refused: every value is read for one
+    let ranked = |i: usize, rank: Json| json!({ "op": "set", "id": format!("Item-{i}"), "fields": { "rank": rank } });
+    write(&db, vec![ranked(0, json!(1e308)), ranked(1, json!(1e308)), ranked(2, json!(true))]).unwrap();
+    let error = read(&db, plan("live", json!([]), json!({ "answer": "sum", "field": "rank" }))).unwrap_err();
+    assert!(error.message.contains("Item-2 holds a boolean"), "{}", error.message);
 }
 
 #[test]

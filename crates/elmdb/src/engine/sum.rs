@@ -6,8 +6,10 @@
 //! beside the result), and is rounded once, when it is asked for, to the nearest number, a tie to the even one. So
 //! the answer is the same for every order of the set.
 //!
-//! The one thing an order can still change is a refusal: a sum that passes what a number holds on the way is refused
-//! there, though the numbers after it would have brought it back.
+//! The one thing an order can still change is a refusal. A number is added to the parts from the smallest, and a sum
+//! is refused where one of those additions passes what a number holds: where the sum so far is past it, though the
+//! numbers after it would have brought it back, and in one corner short of it, the largest number there is added to
+//! a sum that is its opposite to within its last digit, whose small part it meets first.
 
 /// A sum kept exactly: numbers from the smallest to the largest in size, no two sharing a digit, whose sum is the sum
 /// of everything added
@@ -17,7 +19,7 @@ pub(super) struct Sum {
 }
 
 impl Sum {
-    /// Adds a number. False when the sum so far is past what a number holds, and nothing more is to be added
+    /// Adds a number. False when an addition it makes passes what a number holds, and nothing more is to be added
     pub(super) fn add(&mut self, mut x: f64) -> bool {
         // `x` is added to each part in turn, from the smallest: the result goes on to the next, and what the
         // addition rounded off, if anything, stays as a part. The parts never number more than the additions made
@@ -130,6 +132,13 @@ mod tests {
         // The largest number and half a step more is a tie the even number wins, which is past the largest
         assert_eq!(sum(&[f64::MAX, 2f64.powi(969), 2f64.powi(969)]), None);
         assert_eq!(sum(&[f64::MAX, 2f64.powi(969)]), Some(f64::MAX));
+        // A quarter of a step and a little more is short of the tie, though twice what was lost added on passes
+        assert_eq!(sum(&[f64::MAX, 2f64.powi(969), 1.0]), Some(f64::MAX));
+        // The corner short of it: no sum on the way is past the largest number, and the largest, added last, meets
+        // the half step before it meets its opposite
+        let short_of_the_largest = -f64::MAX + 2f64.powi(971);
+        assert_eq!(sum(&[short_of_the_largest, 2f64.powi(970), f64::MAX]), None);
+        assert_eq!(sum(&[f64::MAX, short_of_the_largest, 2f64.powi(970)]), Some(3.0 * 2f64.powi(970)));
     }
 
     #[test]
@@ -147,7 +156,8 @@ mod tests {
             let mut numbers = Vec::with_capacity(count);
             let mut exact = 0i128;
             for _ in 0..count {
-                // Up to eleven digits, at any of 111 places, of either sign; every fourth round's are near ties
+                // Up to eleven digits, at any of 111 places, of either sign; every fourth round's are one digit or
+                // two, whose sums meet a tie more often
                 let digits = if round % 4 == 0 { 1 + (next() % 2) as i128 } else { 1 + (next() % 2047) as i128 };
                 let place = (next() % 111) as u32;
                 let whole = if next() % 2 == 0 { digits << place } else { -(digits << place) };
