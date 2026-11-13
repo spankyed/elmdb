@@ -897,9 +897,10 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
     assert_eq!(error.code, ErrorCode::Io);
 }
 
-/// The grower half of the next test, run as a child of this test binary: writes well past its parent's map, and closes
+/// What `grow_elsewhere` runs as a child of this test binary: writes well past its parent's map, in two commits, and
+/// closes
 #[test]
-#[ignore = "run only by the next test, as its child process"]
+#[ignore = "run only by the tests that grow a database from another process, as their child process"]
 fn child_grower() {
     let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
     let store = Store::open(Path::new(&path), quiet()).unwrap();
@@ -925,14 +926,7 @@ fn a_read_adopts_the_map_another_process_grew_the_file_past() {
     let page = 16 << 10;
     let store = Arc::new(Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * page), ..quiet() }).unwrap());
     put(&store, "a", b"1").unwrap();
-    let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
-        .env("ELMDB_GROW_DB", dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "the child's write failed");
+    grow_elsewhere(dir.path());
     let before = store.map_size();
     let (sent, read) = std::sync::mpsc::channel();
     {
@@ -1176,14 +1170,7 @@ fn asking_whether_another_committed_adopts_the_map_another_process_grew_the_file
     let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * page), ..quiet() }).unwrap();
     put(&store, "a", b"1").unwrap();
     assert!(!store.committed_elsewhere().unwrap());
-    let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
-        .env("ELMDB_GROW_DB", dir.path())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success(), "the child's write failed");
+    grow_elsewhere(dir.path());
     let before = store.map_size();
     // The first this handle hears of the growth, as a handle that asks before it reads does
     assert!(store.committed_elsewhere().unwrap(), "the child committed, past the map this handle had");
@@ -1263,12 +1250,12 @@ fn filled(dir: &tempfile::TempDir, destroy: bool) -> std::path::PathBuf {
 fn reached_in(dir: &tempfile::TempDir, data: &std::path::Path) -> (u64, u64) {
     let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
     let last = store.env.info().last_page_number as u64;
-    let txnid = store.env.info().last_txn_id as u64;
+    let snapshot = super::read_txn(&store.env).unwrap();
     let mut file = std::fs::File::open(data).unwrap();
     let page = super::page_size_of(&mut file, data).unwrap() as u64;
-    let reached =
-        super::reach::reach(&mut file, page as usize, std::fs::metadata(data).unwrap().len() / page, txnid, data)
-            .unwrap();
+    let meta = super::reach::meta(&mut file, page as usize, &snapshot).unwrap();
+    let pages = std::fs::metadata(data).unwrap().len() / page;
+    let reached = super::reach::reach(&mut file, page as usize, pages, &meta, data).unwrap();
     assert!(reached.missing.is_none(), "the whole file holds every page the trees reach");
     (reached.highest, last)
 }
@@ -1322,10 +1309,11 @@ fn drained(dir: &tempfile::TempDir) -> std::path::PathBuf {
             )
             .unwrap();
         let last = store.env.info().last_page_number as u64;
-        let txnid = store.env.info().last_txn_id as u64;
+        let snapshot = super::read_txn(&store.env).unwrap();
         let mut file = std::fs::File::open(&data).unwrap();
         let page = super::page_size_of(&mut file, &data).unwrap();
-        let reached = super::reach::reach(&mut file, page, last + 1, txnid, &data).unwrap();
+        let meta = super::reach::meta(&mut file, page, &snapshot).unwrap();
+        let reached = super::reach::reach(&mut file, page, last + 1, &meta, &data).unwrap();
         if reached.missing.is_none() && reached.highest < last {
             break;
         }
@@ -1350,6 +1338,115 @@ fn a_short_file_whose_tail_the_trees_do_not_reach_opens_and_a_writable_open_exte
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (highest + 1) * page, "a read-only open does not extend it");
     drop(Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file"));
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (last + 1) * page, "extended to the pages its meta page names");
+}
+
+/// A drained database's file cut to the pages its trees reach, short of the pages its meta page names and healthy: the
+/// file, its page size, and the last of those pages
+fn short_and_healthy(dir: &tempfile::TempDir) -> (std::path::PathBuf, u64, u64) {
+    let data = drained(dir);
+    let (highest, last) = reached_in(dir, &data);
+    assert!(highest < last, "the drained trees leave a free tail: reached {highest}, last {last}");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len((highest + 1) * page).unwrap();
+    (data, page, last)
+}
+
+/// Another process opens the database in `dir`, writes some 4 MiB in two commits, and closes it
+fn grow_elsewhere(dir: &Path) {
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+}
+
+#[test]
+fn a_writable_open_cuts_nothing_another_process_wrote_after_the_file_was_found_short() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let (data, page, last) = short_and_healthy(&dir);
+    // The open has read the short file's trees, and has yet to extend it, when another process writes past the pages
+    // its meta page named
+    let written = Rc::new(Cell::new(0));
+    failpoints::run_once_here(points::OPEN_WALKED, {
+        let (dir, data, written) = (dir.path().to_path_buf(), data.clone(), Rc::clone(&written));
+        move || {
+            grow_elsewhere(&dir);
+            written.set(std::fs::metadata(&data).unwrap().len());
+        }
+    });
+    let store = Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file");
+    assert!(written.get() > (last + 1) * page, "the other process wrote past the pages the open had read of");
+    let held = std::fs::metadata(&data).unwrap().len();
+    assert!(held >= written.get(), "the open cut the file to {held} bytes, of the {} written", written.get());
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
+#[test]
+fn an_open_reads_the_trees_at_a_later_commit_when_its_own_s_meta_page_has_been_written_over() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    short_and_healthy(&dir);
+    // The open holds its snapshot, and has yet to read that commit's meta page from the file, when another process
+    // makes two commits: each writes one of the two meta pages, so the snapshot's is gone. The open takes a snapshot
+    // again, which the point armed for the second time says
+    let again = Rc::new(Cell::new(false));
+    failpoints::run_once_here(points::OPEN_SNAPSHOT, {
+        let (dir, again) = (dir.path().to_path_buf(), Rc::clone(&again));
+        move || {
+            grow_elsewhere(&dir);
+            failpoints::run_once_here(points::OPEN_SNAPSHOT, move || again.set(true));
+        }
+    });
+    let store = Store::open(dir.path(), quiet()).expect("the open read the trees at a later commit");
+    assert!(again.get(), "the open took a second snapshot");
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
+#[test]
+fn an_open_refuses_a_file_that_lost_its_commit_s_meta_page_to_no_commit() {
+    use crate::failpoints::{self, points};
+    use std::io::{Seek, SeekFrom, Write};
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    // As the open holds its snapshot, both meta pages stop being LMDB's, with no commit made: nothing to read the
+    // trees at, now or at a later snapshot
+    failpoints::run_once_here(points::OPEN_SNAPSHOT, {
+        let data = data.clone();
+        move || {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+            for meta in [0, page] {
+                file.seek(SeekFrom::Start(meta + 16)).unwrap();
+                file.write_all(&[0; 4]).unwrap();
+            }
+        }
+    });
+    let error = Store::open(dir.path(), quiet()).err().expect("refused, and not asked again for ever");
+    assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+    let told = "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                than a database handle changed the file as it was opened. Open it again once nothing else writes it";
+    assert!(error.message.ends_with(told), "{error}");
+}
+
+#[test]
+fn a_file_that_holds_every_page_its_meta_page_names_is_not_read_for_its_trees() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = filled(&dir, false);
+    // A writable open leaves the file whole, whatever tail LMDB left out of it
+    drop(Store::open(dir.path(), quiet()).unwrap());
+    let store = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    let mut file = std::fs::File::open(&data).unwrap();
+    let page = super::page_size_of(&mut file, &data).unwrap();
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), (store.env.info().last_page_number as u64 + 1) * page as u64);
+    assert!(!super::short_of_its_pages(&store.env, &mut file, page, &data).unwrap(), "a whole file is not short");
 }
 
 #[test]

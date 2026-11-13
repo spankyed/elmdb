@@ -115,6 +115,71 @@ fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usiz
     Ok(page)
 }
 
+/// Whether the data file is shorter than the pages its last commit names, having read the trees to see that they reach
+/// none of the pages it lacks; a file whose trees do is refused as torn.
+///
+/// The trees are read as one commit left them, which a read transaction holds for the walk: other processes may be
+/// committing, and LMDB gives no page a held snapshot reaches to a later commit. The commit's meta page is read from the
+/// file, where the commit after the next writes over it: when it has gone by the time it is read, two commits landed
+/// since the snapshot was taken, and the walk starts again from a later one
+fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usize, data: &Path) -> Result<bool> {
+    loop {
+        let snapshot = read_txn(env)?;
+        run_point!(OPEN_SNAPSHOT);
+        let Some(meta) = reach::meta(file, page, &snapshot) else {
+            if env.info().last_txn_id > snapshot.id() {
+                continue;
+            }
+            // LMDB took the snapshot from a meta page of this file, and no commit has written over it
+            return Err(reach::refused(
+                data,
+                "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                 than a database handle changed the file as it was opened. Open it again once nothing else writes it",
+            ));
+        };
+        // Read once the snapshot is held: a commit writes its pages before its meta page, and a file only grows under
+        // other processes' commits, so every page this commit wrote to the file is in the length read here
+        let held = file.metadata()?.len();
+        if held >= (meta.last_page + 1) * page as u64 {
+            return Ok(false);
+        }
+        let reached = reach::reach(file, page, held / page as u64, &meta, data)?;
+        if let Some(missing) = reached.missing {
+            return Err(Error::new(
+                ErrorCode::Corrupted,
+                format!(
+                    "{} is {held} bytes, and page {missing} of its trees is past its end: a power loss may have left it \
+                     unwritten. Restore the database from a backup, or from a copy of the file that holds it",
+                    data.display()
+                ),
+            ));
+        }
+        debug_assert!(reached.highest < held / page as u64, "a clean walk reaches only pages in the file");
+        return Ok(true);
+    }
+}
+
+/// Extends the data file with zeros to the pages its last commit names. Under the environment's write lock, which every
+/// commit of every process lands under: the file's length and the last commit's pages are read where neither changes,
+/// so the file is only ever made longer, and never cut where another process has written since it was found short
+fn extend_to_its_pages(
+    env: &Env<WithoutTls>,
+    writers: &writers::Writers,
+    file: &std::fs::File,
+    page: usize,
+) -> Result<()> {
+    let _writer = writers.hold()?;
+    let txn = env.write_txn()?;
+    let needed = (env.info().last_page_number as u64 + 1) * page as u64;
+    // mutant-skip: replace < with <= in extend_to_its_pages
+    // A file of exactly those pages would be set to the length it has
+    if file.metadata()?.len() < needed {
+        file.set_len(needed)?;
+    }
+    txn.abort();
+    Ok(())
+}
+
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
 pub const MAP_STEP: usize = 64 << 20;
 
@@ -371,30 +436,16 @@ impl Store {
         // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
-        let info = env.info();
-        let needed = (info.last_page_number as u64 + 1) * page as u64;
-        let held = file.metadata()?.len();
-        if held < needed {
-            let reached = reach::reach(&mut file, page, held / page as u64, info.last_txn_id as u64, &data)?;
-            if let Some(missing) = reached.missing {
-                return Err(Error::new(
-                    ErrorCode::Corrupted,
-                    format!(
-                        "{} is {held} bytes, and page {missing} of its trees is past its end: a power loss may have left it \
-                         unwritten. Restore the database from a backup, or from a copy of the file that holds it",
-                        data.display()
-                    ),
-                ));
-            }
-            debug_assert!(reached.highest < held / page as u64, "a clean walk reaches only pages in the file");
-            if !options.read_only {
-                file.set_len(needed)?;
-            }
-        }
         if options.read_only {
+            // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
             require_registered_reader(&env, &canonical)?;
         }
+        let short = short_of_its_pages(&env, &mut file, page, &data)?;
+        run_point!(OPEN_WALKED);
         let writers = writers::Writers::open(&canonical, options.read_only)?;
+        if short && !options.read_only {
+            extend_to_its_pages(&env, &writers, &file, page)?;
+        }
         let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
         let gate = Arc::new(RecursiveRwLock::new(()));
         let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
