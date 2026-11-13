@@ -18,8 +18,8 @@ exclude_globs = [
     # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
     # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
     "crates/elmdb-node/src/lib.rs",
-    # The pool's jobs: each compute, resolve and reject runs when a promise is made by JavaScript, which only the binding's
-    # suite calls (`test/offthread.test.mjs`)
+    # The pool's jobs and the database's queue of writes: each runs when a promise is made by JavaScript, which only
+    # the binding's suite calls (`test/offthread.test.mjs`)
     "crates/elmdb-node/src/jobs.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to

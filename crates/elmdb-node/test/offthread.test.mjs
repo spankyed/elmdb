@@ -1,9 +1,11 @@
-// Write, check, rebuild and backup run on a thread of the pool, answering a promise: a large rebuild doesn't hold the
-// event loop. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as the promise's rejection with
-// its code; a refusal made before any work starts throws at the call, as it did.
+// Write, check, rebuild and backup run off the thread that asked, answering a promise: a large rebuild doesn't hold
+// the event loop. A check and a backup run on a thread of the pool; a write and a rebuild on the database's writing
+// thread, in the order they were asked for. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as
+// the promise's rejection with its code; a refusal made before any work starts throws at the call, as it did.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
@@ -116,7 +118,36 @@ test('a failure is the promise rejecting with elmdb\'s code, and a refusal made 
   assert.ok(Buffer.isBuffer(await db.write(create('Note-2', 'two'))));
 });
 
-test('a write and a rebuild on the pool, in flight together, both land and the database checks clean', async (t) => {
+test('writes in flight at once are applied in the order they were asked for', async (t) => {
+  const { db } = open(t);
+  db.writeSync(create('Note-0', 'made'));
+  const before = packr.unpack(db.writeSync(create('Note-1', 'made'))).sequence;
+  // Sixty writes of one field, none awaited before the next is asked for: each commits straight after the one asked
+  // before it, and the last one asked for is what the note holds
+  const titled = (i) => packr.pack({ ops: [{ op: 'set', id: 'Note-0', fields: { title: `title ${i}` } }], now: 1000 });
+  const asked = Array.from({ length: 60 }, (_, i) => db.write(titled(i)));
+  const sequences = (await Promise.all(asked)).map((answer) => packr.unpack(answer).sequence);
+  assert.deepEqual(sequences, Array.from({ length: 60 }, (_, i) => before + 1 + i));
+  const read = packr.pack({ reads: [{ read: 'row', id: 'Note-0' }] });
+  assert.equal(packr.unpack(db.readSync(read))[0].row.title, 'title 59');
+});
+
+test('writes waiting their turn behind a rebuild hold no thread of the pool', async (t) => {
+  const { db, dir } = open(t);
+  fill(db, 20000);
+  // A rebuild, and behind it more writes than the pool has threads by default: each waits for the rebuild to end
+  let rebuilt = false;
+  const rebuilding = db.rebuild().then(() => { rebuilt = true; });
+  const writes = Array.from({ length: 12 }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`)));
+  // What Node asks of the pool is answered while they wait: on the pool's threads the writes would hold every one of
+  // them until the rebuild ended, and this would wait behind them
+  await stat(dir);
+  assert.equal(rebuilt, false, 'the pool answered while the rebuild ran and the writes waited');
+  await Promise.all([rebuilding, ...writes]);
+  assert.equal(packr.unpack(db.readSync(count))[0].n, 20012);
+});
+
+test('a write and a rebuild, in flight together, both land and the database checks clean', async (t) => {
   const { db } = open(t);
   fill(db, 2000);
   const writes = [];

@@ -102,6 +102,8 @@ pub struct Database {
     health: Health,
     /// The unit this handle began last, which a panic of the handle ends: the JavaScript object of it holds it too
     unit: std::cell::RefCell<Option<UnitSlot>>,
+    /// The writes asked of this handle off its thread, applied in the order they were asked for (`jobs::Writes`)
+    writes: jobs::Writes,
 }
 
 /// A unit as its JavaScript object and the handle that began it share it, on the thread that began it: empty once
@@ -162,6 +164,24 @@ impl Database {
         AsyncTask::new(Job::new(self.inner.again(), self.health.clone(), export, work, convert))
     }
 
+    /// A write to the database off this thread, in its turn among those asked for, answering a promise of what `work`
+    /// answers as `convert` makes it
+    fn queued<'env, T, V>(
+        &self,
+        env: &'env Env,
+        export: &'static str,
+        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
+        convert: fn(&Env, T) -> napi::Result<V>,
+    ) -> Result<Object<'env>, Code>
+    where
+        T: Send + 'static,
+        V: ToNapiValue + 'static,
+    {
+        self.writes
+            .queue(env, self.inner.again(), self.health.clone(), export, work, convert)
+            .map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
+    }
+
     fn end_unit_once_panicked(&self) {
         if self.health.panicked()
             && let Some(slot) = self.unit.try_borrow_mut().ok().and_then(|mut unit| unit.take())
@@ -204,7 +224,12 @@ impl Database {
             };
             let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
             exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
-            Ok(Self { inner: Held::new(inner), health: Health::default(), unit: std::cell::RefCell::default() })
+            Ok(Self {
+                inner: Held::new(inner),
+                health: Health::default(),
+                unit: std::cell::RefCell::default(),
+                writes: jobs::Writes::default(),
+            })
         })
     }
 
@@ -259,22 +284,19 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
-    /// the pool, so the event loop isn't held while it runs. Writes that are in flight at once are applied one at a time
-    /// in no fixed order, so await a write before one that depends on it; one is refused while a unit is open
+    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. Off this
+    /// thread, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
+    /// order they were asked for, a rebuild among them in its turn; one is refused while a unit is open
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn write(
-        &self,
-        batch: Buffer,
-        durable: Option<bool>,
-    ) -> Result<AsyncTask<Job<Vec<u8>, BufferSlice<'static>>>, Code> {
+    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<Object<'env>, Code> {
         self.guarded("Database.write", || {
             let batch = batch.to_vec();
-            Ok(self.job(
-                "Database.write, on a thread of the pool,",
+            self.queued(
+                env,
+                "Database.write, on the database's writing thread,",
                 move |db| db.write_bytes(&batch, durable.unwrap_or(false)),
                 jobs::bytes,
-            ))
+            )
         })
     }
 
@@ -439,17 +461,23 @@ impl Database {
         })
     }
 
-    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-    /// thread of the pool, as a write is
+    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. Off
+    /// this thread and in its turn among the writes asked for, as a write is
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<AsyncTask<Job<(), ()>>, Code> {
+    pub fn rebuild<'env>(
+        &self,
+        env: &'env Env,
+        entity_type: Option<String>,
+        index: Option<String>,
+    ) -> Result<Object<'env>, Code> {
         self.guarded("Database.rebuild", || {
             let one = rebuild_target(entity_type, index)?;
-            Ok(self.job(
-                "Database.rebuild, on a thread of the pool,",
+            self.queued(
+                env,
+                "Database.rebuild, on the database's writing thread,",
                 move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
                 jobs::nothing,
-            ))
+            )
         })
     }
 

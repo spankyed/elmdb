@@ -391,16 +391,18 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.write(batch, durable?)` applies a batch as one unit, on a thread of the pool, answering a promise; `db.writeSync` is
-the same on the calling thread. Writes in flight together are applied one at a time, in no fixed order, so a caller
-awaits a write before one that depends on it. A database's check, rebuild and backup likewise run on the pool, and their
-`…Sync` forms on the calling thread. A refusal made before any work begins (a rebuild naming only a type, a handle that
+`db.write(batch, durable?)` applies a batch as one unit, off the calling thread, answering a promise; `db.writeSync` is
+the same on the calling thread. Writes in flight together are applied one at a time in the order they were asked for,
+a rebuild among them in its turn: the binding hands them to a thread of the database's own, started by the first, which
+takes them from a queue (`elmdb-node/src/jobs.rs`). A write is applied after the ones asked before it whether or not
+they were awaited, and a caller awaits one whose answer or failure the next depends on. A database's check and backup
+read, and run on a thread of the pool; every `…Sync` form runs on the calling thread. A refusal made before any work begins (a rebuild naming only a type, a handle that
 has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
 promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it,
 so the event loop is held by a close made during one. An operation still queued when the close takes the database
 rejects with `CLOSED` and writes nothing, and a write whose commit has landed is answered as made, not `CLOSED`. A
-queued job waits on a thread of the pool, which Node shares with its file system work, so long jobs or several queued
-writes can delay that work; a caller with a batch that matters to other work uses the blocking form. A unit can also
+write waiting its turn, or for the write lock another process holds, waits in the database's queue and holds no thread
+of the pool, which Node shares with its file system work; a check or a backup holds one for as long as it runs. A unit can also
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends
 it. One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the
@@ -709,13 +711,13 @@ detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 
 A panic in elmdb is a bug in elmdb, and in Node it is an error too: the binding runs every export's work where a
 panic is caught, and throws it as `PANICKED`, naming the export, where the panic was raised and what it said, or
-rejects the promise of a call whose work is on a thread of the pool. Left to unwind into Node, a panic would abort
+rejects the promise of a call whose work is off the calling thread. Left to unwind into Node, a panic would abort
 the process; caught, the process lives. What the panic left in memory is not known, so:
 
 - **The handle refuses calls after it**, with `PANICKED` and the first panic's message, but `close`, `path`,
   `readOnly`, `isOpen` and a unit's `isOpen`. The unit the handle had open is ended by the call that panicked,
   keeping none of its writes, whether the panic was in the unit or in the database: what a panic interrupted may be
-  half of a batch. A panic on a thread of the pool is the handle's too, and its unit is ended by the next call on
+  half of a batch. A panic off the calling thread is the handle's too, and its unit is ended by the next call on
   the handle or the unit.
 - **What was committed is kept.** A transaction a panic unwinds through is aborted, and a unit's place, the write
   transaction and the gate are let go as it unwinds (`Store::begin`, `Database::begin`, `Unit::commit`): the handle closed and the
