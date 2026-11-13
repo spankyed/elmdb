@@ -163,9 +163,10 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
 }
 
 /// Moves every relation of a kind to another kind the schema declares, keeping their ids, ends, info and weights.
-/// Refused, with nothing moved, when the new kind couldn't hold the edges: info the kind doesn't take, an edge that
-/// would be a second of one identity, and an edge the kind's rules refuse a link of (the types it joins, an end with
-/// more far ends than the kind's cardinality gives it, a cycle in a kind declared acyclic)
+/// Refused, with nothing moved, when the new kind couldn't hold the edges: info the kind doesn't take, a weight a
+/// weighted kind doesn't, an edge that would be a second of one identity, and an edge the kind's rules refuse a link
+/// of (an entity joined to itself, the types it joins, an end with more far ends than the kind's cardinality gives it,
+/// a cycle in a kind declared acyclic)
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
     if from == to {
@@ -176,21 +177,31 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     // The schema outlives the unit's borrow of it, so the kind's rules are read while its edges are written
     let schema = t.schema;
     let def = schema.relations.get(to).expect("declared above");
-    // What a rule of the new kind refuses, of one relation: the rule as a link of the kind is told it, and what to do
+    // What a rule of the new kind refuses, of one relation: the rule as a link of the kind is told it, and what to do.
+    // A count of far ends and a cycle are broken by two relations or more, the others of the kind already or moving to
+    // it with this one; every other rule by the one relation alone
     let refused = |id: &str, stored: &relations::Stored, rule: Error| {
+        let beside = if matches!(rule.code, ErrorCode::Cardinality | ErrorCode::Cycle) {
+            format!(", or one it can't be of kind {to} beside, which is of that kind already or of kind {from} with it")
+        } else {
+            String::new()
+        };
         Error::new(
             rule.code,
             format!(
                 "renameRelation({from:?} to {to:?}): the relation {id}, from {} to {}, can't be of kind {to}, and nothing \
-                 was moved. A link of it is refused: \"{}\". Remove or change that relation, or the one of kind {to} it \
-                 can't stand beside, then rename again",
+                 was moved. A link of it is refused: \"{}\". Remove or change that relation{beside}, then rename again",
                 stored.source, stored.target, rule.message
             ),
         )
     };
-    // Its info first: info that is no map reads as a null key, which the identity below would take for the edge's
+    // Its info first: info that is no map reads as a null key, which the identity below would take for the edge's. And
+    // its weight, where the new kind's are read: one outside what a link is given, which only a load brings
     for (id, stored) in &moving {
         relations::check_info(def, to, stored.info.as_ref()).map_err(|rule| refused(id, stored, rule))?;
+        if def.weighted {
+            relations::weight_of(def, to, stored.weight).map_err(|rule| refused(id, stored, rule))?;
+        }
     }
     // Then refused before anything moves: an edge of the new kind with the same ends and key would be one identity
     // twice, as an update of an edge onto another's identity is refused. Two moving edges that would be one identity

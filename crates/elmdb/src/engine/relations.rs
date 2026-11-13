@@ -1,7 +1,7 @@
 //! Relations in the store's keys (`docs/architecture/format.md`, Keys):
 //!
 //! - `p/r relation` → `{ kind, source, target, info, weight, seq }`: the relation's row and its place, `weight` held
-//!   only when it isn't 1 (a kind declared `weighted`)
+//!   only when it isn't 1 (given to an edge of a kind declared `weighted`, and kept by the edge from then on)
 //! - `d/o source kind seq` → `[relation, target]` and `d/n target kind seq` → `[relation, source]`: each entity's edges
 //!   out and in, by kind, in the order linked, so a walk reads a far end without the row; a third element, the weight,
 //!   when the row holds one, so a weighted graph reads it there too
@@ -29,7 +29,7 @@ pub struct Stored {
     pub target: String,
     #[serde(default)]
     pub info: Option<Value>,
-    /// The edge's weight when it isn't 1, which only a kind declared `weighted` holds
+    /// The edge's weight when it isn't 1: given to it in a kind declared `weighted`, read only while its kind is one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
     pub seq: u64,
@@ -290,7 +290,7 @@ pub(super) fn check_rules(
 /// A weight given to an edge of `def`, as the row holds it: refused unless the kind is declared weighted and the weight
 /// is a number from 0 to `MAX_WEIGHT`; 1, every edge's weight unless given another, held as none, and -0 held as 0, so
 /// equal weights are the same bytes
-fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
+pub(super) fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
     let Some(weight) = weight else { return Ok(None) };
     if !def.weighted {
         return Err(Error::new(
@@ -452,8 +452,8 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
 }
 
 /// Moves a relation to another kind, keeping its id, its ends, its info, its weight and its place: an admin
-/// rename's move, of an edge the caller has held to the kind's rules (`check_info`, `check_rules`). A weight goes
-/// with its edge to a kind that reads none, as one stays in a row whose kind stops being weighted
+/// rename's move, of an edge the caller has held to the kind's rules (`check_info`, `weight_of`, `check_rules`). A
+/// weight goes with its edge to a kind that reads none, as one stays in a row whose kind stops being weighted
 pub fn rekind(t: &mut Txn<'_, '_>, relation: &str, stored: Stored, kind: &str) -> Result<()> {
     remove(t, relation)?;
     restore(t, relation, &Stored { kind: kind.to_owned(), ..stored })

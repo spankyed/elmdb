@@ -642,13 +642,15 @@ fn rename_relation_refuses_two_moving_edges_that_would_be_one_identity_in_the_ne
     assert!(db.check().unwrap().is_clean(), "a refused rename leaves the graph as it was");
 }
 
-/// Each relation's kind and the weight its row holds, in the order of their ids
-fn weights(db: &Database) -> Vec<(String, Option<f64>)> {
+/// Each relation's id and row, in the order of their ids
+fn relations(db: &Database) -> Vec<(String, crate::engine::relations::Stored)> {
     db.snapshot(|s| {
         let mut out = Vec::new();
-        for (_, bytes) in s.scan(&keys::all_relations())? {
-            let stored: crate::engine::relations::Stored = rmp_serde::from_slice(&bytes).unwrap();
-            out.push((stored.kind, stored.weight));
+        for (key, bytes) in s.scan(&keys::all_relations())? {
+            let Some(crate::format::key::Part::String(id)) = crate::format::key::decode(&key)?.pop() else {
+                panic!("a relation's key ends in its id")
+            };
+            out.push((id, rmp_serde::from_slice(&bytes).unwrap()));
         }
         Ok(out)
     })
@@ -664,12 +666,14 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
     // Each: the edges there are, the rename, and what refuses it. `parent_of` gives a target one source and holds no
     // cycle; `pins` joins a Note to a Task and gives a source one target; `cites` reads its key from info's fields
     let plain = json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2", "info": "plain" });
+    // The last of each: the ends of the relation the refusal names, the one that can't join those moved before it
     let refused = [
         (
             vec![link("Task-1", "refs", "Task-3"), link("Task-2", "refs", "Task-3")],
             "refs",
             "parent_of",
             ErrorCode::Cardinality,
+            ("Task-2", "Task-3"),
         ),
         // With an edge the kind holds already
         (
@@ -677,12 +681,14 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
             "refs",
             "parent_of",
             ErrorCode::Cardinality,
+            ("Task-2", "Task-3"),
         ),
         (
             vec![link("Task-1", "refs", "Task-2"), link("Task-2", "refs", "Task-3"), link("Task-3", "refs", "Task-1")],
             "refs",
             "parent_of",
             ErrorCode::Cycle,
+            ("Task-3", "Task-1"),
         ),
         // A cycle one edge of the kind and one moved edge close between them
         (
@@ -690,36 +696,51 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
             "refs",
             "parent_of",
             ErrorCode::Cycle,
+            ("Task-2", "Task-1"),
         ),
-        (vec![link("Task-1", "refs", "Task-2")], "refs", "pins", ErrorCode::Endpoint),
+        (vec![link("Task-1", "refs", "Task-2")], "refs", "pins", ErrorCode::Endpoint, ("Task-1", "Task-2")),
         (
             vec![link("Note-1", "refs", "Task-1"), link("Note-1", "refs", "Task-2")],
             "refs",
             "pins",
             ErrorCode::Cardinality,
+            ("Note-1", "Task-2"),
         ),
-        (vec![plain], "refs", "cites", ErrorCode::FieldType),
+        (vec![plain.clone()], "refs", "cites", ErrorCode::FieldType, ("Task-1", "Task-2")),
+        // Info that is no map reads as a null key, the identity of the edge without info the kind holds already: the
+        // info is what is refused, and not a second edge of one identity
+        (vec![link("Task-1", "cites", "Task-2"), plain], "refs", "cites", ErrorCode::FieldType, ("Task-1", "Task-2")),
     ];
-    for (links, from, to, code) in refused {
+    for (links, from, to, code, (source, target)) in refused {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
         write(&db, entities.clone()).unwrap();
         write(&db, links.clone()).unwrap();
         let before = super::edges(&db);
+        let (named, _) = relations(&db)
+            .into_iter()
+            .find(|(_, row)| row.kind == from && row.source == source && row.target == target)
+            .expect("the relation the refusal names");
         let error = db.rename_relation(from, to).unwrap_err();
         assert_eq!(error.code, code, "{from} to {to} over {links:?}: {error}");
-        assert!(
-            error.message.starts_with(&format!("renameRelation({from:?} to {to:?}): the relation Relation-")),
-            "{error}"
+        let head = format!(
+            "renameRelation({from:?} to {to:?}): the relation {named}, from {source} to {target}, can't be of kind {to}, \
+             and nothing was moved. A link of it is refused: \""
         );
+        assert!(error.message.starts_with(&head), "{error}");
         assert_eq!(super::edges(&db), before, "{from} to {to}: no edge moved");
         assert!(db.check().unwrap().is_clean(), "{from} to {to}: a refused rename leaves the graph as it was");
-        // The message names the relation, the rule as a link is told it, and what to do
+        // What to do: of a count or a cycle, with the relation or with another; of any other rule, with the relation
+        let advice = match code {
+            ErrorCode::Cardinality | ErrorCode::Cycle => format!(
+                "\". Remove or change that relation, or one it can't be of kind {to} beside, which is of that kind \
+                 already or of kind {from} with it, then rename again"
+            ),
+            _ => "\". Remove or change that relation, then rename again".to_owned(),
+        };
+        assert!(error.message.ends_with(&advice), "{error}");
         if code == ErrorCode::Endpoint {
-            let rest = ", from Task-1 to Task-2, can't be of kind pins, and nothing was moved. A link of it is refused: \
-                        \"A pins relation doesn't join a Task to a Task\". Remove or change that relation, or the one of \
-                        kind pins it can't stand beside, then rename again";
-            assert!(error.message.ends_with(rest), "{error}");
+            assert!(error.message.contains("\"A pins relation doesn't join a Task to a Task\""), "{error}");
         }
     }
     // Edges the new kind can hold move, and are held to its rules from then on as any of its edges are
@@ -741,6 +762,14 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
     assert_eq!(second_parent.code, ErrorCode::Cardinality, "{second_parent}");
     let cycle = write(&db, vec![link("Task-3", "parent_of", "Task-1")]).unwrap_err();
     assert_eq!(cycle.code, ErrorCode::Cycle, "{cycle}");
+    // The end in the trash has its one source, as the edge moved to it gave it
+    let second_of_trashed = write(&db, vec![link("Task-3", "parent_of", "Task-4")]).unwrap_err();
+    assert_eq!(second_of_trashed.code, ErrorCode::Cardinality, "{second_of_trashed}");
+    // And an edge to an end in the trash is refused as one to any end is: a second source of it
+    write(&db, vec![link("Task-1", "refs", "Task-4")]).unwrap();
+    let error = db.rename_relation("refs", "parent_of").unwrap_err();
+    assert_eq!(error.code, ErrorCode::Cardinality, "{error}");
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs", "target": "Task-4" })]).unwrap();
     // Two edges of one pair, told apart by their key, are one far end: a kind that gives an end one holds both
     let cited =
         |n: u8| json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": { "n": n } });
@@ -751,8 +780,9 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
     // as a weight does whose kind stops being weighted. An edge with none is one of weight 1 in a kind that carries them
     write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "weighs", "target": "Task-2", "weight": 3 })])
         .unwrap();
-    let weight_of =
-        |db: &Database, kind: &str| weights(db).into_iter().find(|(held, _)| held == kind).map(|(_, weight)| weight);
+    let weight_of = |db: &Database, kind: &str| {
+        relations(db).into_iter().find(|(_, row)| row.kind == kind).map(|(_, row)| row.weight)
+    };
     db.rename_relation("weighs", "rates").unwrap();
     assert_eq!(weight_of(&db, "rates"), Some(Some(3.0)));
     db.rename_relation("rates", "tags").unwrap();
@@ -761,6 +791,52 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
     db.rename_relation("blocks", "weighs").unwrap();
     assert_eq!(weight_of(&db, "weighs"), Some(None));
     assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn rename_relation_refuses_what_a_load_brought_that_no_link_of_the_new_kind_is_given() {
+    use crate::engine::maintenance::Load;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id, "fields": { "a": "x" } });
+    write(&db, vec![task("Task-1"), task("Task-2")]).unwrap();
+    let load = |id: &str, kind: &str, target: &str, weight: Option<f64>| Load::Relation {
+        id: id.into(),
+        kind: kind.into(),
+        source: "Task-1".into(),
+        target: target.into(),
+        info: None,
+        weight,
+    };
+    // A load keeps a weight below zero and an entity joined to itself, each of which `check()` reports where it is
+    db.bulk_load(&[
+        load("Relation-light", "tags", "Task-2", Some(-1.0)),
+        load("Relation-own", "blocks", "Task-1", None),
+    ])
+    .unwrap();
+    let before = relations(&db);
+    let reported = db.check().unwrap();
+    assert!(!reported.is_clean());
+    // Into a kind whose weights are read, the weight is held to a link's range
+    let error = db.rename_relation("tags", "weighs").unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
+    let told = "renameRelation(\"tags\" to \"weighs\"): the relation Relation-light, from Task-1 to Task-2, can't be of \
+                kind weighs, and nothing was moved. A link of it is refused: \"A weighs relation's weight is a number \
+                from 0 to 2^960, and was given -1\". Remove or change that relation, then rename again";
+    assert_eq!(error.message, told);
+    // No kind joins an entity to itself
+    let error = db.rename_relation("blocks", "refs").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SelfLink, "{error}");
+    assert!(
+        error.message.contains("the relation Relation-own, from Task-1 to Task-1, can't be of kind refs"),
+        "{error}"
+    );
+    assert_eq!(relations(&db), before, "neither rename moved an edge");
+    assert_eq!(db.check().unwrap(), reported);
+    // Into a kind that reads no weight, the weight goes as it is
+    db.rename_relation("tags", "refs").unwrap();
+    let light = relations(&db).into_iter().find(|(id, _)| id == "Relation-light").unwrap().1;
+    assert_eq!((light.kind.as_str(), light.weight), ("refs", Some(-1.0)));
 }
 
 #[test]
