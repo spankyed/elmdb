@@ -214,9 +214,15 @@ test('writes waiting when a close takes the database reject as closed, the ones 
     assert.equal(one.status, i < applied ? 'fulfilled' : 'rejected', `write ${i} of ${applied} applied`);
     if (one.status === 'rejected') assert.equal(one.reason.code, 'CLOSED');
   }
+  // Closed before the directory is removed: Windows won't remove a file that is open
   const again = Database.open(dir, { schema, syncs: false });
-  t.after(() => again.close());
-  assert.equal(packr.unpack(again.readSync(count))[0].n, applied);
+  let held;
+  try {
+    held = packr.unpack(again.readSync(count))[0].n;
+  } finally {
+    again.close();
+  }
+  assert.equal(held, applied);
 });
 
 test('a write and a rebuild, in flight together, both land and the database checks clean', async (t) => {
