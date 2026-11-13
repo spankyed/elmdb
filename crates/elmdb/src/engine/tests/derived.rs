@@ -809,6 +809,48 @@ fn rename_relation_holds_each_edge_to_the_new_kind_s_rules_and_moves_none_when_o
 }
 
 #[test]
+fn the_edge_mirror_holds_a_loaded_weight_below_zero_as_the_store_does() {
+    use crate::engine::maintenance::Load;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id, "fields": { "a": "x" } });
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+    let load = |id: &str, target: &str, weight: Option<f64>| Load::Relation {
+        id: id.into(),
+        kind: "weighs".into(),
+        source: "Task-1".into(),
+        target: target.into(),
+        info: None,
+        weight,
+    };
+    // A load keeps any finite weight, -1 among them, and an edge with none beside it
+    db.bulk_load(&[load("Relation-light", "Task-2", Some(-1.0)), load("Relation-plain", "Task-3", None)]).unwrap();
+    let mirror = db.store().unwrap().mirror();
+    let at = db.sequence().unwrap();
+    mirror.lock().at(at);
+    let mut held = Vec::new();
+    db.snapshot(|s| {
+        mirror.lock().visit_far_ends(s, at, "Task-1", true, "weighs", |far, weight| held.push((far.to_owned(), weight)))
+    })
+    .unwrap();
+    // Read again, from the list the first read left in the mirror
+    let mut again = Vec::new();
+    db.snapshot(|s| {
+        mirror
+            .lock()
+            .visit_far_ends(s, at, "Task-1", true, "weighs", |far, weight| again.push((far.to_owned(), weight)))
+    })
+    .unwrap();
+    assert_eq!(mirror.lock().held(), 1);
+    assert_eq!(held, [("Task-2".to_owned(), Some(-1.0)), ("Task-3".to_owned(), None)]);
+    assert_eq!(again, held);
+    // The row is reported, a weight no link is given, and the mirror's list is the store's
+    let reported = db.check().unwrap();
+    let subjects: Vec<&str> = reported.violations.iter().map(|v| v.subject.as_str()).collect();
+    assert_eq!(subjects, ["p/r Relation-light"], "{reported:?}");
+}
+
+#[test]
 fn rename_relation_refuses_what_a_load_brought_that_no_link_of_the_new_kind_is_given() {
     use crate::engine::maintenance::Load;
     let dir = tempfile::tempdir().unwrap();
