@@ -885,6 +885,7 @@ impl Store {
             .claim_writer(|| {
                 let guard = self.gate();
                 let writer = self.writers.hold()?;
+                run_point!(RESET_CLAIMING);
                 self.drop_idle();
                 Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
             })

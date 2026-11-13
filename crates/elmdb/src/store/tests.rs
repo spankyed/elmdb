@@ -982,6 +982,27 @@ fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_s
     assert!(store.map_size() > small, "the unit adopted the map the other process grew");
 }
 
+// The slot's lock is the models' own under Loom and Shuttle, which ask the slot's decisions and not this
+#[cfg(not(any(loom, shuttle)))]
+#[test]
+fn a_reset_s_checkpoint_takes_its_turn_where_no_unit_can_reserve_its_place() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
+    put(&store, "a", b"1").unwrap();
+    // A unit that reserved its place between the checkpoint's look at the slot and its turn would keep the turn for
+    // as long as it stayed open, with the checkpoint waiting for it: the turn is taken with the slot's lock held
+    let claimed = Rc::new(Cell::new(None));
+    failpoints::run_once_here(points::RESET_CLAIMING, {
+        let (store, claimed) = (Arc::clone(&store), Rc::clone(&claimed));
+        move || claimed.set(Some(store.unit.is_being_claimed()))
+    });
+    store.recycle_reset_pages().unwrap();
+    assert_eq!(claimed.get(), Some(true), "whether the checkpoint took its turn, and under the slot's lock");
+}
+
 #[test]
 fn a_reset_s_checkpoint_is_refused_while_a_unit_is_open_and_runs_once_it_has_ended() {
     let dir = tempfile::tempdir().unwrap();
