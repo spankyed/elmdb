@@ -108,6 +108,28 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   assert.equal(reopened, sequence);
 });
 
+test('a process that exits with writes asked for and not yet answered ends with every one applied', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Note: { fields: {} } } };
+  const packr = new Packr({ useRecords: false, mapsAsObjects: true });
+  const batch = (i) => packr.pack({ ops: [{ op: 'create', type: 'Note', id: `Note-${i}` }], now: 1000 }).toString('base64');
+  // Forty writes asked for, none awaited, and the process told to exit: the pool is run to its end as a process
+  // exits, the job applying this database's writes with it, so each is applied, in the order asked for
+  const child = [
+    `const { Database } = require(${JSON.stringify(binding)});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncs: false });`,
+    `for (const batch of ${JSON.stringify(Array.from({ length: 40 }, (_, i) => batch(i)))}) db.write(Buffer.from(batch, 'base64'));`,
+    'process.exit(0);',
+  ].join('\n');
+  execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 30_000 });
+  const db = Database.open(dir, { syncs: false });
+  const count = packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'ids' } } }] });
+  const ids = packr.unpack(db.readSync(count))[0].ids;
+  db.close();
+  assert.deepEqual(ids, Array.from({ length: 40 }, (_, i) => `Note-${i}`));
+});
+
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

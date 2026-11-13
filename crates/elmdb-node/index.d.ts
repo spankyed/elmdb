@@ -34,9 +34,10 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. Off this
-   * thread, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
-   * order they were asked for, a rebuild among them in its turn; one is refused while a unit is open
+   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
+   * the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
+   * order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
+   * is refused while a unit is open
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Promise<Buffer>
   /** `write` on this thread, held until the batch is applied */
@@ -85,8 +86,8 @@ export declare class Database {
   /** `check` on this thread */
   checkSync(): CheckReport
   /**
-   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. Off
-   * this thread and in its turn among the writes asked for, as a write is
+   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
+   * thread of the pool and in its turn among the writes asked for, as a write is
    */
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
   /** `rebuild` on this thread */

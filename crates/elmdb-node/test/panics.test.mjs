@@ -33,8 +33,7 @@ function seeded(t) {
 const run = (dir, name, asked) =>
   spawnSync(process.execPath, [child, dir, name], { env: { ...process.env, ELMDB_TEST_PANIC: asked }, encoding: 'utf8' });
 
-// Every member the two classes have, the factory, and the work six of them do off the thread that asked: on a thread
-// of the pool, or for what writes, on the database's writing thread
+// Every member the two classes have, the factory, and the work two of them do on a thread of the pool
 const members = (prototype) => Object.getOwnPropertyNames(prototype).filter((name) => name !== 'constructor');
 const exports = [
   'Database.open',
@@ -42,9 +41,9 @@ const exports = [
   ...members(Unit.prototype).map((name) => `Unit.${name}`),
   'Database.read, on a thread of the pool,',
   'Database.durable, on a thread of the pool,',
-  "Database.write, on the database's writing thread,",
+  'Database.write, on a thread of the pool,',
   'Database.check, on a thread of the pool,',
-  "Database.rebuild, on the database's writing thread,",
+  'Database.rebuild, on a thread of the pool,',
   'Database.backup, on a thread of the pool,',
 ];
 

@@ -102,7 +102,7 @@ const ofUnit = {
   isOpen: (unit) => unit.isOpen,
 };
 
-const [of, member, pool] = name.match(/^(Database|Unit)\.(\w+)(, on a thread of the pool,|, on the database's writing thread,)?$/).slice(1);
+const [of, member, pool] = name.match(/^(Database|Unit)\.(\w+)(, on a thread of the pool,)?$/).slice(1);
 let db;
 if (name === 'Database.open') {
   // No handle is made by an open that panics
@@ -115,7 +115,7 @@ if (name === 'Database.open') {
   const unit = member === 'begin' ? undefined : db.begin();
   unit?.write(batch('Note-in-the-unit'));
   if (pool) {
-    // The work of a promise is done off this thread, where its panic rejects the promise
+    // The work of a promise is done on a thread of the pool, where its panic rejects the promise
     panicked(await call(db).then(() => undefined, (error) => error));
     // And the next call is refused where it is made, before any promise
     assert.match(thrown(() => call(db))?.message ?? '', /^Database\.\w+ is refused/);

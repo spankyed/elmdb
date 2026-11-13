@@ -1,7 +1,7 @@
-// Write, check, rebuild and backup run off the thread that asked, answering a promise: a large rebuild doesn't hold
-// the event loop. A check and a backup run on a thread of the pool; a write and a rebuild on the database's writing
-// thread, in the order they were asked for. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as
-// the promise's rejection with its code; a refusal made before any work starts throws at the call, as it did.
+// Write, check, rebuild and backup run on a thread of the pool, answering a promise: a large rebuild doesn't hold the
+// event loop. A database's writes and rebuilds are applied in the order they were asked for, by one job of the pool at
+// a time. Their `…Sync` forms are the blocking ones. A failure reaches JavaScript as the promise's rejection with its
+// code; a refusal made before any work starts throws at the call, as it did.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -132,19 +132,22 @@ test('writes in flight at once are applied in the order they were asked for', as
   assert.equal(packr.unpack(db.readSync(read))[0].row.title, 'title 59');
 });
 
-test('writes waiting their turn behind a rebuild hold no thread of the pool', async (t) => {
+test('writes waiting their turn behind a rebuild hold one thread of the pool between them', async (t) => {
   const { db, dir } = open(t);
   fill(db, 20000);
-  // A rebuild, and behind it more writes than the pool has threads by default: each waits for the rebuild to end
+  // A rebuild, and behind it three times as many writes as the pool has threads: each waits for the rebuild to end
+  const threads = Number(process.env.UV_THREADPOOL_SIZE) || 4;
   let rebuilt = false;
-  const rebuilding = db.rebuild().then(() => { rebuilt = true; });
-  const writes = Array.from({ length: 12 }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`)));
-  // What Node asks of the pool is answered while they wait: on the pool's threads the writes would hold every one of
-  // them until the rebuild ended, and this would wait behind them
+  const began = performance.now();
+  const rebuilding = db.rebuild().then(() => { rebuilt = performance.now() - began; });
+  const writes = Array.from({ length: 3 * threads }, (_, i) => db.write(create(`Note-Late-${i}`, `late ${i}`)));
+  // What Node asks of the pool is answered while they wait: each a job of its own, the writes would hold every thread
+  // until the rebuild ended, and this would wait behind them
   await stat(dir);
-  assert.equal(rebuilt, false, 'the pool answered while the rebuild ran and the writes waited');
+  const answered = performance.now() - began;
+  assert.equal(rebuilt, false, `the pool answered ${answered.toFixed(1)} ms in, after the rebuild ended at ${rebuilt} ms`);
   await Promise.all([rebuilding, ...writes]);
-  assert.equal(packr.unpack(db.readSync(count))[0].n, 20012);
+  assert.equal(packr.unpack(db.readSync(count))[0].n, 20000 + 3 * threads);
 });
 
 test('a write and a rebuild, in flight together, both land and the database checks clean', async (t) => {

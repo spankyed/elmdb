@@ -102,7 +102,7 @@ pub struct Database {
     health: Health,
     /// The unit this handle began last, which a panic of the handle ends: the JavaScript object of it holds it too
     unit: std::cell::RefCell<Option<UnitSlot>>,
-    /// The writes asked of this handle off its thread, applied in the order they were asked for (`jobs::Writes`)
+    /// The writes asked of this handle for the pool, applied in the order they were asked for (`jobs::Writes`)
     writes: jobs::Writes,
 }
 
@@ -164,8 +164,8 @@ impl Database {
         AsyncTask::new(Job::new(self.inner.again(), self.health.clone(), export, work, convert))
     }
 
-    /// A write to the database off this thread, in its turn among those asked for, answering a promise of what `work`
-    /// answers as `convert` makes it
+    /// A write to the database on a thread of the pool, in its turn among those asked for, answering a promise of
+    /// what `work` answers as `convert` makes it
     fn queued<'env, T, V>(
         &self,
         env: &'env Env,
@@ -284,16 +284,17 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. Off this
-    /// thread, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
-    /// order they were asked for, a rebuild among them in its turn; one is refused while a unit is open
+    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
+    /// the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
+    /// order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
+    /// is refused while a unit is open
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<Object<'env>, Code> {
         self.guarded("Database.write", || {
             let batch = batch.to_vec();
             self.queued(
                 env,
-                "Database.write, on the database's writing thread,",
+                "Database.write, on a thread of the pool,",
                 move |db| db.write_bytes(&batch, durable.unwrap_or(false)),
                 jobs::bytes,
             )
@@ -461,8 +462,8 @@ impl Database {
         })
     }
 
-    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. Off
-    /// this thread and in its turn among the writes asked for, as a write is
+    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
+    /// thread of the pool and in its turn among the writes asked for, as a write is
     #[napi(ts_return_type = "Promise<void>")]
     pub fn rebuild<'env>(
         &self,
@@ -474,7 +475,7 @@ impl Database {
             let one = rebuild_target(entity_type, index)?;
             self.queued(
                 env,
-                "Database.rebuild, on the database's writing thread,",
+                "Database.rebuild, on a thread of the pool,",
                 move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
                 jobs::nothing,
             )

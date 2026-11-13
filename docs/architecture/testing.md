@@ -330,7 +330,7 @@ argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
-factory, and the work six exports do off the calling thread, a child process is started with `ELMDB_TEST_PANIC`
+factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
 naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
 without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
 a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
@@ -352,12 +352,13 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
-`offthread.test.mjs` holds the four operations that run off the calling thread: a write, a check, a rebuild and a
-backup answer a promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its
-code, and a refusal made before the work throws. Sixty writes asked for without an await commit in the order asked,
-each straight after the one before; and with a rebuild running and twelve writes waiting behind it, more than the
-pool's four threads, a file `stat` asked of the pool is answered before the rebuild ends. Each `…Sync` form is the
-blocking one the rest of the suite calls.
+`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
+promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
+refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
+after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
+threads, a file `stat` asked of the pool is answered before the rebuild ends. `exit.test.mjs` asks forty writes of a
+child process that then calls `process.exit()`: all forty are there. Each `…Sync` form is the blocking one the rest
+of the suite calls.
 
 ## Platforms
 

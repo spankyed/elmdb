@@ -122,8 +122,7 @@ impl Health {
         })
     }
 
-    /// Runs an export's work off the thread that asked for it: refused after a panic, and a panic in it the handle's
-    /// first
+    /// Runs an export's work on a thread of the pool: refused after a panic, and a panic in it the handle's first
     pub fn caught<T>(&self, export: &'static str, work: impl FnOnce() -> T) -> Result<T, elmdb::Error> {
         if let Some(refused) = self.refusal(export) {
             return Err(refused);
