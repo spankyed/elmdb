@@ -1431,7 +1431,9 @@ fn an_open_refuses_a_file_that_lost_its_commit_s_meta_page_to_no_commit() {
     });
     let error = Store::open(dir.path(), quiet()).err().expect("refused, and not asked again for ever");
     assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
-    assert!(error.message.contains("holds no meta page of the commit LMDB opened it at"), "{error}");
+    let told = "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                than a database handle changed the file as it was opened. Open it again once nothing else writes it";
+    assert!(error.message.ends_with(told), "{error}");
 }
 
 #[test]

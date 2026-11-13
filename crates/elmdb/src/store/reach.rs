@@ -150,8 +150,9 @@ impl Walk<'_> {
                     return Err(refused(
                         self.path,
                         &format!(
-                            "holds a duplicate-sorted node on page {pgno}, which elmdb never writes: it is not a file \
-                             elmdb wrote. Open a database elmdb wrote"
+                            "holds a duplicate-sorted node on page {pgno}, which elmdb never writes: it is another \
+                             program's file, or one of elmdb's with that page torn by a power loss. Open a database \
+                             elmdb wrote, or restore this one from a backup"
                         ),
                     ));
                 }
