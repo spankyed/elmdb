@@ -104,12 +104,14 @@ itself: LMDB maps a file whose meta page names pages past its end, and touching 
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
 they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
 LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. A torn
-file that is refused counts as a file that didn't survive. A child that reads a file and says nothing fails the test.
+file that is refused counts as a file that didn't survive.
 
-A file torn within its length can end its reader as well: LMDB aborts the process on a page that is no page of the
-tree it is in. One of the grouped mode's replayed files did on Linux (CI, 2026-11-13, `SIGABRT`), and none on Apple
-silicon, whose pages are larger. The replay counts such a file as one that didn't survive, with how its reader ended,
-and fails on a reader ended by the fault of a read past the file's end, which the open's check is there to stop.
+A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
+2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
+such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
+reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
+to half its pages shows it stopping, and on a child that says nothing and ended any other way.
 
 ## Failpoints
 

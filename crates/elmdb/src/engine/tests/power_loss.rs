@@ -175,26 +175,33 @@ enum Read {
     /// maps a file whose meta page names pages past its end, and touching one is that fault. `Store::open` refuses such
     /// a file before it reads a page, so this is a file that check let through: the caller fails on it
     Faulted(String),
-    /// The reader ended another way before it said anything, with the last it wrote to its error stream: LMDB aborts on
-    /// a page that is no page of the tree it is in, which a file torn within its length can hold. On Windows a fault
-    /// and an abort end a process alike, so every crash there is this
-    Ended(String),
+    /// The reader was ended by LMDB's abort before it said anything, with the last it wrote to its error stream: built
+    /// with its assertions on, as the tests' build is, LMDB aborts on a page that is no page of the tree it is in,
+    /// which a file torn within its length can hold
+    Aborted(String),
 }
 
-/// Whether a process ended by the fault of a read past the end of a mapped file
-#[cfg(unix)]
+/// Whether a process was ended by the fault of a read past the end of a mapped file: a signal of its own on Unix, and
+/// on Windows the exception of a read outside a mapped view or of a page that couldn't be brought in
 fn faulted(status: &std::process::ExitStatus) -> bool {
-    std::os::unix::process::ExitStatusExt::signal(status) == Some(libc::SIGBUS)
+    #[cfg(unix)]
+    return std::os::unix::process::ExitStatusExt::signal(status) == Some(libc::SIGBUS);
+    #[cfg(windows)]
+    return matches!(status.code().map(|code| code as u32), Some(0xC000_0005 | 0xC000_0006));
 }
 
-#[cfg(not(unix))]
-fn faulted(_: &std::process::ExitStatus) -> bool {
-    false
+/// Whether a process was ended by its own `abort`: a signal on Unix, and on Windows the fast-fail exception the C
+/// runtime raises, or its older exit code
+fn aborted(status: &std::process::ExitStatus) -> bool {
+    #[cfg(unix)]
+    return std::os::unix::process::ExitStatusExt::signal(status) == Some(libc::SIGABRT);
+    #[cfg(windows)]
+    return matches!(status.code().map(|code| code as u32), Some(0xC000_0409 | 3));
 }
 
 /// `held`, asked of a child of this test binary, since a file whose pages are of different commits may be one that
-/// ends the process reading it: the child says, as its last line, what it holds or refuses. A child that ran no test
-/// fails here, and one that crashed is answered as how it ended
+/// ends the process reading it: the child says, as its last line, what it holds or refuses. One ended by a fault or
+/// by an abort is answered as that, and one that said nothing and ended any other way fails here
 fn held_apart(image: &[u8]) -> Read {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
@@ -214,13 +221,10 @@ fn held_apart(image: &[u8]) -> Read {
     let last = errors.lines().rev().find(|line| !line.trim().is_empty()).unwrap_or_default();
     match (verdict, child.status.code()) {
         (Some(verdict), Some(0)) => verdict,
-        // Killed by a signal, or by Windows' exception (an NTSTATUS code, with its top bits set), after the child started:
-        // the file was read, and it ended the reader
-        (None, None) if faulted(&child.status) => Read::Faulted(format!("{}", child.status)),
-        (None, None) => Read::Ended(format!("{}: {last}", child.status)),
-        (None, Some(code)) if code as u32 >= 0xC000_0000 => Read::Ended(format!("{}: {last}", child.status)),
-        // The child exited without a verdict, or without success: it did not run the reader
-        _ => panic!("the child reading the file did not say what it holds: {} {said}", child.status),
+        (None, _) if faulted(&child.status) => Read::Faulted(format!("{}", child.status)),
+        (None, _) if aborted(&child.status) => Read::Aborted(format!("{}: {last}", child.status)),
+        // The child ended without a verdict and by neither: it did not run the reader, or something else ended it
+        _ => panic!("the child reading the file did not say what it holds: {} {said} {last}", child.status),
     }
 }
 
@@ -283,10 +287,17 @@ fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
             }
             // A file torn within its length can end its reader too, by LMDB's abort on a page it can't read as one of
             // the tree it is in: not survived, and not what the open's check is for
-            Read::Ended(how) => lost.push(format!("ended its reader ({how})")),
+            Read::Aborted(how) => lost.push(format!("its reader aborted ({how})")),
         }
     }
     assert!(!lost.is_empty(), "every file of some of the pages was some commit's");
+    // Cut to half its pages, the last commit's file lacks pages its trees reach: refused by the open's check, where a
+    // reader let through would fault on the first of them it touched
+    match held_apart(&last[..last.len() / 2 / page * page]) {
+        Read::Refused(why) => assert!(why.contains("past its end"), "{why}"),
+        Read::Faulted(how) => panic!("the last commit's file, cut to half its pages, was read past its end ({how})"),
+        Read::Holds(_) | Read::Aborted(_) => panic!("the last commit's file, cut to half its pages, was read"),
+    }
     // Refused as LMDB refuses a file it can't read, or holding no commit's tasks: a loss of some pages is not survived
 }
 

@@ -469,11 +469,12 @@ rounds, after the Apple full sync was added), a commit took 0.03 ms in the group
 4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
 may be lost to a power loss until its sync, a moment later. More than the last commits can go with it: nothing orders
 the pages and meta pages written between two syncs, so a loss can leave a meta page on disk without all the pages it
-names, and both meta pages may be of commits since the sync. The file is then no commit's, a `durable` commit's
-neither: its sync covered the file as it was, not what later commits wrote over. Such a file is refused at open
-(`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may read wrongly, or
-end the process that reads it: LMDB aborts on a page that is no page of the tree it is in. The remedy is a backup. A
-test replays the loss in both modes (`testing.md`, Power loss).
+names, and LMDB opens a file by the newer of its two meta pages, whatever it names. The file is then no commit's, a
+`durable` commit's neither: its sync covered the file as it was, not what later commits wrote over. Such a file is
+refused at open (`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may
+read wrongly or end the process that reads it: LMDB reads a page as it finds it, and where it is built with its
+assertions on, as a debug build is, aborts on one that is no page of the tree it is in. The remedy is a backup. A test
+replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
