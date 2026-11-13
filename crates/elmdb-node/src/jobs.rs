@@ -15,8 +15,8 @@ use napi::{Env, Task};
 use crate::panics::{Health, Held};
 use crate::to_js;
 
-/// A write as the pool applies it: the work, and the settling of its promise, or for a write that waits for its sync,
-/// the wait and the settling, left for after the writes behind it
+/// A write as the pool applies it, with whether it is a durable one: the work, and the settling of its promise, or
+/// for a durable write, the wait for its sync and the settling, left for after the durable writes straight behind it
 type Queued = (bool, Box<dyn FnOnce() -> Option<Synced> + Send>);
 
 /// The wait for a durable write's sync, and the settling of its promise
@@ -92,9 +92,6 @@ impl Writes {
         let (deferred, promise) = env.create_deferred()?;
         let write = Box::new(move || {
             let ran = health.caught(export, || work(&db)).and_then(|done| done);
-            // The hold is let go on the pool's thread, before the promise is settled on JavaScript's: the last one
-            // closes the database
-            drop(db);
             let settle = move |ran: elmdb::Result<T>| {
                 deferred.resolve(move |env| match ran {
                     Ok(answer) => convert(&env, answer),
@@ -102,18 +99,25 @@ impl Writes {
                 });
             };
             match ran {
-                // Committed, and durable once its sync has run: answered then, after the writes behind it
+                // Committed, and durable once its sync has run: answered then, after the durable writes behind it
                 Ok((answer, Some(unsynced))) => Some(Box::new(move || {
                     // Waited for whatever the handle has been through since: the write is made, and a panic of one
                     // behind it is not its answer
                     let synced = health.always(export, || unsynced.wait()).and_then(|synced| synced);
+                    // The hold on the database outlasts the write's own on its store: let go first, the last hold
+                    // would close the database, and wait for a store this write still held
+                    drop(db);
                     settle(synced.map(|()| answer));
                 }) as Synced),
+                // The hold is let go on the pool's thread, before the promise is settled on JavaScript's: the last
+                // one closes the database
                 Ok((answer, None)) => {
+                    drop(db);
                     settle(Ok(answer));
                     None
                 }
                 Err(failed) => {
+                    drop(db);
                     settle(Err(failed));
                     None
                 }
