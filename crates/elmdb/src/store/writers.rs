@@ -11,8 +11,9 @@
 //! transaction begins. A writer waiting for another waits on the file lock rather than inside LMDB, so one already
 //! waiting when the holder dies is let go by the kernel too.
 //!
-//! On every platform a writer first takes its turn among this process's writers, and keeps it as long: LMDB's lock
-//! is let go as a commit lands, and what the store does with the commit after that is still one writer's at a time.
+//! On every platform a writer first takes its turn among this process's writers, and keeps it until the store has
+//! accounted for its commit: LMDB's lock is let go as a commit lands, and what the store does with the commit after
+//! that is still one writer's at a time.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -38,7 +39,7 @@ pub(crate) struct Writers {
     /// This process's writers, one at a time, each from before it takes the write transaction until it lets its hold
     /// go. LMDB lets its own lock go as a commit lands, which is before the store has handed the commit's edges to
     /// the mirror (`Store::commit_txn`): without the turn, the next writer of this process, on another thread, could
-    /// begin, and clear or add to what the first had yet to hand over
+    /// begin, and clear or replace what the first had yet to hand over
     turn: Arc<parking_lot::Mutex<()>>,
     #[cfg(target_os = "macos")]
     held: Option<macos::Held>,

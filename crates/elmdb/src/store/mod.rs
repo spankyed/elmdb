@@ -203,7 +203,8 @@ pub struct Store {
     replacing: AtomicU64,
     /// Tells other processes of commits here, and this one of theirs
     pub(crate) wake: wake::Wake,
-    /// What a writer takes before LMDB's write lock, so one a dead writer left held is let go
+    /// What a writer takes before LMDB's write lock: its turn among this process's writers, kept until its commit is
+    /// accounted for, and on macOS a file lock, so a write lock a dead writer left held is let go
     writers: writers::Writers,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
