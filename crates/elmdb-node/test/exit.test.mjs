@@ -152,7 +152,8 @@ test('a durable write of a handle nothing else holds is answered once the handle
   // been waited for: letting the database go first would close it, and wait for the store the write still held.
   // A rebuild of 20,000 notes runs ahead of the write, so the handle is collected before the write's turn comes: the
   // child says `collected` only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or
-  // `kept` where this run showed nothing
+  // `kept` where this run showed nothing. The handle was collected 6 to 7 ms in and the rebuild ended 245 to 274 ms
+  // in, over three runs (Apple M1 Pro, 2026-11-13, the binding built in release)
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
