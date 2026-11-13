@@ -610,10 +610,13 @@ unit is open.
   relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves.
-  `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info and
-  its weight, the types it joins (`ENDPOINT`), how many edges an end may have (`CARDINALITY`) and, in a kind declared
-  acyclic, no cycle (`CYCLE`); refused at the first edge the kind can't hold beside those already moved, with nothing
-  moved.
+  `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
+  (`FIELD_TYPE`, `REQUIRED_FIELD`), the types it joins (`ENDPOINT`), how many far ends an end may have
+  (`CARDINALITY`) and, in a kind declared acyclic, no cycle (`CYCLE`), each against the edges the kind holds and
+  those moved before it. A rename the kind refuses moves nothing, and names the relation refused. A weight goes
+  with its edge, to a kind that reads none as well, where it stays in the row as one does whose kind stops being
+  weighted (`schema.md`, Relations). An edge a looser rule let in before the kind was tightened, which `check()`
+  reports where it is, is refused the same way on its way into a kind with the rule.
   `renameField` refuses the engine's own fields (`RESERVED_FIELD`), and refuses, with nothing moved, while an entity
   holds a value under both names (`SCHEMA_CHANGE_REFUSED`): the move would replace the one the new name holds.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.

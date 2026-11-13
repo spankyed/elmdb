@@ -249,7 +249,7 @@ pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String], 
 
 /// Refuses an edge of `def` from `source` to `target` its kind's rules don't allow, an edge `relation` itself (when
 /// it is being moved) aside
-fn check_rules(
+pub(super) fn check_rules(
     t: &impl Read,
     def: &RelationDef,
     kind: &str,
@@ -307,7 +307,9 @@ fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Optio
     Ok((weight != 1.0).then_some(weight.abs()))
 }
 
-fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
+/// Refuses info an edge of `def` can't hold: what the kind's info spec refuses, and info that is no map where the
+/// kind's key is read from its fields
+pub(super) fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
     match info {
         // A key is read from the info's fields, so info that is no map would hold a null key whatever it was
         Some(info) if !def.key.is_empty() && !matches!(info, Value::Map(_)) => Err(Error::new(
@@ -449,15 +451,10 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
     Ok(())
 }
 
-/// Moves a relation to the kind `def` declares as `kind`, keeping its id, its ends and its place, held to that
-/// kind's rules as a link of it is: what its info and its weight may be, the types it joins, how many edges an end may
-/// have, and no cycle. The rules are read against the kind's edges as they are, those moved before this one among
-/// them, so a run of moves is refused at the first edge the new kind can't hold beside the others. An admin rename's
-/// move, between two kinds
-pub fn rekind(t: &mut Txn<'_, '_>, relation: &str, stored: Stored, def: &RelationDef, kind: &str) -> Result<()> {
-    check_info(def, kind, stored.info.as_ref())?;
-    weight_of(def, kind, stored.weight)?;
-    check_rules(t, def, kind, &stored.source, &stored.target, None)?;
+/// Moves a relation to another kind, keeping its id, its ends, its info, its weight and its place: an admin
+/// rename's move, of an edge the caller has held to the kind's rules (`check_info`, `check_rules`). A weight goes
+/// with its edge to a kind that reads none, as one stays in a row whose kind stops being weighted
+pub fn rekind(t: &mut Txn<'_, '_>, relation: &str, stored: Stored, kind: &str) -> Result<()> {
     remove(t, relation)?;
     restore(t, relation, &Stored { kind: kind.to_owned(), ..stored })
 }

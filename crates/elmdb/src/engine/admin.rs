@@ -162,10 +162,10 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
     Ok(())
 }
 
-/// Moves every relation of a kind to another kind the schema declares, keeping their ids and ends. Refused, with
-/// nothing moved, when the new kind couldn't hold the edges: one that would be a second of an identity, and one the
-/// kind's rules refuse a link of (its info or weight, the types it joins, an end with more edges than the kind's
-/// cardinality lets it have, a cycle in a kind declared acyclic)
+/// Moves every relation of a kind to another kind the schema declares, keeping their ids, ends, info and weights.
+/// Refused, with nothing moved, when the new kind couldn't hold the edges: info the kind doesn't take, an edge that
+/// would be a second of one identity, and an edge the kind's rules refuse a link of (the types it joins, an end with
+/// more far ends than the kind's cardinality gives it, a cycle in a kind declared acyclic)
 pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> {
     requires_declared(t.schema.relations.contains_key(to), &format!("The relation kind {to}"))?;
     if from == to {
@@ -173,12 +173,28 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
     }
     let moving: Vec<(String, relations::Stored)> =
         all_relations(t)?.into_iter().filter(|(_, stored)| stored.kind == from).collect();
-    // Refused before anything moves: an edge of the new kind with the same ends and key would be one identity twice, as
-    // an update of an edge onto another's identity is refused. Two moving edges that would be one identity are refused
-    // the same way, compared by the identity's own equality among those with the same ends
     // The schema outlives the unit's borrow of it, so the kind's rules are read while its edges are written
     let schema = t.schema;
     let def = schema.relations.get(to).expect("declared above");
+    // What a rule of the new kind refuses, of one relation: the rule as a link of the kind is told it, and what to do
+    let refused = |id: &str, stored: &relations::Stored, rule: Error| {
+        Error::new(
+            rule.code,
+            format!(
+                "renameRelation({from:?} to {to:?}): the relation {id}, from {} to {}, can't be of kind {to}, and nothing \
+                 was moved. A link of it is refused: \"{}\". Remove or change that relation, or the one of kind {to} it \
+                 can't stand beside, then rename again",
+                stored.source, stored.target, rule.message
+            ),
+        )
+    };
+    // Its info first: info that is no map reads as a null key, which the identity below would take for the edge's
+    for (id, stored) in &moving {
+        relations::check_info(def, to, stored.info.as_ref()).map_err(|rule| refused(id, stored, rule))?;
+    }
+    // Then refused before anything moves: an edge of the new kind with the same ends and key would be one identity
+    // twice, as an update of an edge onto another's identity is refused. Two moving edges that would be one identity
+    // are refused the same way, compared by the identity's own equality among those with the same ends
     let mut by_ends: std::collections::BTreeMap<(String, String), Vec<Vec<rmpv::Value>>> = Default::default();
     for (_, stored) in &moving {
         let key = relations::key_values(def, stored.info.as_ref());
@@ -209,17 +225,12 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
         }
         group.push(key);
     }
+    // Each edge is held to the kind's rules as it moves, against the edges the kind holds by then, those moved before
+    // it among them: a rename the kind can hold whole is refused at none, whatever order its edges move in
     for (id, stored) in moving {
-        let (source, target) = (stored.source.clone(), stored.target.clone());
-        relations::rekind(t, &id, stored, def, to).map_err(|refused| {
-            Error::new(
-                refused.code,
-                format!(
-                    "renameRelation({from:?} to {to:?}): the edge from {source} to {target} can't be of kind {to}, and                      nothing was moved: {}",
-                    refused.message
-                ),
-            )
-        })?;
+        relations::check_rules(t, def, to, &stored.source, &stored.target, None)
+            .map_err(|rule| refused(&id, &stored, rule))?;
+        relations::rekind(t, &id, stored, to)?;
     }
     Ok(())
 }
