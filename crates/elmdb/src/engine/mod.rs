@@ -419,6 +419,19 @@ pub struct Written<'a> {
     pub sequence: u64,
 }
 
+/// A write that has committed, and the sync that makes it durable
+pub struct Unsynced {
+    sequence: u64,
+    durable: crate::store::sync::Durable,
+}
+
+impl Unsynced {
+    /// Waits for the sync that covers the write, answering as a durable write does: `NOT_DURABLE` when it failed
+    pub fn wait(self) -> Result<()> {
+        Commit { sequence: self.sequence, synced: self.durable.wait() }.finish()
+    }
+}
+
 impl Database {
     /// `write` with the batch as msgpack bytes and the answer as msgpack bytes (`Written`), as the binding takes them
     pub fn write_bytes(&self, batch: &[u8], durable: bool) -> Result<Vec<u8>> {
@@ -430,6 +443,19 @@ impl Database {
             sequence: changes.sequence,
         })
         .expect("an answer serializes"))
+    }
+
+    /// `write_bytes`, answered once the commit has landed and before its sync, with the sync to wait for
+    /// (`Unsynced::wait`): a caller with several writes in hand makes them all and waits once, where each made
+    /// durable would wait for a sync of its own
+    pub fn write_bytes_unsynced(&self, batch: &[u8]) -> Result<(Vec<u8>, Unsynced)> {
+        let batch = decode_batch(batch)?;
+        let (results, changes) = self.write(&batch, false)?;
+        // Taken after the commit, so it covers it. A database closed since synced what it owed as it closed
+        let durable = self.durable().unwrap_or_else(|_| crate::store::sync::Durable::resolved());
+        let answer = Written { results: &results.results, changes: &changes, sequence: changes.sequence };
+        let answer = rmp_serde::to_vec_named(&answer).expect("an answer serializes");
+        Ok((answer, Unsynced { sequence: changes.sequence, durable }))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules

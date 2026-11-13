@@ -234,3 +234,30 @@ fn unchanged_schema_marker_commits_finalize_before_failed_sync() {
     assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::WATCH_READ));
     assert!(db.close().is_err());
 }
+
+#[test]
+fn a_write_made_before_its_sync_answers_at_once_and_its_wait_answers_as_a_durable_write_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), sync_idle_ms: 5, ..Default::default() })
+        .unwrap();
+    let bytes =
+        |id: &str| rmp_serde::to_vec_named(&batch(vec![json!({ "op": "create", "type": "Task", "id": id })])).unwrap();
+    // Two writes made and one sync waited for: each wait answers once a sync has covered its commit
+    let (first, first_sync) = db.write_bytes_unsynced(&bytes("Task-1")).unwrap();
+    let (second, second_sync) = db.write_bytes_unsynced(&bytes("Task-2")).unwrap();
+    assert!(super::row(&db, "Task-1").is_some() && super::row(&db, "Task-2").is_some(), "both are there before a sync");
+    let sequence = |answer: &[u8]| rmpv::decode::read_value(&mut &answer[..]).unwrap()["sequence"].as_u64().unwrap();
+    assert_eq!(sequence(&second), sequence(&first) + 1);
+    let synced = db.syncs().unwrap();
+    second_sync.wait().unwrap();
+    first_sync.wait().unwrap();
+    assert!(db.syncs().unwrap() > synced, "a sync ran for them");
+    // A sync that fails is the write's `NOT_DURABLE`, naming the commit that landed
+    let failure = FailedSync::arm(&db);
+    let (third, third_sync) = db.write_bytes_unsynced(&bytes("Task-3")).unwrap();
+    let error = third_sync.wait().unwrap_err();
+    assert_eq!(error.code, ErrorCode::NotDurable, "{error}");
+    assert!(error.message.contains(&format!("(sequence {})", sequence(&third))), "{error}");
+    assert!(super::row(&db, "Task-3").is_some(), "the write is there");
+    drop(failure);
+}

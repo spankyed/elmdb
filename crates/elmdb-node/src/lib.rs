@@ -170,7 +170,7 @@ impl Database {
         &self,
         env: &'env Env,
         export: &'static str,
-        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
+        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<(T, Option<elmdb::Unsynced>)> + Send + 'static,
         convert: fn(&Env, T) -> napi::Result<V>,
     ) -> Result<Object<'env>, Code>
     where
@@ -295,7 +295,11 @@ impl Database {
             self.queued(
                 env,
                 "Database.write, on a thread of the pool,",
-                move |db| db.write_bytes(&batch, durable.unwrap_or(false)),
+                // A durable write's sync is waited for after the writes behind it, one sync between them
+                move |db| match durable.unwrap_or(false) {
+                    true => db.write_bytes_unsynced(&batch).map(|(answer, unsynced)| (answer, Some(unsynced))),
+                    false => db.write_bytes(&batch, false).map(|answer| (answer, None)),
+                },
                 jobs::bytes,
             )
         })
@@ -476,7 +480,10 @@ impl Database {
             self.queued(
                 env,
                 "Database.rebuild, on a thread of the pool,",
-                move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
+                move |db| {
+                    let one = one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()));
+                    db.rebuild(one).map(|()| ((), None))
+                },
                 jobs::nothing,
             )
         })
