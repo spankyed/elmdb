@@ -200,8 +200,9 @@ fn aborted(status: &std::process::ExitStatus) -> bool {
 }
 
 /// `held`, asked of a child of this test binary, since a file whose pages are of different commits may be one that
-/// ends the process reading it: the child says, as its last line, what it holds or refuses. One ended by a fault or
-/// by an abort is answered as that, and one that said nothing and ended any other way fails here
+/// ends the process reading it: the child says, as its last line, what it holds or refuses. One ended by a fault,
+/// or by an abort LMDB made of an assertion it wrote, is answered as that, and one that said nothing and ended any
+/// other way fails here
 fn held_apart(image: &[u8]) -> Read {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("image");
@@ -214,7 +215,8 @@ fn held_apart(image: &[u8]) -> Read {
     let said = String::from_utf8_lossy(&child.stdout);
     let verdict = said.lines().rev().find_map(|line| {
         // On one thread the harness writes the test's name and the child its line after it, on one line
-        let line = line.rsplit_once(" ... ").map_or(line, |(_, said)| said);
+        let line =
+            line.strip_prefix("test ").and_then(|named| named.split_once(" ... ")).map_or(line, |(_, said)| said);
         line.strip_prefix("held ")
             .map(|model| Read::Holds(serde_json::from_str(model).unwrap()))
             .or_else(|| line.strip_prefix("refused ").map(|why| Read::Refused(why.to_owned())))

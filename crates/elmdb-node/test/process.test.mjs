@@ -229,14 +229,26 @@ test('a commit from another process wakes a listener, and a killed writer leaves
     child.stderr.on('data', (chunk) => (errors += chunk));
     // Its end, once its error stream has closed: how it ended, by a code or by a signal
     const ended = new Promise((resolve) => child.on('close', (code, signal) => resolve(code ?? signal)));
-    // One that ends any way but cleanly, and wasn't killed here, wrote nothing to wait for a wake of
-    const refused = ended.then((how) => {
-      if (how !== 0 && !killed) throw new Error(`the child ended by ${how}: ${errors}`);
+    // How a child told to kill itself ends: by the signal, or on Windows with the code a killed process leaves
+    const asAsked = (how) => (killed ? how === 'SIGKILL' || (process.platform === 'win32' && how === 1) : how === 0);
+    // An end that was not asked for wrote nothing to wait for a wake of. Only that settles this: a wait for the wake
+    // ends by the wake, never by the child ending as it was asked to
+    const refused = new Promise((_, reject) => {
+      ended.then((how) => {
+        if (!asAsked(how)) reject(new Error(`the child ended by ${how}: ${errors}`));
+      });
     });
-    await held(Promise.race([heard, refused]));
+    try {
+      await held(Promise.race([heard, refused]));
+    } catch (error) {
+      // One still running when the wait gave up would keep this process, and its job, from ending
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      throw error;
+    }
     // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
-    // commits, before it closes, and Windows removes no file a process holds open. One that wasn't killed closed
-    await refused;
+    // commits, before it closes, and Windows removes no file a process holds open
+    const how = await ended;
+    assert.ok(asAsked(how), `the child ended by ${how}: ${errors}`);
   };
 
   await writeElsewhere('Task-a', 'other.close();');

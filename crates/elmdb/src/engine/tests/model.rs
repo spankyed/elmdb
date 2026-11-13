@@ -2201,6 +2201,9 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             replaced_at: None,
         };
         for step in &reference.prelude {
+            // Read beside the builder, which a prelude runs with: no step of one is a rename, whose commit alone is
+            // taken from this
+            assert!(!matches!(step, Step::RenameRelation { .. } | Step::RenameField { .. }), "{step:?} in a prelude");
             let quiet = engine.db.sequence().expect("the sequence reads");
             let got = run(&engine.db, step);
             assert!(got.is_ok(), "the prelude's {step:?}: {got:?}");
