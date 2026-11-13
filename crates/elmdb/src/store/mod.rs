@@ -127,13 +127,15 @@ fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usi
         let snapshot = read_txn(env)?;
         run_point!(OPEN_SNAPSHOT);
         let Some(meta) = reach::meta(file, page, &snapshot) else {
-            // mutant-skip: replace > with >= in short_of_its_pages
-            // LMDB took the snapshot from a meta page of this file, so one is missing only when a commit has written
-            // over it: no test can make a file that lacks it with no commit since
             if env.info().last_txn_id > snapshot.id() {
                 continue;
             }
-            return Err(reach::corrupt(data, "holds no meta page of the commit LMDB opened it at"));
+            // LMDB took the snapshot from a meta page of this file, and no commit has written over it
+            return Err(reach::refused(
+                data,
+                "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                 than a database handle changed the file as it was opened. Open it again once nothing else writes it",
+            ));
         };
         // Read once the snapshot is held: a commit writes its pages before its meta page, and a file only grows under
         // other processes' commits, so every page this commit wrote to the file is in the length read here

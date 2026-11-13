@@ -7,7 +7,8 @@
 //!
 //! The walk reads the pages of one commit while other processes may be committing, so it reads them under a read
 //! transaction at that commit: LMDB gives none of the pages a snapshot reaches to a later commit while a reader holds
-//! it. A `Meta` borrows the transaction it was read for, and the walk takes a `Meta`, so no walk outlasts its snapshot.
+//! it. A `Meta` borrows the transaction it was read for, and `reach` takes a `Meta`, so the store's walk never
+//! outlasts its snapshot.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -32,8 +33,8 @@ const NONE: u64 = u64::MAX;
 /// The sub-database record a sub-database node holds, and where its root is in it
 const DB_RECORD: usize = 48;
 const DB_ROOT: usize = 40;
-/// The meta page fields the walk reads, from the start of the page: the magic, the roots of the free and main trees, and
-/// the transaction that committed it
+/// The meta page fields the walk reads, from the start of the page: the magic, the roots of the free and main trees, the
+/// last page the commit names, and the transaction that committed it
 const META_MAGIC: usize = PAGE_HEADER;
 const META_FREE_ROOT: usize = PAGE_HEADER + 24 + DB_ROOT;
 const META_MAIN_ROOT: usize = PAGE_HEADER + 24 + DB_RECORD + DB_ROOT;
@@ -74,10 +75,11 @@ pub(super) fn reach(file: &mut File, psize: usize, pages: u64, meta: &Meta<'_>, 
 /// the walk against LMDB's own counts of the trees in tests
 #[cfg(test)]
 pub(super) fn main_tree_pages(file: &mut File, psize: usize, pages: u64, txnid: u64, path: &Path) -> Result<usize> {
-    let main = meta_of(file, psize, txnid).ok_or_else(|| corrupt(path, "holds no meta page of that transaction"))?.main;
+    let (_, main, _) =
+        meta_of(file, psize, txnid).ok_or_else(|| refused(path, "holds no meta page of that transaction"))?;
     let mut walk = Walk { file, psize, pages, path, seen: vec![false; pages as usize], highest: 0 };
     if let Some(missing) = walk.tree(main)? {
-        return Err(corrupt(path, &format!("reaches page {missing} past its end")));
+        return Err(refused(path, &format!("reaches page {missing} past its end")));
     }
     Ok(walk.seen.iter().filter(|seen| **seen).count())
 }
@@ -89,21 +91,18 @@ pub(super) fn meta<'snapshot>(
     psize: usize,
     snapshot: &'snapshot RoTxn<'_, WithoutTls>,
 ) -> Option<Meta<'snapshot>> {
-    meta_of(file, psize, snapshot.id() as u64)
+    let (free, main, last_page) = meta_of(file, psize, snapshot.id() as u64)?;
+    Some(Meta { free, main, last_page, _held: PhantomData })
 }
 
-fn meta_of<'snapshot>(file: &mut File, psize: usize, txnid: u64) -> Option<Meta<'snapshot>> {
+/// The free tree's root, the main tree's and the last page, of the meta page transaction `txnid` wrote
+fn meta_of(file: &mut File, psize: usize, txnid: u64) -> Option<(u64, u64, u64)> {
     for at in [0, psize as u64] {
         let Some(page) = read_at(file, at, META_LEN) else { continue };
         if u32_at(&page, META_MAGIC) != MAGIC || u64_at(&page, META_TXNID) != txnid {
             continue;
         }
-        return Some(Meta {
-            free: u64_at(&page, META_FREE_ROOT),
-            main: u64_at(&page, META_MAIN_ROOT),
-            last_page: u64_at(&page, META_LAST_PAGE),
-            _held: PhantomData,
-        });
+        return Some((u64_at(&page, META_FREE_ROOT), u64_at(&page, META_MAIN_ROOT), u64_at(&page, META_LAST_PAGE)));
     }
     None
 }
@@ -148,9 +147,12 @@ impl Walk<'_> {
                     continue;
                 }
                 if node_flags & F_DUPDATA != 0 {
-                    return Err(corrupt(
+                    return Err(refused(
                         self.path,
-                        &format!("page {pgno} holds a duplicate-sorted node, which elmdb never writes"),
+                        &format!(
+                            "holds a duplicate-sorted node on page {pgno}, which elmdb never writes: it is not a file \
+                             elmdb wrote. Open a database elmdb wrote"
+                        ),
                     ));
                 }
                 if node_flags & F_SUBDATA != 0 {
@@ -246,16 +248,20 @@ fn read_at(file: &mut File, at: u64, len: usize) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-/// A file the walk can't read as LMDB wrote it: what it found, and what there is to do about a torn file
-pub(super) fn corrupt(path: &Path, what: &str) -> Error {
-    Error::new(
-        ErrorCode::Corrupted,
-        format!(
-            "{} {what}: a power loss may have left it torn. Restore the database from a backup, or from a copy of the \
-             file that is whole",
-            path.display()
+/// A page the walk can't read as LMDB wrote it, in the file's own words, and what there is to do about a torn file
+fn corrupt(path: &Path, what: &str) -> Error {
+    refused(
+        path,
+        &format!(
+            "{what}: a power loss may have left it torn. Restore the database from a backup, or from a copy of the file \
+             that is whole"
         ),
     )
+}
+
+/// A file refused as `CORRUPTED`: what is wrong with it and what to do, after its path
+pub(super) fn refused(path: &Path, what: &str) -> Error {
+    Error::new(ErrorCode::Corrupted, format!("{} {what}", path.display()))
 }
 
 fn u16_at(bytes: &[u8], at: usize) -> u16 {
