@@ -143,5 +143,5 @@ elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.
 Its base trails upstream: on 2026-10-24 heed 0.23.0's LMDB sat on upstream's 2026-04-27 commit, without ten later
 fixes, among them ITS#10642 (`mdb_subdb_adjust` alignment) and ITS#10643 (page counts when deleting DUPSORT records).
 Neither reaches elmdb: `mdb_subdb_adjust` isn't in heed's LMDB at all, and both concern DUPSORT sub-databases, which
-elmdb doesn't use (`docs/evidence/phase-1.md`). No CI job tracks the upstream commits heed's LMDB lacks: they are checked by hand, and a fix elmdb needs goes to
+elmdb doesn't use (`docs/evidence/phase-1.md`). The `lmdb upstream` workflow fails each week upstream has a commit nobody here has read (`scripts/lmdb-upstream.py`), and a fix elmdb needs goes to
 Meilisearch's fork as a rebase request or a pull request.

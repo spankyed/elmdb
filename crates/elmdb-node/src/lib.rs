@@ -509,7 +509,7 @@ impl Database {
         })
     }
 
-    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    /// Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when a build failed
     #[napi(ts_return_type = "IndexStatus[]")]
     pub fn index_status(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.indexStatus", || {

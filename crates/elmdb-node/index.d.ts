@@ -92,7 +92,7 @@ export declare class Database {
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
   /** `rebuild` on this thread */
   rebuildSync(entityType?: string | undefined | null, index?: string | undefined | null): void
-  /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
+  /** Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
   committedElsewhere(): boolean
