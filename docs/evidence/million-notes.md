@@ -397,3 +397,28 @@ A third run at a million with a second enum of two values in two indexes, at the
 entities hold adds 19.6 µs, 56% of the unit, where a second filing of a string no other holds added 13.2 in that
 run (32.4 and 45.6). Not read: why. By the layout a value's places are in blocks by place, so each change of a
 unit spread over the type would write a block of its own under each value, which is an inference.
+
+## A string's order, read from its index
+
+The same benchmark on `session/string-order-build` at `0655330` with untracked files of no part in it, a million
+notes, one run (Apple M1 Pro, 2026-11-14, Node 24.16.0, SQLite 3.53.0, the binding built in release). The machine
+was at load 202 as the run began and 66 as it ended, other work having it: no time here is one to compare with the
+readings above, and two engines' times are compared only within this run. What load doesn't change is what was
+visited.
+
+| | elmdb | SQLite | elmdb visited | visited before |
+|---|---:|---:|---:|---:|
+| The first ten of the names' order | 0.052 ms | 0.020 ms | 10 | 1,000,092 |
+| A page of 50 near the end of the loaded notes' names | 0.129 ms | 0.167 ms | 50 | 1,000,092 |
+| The count of the last 200 names, by a range | 0.425 ms | 0.053 ms | 200 | 1,000,092 |
+| Every note in the names' order, a million ids handed over | 3,220 ms | 2,510 ms | 1,000,092 | 1,000,092 |
+| A unit that gives 1,000 notes each a name elsewhere in the order, the process's CPU | 42.8 ms | 57.2 ms | | |
+| A unit that gives 1,000 notes each the other status, the process's CPU | 38.0 ms | 48.2 ms | | |
+
+The name's index is 113.2 MB where it was 41.0: its order's keys are 72 MB, 72 bytes a note, and a note is 1,327
+bytes as loaded where it was 1,304. The status's index is 1.1 MB as it was, its order two keys.
+
+What they say. An order of strings, a page of it and a range of it each read what they answer with and no more.
+Every note in the names' order took 1.28 times what SQLite took in this run, where it took 3.1 times in the run
+above; whether it is under half its own time before, which `../roadmap/string-order.md`'s fourth phase asks, a
+run this loaded can't say, nor what the order adds to the two units: both are owed a run on a quiet machine.
