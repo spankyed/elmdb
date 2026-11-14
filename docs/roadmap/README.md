@@ -17,7 +17,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [The change log as a product](change-log.md) | Designed: incremental backup from the fields changed since a sequence; sync and undo named, not designed |
 | [The JavaScript boundary](javascript-boundary.md) | Designed: lazy rows that decode a field when read, and optimistic units that can span an `await` |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
-| [A string's order from its index](string-order.md) | Designed, not built: every declared value index files its strings' places a second time under the collation's sort keys, so an order, a page and a string range read entries where they read every entity, and no stale sort key is read |
+| [A string's order from its index](string-order.md) | Designed, not built: every declared value index files its strings' places a second time under the collation's sort keys, so an order, a page and a string range read entries where they read every entity; a marker of the collator's stamp and a build keep a stale sort key from being read |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
 ## Development improvements
