@@ -329,3 +329,71 @@ machine otherwise quiet: the rebuild on the pool held the event loop for at most
 other, while the rebuild took 3.6 and 3.7 s; the calling-thread form held it for the whole 3.5 s in both. An idle run of
 the timer at the same load showed one gap of 10.0 ms, so the timer's own noise is of the gate's size even at this load:
 the pool's holds were below it in both rebuild runs. The calling-thread form held the loop for the whole rebuild each time.
+
+## A string's order, before an index reads it
+
+The benchmark with a name in a value index, a string no other note holds, beside the status, one of two
+(`fixtureVersion` 3), on `session/string-order-readings` at `d4e6544` with two untracked files of no part in it, a
+million notes, one run (Apple M1 Pro, 2026-11-13, load 9.5 as it began and 6.7 as it ended, Node 24.16.0, SQLite
+3.53.0, the binding built in release). These are the readings `../roadmap/string-order.md` starts from: an order on a
+string is answered from the rows, as is a range of strings.
+
+| | elmdb | SQLite | elmdb visited |
+|---|---:|---:|---:|
+| The first ten of the names' order | 976 ms | 0.005 ms | 1,000,092 |
+| A page of 50 near the end of the loaded notes' names | 990 ms | 0.027 ms | 1,000,092 |
+| The count of the last 200 names, by a range | 1,108 ms | 0.006 ms | 1,000,092 |
+| Every note in the names' order, a million ids handed over | 2,534 ms | 817 ms | 1,000,092 |
+| The ten lowest of the indexed number, beside them | 0.027 ms | 0.008 ms | 10 |
+| A unit that gives 1,000 notes each a name elsewhere in the order | 22.6 ms | 35.3 ms | |
+| The process's CPU for that unit | 23.9 ms | 34.2 ms | |
+| A unit that gives 1,000 notes each the other status | 30.1 ms | 27.8 ms | |
+| The process's CPU for that unit | 31.1 ms | 29.0 ms | |
+| A create of three terms every note holds, at a million | 0.176 ms | 0.058 ms | |
+| A create of thirty terms, fifteen widely held, at a million | 0.437 ms | 0.066 ms | |
+| Load | 77.5 s | 50.5 s | |
+| Bytes a note, as loaded | 1,304 | 199 | |
+| Bytes a note, compacted | 1,003 | 191 | |
+| A check | 44.4 s | 2.6 s | |
+| A rebuild | 50.9 s | 2.7 s | |
+
+The bytes of each of elmdb's value indexes, keys and values in every family it is filed in (`stats()`): the name's
+41.0 MB, 41 bytes a note; the number's 27.0 MB; the status's 1.1 MB, a little over a byte a note.
+
+What they say for that design. Each read of the names' order visits every note, where the number's visits ten. A
+change of one indexed string costs 23 to 30 µs of a unit, the status's no less than the name's though its index is a
+thirty-sixth the size.
+
+Where those microseconds go, read apart from the benchmark by `crates/elmdb/examples/change-cost.rs`: a type of a
+million entities with a title of 94 bytes, a string no index reads, one a value index files, one two value indexes
+file, an enum of two values and a number, each unit setting one field of 1,000 entities spread over the type; then a
+create in each of three types as large, of the title and a string that no index, one and two file. The median of five
+units, CPU of the process for each entity, the wall times left out for the load (Apple M1 Pro, 2026-11-14, built in
+release, at the commit that adds the creates; two runs at a million, load 24 to 25 and 13.5 to 14.8, the creates in
+the second only, and one at 100,000, load about 30).
+
+| | A million | again | 100,000 |
+|---|---:|---:|---:|
+| Set a string no index reads | 14.7 µs | 14.4 µs | 11.4 µs |
+| The same, of 1,000 entities next to each other | 5.2 µs | 5.3 µs | 4.7 µs |
+| Set a string one value index files | 32.2 µs | 33.2 µs | 17.8 µs |
+| Set a string two value indexes file | 45.7 µs | 49.1 µs | 26.3 µs |
+| Set the enum of two values, in one index | 33.8 µs | 36.8 µs | 27.0 µs |
+| Set the number, in one index | 31.5 µs | 37.4 µs | 16.8 µs |
+| Create, the string in no index | | 14.0 µs | 12.9 µs |
+| Create, the string in one index | | 19.4 µs | 18.3 µs |
+| Create, the string in two | | 23.1 µs | 22.1 µs |
+
+A change's time is the pages it is the first of its unit to write. An entity next to the last one changed costs 5 µs,
+one in a page of its own 11 to 15, and an index adds 5 to 23 for the place it takes out and the one it puts in, each
+in a leaf no other change of the unit touches. So about half of a change of an indexed string is its index's. A
+second index of the same string is what a second place filed for an order is, but for the sort key. It adds 13.5 and
+15.9 µs to a change of that string at a million, 42% and 48% of the unit, and 8.5 µs at 100,000. To a create it adds
+3.7 µs, a place put in and none taken out: 19% of a create of a title and a string, and 2% of the 176 µs the
+benchmark's create of a note of three terms took above. A write that changes another field pays nothing.
+
+A third run at a million with a second enum of two values in two indexes, at the commit that adds it (load 23 to
+27): a change of the enum one index files 35.3 µs, of the one two file 54.9, so a second filing of a value half the
+entities hold adds 19.6 µs, 56% of the unit, where a second filing of a string no other holds added 13.2 in that
+run (32.4 and 45.6). Not read: why. By the layout a value's places are in blocks by place, so each change of a
+unit spread over the type would write a block of its own under each value, which is an inference.
