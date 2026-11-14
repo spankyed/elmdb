@@ -115,6 +115,64 @@ fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usiz
     Ok(page)
 }
 
+/// The environment as an open holds it, before a store is made of it: this process's only handle to the files
+/// (`open_paths`), with no transaction open but the one the open is in, each ended before the next is begun
+#[derive(Clone, Copy)]
+struct Opening<'a> {
+    env: &'a Env<WithoutTls>,
+    /// The database's directory
+    dir: &'a Path,
+    read_only: bool,
+}
+
+impl<'a> Opening<'a> {
+    /// A transaction begun, the map taken at the size another process grew the file to when LMDB refuses to begin one
+    /// in the map as it was opened (`MDB_MAP_RESIZED`): other processes write while this one opens
+    fn begin<T>(&self, begin: impl Fn() -> heed::Result<T>) -> Result<T> {
+        loop {
+            match begin() {
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    run_point!(OPEN_MAP_GROWN);
+                    // SAFETY: the transaction refused was the open's one, so none is open in this process, which
+                    // LMDB requires, and no other thread holds the environment yet: the open begins its last
+                    // transaction before it starts group commit's thread
+                    unsafe { adopt_grown_map(self.env, self.dir, self.read_only) }?;
+                }
+                begun => return Ok(begun?),
+            }
+        }
+    }
+
+    fn read(&self) -> Result<RoTxn<'a, WithoutTls>> {
+        let env = self.env;
+        self.begin(|| read_txn(env))
+    }
+
+    fn write(&self) -> Result<heed::RwTxn<'a>> {
+        let env = self.env;
+        self.begin(|| env.write_txn())
+    }
+}
+
+/// Takes the map size another process grew the file to.
+///
+/// # Safety
+///
+/// No transaction is open in this process, and nothing else reads through the map LMDB unmaps.
+unsafe fn adopt_grown_map(env: &Env<WithoutTls>, dir: &Path, read_only: bool) -> Result<()> {
+    #[cfg(windows)]
+    let size = if read_only { read_only_map_size(std::fs::metadata(dir.join("data.mdb"))?.len(), None) } else { 0 };
+    #[cfg(not(windows))]
+    let size = {
+        let _ = (dir, read_only);
+        0
+    };
+    // SAFETY: the caller's; a size of 0 adopts the recorded capacity. Windows read-only mappings instead use physical
+    // file length, so the next external extension is detected before any page outside that view is read.
+    unsafe { env.resize(size) }?;
+    Ok(())
+}
+
 /// Whether the data file is shorter than the pages its last commit names, having read the trees to see that they reach
 /// none of the pages it lacks; a file whose trees do is refused as torn.
 ///
@@ -122,9 +180,10 @@ fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usiz
 /// committing, and LMDB gives no page a held snapshot reaches to a later commit. The commit's meta page is read from the
 /// file, where the commit after the next writes over it: when it has gone by the time it is read, two commits landed
 /// since the snapshot was taken, and the walk starts again from a later one
-fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usize, data: &Path) -> Result<bool> {
+fn short_of_its_pages(opening: &Opening<'_>, file: &mut std::fs::File, page: usize, data: &Path) -> Result<bool> {
+    let env = opening.env;
     loop {
-        let snapshot = read_txn(env)?;
+        let snapshot = opening.read()?;
         run_point!(OPEN_SNAPSHOT);
         let Some(meta) = reach::meta(file, page, &snapshot) else {
             if env.info().last_txn_id > snapshot.id() {
@@ -163,13 +222,14 @@ fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usi
 /// commit of every process lands under: the file's length and the last commit's pages are read where neither changes,
 /// so the file is only ever made longer, and never cut where another process has written since it was found short
 fn extend_to_its_pages(
-    env: &Env<WithoutTls>,
+    opening: &Opening<'_>,
     writers: &writers::Writers,
     file: &std::fs::File,
     page: usize,
 ) -> Result<()> {
+    let env = opening.env;
     let _writer = writers.hold()?;
-    let txn = env.write_txn()?;
+    let txn = opening.write()?;
     let needed = (env.info().last_page_number as u64 + 1) * page as u64;
     // mutant-skip: replace < with <= in extend_to_its_pages
     // A file of exactly those pages would be set to the length it has
@@ -351,7 +411,11 @@ pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutT
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
-    let _reader = read_txn(env)?;
+    registered(env, path, &read_txn(env)?)
+}
+
+/// Whether the lock table registers `_reader`, a read transaction of `env` held while it is asked
+fn registered(env: &Env<WithoutTls>, path: &Path, _reader: &RoTxn<'_, WithoutTls>) -> Result<()> {
     if env.info().number_of_readers == 0 {
         return Err(Error::new(
             ErrorCode::Io,
@@ -437,17 +501,30 @@ impl Store {
         // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
+        run_point!(OPEN_ENV);
+        let opening = Opening { env: &env, dir: &canonical, read_only: options.read_only };
         if options.read_only {
             // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
-            require_registered_reader(&env, &canonical)?;
+            registered(&env, &canonical, &opening.read()?)?;
         }
-        let short = short_of_its_pages(&env, &mut file, page, &data)?;
+        let short = short_of_its_pages(&opening, &mut file, page, &data)?;
         run_point!(OPEN_WALKED);
         let writers = writers::Writers::open(&canonical, options.read_only)?;
         if short && !options.read_only {
-            extend_to_its_pages(&env, &writers, &file, page)?;
+            extend_to_its_pages(&opening, &writers, &file, page)?;
         }
-        let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
+        let db = Self::open_db(&opening, &writers)?;
+        // Read before group commit's thread is started, the last of the open's transactions: none is begun, and no
+        // map taken at a new size, once another thread holds the environment
+        let sequence = {
+            let txn = opening.read()?;
+            let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
+            held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
+        };
+        let epoch = {
+            let txn = opening.read()?;
+            stored_epoch(&txn, db)?
+        };
         let gate = Arc::new(RecursiveRwLock::new(()));
         let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
             GroupCommit::start(
@@ -456,15 +533,6 @@ impl Store {
                 Box::new(SystemClock),
             )
         });
-        let sequence = {
-            let txn = read_txn(&env)?;
-            let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
-            held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
-        };
-        let epoch = {
-            let txn = read_txn(&env)?;
-            stored_epoch(&txn, db)?
-        };
         let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);
@@ -501,8 +569,9 @@ impl Store {
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
-    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool, writers: &writers::Writers) -> Result<Db> {
-        let rtxn = read_txn(env)?;
+    fn open_db(opening: &Opening<'_>, writers: &writers::Writers) -> Result<Db> {
+        let Opening { env, dir: path, read_only } = *opening;
+        let rtxn = opening.read()?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
                 let elmdb = opener.open_database::<Bytes, Bytes>(rtxn, Some(format::DB_NAME))?;
@@ -513,7 +582,7 @@ impl Store {
         // The unnamed database lists the named ones: anything in it but elmdb's own is another program's data
         let foreign = match main {
             Some(main) => {
-                let txn = read_txn(env)?;
+                let txn = opening.read()?;
                 main.iter(&txn)?.any(|e| {
                     e.is_ok_and(|(k, _)| {
                         ![format::DB_NAME, format::COSINE_GRAPHS, format::EUCLIDEAN_GRAPHS]
@@ -525,8 +594,8 @@ impl Store {
             None => false,
         };
         if let Some(db) = db {
-            check_stamp(env, db, path)?;
-            return Self::with_graphs(env, db, read_only, writers);
+            check_stamp(opening, db)?;
+            return Self::with_graphs(opening, db, writers);
         }
         if read_only || foreign {
             return Err(Error::new(
@@ -540,7 +609,7 @@ impl Store {
         }
         // A new environment: its database and stamp in one unit, synced, before anything else is written
         let writer = writers.hold()?;
-        let wtxn = env.write_txn()?;
+        let wtxn = opening.write()?;
         let db = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
                 let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
@@ -557,18 +626,18 @@ impl Store {
         // Let go before the graphs' transaction, which takes it again
         writer.release();
         env.force_sync()?;
-        Self::with_graphs(env, db, read_only, writers)
+        Self::with_graphs(opening, db, writers)
     }
 
     /// The databases around `main`: hannoy's graph databases, created in a writable environment that lacks them, and
     /// opened, when there, in a read-only one
     fn with_graphs(
-        env: &Env<WithoutTls>,
+        opening: &Opening<'_>,
         main: heed::Database<'static, Bytes, Bytes>,
-        read_only: bool,
         writers: &writers::Writers,
     ) -> Result<Db> {
-        let rtxn = read_txn(env)?;
+        let Opening { env, read_only, .. } = *opening;
+        let rtxn = opening.read()?;
         let (cosine, euclidean) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
                 let cosine = opener.open_database(rtxn, Some(format::COSINE_GRAPHS))?;
@@ -580,7 +649,7 @@ impl Store {
             return Ok(Db { main, cosine, euclidean });
         }
         let _writer = writers.hold()?;
-        let wtxn = env.write_txn()?;
+        let wtxn = opening.write()?;
         let (cosine, euclidean) = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
                 let cosine = opener.create_database(wtxn, Some(format::COSINE_GRAPHS))?;
@@ -1098,17 +1167,8 @@ impl Store {
     fn adopt_map_size(&self) -> Result<()> {
         let _gate = self.gate.write();
         self.drop_idle();
-        #[cfg(windows)]
-        let size = if self.read_only {
-            read_only_map_size(std::fs::metadata(self.path.join("data.mdb"))?.len(), None)
-        } else {
-            0
-        };
-        #[cfg(not(windows))]
-        let size = 0;
-        // SAFETY: as in `grow`; a size of 0 adopts the recorded capacity. Windows read-only mappings instead use
-        // physical file length, so the next external extension is detected before any page outside that view is read.
-        unsafe { self.env.resize(size) }?;
+        // SAFETY: as in `grow`
+        unsafe { adopt_grown_map(&self.env, &self.path, self.read_only) }?;
         Ok(())
     }
 
@@ -1242,8 +1302,9 @@ pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name:
     db.put(txn, &meta_key(name), value).map_err(Into::into)
 }
 
-fn check_stamp(env: &Env<WithoutTls>, db: heed::Database<'_, Bytes, Bytes>, path: &Path) -> Result<()> {
-    let txn = read_txn(env)?;
+fn check_stamp(opening: &Opening<'_>, db: heed::Database<'_, Bytes, Bytes>) -> Result<()> {
+    let path = opening.dir;
+    let txn = opening.read()?;
     let kind = db.get(&txn, &meta_key(meta::KIND))?;
     if kind != Some(format::KIND.as_bytes()) {
         return Err(Error::new(ErrorCode::NotADatabase, format!("{} holds no elmdb database", path.display())));

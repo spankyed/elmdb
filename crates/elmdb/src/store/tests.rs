@@ -1456,11 +1456,53 @@ fn a_writable_open_cuts_nothing_another_process_wrote_after_the_file_was_found_s
             written.set(std::fs::metadata(&data).unwrap().len());
         }
     });
-    let store = Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file");
+    // The open's map is no larger than the file it found, so what the other process wrote is past it: the write
+    // transaction the file is extended under is the first the open begins after, and takes the grown map
+    let found_grown = Rc::new(Cell::new(false));
+    failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+        let found_grown = Rc::clone(&found_grown);
+        move || found_grown.set(true)
+    });
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..quiet() })
+        .expect("a writable open of a healthy short file");
     assert!(written.get() > (last + 1) * page, "the other process wrote past the pages the open had read of");
+    assert!(found_grown.get(), "the open began its write transaction in the map the other process had outgrown");
     let held = std::fs::metadata(&data).unwrap().len();
     assert!(held >= written.get(), "the open cut the file to {held} bytes, of the {} written", written.get());
     assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
+#[test]
+fn an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    // Grown before the open's first transaction, which for a read-only open is the one its reader is registered by
+    // and for a writable one the snapshot its walk reads at, and grown after the walk, before the databases are opened
+    let cases = [points::OPEN_ENV, points::OPEN_WALKED].into_iter().flat_map(|point| [(point, false), (point, true)]);
+    for (point, read_only) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let small = 1 << 20;
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap();
+        put(&store, "a", b"1").unwrap();
+        store.close().unwrap();
+        // The open holds the file in a map of 1 MiB when another process writes some 4 MiB: each transaction it
+        // begins from then on is refused in the map as it was opened, until it takes the new size
+        failpoints::run_once_here(point, {
+            let dir = dir.path().to_path_buf();
+            move || grow_elsewhere(&dir)
+        });
+        let found_grown = Rc::new(Cell::new(false));
+        failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+            let found_grown = Rc::clone(&found_grown);
+            move || found_grown.set(true)
+        });
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), read_only, ..quiet() })
+            .unwrap_or_else(|e| panic!("an open while another process grows the file at {point}: {e}"));
+        assert!(found_grown.get(), "the open began a transaction in the map the other process had outgrown");
+        assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+        assert!(store.map_size() > small);
+    }
 }
 
 #[test]
@@ -1522,7 +1564,8 @@ fn a_file_that_holds_every_page_its_meta_page_names_is_not_read_for_its_trees() 
     let mut file = std::fs::File::open(&data).unwrap();
     let page = super::page_size_of(&mut file, &data).unwrap();
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (store.env.info().last_page_number as u64 + 1) * page as u64);
-    assert!(!super::short_of_its_pages(&store.env, &mut file, page, &data).unwrap(), "a whole file is not short");
+    let opening = super::Opening { env: &store.env, dir: store.path(), read_only: false };
+    assert!(!super::short_of_its_pages(&opening, &mut file, page, &data).unwrap(), "a whole file is not short");
 }
 
 #[test]
