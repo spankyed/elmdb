@@ -1,147 +1,209 @@
 # A string's order read from its index
 
 Status: designed, 2026-11-13, and not built. It is the part of roadmap change 5 still open (`../roadmap.md`): an
-`orderBy` on a string field sorts every entity of the set, where one on a number reads ten entries for its first ten.
-It adds derived keys, so it is built before format 1 is frozen (change 8).
+`orderBy` on a string field reads every entity of the set, where one on a number reads ten entries for its first ten.
+It adds derived keys, so it is built before format 1 is frozen (change 8). The design was read against the code by a
+second reader, and what that changed is under What was set aside.
 
 ## Where it stands
 
 A value index files a string under its own bytes (`../architecture/format.md`, `d/x`), which is what an equality and
 `unique` need. An `orderBy` and a `range` with string bounds order strings by the schema's collation, ICU's root or a
 locale's (`../architecture/schema.md`, `collation`), and the collation's order is not the bytes' order: `a` sorts
-before `B`, and `é` beside `e`. So an order on a string field reads the field of every entity in the set, sorts them
-with the collator, and hands them on (`engine/reads.rs`, the `orderBy` step's sorted arm), and a string `range` tests
-each entity it is given. A `limit 10` after the order saves nothing: the sort is whole before the first is handed on.
+before `B`, and `é` beside `e`. So an order on a string field reads the field of every entity in the set and compares
+them with the collator (`engine/reads.rs`, the `orderBy` step's sorted arm), and a string `range` tests each entity it
+is given. With a `limit` straight after it the order keeps only that many as it goes (`first_ordered`), one pass and
+no sort; without one it sorts them all. Either way every entity's field is read.
+
+An index holding any value it can't file, a string past 256 bytes among them (`MAX_INDEXED_STRING`), is read for no
+order at all, of numbers either: one such value sends every order on the field to the sorted arm.
 
 A change of the schema's collation is applied at once and costs nothing, because no stored key depends on it
 (`../architecture/schema.md`, Changing a schema).
 
 ## The measurements
 
-One run of a disposable program on a copy of `main` at `0933e43` (Apple M1 Pro, 2026-11-13, load 14.4, built in
-release, `icu_collator` 2.4.0, root collation): a million titles of three to six words from a vocabulary of 4,000, a
-tenth of the words with an accented letter and a quarter capitalized, 33.6 bytes a title. No database is in it: these
-are the collator's costs alone, and the sorted arm also reads each entity's field.
+Two runs of disposable programs on a copy of `main` at `0933e43` (Apple M1 Pro, 2026-11-13, load 14.4 for the first,
+built in release, `icu_collator` 2.4.0). No database is in them: these are the collator's costs alone.
+
+The first, root collation, a million titles of three to six words from a vocabulary of 4,000, a tenth of the words
+with an accented letter and a quarter capitalized, 33.6 bytes a title:
 
 | What | Reading |
 |---|---|
 | A sort key | 40.2 bytes a title, 1.2 times the string; 775 ns to make |
 | The million sorted by the collator's comparison | 2,351 ms |
 | The million sorted by their sort keys' bytes | 211 ms, the same order |
-| The ten least kept in one pass of comparisons, no sort | 335 ms |
-| A sort key's longest, of a string the index files (256 bytes at most) | 389 bytes, for 128 `é`; 269 for 256 ASCII letters |
-| A zero byte in any of the million keys | none |
+| The ten least kept in one pass of comparisons, which is what a `limit 10` costs today before its fields are read | 335 ms |
 | `é` composed and decomposed | equal to the collator, and one sort key |
 | `a` and `A` | different sort keys |
 
-What they say: the comparison sort is the cost an index would remove, some 2.4 µs an entity before any field is read;
-a sort key orders as the collator does and is a little longer than its string; and two strings of different bytes can
-be equal to the collator, so a sort key can't stand in for the string where an equality is asked.
+The second, sort keys at their longest and against the collator's comparison:
+
+| What | Reading |
+|---|---|
+| 256 uppercase ASCII letters | a key of 522 bytes, past LMDB's 511-byte key |
+| 256 bytes of capitalized words | 368 bytes |
+| 85 of U+FDFA, 255 bytes | 3,620 bytes |
+| A key written into a buffer too short for it | an error, and for 128 Cyrillic letters the bytes written were not the whole key's first |
+| The sign of the comparison against the keys' byte order, 300,000 pairs of random strings of mixed scripts in each of root, `sv`, `de`, `fr-CA`, `ja`, `es`, `tr`, `zh` | the same on every pair |
+| Pairs equal to the collator and of different bytes, of each 300,000 | 109 to 160 |
+
+What they say: a sort key orders as the collator does; it has no useful bound, so a key is cut and cut keys are met
+in ordinary data; a cut is the first bytes of the whole key and can't be had by stopping the collator early; and two
+strings of different bytes can be equal to the collator, so a sort key can't stand in for a string where an equality
+is asked.
 
 ## The design
 
-**Every value index orders its strings, and nothing is declared.** A caller who indexes a field and orders by it gets
-the index's speed without knowing there was a choice to make, and one code path is the one every index, test and
-model step runs. What makes that affordable is the next point: the cost is by distinct string, not by entity.
+**Every value index a schema declares keeps its last field's strings in the collation's order, and nothing is
+declared.** A caller who indexes a field and orders by it gets the index, without knowing there was a choice. The one
+field left out is one declared a `ref`, whose strings are ids. The engine's own indexes, of short codes and roles,
+are read for no order and keep none.
 
-**The keys are a directory of the index's strings, in the collation's order.** One more derived prefix, declared in
-`format`'s table:
+**The keys hold an index's order, in the form its values are held.** One more derived family, declared in `format`'s
+table, with its blocks as `d/x` has `d/xp`:
 
 | Key | Holds |
 |---|---|
-| `d/xo` type index leading… sortkey | the strings the index files under these leading values whose sort key this is: one, or the few the collator holds equal or that share the key's bytes |
+| `d/xo` type index build leading… sortkey | the places of the entities whose last field holds a string with this sort key, under what the index's fields before the last hold: as `d/x` holds a value's places |
+| `d/xo` type index build leading… (no key) | the places of the entities the order can't place: a list, a map, any value the index files nowhere but a string |
 
-- It holds no places. A string's entities are where they are today, under the string in `d/x`: an order reads a
-  `d/xo` entry for the next string and that string's `d/x` entry for its entities. So a field of ten values over a
-  million entities adds ten entries, a write that gives an entity a string the index already holds makes no sort key
-  and writes nothing here, and a rebuild reads the index's own keys and no row.
-- An entry is written when a string's `d/x` key is first written and deleted when that key is, in the same unit.
-- The sort key is the collator's for the schema's collation at its default strength, filed as a bytes part. It is cut
-  to the room the key has under LMDB's 511 bytes, the same room for every string under the same leading values, so a
-  key's bytes order as the whole sort keys do wherever they differ within it. Strings that share a key are ordered by
-  the collator as they are read. No string the index files is left out, so one long title can't take the index away
-  from every order on its field.
-- Strings the collator holds equal are read together, their entities merged in place order. That is the order the
-  sorted arm gives today, a stable sort of place order, so the two arms answer the same.
-- `d/xw`, the entities without a value, is read last, or first when descending, as a number's order reads it.
-  A string past `MAX_INDEXED_STRING`, a list, and the other values `d/xu` holds stay unordered, and an index holding
-  any sorts as it does today, which EXPLAIN says with the reason.
+- **It is `d/x` again with a sort key where the string was.** So an order on strings is read by what reads an order
+  on numbers: the same walk, the same blocks, the same cursor of a value and a place. Strings the collator holds
+  equal have one sort key and so one entry, their entities in place order, which is where the sorted arm's stable
+  sort has them: there is nothing to merge.
+- **The sort key** is the collator's for the schema's collation at its default strength, a bytes part, cut to the
+  room its key has under LMDB's 511 bytes. The cut is the first bytes of the whole key, never the collator stopped
+  early. An entry whose key fills the room may hold strings whose keys differ past it: a reader orders that entry's
+  entities by reading their fields, whole sort key and then place. Every other entry is read without a row.
+- **A string of any length is filed**, the 256 bytes `d/x` stops at being an equality's limit and not an order's. A
+  long string no longer takes the index away from an order.
+- **What the order can't place has its own entry**, so whether an index can be read for an order is whether that
+  entry is there, and doesn't depend on what `d/xu` holds for equalities. Phase 4 reads it where it reads no order
+  today.
+- **`build`** is a number the index's built marker holds. Entries under any other are no index's, and are deleted in
+  the background. It is what lets a rebuild fill an empty range, below.
+- **One function derives an entity's entries for an index, both families**, and a write, the builder, `rebuild()` and
+  `check()` each file what it gives. An entity filed under `d/x` and not here would be missing from an order's
+  answer, so no caller files one family alone.
 
-**What reads it.** Each where the plan would have read a number's entries, under the same conditions (one type, a
-built index, nothing in `d/xu`, and for a compound index equalities on the fields before the last):
+**What reads it**, each where the plan reads a number's entries today and under the same conditions (one type, a
+built index, and for a compound index equalities on the fields before the last):
 
-- `orderBy` on the field: `d/xo` walked forward or back, each string's entities handed on as its `d/x` entry is read.
-  The first ten of a million read ten strings at most.
-- `after`, a page's cursor: a seek to the cursor's sort key, string and place, so a page costs the same wherever it
-  is.
+- `orderBy`: false, true and the numbers from `d/x`, then the strings from `d/xo`, then the entities without a value
+  from `d/xw`; backwards when descending. A field holding both numbers and strings is read across the seam.
+- `after`, a page's cursor: a seek to the cursor's value and place, in whichever family holds it.
 - `range` with string bounds: a seek to the lower bound's sort key and a walk to the upper's.
-- `least` and `greatest`: the first entry from either end, which holds the string itself.
+- `least` and `greatest`: the first entity the order hands on within the scope, and its field read from its row,
+  since an entry may hold entities the scope leaves out and strings of different bytes.
 
-An equality, `unique`, and an order on booleans and numbers read `d/x` as now.
+An equality and `unique` read `d/x` as now, and depend on no sort key.
 
 **A stale sort key is never read.** A sort key is the collator's output, and ICU's documentation says to presume
 stored ones invalid after an update of CLDR, of Unicode or of the library. Read stale, they give a wrong order with no
-error, which is the failure this design is built around:
+error. So:
 
-- *The stamp.* The collator's crates are pinned to exact versions in `Cargo.toml`, and elmdb holds those versions in
-  a constant that `cargo xtask` holds to the lockfile, so the two can't part. An index's built marker (`d/xb`) records
-  the collation and that constant as its strings were filed.
-- *Every transaction checks it.* A plan reads the marker in its own snapshot before it reads `d/xo`, and sorts when
-  the marker names another collation or another constant. A write that finds one clears the marker's record of the
-  order, so no reader of any process trusts `d/xo`, and queues it for the builder, which files it again from `d/x`.
-  Two processes of different elmdb versions on one database each rebuild after the other; neither reads the other's
-  keys.
-- *The schema's collation.* A change's effect becomes `Builds` where it is `Applied` today, by the same path.
-- *The proof.* `check()` derives `d/xo` from `d/x` with the running collator and reports any difference. A test pins
-  the sort keys of a fixed set of strings in each collation the tests open, so an update that changes one is seen in
-  review, not only by the constant.
+- *The stamp* is a hash of four things: the schema's collation; a number for this layout (the cut, the room, the
+  collator's options); the names and versions of every ICU crate in the collator's dependency tree, which
+  `Cargo.toml` requires exactly (`=`) and `cargo xtask` holds to the lockfile; and the sort keys of a few dozen probe
+  strings, made by the running collator at open. The exact requirements make another dependency that needs another
+  version fail to resolve, loudly; the probes make a build with other data under the same versions (`ICU4X_DATA_DIR`,
+  which the build also refuses) a different stamp and not a wrong order.
+- *The marker* of a built index (`d/xb`) records, for its order: the stamp, the `build` number, and whether that
+  build is whole. It is read in each transaction that uses the order, in that transaction's own snapshot.
+- *A read* uses `d/xo` only under a marker whose stamp is its own and whose build is whole. Otherwise it reads the
+  rows, as today.
+- *A write* that changes the index's strings under a marker of its own stamp files under that marker's build, whole
+  or not. Under any other stamp, or none, it first rewrites the marker in the same unit, to its own stamp, the next
+  build number and not whole, and files under that. Nothing reads the keys it didn't write, and the builder is told
+  once the unit commits.
+- *The builder* fills a build from the rows, as it builds a value index: into a range no key was in, idempotently,
+  beside writes that keep it. Each of its units checks that the marker still names its build and stops if not; the
+  last marks the build whole. It starts once the marker has stood unchanged for a time, so two elmdb versions
+  writing one database leave it unbuilt and sorted while both write, and don't rebuild after each other without end.
+- *An open* that can write compares each index's marker with its stamp where it queues unbuilt indexes, so a
+  database that is only read after an update is rebuilt too. One opened read-only sorts.
+- *The schema's collation* is in the stamp, so a change's effect becomes `Builds` where it is `Applied` today, by the
+  same path.
+- *`check()`* derives `d/xo` under a whole build of its own stamp and reports an entry missing, one too many and one
+  under the wrong key, each by name. Under another stamp it says the order was filed by another collator and was not
+  compared, which is what `elmdb-cli` of another build meets.
 
-**What it costs.** For each distinct string an index files: one sort key, 775 ns by the reading above, and one entry
-holding the sort key and the string. Nothing for a write that repeats a string. An index whose strings are nearly all
-different, a title or an id, about doubles in size by that arithmetic; the reading is phase 1's, and no option to
-leave an index unordered is built unless it shows a cost worth one (below).
+**What it costs.** For each write of a string in a declared index: one sort key, 775 ns for a title by the first
+reading and more for a longer string, and one place filed a second time. An index grows by a sort key for each
+distinct string and a place for each entity: for strings nearly all different, a little more than its `d/x` again;
+for a field of few values, the places alone. An update of the collator's crates rebuilds every index's order once,
+in the background, at the cost of building the index. Each is read in phase 2, on a unit's time and the file's size,
+before and after.
 
 ## What was set aside
 
-- **An index that asks for it (`"collated": true`).** The first draft of this design. A caller who doesn't know to
-  ask gets the sort, silently, and the option is a path most indexes and most tests never run. It comes back, as a
-  way to opt out, only on a reading: an index never ordered whose `d/xo` is over a tenth of a compacted file.
-- **The places filed a second time under the sort key.** No second read for a string's entities, but every write of
-  the field makes a sort key and writes two entries, a field of few values over many entities doubles, a rebuild
-  reads every row, and telling apart strings that share a key means reading rows.
-- **Replacing `d/x`'s string entries with sort keys.** One family instead of two, but an equality would then find
-  every string the collator holds equal to the one asked for, `unique` would refuse `é` in two forms, and a collator
-  update would take equality lookups away until the rebuild ends.
-- **Leaving out a string whose sort key is too long.** One such string would send every order on the field back to
-  sorting.
-- **A constant raised by hand when a test of pinned sort keys fails.** The test samples; the pinned versions don't.
+- **An index that asks for it (`"collated": true`).** The first draft. A caller who doesn't know to ask gets the
+  rows read, silently, and the option is a path most indexes and most tests never run.
+- **A directory of distinct strings, each pointing back to its `d/x` entry.** The second draft: nothing to pay for a
+  write that repeats a string, and a field of few values costs nearly nothing. Read against the code, it needed a
+  second read for each string, a merge by place of the strings the collator holds equal, a key for each string made
+  unique by a hash, its entries written where a `d/x` key first appears and last goes, and a second kind of entry
+  for strings too long for it. Filing places under the sort key needs none of those and is read by the walk already
+  tested; its cost is the second place filed, which is measured before it is accepted.
+- **The order built when a plan first wants it.** It costs nothing for an index never ordered. But what is stored
+  would depend on which plans ran and not on the rows and the schema, a read would cause a write, a database opened
+  read-only could never have it, and a caller's tests would run one arm where production runs the other.
+- **An order kept in memory by each process**, as the edge mirror keeps edges. No stored key to go stale; some second
+  and tens of megabytes for a million strings at every start, emptied by another process's commit.
+- **`d/x` itself keyed by the sort key, then the string.** One family, exact equality kept. But every equality and
+  `unique` would then wait on a rebuild after a collator update.
+- **Leaving out what doesn't fit**: a string past 256 bytes, or one whose sort key passes the room. Either sends
+  every order on its field back to the rows.
+- **Cutting a key by stopping the collator at the room.** The bytes written are not the key's first (second
+  reading).
+- **Rebuilding in place**, by clearing the old keys and filing the new. A writer of the same stamp, a second
+  builder and a writer of another stamp each meet a range half cleared; a build under a new number meets none.
+- **A constant raised by hand when a test of pinned sort keys fails.** The test samples; the pinned versions and the
+  probes are in the stamp itself.
 - **Ordering by bytes and calling that the order.** It is what the index has, and it is wrong for any text a person
   reads: capitals before every lowercase letter, accented letters after `z`.
 
 ## Risks
 
-- **The two arms must agree.** The sorted arm stays, for sets no index orders. The model harness already holds an
-  order read from an index to the sorted one for numbers, and takes strings into the same step, with strings the
-  collator holds equal and strings long enough to share a cut key among its values.
-- **A rebuild at every update of the collator's crates.** It reads `d/x`'s keys, not rows: under a second of sort
-  keys for a million distinct strings by the reading above, and the builder's writes, read in phase 2. Until it ends
-  plans sort, as they do today.
-- **A second read for each string.** An order over strings that are nearly all different reads two entries an
-  entity where a number's reads one. Phase 2's gate reads it against the sort it replaces.
+- **The two arms must agree.** The sorted arm stays, for sets no index orders, and is what the model harness holds
+  the index's order to.
+- **The second place filed.** Every write of an indexed string pays it. If phase 2's reading on a unit's time is
+  more than the order is worth for an index, the answer set aside for that day is a field declared to hold
+  identifiers, ordered by its bytes from `d/x` with no second family, not an option on the index.
+- **An entry that fills the room.** Its entities' fields are read whenever an order or a page reaches it. Strings
+  that agree for some two hundred characters are few in a title and may be many in a field of paths or of log lines
+  under a long leading value; EXPLAIN counts the rows it read.
+- **A rebuild at every update of the collator's crates**, for every database, at its next open that can write.
 
 ## Phases
 
-1. **The sorted arm hands on from a heap.** It changes no key and helps every order no index reads: a `limit 10`
-   costs one pass and ten pops where it costs a whole sort, 335 ms against 2,351 ms for a million by the reading
-   above, before the fields are read. Done when a test counts the comparisons of an order with a limit, and the
-   million-note benchmark (`../architecture/testing.md`, Against SQLite) records an `orderBy` on its indexed string
-   with `limit 10`, a page of fifty near the order's end, and a string `range`, before and after, with that index's
-   `d/x` size.
-2. **The keys and the order.** `d/xo` in `format`'s table, filed by writes, `rebuild()` and the builder, with the
-   stamp in `d/xb`, the pinned versions and their `xtask` check from the start; `orderBy`, `after`, `least` and
-   `greatest` reading it. Done when: the first ten of a million read ten strings and a page costs the same wherever
-   its cursor is, both recorded beside phase 1's; the model harness orders by an indexed string; `check()` reports a
-   `d/xo` entry changed by hand; a database filed under another constant, and one whose collation changed, each
-   order by sorting until the builder ends and by the index after, and a test opens both; the index's size and a
-   unit's time are recorded before and after.
-3. **Ranges.** A string `range` reads `d/xo`. Done when the benchmark's range reads no string outside its bounds.
+1. **The readings.** The million-note benchmark (`../architecture/testing.md`, Against SQLite) gains an `orderBy` on
+   its indexed string with `limit 10`, a page of fifty near the order's end, a string `range`, and an order with no
+   limit. Done when the four are recorded in `../evidence/million-notes.md` as the sorted arm answers them, with that
+   index's `d/x` size and a unit's time.
+2. **The keys, the stamp and the order.** `d/xo` in `format`'s table, filed through the one function by writes,
+   `rebuild()` and the builder; the marker, the stamp, the exact requirements and their `xtask` check;
+   `orderBy`, `after`, `least` and `greatest` reading it. Done when:
+   - the four readings are recorded again, the first ten of a million reading ten entries where no entry is trashed,
+     and the index's size and a unit's time beside phase 1's;
+   - a property test holds the sign of the collator's comparison to the sort keys' byte order, over random strings
+     and the tailored collations of the second reading;
+   - the model harness orders by an indexed string with a filter before the order, `after` both ways inside an entry
+     of equal strings and inside one that fills the room, a compound index, the trash, a field of numbers and
+     strings, strings past 256 bytes, and a read inside a unit;
+   - `check()` reports a `d/xo` entry removed, one added and one moved, each by hand, and a copy of the code with one
+     caller filing `d/x` alone fails it;
+   - a database filed under another collation with its stamp forged to this one's is shown ordered wrongly, which
+     proves the test's keys differ, and the same database with its true stamp orders by the rows until the builder
+     ends and by the index after; a database whose collation changed does the same;
+   - the builder's concurrency model (`builder/model.rs`) runs a write of another stamp between two of a build's
+     units, and two builders of one build;
+   - a watch on an ordered read is told when a commit files a string before the first it read.
+3. **Ranges.** A string `range` reads `d/xo`. Done when the benchmark's range reads no entity outside its bounds but
+   those of an entry that fills the room.
+4. **No value takes the index away.** The entities the order can't place are read from their rows and sorted among
+   themselves, where the sorted arm has them, so an index holding a list or a map is still read for an order, of
+   numbers too. Done when the model harness holds it, and an order's cost with a thousand such values among a
+   million is recorded.
