@@ -390,5 +390,10 @@ in a leaf no other change of the unit touches. So about half of a change of an i
 second index of the same string is what a second place filed for an order is, but for the sort key. It adds 13.5 and
 15.9 µs to a change of that string at a million, 42% and 48% of the unit, and 8.5 µs at 100,000. To a create it adds
 3.7 µs, a place put in and none taken out: 19% of a create of a title and a string, and 2% of the 176 µs the
-benchmark's create of a note of three terms took above. A write that changes another field pays nothing. Not read:
-why the enum's index of two values costs as much as one of strings all different, and more at 100,000.
+benchmark's create of a note of three terms took above. A write that changes another field pays nothing.
+
+A third run at a million with a second enum of two values in two indexes, at the commit that adds it (load 23 to
+27): a change of the enum one index files 35.3 µs, of the one two file 54.9, so a second filing of a value half the
+entities hold adds 19.6 µs, 56% of the unit, where a second filing of a string no other holds added 13.2 in that
+run (32.4 and 45.6). Not read: why. By the layout a value's places are in blocks by place, so each change of a
+unit spread over the type would write a block of its own under each value, which is an inference.

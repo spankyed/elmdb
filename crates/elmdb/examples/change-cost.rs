@@ -1,5 +1,6 @@
 //! Where the time of a unit goes that changes one field of a thousand entities, by the field: one no index reads, a
-//! string one value index files, a string two value indexes file, an enum of two values, and a number. Each unit's
+//! string one value index files, a string two value indexes file, an enum of two values in one index and one in two,
+//! and a number. Each unit's
 //! entities are spread over the type as a program's changes are, and one reading changes a thousand that are next to
 //! each other instead, so what the spread costs shows apart from what an index does. Prints microseconds of CPU and of
 //! wall time per changed entity, the median of five units, no entity in two of them, and the bytes of each index.
@@ -91,7 +92,7 @@ fn creates(entity_type: &str, from: usize, to: usize) -> Vec<Value> {
 
 fn main() {
     let loaded: usize = std::env::args().nth(1).map_or(100_000, |n| n.parse().unwrap());
-    assert!(loaded >= 40 * UNIT && !loaded.is_multiple_of(7919), "the units' entities would not be distinct");
+    assert!(loaded >= 45 * UNIT && !loaded.is_multiple_of(7919), "the units' entities would not be distinct");
     let dir = tempfile::tempdir().unwrap();
     let string = json!({ "type": "string" });
     let schema = elmdb::schema::Schema::from_json(&json!({
@@ -100,6 +101,7 @@ fn main() {
             "fields": {
                 "title": string, "plain": string, "name": string, "alias": string, "n": { "type": "number" },
                 "status": { "type": "enum", "values": ["open", "done"] },
+                "state": { "type": "enum", "values": ["open", "done"] },
             },
             "indexes": {
                 "name": { "kind": "value", "fields": ["name"] },
@@ -107,6 +109,8 @@ fn main() {
                 "aliasAgain": { "kind": "value", "fields": ["alias"] },
                 "n": { "kind": "value", "fields": ["n"] },
                 "status": { "kind": "value", "fields": ["status"] },
+                "state": { "kind": "value", "fields": ["state"] },
+                "stateAgain": { "kind": "value", "fields": ["state"] },
             },
         },
         "Bare": { "fields": { "title": string, "s": string } },
@@ -125,6 +129,7 @@ fn main() {
                 let fields = json!({
                     "title": TITLE, "plain": string_of(i, 0), "name": string_of(i, 0), "alias": string_of(i, 0),
                     "n": (i * 7919) % loaded, "status": if i % 2 == 0 { "open" } else { "done" },
+                    "state": if i % 2 == 0 { "open" } else { "done" },
                 });
                 json!({ "op": "create", "type": "Note", "id": id(i), "fields": fields })
             })
@@ -146,6 +151,7 @@ fn main() {
     reading(&db, "twoStringIndexes", 20, |unit| sets(unit, loaded, true, "alias", other));
     let flipped = |i: usize| json!(if i.is_multiple_of(2) { "done" } else { "open" });
     reading(&db, "enumIndex", 25, |unit| sets(unit, loaded, true, "status", flipped));
+    reading(&db, "twoEnumIndexes", 40, |unit| sets(unit, loaded, true, "state", flipped));
     reading(&db, "numberIndex", 30, |unit| sets(unit, loaded, true, "n", |i| json!(((i + 1) * 7919) % loaded)));
     // The first again, last: what the readings between them did to the file shows in how far the two differ
     reading(&db, "noIndexSpreadAgain", 35, |unit| sets(unit, loaded, true, "plain", other));
