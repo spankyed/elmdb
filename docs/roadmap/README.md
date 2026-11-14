@@ -20,6 +20,11 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [A string's order from its index](string-order.md) | Designed, not built: every declared value index keeps a key for each distinct string it holds, under the collation's sort key, so an order, a page and a string range read keys and entries where they read every entity, and a write that repeats a string files nothing more; a marker of the collator's stamp and a build keep a stale sort key from being read |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
+## Where the code lives
+
+- [EARS in elmdb's repository](ears.md): planned, not built. apack's `@apackdev/ears`, the fluent TypeScript API over
+  a database, moves here as `@elmdb/ears`, with what apack keeps, what it costs and the phases.
+
 ## Development improvements
 
 - [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
