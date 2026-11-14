@@ -303,7 +303,10 @@ an answer:
   that build, since what the other would have filed is its layout's. The builder builds the order of a built index
   whose marker isn't its own and whole, from the index's entries and the rows of its long strings, beside the writes
   that keep it, and deletes what is under any other build; `rebuild()` files an order whole under a build of its
-  own, and an index marked built with no entity has its order whole with it. A build this builder began and finds
+  own, and an index marked built with no entity has its order whole with it. A `range` with string bounds reads
+  the same keys, alone, counted, among a type's leading filters and before an order: it seeks the run of each
+  bound's sort key and walks between them, and tests each string it comes to against the bounds by the collator,
+  which is what a bound whose sort key was cut, and one the collator holds equal to a string of other bytes, ask. A build this builder began and finds
   ended is begun again after a wait that doubles, so two elmdbs of different collators writing one database leave
   its orders to the rows more of the time the longer both stay.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that

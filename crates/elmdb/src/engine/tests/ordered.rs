@@ -268,6 +268,106 @@ fn a_string_is_read_where_the_index_s_order_has_it_after_every_number() {
     }
 }
 
+/// Strings whose order by the collation isn't their bytes': capitals, accents composed and combining, one another's
+/// beginning, a pair the collator holds equal, one of zero bytes with no key of its own in an order, long ones that
+/// agree past where a sort key is cut, and beside them numbers, a boolean and entities without a value
+fn worded() -> Vec<Option<Value>> {
+    let long = |end: &str| Value::from(format!("{}{end}", "long ".repeat(70)));
+    vec![
+        Some("pear".into()),
+        Some("Apple".into()),
+        Some(3.into()),
+        Some("apple".into()),
+        Some("é".into()),
+        Some("e\u{301}".into()),
+        None,
+        Some("eb".into()),
+        Some("e".into()),
+        Some(long("b")),
+        Some("Pear".into()),
+        Some(long("a")),
+        Some(true.into()),
+        Some(format!("ea{}", "\0".repeat(260)).into()),
+        Some("pear".into()),
+        Some(Value::Nil),
+        Some("zebra".into()),
+        Some(long("a")),
+    ]
+}
+
+#[test]
+fn a_range_of_strings_is_read_from_the_index_s_order_alone_and_before_an_order() {
+    let (_dir, db) = open();
+    let all = load(&db, "Item", &worded());
+    db.wait_for_index_builds().unwrap();
+    let strings = worded().iter().flatten().filter(|value| value.is_str()).count() as u64;
+    let range = |field: &str, bounds: &Json| {
+        let mut step = bounds.clone();
+        step["step"] = json!("range");
+        step["field"] = json!(field);
+        step
+    };
+    let long = format!("{}a", "long ".repeat(70));
+    let bounds = [
+        // A bound on either side, within and without; one equal to the collator and of other bytes than a string
+        // held; one no string holds; one whose sort key is cut where the long strings' are; and ones that keep none
+        json!({ "atLeast": "e" }),
+        json!({ "above": "e" }),
+        json!({ "atMost": "e\u{301}" }),
+        json!({ "below": "é" }),
+        json!({ "atLeast": "apple", "atMost": "Pear" }),
+        json!({ "above": "Apple", "below": "pear" }),
+        json!({ "atLeast": "b", "below": "f" }),
+        json!({ "atLeast": long }),
+        json!({ "above": long }),
+        json!({ "atMost": long }),
+        json!({ "below": long }),
+        json!({ "atLeast": format!("{long}a") }),
+        json!({ "above": "zebra" }),
+        json!({ "below": "a" }),
+        json!({ "atLeast": "" }),
+    ];
+    for bound in &bounds {
+        // Alone: the entities within it, in creation order, and no entity read but those and what else is in the
+        // run at each bound
+        let (kept, visits) = same(&db, "live", |field| json!([range(field, bound)]));
+        assert!(visits <= kept.len() as u64 + 4, "{bound}: {visits} read for {}", kept.len());
+        assert!(visits < strings || kept.len() as u64 >= strings - 1, "{bound}: {visits} of {strings} strings read");
+        // Counted, which reads no entity's row but an unplaced string's in a run at a bound
+        let counted = |field: &str| {
+            let mut asked = plan("live", &["Item"], json!([range(field, bound)]));
+            asked["terminal"] = json!({ "answer": "count" });
+            read(&db, json!({ "read": "query", "plan": asked })).unwrap()["n"].as_u64().unwrap()
+        };
+        assert_eq!((counted("n"), counted("m")), (kept.len() as u64, kept.len() as u64), "{bound}");
+        // Before an order, either way, a page of it and a page after each entity it keeps
+        for descending in [false, true] {
+            let (ordered, _) = same(&db, "live", |field| json!([range(field, bound), order(field, descending)]));
+            assert_eq!(ordered.len(), kept.len(), "{bound}");
+            let (_, visits) =
+                same(&db, "live", |field| json!([range(field, bound), order(field, descending), limit(2)]));
+            assert!(visits <= 2 + 4, "{bound}, descending {descending}: {visits} read for a page of two");
+            for cursor in &ordered {
+                same(&db, "live", |field| {
+                    json!([range(field, bound), order(field, descending), after(cursor), limit(2)])
+                });
+            }
+        }
+    }
+    // A range of strings holds no number, and one of numbers no string
+    let (kept, _) = same(&db, "live", |field| json!([range(field, &json!({ "atLeast": 0 }))]));
+    assert_eq!(kept, of(&all, &[2]));
+    clean(&db);
+    // With the trash, and of the trash alone, which no index is read for
+    write(&db, vec![op(json!({ "op": "trash", "id": all[0] })), op(json!({ "op": "trash", "id": all[4] }))]);
+    for scope in ["live", "withTrashed", "trashed"] {
+        for bound in &bounds {
+            same(&db, scope, |field| json!([range(field, bound)]));
+            same(&db, scope, |field| json!([range(field, bound), order(field, true), limit(3)]));
+        }
+    }
+}
+
 #[test]
 fn a_long_string_leaves_a_range_of_its_field_s_numbers_to_the_index() {
     let (_dir, db) = open();
@@ -1171,10 +1271,11 @@ fn a_range_is_counted_in_the_index_without_reading_an_entity() {
     assert_eq!(count("live", &["Item", "Other"], "n", from_one.clone()), (8, 10));
     assert_eq!(count("live", &["Item"], "n", json!({ "above": 1, "below": 3 })), (1, 1));
     assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": 50 })), (0, 0));
-    // The twin with no index, strings, and two types of which one has no index are walked
+    // The twin with no index, and two types of which one has no index, are walked
     assert_eq!(count("live", &["Item"], "m", from_one.clone()), (6, 15));
     assert_eq!(count("live", &["Item", "Other"], "m", from_one.clone()), (8, 17));
-    assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": "a" })), (0, 15));
+    // A range of strings is counted in the index's order of them, which holds none here
+    assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": "a" })), (0, 0));
     // An index that holds no number has no entry to count
     assert_eq!(count("live", &["Item"], "tag", from_one), (0, 0));
     // As is an index holding a list, whose entries are its elements'
