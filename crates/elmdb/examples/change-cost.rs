@@ -3,6 +3,8 @@
 //! entities are spread over the type as a program's changes are, and one reading changes a thousand that are next to
 //! each other instead, so what the spread costs shows apart from what an index does. Prints microseconds of CPU and of
 //! wall time per changed entity, the median of five units, no entity in two of them, and the bytes of each index.
+//! Then what a create costs in three types as large, of a title and a string each: the string in no index, in one,
+//! and in two.
 //!
 //! `cargo run --release --example change-cost -- 1000000`: the entities to load, 100,000 when none is given.
 
@@ -15,6 +17,7 @@ const WORDS: [&str; 12] =
     ["amber", "birch", "cedar", "dune", "ember", "fjord", "glade", "heath", "isle", "juniper", "kelp", "larch"];
 const UNIT: usize = 1000;
 const UNITS: usize = 5;
+const TITLE: &str = "a note of ordinary size, as long as a line of a page someone wrote and left for later reading";
 
 /// An id whose order among the keys is its number's
 fn id(i: usize) -> String {
@@ -55,29 +58,35 @@ fn entities(unit: usize, loaded: usize, spread: bool) -> Vec<usize> {
     (0..UNIT).map(|k| if spread { ((unit * UNIT + k) * 7919) % loaded } else { unit * UNIT + k }).collect()
 }
 
-/// Five units, each setting `field` of a thousand entities to what `value` gives, from the unit numbered `first` on
-fn reading(
-    db: &Database,
-    label: &str,
-    loaded: usize,
-    first: usize,
-    spread: bool,
-    field: &str,
-    value: impl Fn(usize) -> Value,
-) {
+/// Five units of a thousand ops each, those of the unit numbered `unit` being what `ops` gives
+fn reading(db: &Database, label: &str, first: usize, ops: impl Fn(usize) -> Vec<Value>) {
     let (mut cpu, mut wall) = (Vec::new(), Vec::new());
     for unit in first..first + UNITS {
-        let ops: Vec<Value> = entities(unit, loaded, spread)
-            .into_iter()
-            .map(|i| json!({ "op": "set", "id": id(i), "fields": { field: value(i) }, "touch": false }))
-            .collect();
-        let batch = serde_json::from_value(json!({ "ops": ops, "now": 2.0 })).unwrap();
+        let batch = serde_json::from_value(json!({ "ops": ops(unit), "now": 2.0 })).unwrap();
         let (used, began) = (cpu_micros(), Instant::now());
         db.write(&batch, false).unwrap();
         wall.push(began.elapsed().as_secs_f64() * 1e6 / UNIT as f64);
         cpu.push((cpu_micros() - used) / UNIT as f64);
     }
     println!("{label}: cpu={:.1}us wall={:.1}us", median(cpu), median(wall));
+}
+
+/// The ops setting `field` of a unit's entities to what `value` gives
+fn sets(unit: usize, loaded: usize, spread: bool, field: &str, value: impl Fn(usize) -> Value) -> Vec<Value> {
+    entities(unit, loaded, spread)
+        .into_iter()
+        .map(|i| json!({ "op": "set", "id": id(i), "fields": { field: value(i) }, "touch": false }))
+        .collect()
+}
+
+/// The ops creating the entities numbered from `from` to `to` of a type of a title and a string
+fn creates(entity_type: &str, from: usize, to: usize) -> Vec<Value> {
+    (from..to)
+        .map(|i| {
+            let fields = json!({ "title": TITLE, "s": string_of(i, 0) });
+            json!({ "op": "create", "type": entity_type, "id": format!("{entity_type}-{i:08}"), "fields": fields })
+        })
+        .collect()
 }
 
 fn main() {
@@ -99,18 +108,22 @@ fn main() {
                 "n": { "kind": "value", "fields": ["n"] },
                 "status": { "kind": "value", "fields": ["status"] },
             },
-        } },
+        },
+        "Bare": { "fields": { "title": string, "s": string } },
+        "Once": { "fields": { "title": string, "s": string }, "indexes": { "s": { "kind": "value", "fields": ["s"] } } },
+        "Twice": { "fields": { "title": string, "s": string }, "indexes": {
+            "s": { "kind": "value", "fields": ["s"] }, "sAgain": { "kind": "value", "fields": ["s"] },
+        } } },
         "relations": {}, "roles": {}
     }))
     .unwrap();
     let db =
         Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
-    let title = "a note of ordinary size, as long as a line of a page someone wrote and left for later reading";
     for from in (0..loaded).step_by(10_000) {
         let ops: Vec<Value> = (from..(from + 10_000).min(loaded))
             .map(|i| {
                 let fields = json!({
-                    "title": title, "plain": string_of(i, 0), "name": string_of(i, 0), "alias": string_of(i, 0),
+                    "title": TITLE, "plain": string_of(i, 0), "name": string_of(i, 0), "alias": string_of(i, 0),
                     "n": (i * 7919) % loaded, "status": if i % 2 == 0 { "open" } else { "done" },
                 });
                 json!({ "op": "create", "type": "Note", "id": id(i), "fields": fields })
@@ -126,14 +139,26 @@ fn main() {
     }
     let other = |i: usize| json!(string_of(i, 1));
     // Units no reading counts, so the first that counts doesn't pay for what the load left cold
-    reading(&db, "warm", loaded, 0, true, "plain", other);
-    reading(&db, "noIndexSpread", loaded, 5, true, "plain", other);
-    reading(&db, "noIndexAdjacent", loaded, 10, false, "plain", other);
-    reading(&db, "oneStringIndex", loaded, 15, true, "name", other);
-    reading(&db, "twoStringIndexes", loaded, 20, true, "alias", other);
-    reading(&db, "enumIndex", loaded, 25, true, "status", |i| json!(if i % 2 == 0 { "done" } else { "open" }));
-    reading(&db, "numberIndex", loaded, 30, true, "n", |i| json!(((i + 1) * 7919) % loaded));
+    reading(&db, "warm", 0, |unit| sets(unit, loaded, true, "plain", other));
+    reading(&db, "noIndexSpread", 5, |unit| sets(unit, loaded, true, "plain", other));
+    reading(&db, "noIndexAdjacent", 10, |unit| sets(unit, loaded, false, "plain", other));
+    reading(&db, "oneStringIndex", 15, |unit| sets(unit, loaded, true, "name", other));
+    reading(&db, "twoStringIndexes", 20, |unit| sets(unit, loaded, true, "alias", other));
+    let flipped = |i: usize| json!(if i.is_multiple_of(2) { "done" } else { "open" });
+    reading(&db, "enumIndex", 25, |unit| sets(unit, loaded, true, "status", flipped));
+    reading(&db, "numberIndex", 30, |unit| sets(unit, loaded, true, "n", |i| json!(((i + 1) * 7919) % loaded)));
     // The first again, last: what the readings between them did to the file shows in how far the two differ
-    reading(&db, "noIndexSpreadAgain", loaded, 35, true, "plain", other);
+    reading(&db, "noIndexSpreadAgain", 35, |unit| sets(unit, loaded, true, "plain", other));
+    // A create: its entity goes after the last of its type, and its string's place where the string sorts
+    for entity_type in ["Bare", "Once", "Twice"] {
+        for from in (0..loaded).step_by(10_000) {
+            let ops = creates(entity_type, from, (from + 10_000).min(loaded));
+            db.write(&serde_json::from_value(json!({ "ops": ops, "now": 1.0 })).unwrap(), false).unwrap();
+        }
+    }
+    db.wait_for_index_builds().unwrap();
+    for (entity_type, label) in [("Bare", "createNoIndex"), ("Once", "createOneIndex"), ("Twice", "createTwoIndexes")] {
+        reading(&db, label, 0, |unit| creates(entity_type, loaded + unit * UNIT, loaded + (unit + 1) * UNIT));
+    }
     db.close().unwrap();
 }

@@ -366,23 +366,29 @@ thirty-sixth the size.
 
 Where those microseconds go, read apart from the benchmark by `crates/elmdb/examples/change-cost.rs`: a type of a
 million entities with a title of 94 bytes, a string no index reads, one a value index files, one two value indexes
-file, an enum of two values and a number, each unit setting one field of 1,000 entities spread over the type, the
-median of five units, CPU of the process for each entity changed (Apple M1 Pro, 2026-11-14, load 24 to 25 throughout,
-so the wall times are left out; built in release, one run, at the commit that adds the example). The same at 100,000 entities, load 30, beside it.
+file, an enum of two values and a number, each unit setting one field of 1,000 entities spread over the type; then a
+create in each of three types as large, of the title and a string that no index, one and two file. The median of five
+units, CPU of the process for each entity, the wall times left out for the load (Apple M1 Pro, 2026-11-14, built in
+release, at the commit that adds the creates; two runs at a million, load 24 to 25 and 13.5 to 14.8, the creates in
+the second only, and one at 100,000, load about 30).
 
-| Field a unit sets | A million | 100,000 |
-|---|---:|---:|
-| A string no index reads | 14.7 µs | 10.8 µs |
-| The same, of 1,000 entities next to each other | 5.2 µs | 4.9 µs |
-| A string one value index files | 32.2 µs | 19.5 µs |
-| A string two value indexes file | 45.7 µs | 29.3 µs |
-| The enum of two values, in one index | 33.8 µs | 28.2 µs |
-| The number, in one index | 31.5 µs | 18.9 µs |
+| | A million | again | 100,000 |
+|---|---:|---:|---:|
+| Set a string no index reads | 14.7 µs | 14.4 µs | 11.4 µs |
+| The same, of 1,000 entities next to each other | 5.2 µs | 5.3 µs | 4.7 µs |
+| Set a string one value index files | 32.2 µs | 33.2 µs | 17.8 µs |
+| Set a string two value indexes file | 45.7 µs | 49.1 µs | 26.3 µs |
+| Set the enum of two values, in one index | 33.8 µs | 36.8 µs | 27.0 µs |
+| Set the number, in one index | 31.5 µs | 37.4 µs | 16.8 µs |
+| Create, the string in no index | | 14.0 µs | 12.9 µs |
+| Create, the string in one index | | 19.4 µs | 18.3 µs |
+| Create, the string in two | | 23.1 µs | 22.1 µs |
 
 A change's time is the pages it is the first of its unit to write. An entity next to the last one changed costs 5 µs,
-one a page of its own 11 to 15, and an index adds 8 to 18 for the place it takes out and the one it puts in, each in
-a leaf no other change of the unit touches. So about half of a change of an indexed string is its index's, and a
-second index of the same string, which is what a second place filed for an order is but for the sort key, adds 13.5 µs
-at a million and 9.8 at 100,000: 42% and 50% of the unit. That is past the tenth `../roadmap/string-order.md` decides
-on. Not read: what a create pays for a second place, and why the enum's index of two values costs as much as one of
-strings all different, and more at 100,000.
+one in a page of its own 11 to 15, and an index adds 6 to 19 for the place it takes out and the one it puts in, each
+in a leaf no other change of the unit touches. So about half of a change of an indexed string is its index's. A
+second index of the same string is what a second place filed for an order is, but for the sort key. It adds 13.5 and
+15.9 µs to a change of that string at a million, 42% and 48% of the unit, and 8.5 µs at 100,000. To a create it adds
+3.7 µs, a place put in and none taken out: 19% of a create of a title and a string, and 2% of the 176 µs the
+benchmark's create of a note of three terms took above. A write that changes another field pays nothing. Not read:
+why the enum's index of two values costs as much as one of strings all different, and more at 100,000.
