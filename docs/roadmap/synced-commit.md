@@ -32,16 +32,21 @@ How often a file is torn, and what the mode that can't be costs the program elmd
   synced each second, so it is the loss that falls inside a sync's own writing, a few milliseconds, that tears. A
   loss at any other moment after a commit leaves the last synced commit whole on disk and the commits after it
   gone. This is the second reader's reasoning from LMDB's order of writes, not a measurement.
-- apack writes a streamed reply's text on every chunk, 181 commits for a reply of 400 words
-  (`../evidence/next-phase-10.md`). At the 0.03 ms a grouped commit took and the 8.0 ms a `syncEachCommit` one took
-  on an Apple M1 Pro (2026-11-12, `../architecture/engine.md`, Durability), that reply's commits are 5 ms in the one
-  mode and 1.4 s in the other. apack opens every database it keeps in the grouped mode, asks for no durable write,
-  opens temporary ones with `syncs: false`, and opens its databases read-only beside the running app from its CLI
-  and its backup (apack's `packages/apack-ears/src/lmdb/database.ts` and `packages/apack-host`, read 2026-11-14).
+- apack wrote a streamed reply's text whole on every chunk, 181 commits for a reply of 400 words
+  (`../evidence/next-phase-10.md`), until its commit `d9102d235b` of 2026-11-09. Since then it appends the text on
+  a clock of 250 ms and writes it whole once at the end: about 40 commits for such a reply streamed over ten
+  seconds, counted by a test in apack's pull request 483 (2026-11-14). At the 0.03 ms a grouped commit took and
+  the 8.0 ms a `syncEachCommit` one took on an Apple M1 Pro (2026-11-12, `../architecture/engine.md`, Durability),
+  that reply's commits are about 1 ms in the one mode and a third of a second in the other, a thirtieth of the
+  time it streams. Neither was measured in apack. apack opens every database it keeps in the grouped mode, asks
+  for no durable write, opens temporary ones with `syncs: false`, and opens its databases read-only beside the
+  running app from its CLI and its backup (apack's `packages/apack-ears/src/lmdb/database.ts` and
+  `packages/apack-host`, read 2026-11-14).
 
-What they say: `syncEachCommit` as the default would need no new code and would not serve apack, which would turn
-it off where it writes most. And a restore will run far more often than a tear happens, at every loss within a
-second of a commit: it is a path that runs, and must be right.
+What they say: `syncEachCommit` as the default needs no new code, and by the count as it now stands it may well
+serve apack: the fourth draft set it aside on the count of 181, which was out of date. Which of the two to build
+is open again, and is read in apack before more of this design is built. And a restore will run far more often
+than a tear happens, at every loss within a second of a commit: it is a path that runs, and must be right.
 
 ## What LMDB already promises
 
@@ -207,8 +212,9 @@ first is the cost the format's rule accepts until a release has users (`../archi
 
 ## What was set aside
 
-- **`syncEachCommit` as the default, and the grouped mode asked for.** No new code, and the simplest thing that is
-  sound. By the readings apack would ask for the grouped mode where it writes most, and be where it is.
+- **`syncEachCommit` as the default, and the grouped mode asked for**, set aside in the fourth draft and open
+  again: no new code, and the simplest thing that is sound. It was set aside on a count of apack's commits that
+  was out of date (The readings).
 - **A marker of commits not yet synced, and the file refused when the machine restarted under it.** The first
   design. Its reader found it unsound as written: commits that pass no common function and are synced by nothing;
   a sync that failed, after which the same boot's open went on; a lock that doesn't exclude within a process on
