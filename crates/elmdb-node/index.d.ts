@@ -121,7 +121,10 @@ export declare class Database {
   replaceWith(source: string): void
   /** Every entry removed but the database's format and schema */
   reset(): void
-  /** What the database holds: entities per type and field, relations per kind, entries per index, its sizes */
+  /**
+   * What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+   * each value index, its sizes
+   */
   stats(): Stats
   /**
    * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a

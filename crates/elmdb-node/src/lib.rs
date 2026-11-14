@@ -616,7 +616,8 @@ impl Database {
         self.guarded("Database.reset", || self.inner.reset().map_err(to_js))
     }
 
-    /// What the database holds: entities per type and field, relations per kind, entries per index, its sizes
+    /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+    /// each value index, its sizes
     #[napi(ts_return_type = "Stats")]
     pub fn stats(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.stats", || {
