@@ -47,10 +47,20 @@ const STALE_RETRIES: u32 = 2;
 /// them again
 const DRAIN_PUSHES: usize = 20_000_000;
 
-/// What the thread does: build a type's index, or build or drain a rank index
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How long the second build this builder begins of one index's order waits, and twice as long each one after:
+/// a build is begun again when a write of another elmdb's ended the last, and two elmdbs that write one database in
+/// turn would otherwise each build its orders at every turn
+const ORDER_PUT_OFF: Duration = Duration::from_secs(1);
+
+/// The longest a build of an order is put off
+const ORDER_PUT_OFF_MOST: Duration = Duration::from_secs(600);
+
+/// What the thread does: build a type's index, build the order a value index keeps of its strings, or build or
+/// drain a rank index
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Work {
     Index { entity_type: String, index: String },
+    Order { entity_type: String, index: String },
     Rank { name: String },
 }
 
@@ -70,6 +80,11 @@ struct State {
     failures: Vec<IndexFailure>,
     /// When work was last queued for each rank index: the commit its drain waits to be the last of a burst
     queued_at: HashMap<String, Instant>,
+    /// Work put off, each piece with when it is due
+    later: Vec<(Instant, Work)>,
+    /// The orders this builder has begun a build of: how long the next build it begins of each is put off, and
+    /// whether that wait is over
+    begun: HashMap<Work, (Duration, bool)>,
 }
 
 /// What the thread decides, apart from what doing a piece of work means: its queue, the pause a rank index's drain
@@ -129,6 +144,18 @@ impl Core {
                     if state.stopping {
                         return;
                     }
+                    // What was put off until now is work again, and may begin
+                    let now = self.clock.now();
+                    let (due, later) = std::mem::take(&mut state.later).into_iter().partition(|(at, _)| *at <= now);
+                    state.later = later;
+                    for (_, work) in due as Vec<(Instant, Work)> {
+                        if let Some((_, over)) = state.begun.get_mut(&work) {
+                            *over = true;
+                        }
+                        if !state.queue.contains(&work) {
+                            state.queue.push_back(work);
+                        }
+                    }
                     if let Some(next) = state.queue.pop_front() {
                         state.busy = true;
                         state.active = Some(next.clone());
@@ -136,7 +163,15 @@ impl Core {
                     }
                     state.busy = false;
                     self.changed.notify_all();
-                    state = self.changed.wait(state).expect("the builder's lock is never poisoned");
+                    // Asleep until work is queued, or until the first of what was put off is due
+                    let first = state.later.iter().map(|(at, _)| *at).min().filter(|_| !self.clock.is_manual());
+                    state = match first {
+                        Some(at) => {
+                            let wait = at.saturating_duration_since(now);
+                            self.changed.wait_timeout(state, wait).expect("the builder's lock is never poisoned").0
+                        }
+                        None => self.changed.wait(state).expect("the builder's lock is never poisoned"),
+                    };
                 }
             };
             if let Work::Rank { name } = &work {
@@ -156,6 +191,32 @@ impl Core {
             state.busy = !state.queue.is_empty();
             self.changed.notify_all();
         }
+    }
+
+    /// Whether a build of an order may begin now: the first this builder begins of it, or one whose wait is over
+    fn may_begin(&self, work: &Work) -> bool {
+        self.lock().begun.get(work).is_none_or(|(_, over)| *over)
+    }
+
+    /// That a build of an order began: the next this builder begins of it waits, twice as long as the last did
+    fn began(&self, work: &Work) {
+        let mut state = self.lock();
+        let next = match state.begun.get(work) {
+            Some((wait, _)) => (*wait * 2).min(ORDER_PUT_OFF_MOST),
+            None => ORDER_PUT_OFF,
+        };
+        state.begun.insert(work.clone(), (next, false));
+    }
+
+    /// Puts a build of an order off for as long as its next is to wait
+    fn put_off(&self, work: &Work) {
+        let mut state = self.lock();
+        let wait = state.begun.get(work).map_or(ORDER_PUT_OFF, |(wait, _)| *wait);
+        let due = self.clock.now() + wait;
+        if !state.later.iter().any(|(_, put_off)| put_off == work) {
+            state.later.push((due, work.clone()));
+        }
+        self.changed.notify_all();
     }
 
     /// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops. On a
@@ -195,15 +256,26 @@ pub struct Builder {
 impl Builder {
     pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Self {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
+        #[cfg(test)]
+        let forged = super::order::forged();
         let thread = {
             let core = Arc::clone(&core);
             let store = Arc::clone(&store);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
                 .spawn(move || {
+                    // A stamp forged by the thread that opened the database is this thread's too
+                    #[cfg(test)]
+                    super::order::forge(forged);
                     core.run(|work, stopping| match work {
                         Work::Index { entity_type, index } => {
-                            build_index(&store, &commits, entity_type, index, stopping)
+                            build_index(&store, &commits, entity_type, index, stopping)?;
+                            // A value index just built has an order to build
+                            core.queue([Work::Order { entity_type: entity_type.clone(), index: index.clone() }]);
+                            Ok(())
+                        }
+                        Work::Order { entity_type, index } => {
+                            build_order(&store, &commits, &core, work, entity_type, index, stopping)
                         }
                         Work::Rank { name } => {
                             build_rank(&store, &schema, &commits, name, stopping, &|| core.await_quiet(name))
@@ -326,6 +398,39 @@ fn build_index(
         })?;
         after = next.unwrap_or(after);
         Ok(done)
+    })
+}
+
+/// Builds the order a value index keeps of its strings (`order::build_unit`), a chunk of its entries at a time, each
+/// a unit: nothing for an index that keeps none, or isn't built. A build this builder has begun before and finds
+/// ended is put off, and begins when its wait is over
+fn build_order(
+    store: &Store,
+    commits: &Commits,
+    core: &Core,
+    work: &Work,
+    entity_type: &str,
+    index: &str,
+    stopping: &dyn Fn() -> bool,
+) -> crate::Result<()> {
+    use super::order::{Step, build_unit};
+    let mut step = Step::Begin;
+    chunks(store, stopping, || {
+        // Where the build is moves on only once its unit commits
+        let (may_begin, mut next) = (core.may_begin(work), None);
+        commits(&mut |t| {
+            next = Some(build_unit(t, entity_type, index, step.clone(), may_begin, CHUNK)?);
+            Ok(true)
+        })?;
+        let (reached, began) = next.expect("the unit ran");
+        if began {
+            core.began(work);
+        }
+        step = reached;
+        if step == Step::PutOff {
+            core.put_off(work);
+        }
+        Ok(matches!(step, Step::Done | Step::PutOff))
     })
 }
 

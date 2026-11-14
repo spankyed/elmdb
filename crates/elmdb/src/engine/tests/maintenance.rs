@@ -447,12 +447,25 @@ fn single_index_rebuilds_spill_and_late_uniqueness_failure_rolls_back() {
         )
         .unwrap();
     }
+    // An order is filed again under a build of the rebuild's own, so its keys are compared without their build,
+    // and its marker, which holds the build, not at all
     let derived = |db: &Database| {
         db.snapshot(|r| {
             let mut out = Vec::new();
             for prefix in crate::format::Prefix::ALL {
-                if prefix.kind() == crate::format::PrefixKind::Derived {
-                    out.extend(r.scan(&prefix.key().to_vec())?);
+                if prefix.kind() != crate::format::PrefixKind::Derived
+                    || prefix == crate::format::Prefix::IndexOrderBuilt
+                {
+                    continue;
+                }
+                for (key, value) in r.scan(&prefix.key().to_vec())? {
+                    if prefix == crate::format::Prefix::IndexOrder {
+                        let mut parts = crate::format::key::decode(&key)?;
+                        parts.remove(3);
+                        out.push((crate::format::key::encode(&parts), value));
+                    } else {
+                        out.push((key, value));
+                    }
                 }
             }
             Ok(out)

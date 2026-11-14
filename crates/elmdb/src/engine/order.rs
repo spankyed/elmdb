@@ -7,8 +7,19 @@
 //! no longer; so of two strings filed under `(sort key, cut)`, the lesser key is the lesser string, but for two whose
 //! keys were cut and are the same bytes, which differ past the cut if they differ.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+
 use icu_collator::{CollationKeySink, CollatorBorrowed};
+use rmpv::Value;
 use sha2::{Digest, Sha256};
+
+use crate::error::{Error, ErrorCode, Result};
+use crate::format::key::Part;
+
+use super::unit::{Read, Txn};
+use super::{keys, values};
 
 /// A sort key as far as it was kept, and whether more of it was cut off
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -31,7 +42,7 @@ impl CollationKeySink for Kept {
     type State = ();
     type Output = ();
 
-    fn write(&mut self, (): &mut (), bytes: &[u8]) -> Result<(), Full> {
+    fn write(&mut self, (): &mut (), bytes: &[u8]) -> std::result::Result<(), Full> {
         let left = self.room - self.bytes.len();
         match bytes.len() <= left {
             true => {
@@ -45,7 +56,7 @@ impl CollationKeySink for Kept {
         }
     }
 
-    fn finish(&mut self, (): ()) -> Result<(), Full> {
+    fn finish(&mut self, (): ()) -> std::result::Result<(), Full> {
         Ok(())
     }
 }
@@ -104,9 +115,8 @@ const PROBES: [&str; 24] = [
     "カ", "中", "한", "ก",
 ];
 
-/// The stamp of the keys this elmdb files for a schema's `collation`
-pub fn stamp(collation: &str) -> crate::error::Result<Stamp> {
-    let collator = super::collator(collation)?;
+/// The stamp of the keys this elmdb files for a schema's `collation`, whose sort keys `collator` makes
+fn stamp_of(collation: &str, collator: &CollatorBorrowed<'static>) -> Stamp {
     let mut hash = Sha256::new();
     // Each part ended, so no two lists of parts are the same bytes
     let mut part = |bytes: &[u8]| {
@@ -120,9 +130,411 @@ pub fn stamp(collation: &str) -> crate::error::Result<Stamp> {
         part(version.as_bytes());
     }
     for probe in PROBES {
-        part(&sort_key(&collator, probe, usize::MAX).bytes);
+        part(&sort_key(collator, probe, usize::MAX).bytes);
     }
-    Ok(hash.finalize().into())
+    #[cfg(test)]
+    part(&[FORGED.with(std::cell::Cell::get)]);
+    hash.finalize().into()
+}
+
+/// The stamp of the keys this elmdb files for a schema's `collation`
+pub fn stamp(collation: &str) -> Result<Stamp> {
+    Ok(running(collation)?.stamp)
+}
+
+/// A collation's collator and the stamp of the keys it makes
+pub struct Running {
+    pub collator: CollatorBorrowed<'static>,
+    pub stamp: Stamp,
+}
+
+thread_local! {
+    /// The collators this thread has made, each with its stamp, by collation: one is made once and kept, a stamp
+    /// taking some dozens of sort keys to work out. A thread's own, so no write waits on another's for one
+    static RUNNING: RefCell<HashMap<String, Rc<Running>>> = RefCell::new(HashMap::new());
+    /// What a test adds to every stamp this thread works out, to stand for an elmdb of another collator
+    #[cfg(test)]
+    static FORGED: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+}
+
+/// The collator of a schema's `collation` and its stamp, as this elmdb makes them
+pub fn running(collation: &str) -> Result<Rc<Running>> {
+    #[cfg(test)]
+    let named = format!("{collation}\u{0}{}", FORGED.with(std::cell::Cell::get));
+    #[cfg(not(test))]
+    let named = collation.to_owned();
+    if let Some(found) = RUNNING.with(|running| running.borrow().get(&named).cloned()) {
+        return Ok(found);
+    }
+    let collator = super::collator(collation)?;
+    let made = Rc::new(Running { stamp: stamp_of(collation, &collator), collator });
+    RUNNING.with(|running| running.borrow_mut().insert(named, Rc::clone(&made)));
+    Ok(made)
+}
+
+/// What a test's thread forges its stamps with, and sets them to: the builder a database starts takes its opener's
+#[cfg(test)]
+pub fn forged() -> u8 {
+    FORGED.with(std::cell::Cell::get)
+}
+
+/// Makes every stamp this thread works out from here on another elmdb's, by `with`; 0 is this elmdb's own
+#[cfg(test)]
+pub fn forge(with: u8) {
+    FORGED.with(|forged| forged.set(with));
+}
+
+/// An order's marker (`d/xob`): the stamp its keys were filed under, the build they are under, and whether that
+/// build holds every key the index's entries ask for. A read trusts an order whose marker is its own stamp's and
+/// whole; a write keeps one of its own stamp, and ends one of another's by deleting the marker
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Marker {
+    pub stamp: Stamp,
+    pub build: u64,
+    pub whole: bool,
+}
+
+impl Marker {
+    pub fn encode(&self) -> Vec<u8> {
+        values::encode(&Value::Array(vec![self.stamp.to_vec().into(), self.build.into(), self.whole.into()]))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Marker> {
+        let unread = || Error::new(ErrorCode::Corrupted, "An order's marker doesn't read");
+        let stored = values::decode(bytes)?;
+        let parts = stored.as_array().ok_or_else(unread)?;
+        let (Some(Value::Binary(stamp)), Some(build), Some(whole)) =
+            (parts.first(), parts.get(1).and_then(Value::as_u64), parts.get(2).and_then(Value::as_bool))
+        else {
+            return Err(unread());
+        };
+        Ok(Marker { stamp: stamp.as_slice().try_into().map_err(|_| unread())?, build, whole })
+    }
+}
+
+/// The marker of an index's order, when it has one
+pub fn marker(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<Marker>> {
+    r.get(&keys::order_marker(entity_type, index))?.map(|stored| Marker::decode(&stored)).transpose()
+}
+
+/// The build a read takes an index's order from: its marker's, when that is this elmdb's stamp and whole
+pub fn readable(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<u64>> {
+    let stamp = stamp(&r.schema().collation)?;
+    Ok(marker(r, entity_type, index)?.filter(|marker| marker.stamp == stamp && marker.whole).map(|marker| marker.build))
+}
+
+/// The build a write files an index's order under, as it files or takes out a string there: its marker's, when
+/// that is this elmdb's stamp, whole or not. A marker of another stamp is deleted, which ends that build, since
+/// what the other files for this write is its layout's and unknown here; and then, as with no marker, nothing is
+/// filed and the order is owed a build, which the unit's commit asks for
+pub fn filing(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<Option<u64>> {
+    let stamp = stamp(&t.schema.collation)?;
+    let own = keys::order_marker(entity_type, index);
+    match t.get(&own)?.map(|stored| Marker::decode(&stored)).transpose()? {
+        Some(marker) if marker.stamp == stamp => Ok(Some(marker.build)),
+        found => {
+            if found.is_some() {
+                t.del(&own)?;
+            }
+            t.state.orders_owed.insert((entity_type.to_owned(), index.to_owned()));
+            Ok(None)
+        }
+    }
+}
+
+/// What files an index's order under a build: the build, and the collator its sort keys are made by
+#[derive(Clone)]
+pub struct Filing {
+    pub build: u64,
+    pub running: Rc<Running>,
+}
+
+impl Filing {
+    /// The key the order has for the string an entry is for, given the entry's own key (`string_key`): none for an
+    /// entry of anything else, and for a key that is no entry's
+    pub fn of_entry(&self, own: &[u8]) -> Option<Vec<u8>> {
+        if !own.starts_with(&crate::format::Prefix::Index.key().to_vec()) {
+            return None;
+        }
+        let parts = crate::format::key::decode(own).ok()?;
+        let (Some(Part::String(entity_type)), Some(Part::String(index))) = (parts.get(1), parts.get(2)) else {
+            return None;
+        };
+        string_key(&self.running.collator, entity_type, index, self.build, parts.get(3..)?)
+    }
+
+    /// The keys the order has for the entity at `place`, one for each string it holds that has no key of its own
+    /// (`entities::Filed::unplaced`)
+    pub fn of_places(
+        &self,
+        entity_type: &str,
+        index: &str,
+        unplaced: &[(Vec<Part>, String)],
+        place: u64,
+    ) -> impl Iterator<Item = Vec<u8>> {
+        let key = move |(leading, string): &(Vec<Part>, String)| {
+            place_key(&self.running.collator, entity_type, index, self.build, leading, string, place)
+        };
+        unplaced.iter().filter_map(key)
+    }
+}
+
+/// What files an index's order where a read trusts it, under its marker's build: none when the marker is another
+/// stamp's, isn't whole, or isn't there
+pub fn trusted(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<Filing>> {
+    match readable(r, entity_type, index)? {
+        Some(build) => Ok(Some(Filing { build, running: running(&r.schema().collation)? })),
+        None => Ok(None),
+    }
+}
+
+/// Marks an index's order whole under a build begun by this unit, which files every key of it: what `rebuild()`
+/// does for an index it builds. The build is the sequence the unit commits as, so no two of a database share one
+pub fn begin_whole(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<Filing> {
+    let running = running(&t.schema.collation)?;
+    let build = super::mirror::stored_sequence(t)? + 1;
+    let marker = Marker { stamp: running.stamp, build, whole: true };
+    t.put(&keys::order_marker(entity_type, index), &marker.encode())?;
+    Ok(Filing { build, running })
+}
+
+/// Where a build of an index's order has got to, which the builder holds between its units
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Not begun: the marker says what there is to do
+    Begin,
+    /// The index's entries read as far as the key `after`, each string's key put where there was none
+    Entries { build: u64, after: Option<Vec<u8>> },
+    /// And so the entities holding long strings, by the keys their places are under
+    Long { build: u64, after: Option<Vec<u8>> },
+    /// Whole. What is left under any other build is deleted
+    Sweep { build: u64 },
+    /// Nothing more to do
+    Done,
+    /// The order has no marker of this elmdb's, and this build may not begin one yet
+    PutOff,
+}
+
+/// Whether a type's index is one whose order is kept: a value index the schema declares, built
+fn kept(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<super::entities::ValueIndex>> {
+    let declared = super::entities::value_indexes(r.schema(), entity_type).into_iter().find(|i| i.name == index);
+    match declared.filter(super::entities::ValueIndex::accounts) {
+        Some(found) if super::derive::is_built(r, entity_type, index)? => Ok(Some(found)),
+        _ => Ok(None),
+    }
+}
+
+/// One unit of the build of an index's order (`docs/roadmap/string-order.md`, A stale sort key is never read),
+/// answering where the build is after it, and whether it began one.
+///
+/// A build is begun under a marker of this elmdb's stamp, not whole, and its number the sequence this unit commits
+/// as. It goes on with one it finds so, from the index's first key, and leaves one that is whole. Each unit after
+/// the first holds the marker to the stamp and the build it began under and begins again when it is another: a
+/// write of another stamp ended it, or a `rebuild()` replaced it. Writes of this stamp keep the keys either side
+/// of where the build is, so it puts only a key that isn't there. With `may_begin` false it begins none
+pub fn build_unit(
+    t: &mut Txn<'_, '_>,
+    entity_type: &str,
+    index: &str,
+    mut step: Step,
+    may_begin: bool,
+    limit: usize,
+) -> Result<(Step, bool)> {
+    // As far as the unit's share of the work goes: a part that ended short of it leaves the next its turn, so a
+    // small index's order is built in one unit
+    let mut began = false;
+    loop {
+        let before = std::mem::discriminant(&step);
+        let (reached, begun) = build_step(t, entity_type, index, step, may_begin, limit)?;
+        began |= begun;
+        step = reached;
+        if matches!(step, Step::Done | Step::PutOff) || std::mem::discriminant(&step) == before {
+            return Ok((step, began));
+        }
+    }
+}
+
+/// One part of `build_unit`: the build's beginning, `limit` of the index's entries or of the keys its long strings
+/// are under, or `limit` keys of other builds deleted
+fn build_step(
+    t: &mut Txn<'_, '_>,
+    entity_type: &str,
+    index: &str,
+    step: Step,
+    may_begin: bool,
+    limit: usize,
+) -> Result<(Step, bool)> {
+    let Some(found) = kept(t, entity_type, index)? else { return Ok((Step::Done, false)) };
+    let running = running(&t.schema.collation)?;
+    let held = marker(t, entity_type, index)?;
+    // The marker a unit of the build is under: this stamp's, its build, and whole only once it has been made so
+    let under = |build: u64, whole: bool| {
+        held.as_ref().is_some_and(|m| m.stamp == running.stamp && m.build == build && m.whole == whole)
+    };
+    let put = |t: &mut Txn<'_, '_>, key: Option<Vec<u8>>| -> Result<()> {
+        match key {
+            Some(key) if !t.contains(&key)? => t.put(&key, &[]),
+            _ => Ok(()),
+        }
+    };
+    match step {
+        Step::Done | Step::PutOff => Ok((step, false)),
+        Step::Begin => match held {
+            Some(m) if m.stamp == running.stamp && m.whole => Ok((Step::Sweep { build: m.build }, false)),
+            Some(m) if m.stamp == running.stamp => Ok((Step::Entries { build: m.build, after: None }, false)),
+            _ if !may_begin => Ok((Step::PutOff, false)),
+            _ => {
+                let build = super::mirror::stored_sequence(t)? + 1;
+                let begun = Marker { stamp: running.stamp, build, whole: false };
+                t.put(&keys::order_marker(entity_type, index), &begun.encode())?;
+                Ok((Step::Entries { build, after: None }, true))
+            }
+        },
+        Step::Entries { build, after } => {
+            if !under(build, false) {
+                return Ok((Step::Begin, false));
+            }
+            let filing = Filing { build, running };
+            let entries = keys::index_range(entity_type, index, &[]);
+            let from = after.map_or_else(
+                || entries.clone(),
+                |mut key| {
+                    key.push(0);
+                    key
+                },
+            );
+            let mut read: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            t.visit_from(&entries, &from, |key, stored| {
+                read.push((key.to_vec(), stored.to_vec()));
+                read.len() < limit
+            })?;
+            for (own, stored) in &read {
+                put(t, filing.of_entry(own))?;
+                // A string with no key of its own has one for each entity its entry holds
+                let parts = crate::format::key::decode(own)?;
+                if let Some((Part::String(string), leading)) = parts.get(3..).and_then(<[Part]>::split_last)
+                    && !placed(string)
+                {
+                    for place in super::places::held(t, own, stored)? {
+                        let key =
+                            place_key(&filing.running.collator, entity_type, index, build, leading, string, place);
+                        put(t, key)?;
+                    }
+                }
+            }
+            match read.len() < limit {
+                true => Ok((Step::Long { build, after: None }, false)),
+                false => Ok((Step::Entries { build, after: read.pop().map(|(key, _)| key) }, false)),
+            }
+        }
+        Step::Long { build, after } => {
+            if !under(build, false) {
+                return Ok((Step::Begin, false));
+            }
+            let filing = Filing { build, running };
+            // The keys the entities holding a long string are under: the range's own, for an index on one field,
+            // and one for each tuple under it
+            let range = keys::index_others(crate::format::Prefix::IndexLong, entity_type, index, &[]);
+            let mut read: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+            let from = match after {
+                None => {
+                    read.extend(t.get(&range)?.map(|stored| (range.clone(), stored)));
+                    range.clone()
+                }
+                Some(mut key) => {
+                    key.push(0);
+                    key
+                }
+            };
+            t.visit_from(&range, &from, |key, stored| {
+                read.push((key.to_vec(), stored.to_vec()));
+                read.len() < limit
+            })?;
+            let last = found.fields.last().map(String::as_str).unwrap_or_default();
+            for (own, stored) in &read {
+                let parts = crate::format::key::decode(own)?;
+                let leading = parts.get(3..).unwrap_or_default();
+                for place in super::places::held(t, own, stored)? {
+                    let Some((id, _)) = super::entities::at_place(t, entity_type, place)? else { continue };
+                    if let Some(Value::String(string)) = super::entities::get(t, &id, last)?
+                        && let Some(string) = string.as_str()
+                    {
+                        let key =
+                            place_key(&filing.running.collator, entity_type, index, build, leading, string, place);
+                        put(t, key)?;
+                    }
+                }
+            }
+            if read.len() >= limit {
+                return Ok((Step::Long { build, after: read.pop().map(|(key, _)| key) }, false));
+            }
+            let whole = Marker { stamp: filing.running.stamp, build, whole: true };
+            t.put(&keys::order_marker(entity_type, index), &whole.encode())?;
+            Ok((Step::Sweep { build }, false))
+        }
+        Step::Sweep { build } => {
+            if !under(build, true) {
+                return Ok((Step::Begin, false));
+            }
+            // What is under a build before the marker's, and after it: no order's
+            let (low, high) = crate::format::key::prefix_range(&keys::order_of(entity_type, index));
+            let (first, past) = crate::format::key::prefix_range(&keys::order_range(entity_type, index, build, &[]));
+            let mut stale: Vec<Vec<u8>> = Vec::new();
+            for (from, to) in [(&low, &first), (&past, &high)] {
+                t.visit_within(from, to, |key, _| {
+                    stale.push(key.to_vec());
+                    stale.len() < limit
+                })?;
+            }
+            for key in &stale {
+                t.del(key)?;
+            }
+            Ok((if stale.len() < limit { Step::Done } else { Step::Sweep { build } }, false))
+        }
+    }
+}
+
+/// Removes an index's order: its keys under every build, and its marker
+pub fn clear(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<()> {
+    t.clear_prefix(&keys::order_of(entity_type, index))?;
+    let marker = keys::order_marker(entity_type, index);
+    if t.contains(&marker)? {
+        t.del(&marker)?;
+    }
+    Ok(())
+}
+
+/// The key that says an index has an entry for the string its `parts` end with, under the parts before it: none
+/// for parts ending with no string, for a string filed by its entities' places (`placed`), and under parts that
+/// leave a key no room
+pub fn string_key(
+    collator: &CollatorBorrowed<'static>,
+    entity_type: &str,
+    index: &str,
+    build: u64,
+    parts: &[Part],
+) -> Option<Vec<u8>> {
+    let (Part::String(string), leading) = parts.split_last()? else { return None };
+    if !placed(string) {
+        return None;
+    }
+    let room = keys::order_room(entity_type, index, leading)?;
+    Some(keys::order_string(entity_type, index, build, leading, &sort_key(collator, string, room), string))
+}
+
+/// The key that says the entity at `place` holds `string`, one with no key of its own, under these leading parts:
+/// none under parts that leave a key no room
+pub fn place_key(
+    collator: &CollatorBorrowed<'static>,
+    entity_type: &str,
+    index: &str,
+    build: u64,
+    leading: &[Part],
+    string: &str,
+    place: u64,
+) -> Option<Vec<u8>> {
+    let room = keys::order_room(entity_type, index, leading)?;
+    Some(keys::order_place(entity_type, index, build, leading, &sort_key(collator, string, room), place))
 }
 
 #[cfg(test)]

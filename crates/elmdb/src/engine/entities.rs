@@ -18,7 +18,7 @@
 //! among them.
 
 use rmpv::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::Prefix;
@@ -378,6 +378,24 @@ impl ValueIndex {
         }
         if !self.accounts() {
             filed.others.clear();
+            return filed;
+        }
+        // The strings it holds that an order has no key of their own for: one with an entry, and a long one
+        let unplaced = |parts: &Vec<Part>| match parts.split_last() {
+            Some((Part::String(string), leading)) if !super::order::placed(string) => {
+                Some((leading.to_vec(), string.clone()))
+            }
+            _ => None,
+        };
+        filed.unplaced = filed.entries.iter().filter_map(unplaced).collect();
+        if let Some(Value::String(string)) = last
+            && let Some(string) = string.as_str()
+        {
+            let under = |other: &Other| match other {
+                Other::Long(leading) => Some((leading.clone(), string.to_owned())),
+                _ => None,
+            };
+            filed.unplaced.extend(filed.others.iter().filter_map(under));
         }
         filed
     }
@@ -390,6 +408,10 @@ pub struct Filed {
     pub entries: Vec<Vec<Part>>,
     /// Where an index that accounts for its entities files it besides
     pub others: Vec<Other>,
+    /// The strings it holds that the index's order has no key of their own for (`order::placed`), each with the
+    /// parts the index's fields before the last hold: the order files the entity's place for each, where the
+    /// string's sort key puts it. One the index has an entry for, and one it has none for (`Other::Long`)
+    pub unplaced: Vec<(Vec<Part>, String)>,
 }
 
 impl Filed {
@@ -676,13 +698,61 @@ fn reindex(
         let (had, has) = (was.entry_keys(&entity_type, &index.name), now.entry_keys(&entity_type, &index.name));
         let (had_others, has_others) =
             (was.other_keys(&entity_type, &index.name), now.other_keys(&entity_type, &index.name));
+        // The order the index keeps of its strings (`order.rs`) has a key for each string an entry is for, there
+        // while the entry holds a place, and one for the entity under each string with no key of its own. So the
+        // entries of strings this write files the entity under or takes it out from, by their keys
+        let strings = |filed: &Filed, other: &BTreeSet<Vec<u8>>| -> BTreeMap<Vec<u8>, Vec<Part>> {
+            let of_strings = filed.entries.iter().filter(|parts| matches!(parts.last(), Some(Part::String(_))));
+            let keyed = of_strings.map(|parts| (keys::index_range(&entity_type, &index.name, parts), parts.clone()));
+            keyed.filter(|(key, _)| !other.contains(key)).collect()
+        };
+        let (lost, gained) = match index.accounts() {
+            true => (strings(&was, &has), strings(&now, &had)),
+            false => Default::default(),
+        };
+        // A write that files a string or takes one out reads the order's marker, and files under it or ends it
+        let order = match lost.is_empty() && gained.is_empty() && was.unplaced == now.unplaced {
+            true => None,
+            false => match super::order::filing(t, &entity_type, &index.name)? {
+                Some(build) => Some((build, super::order::running(&t.schema.collation)?)),
+                None => None,
+            },
+        };
+        let key_of = |order: &Option<(u64, std::rc::Rc<super::order::Running>)>, parts: Option<&Vec<Part>>| {
+            let (build, running) = order.as_ref()?;
+            super::order::string_key(&running.collator, &entity_type, &index.name, *build, parts?)
+        };
         for key in had.difference(&has).chain(had_others.difference(&has_others)) {
-            places::unfile(t, key.clone(), seq)?;
+            // The string's key goes with the last place its entry held. What it held is known without a read: a
+            // unit that rolls this back has the entry again, and so the key, whether or not a build had put it yet
+            if places::unfile(t, key.clone(), seq)?
+                && let Some(gone) = key_of(&order, lost.get(key))
+            {
+                t.del_over(&gone, Some(&[]))?;
+            }
         }
         for key in has.difference(&had).chain(has_others.difference(&had_others)) {
             // What makes a key too long is a value the index holds
             key_fits(key, id, &entity_type, &index.name)?;
-            places::file(t, key.clone(), seq)?;
+            // And comes with the first: there was none, the entry having held no place
+            if places::file(t, key.clone(), seq)?
+                && let Some(came) = key_of(&order, gained.get(key))
+            {
+                t.put_over(&came, &[], None)?;
+            }
+        }
+        if let Some((build, running)) = &order {
+            let filing = super::order::Filing { build: *build, running: std::rc::Rc::clone(running) };
+            let places_of = |filed: &Filed| -> BTreeSet<Vec<u8>> {
+                filing.of_places(&entity_type, &index.name, &filed.unplaced, seq).collect()
+            };
+            let (had_places, has_places) = (places_of(&was), places_of(&now));
+            for key in had_places.difference(&has_places) {
+                t.del(key)?;
+            }
+            for key in has_places.difference(&had_places) {
+                t.put(key, &[])?;
+            }
         }
     }
     Ok(())

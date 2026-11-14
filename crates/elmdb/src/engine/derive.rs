@@ -99,6 +99,26 @@ fn index_others_into(
     Ok(())
 }
 
+/// Hands `file` each key an index's order has for each of these entities by its place: one for each string it
+/// holds that has no key of its own (`entities::Filed::unplaced`)
+fn order_places_into(
+    r: &impl Read,
+    entity_type: &str,
+    index: &ValueIndex,
+    of: &[&Entity],
+    order: &super::order::Filing,
+    mut file: impl FnMut(Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    for e in of {
+        let fields: Vec<Option<Value>> =
+            index.fields.iter().map(|f| entities::get(r, &e.id, f)).collect::<Result<_>>()?;
+        for key in order.of_places(entity_type, &index.name, &index.files(&fields).unplaced, e.seq) {
+            file(key)?;
+        }
+    }
+    Ok(())
+}
+
 /// Refuses what would keep a build of a value index from finishing: values whose key LMDB can't store
 /// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`). `own` is the key
 /// the entity `id` is filed under as an entry
@@ -172,10 +192,16 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     for (t, of) in &by_type {
         for index in value_indexes(r.schema(), t) {
             if is_built(r, t, &index.name)? {
-                let mut filing = places::Sorting::new()?;
+                // Its order's keys with its entries, where a read trusts the order: under a marker of another
+                // stamp, or one not whole, what the order holds is no one's to say here
+                let order = super::order::trusted(r, t, &index.name)?;
+                let mut filing = places::Sorting::new()?.ordered(order.clone());
                 index_entries_into(r, t, &index, of, |key, e| filing.entry(key, e.seq))?;
                 index_others_into(r, t, &index, of, |key, e| filing.entry(key, e.seq))?;
                 filing.finish(&mut emit)?;
+                if let Some(order) = &order {
+                    order_places_into(r, t, &index, of, order, |key| emit(key, Vec::new()))?;
+                }
             }
         }
         let places: Vec<(u64, String)> = of.iter().map(|e| (e.seq, e.id.clone())).collect();
@@ -226,7 +252,7 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
 
 /// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
 /// was built rather than following from primary data
-const COMPARED: [Prefix; 26] = [
+const COMPARED: [Prefix; 27] = [
     Prefix::Live,
     Prefix::Changed,
     Prefix::Trashed,
@@ -241,6 +267,7 @@ const COMPARED: [Prefix; 26] = [
     Prefix::IndexUnorderedPlaces,
     Prefix::IndexLong,
     Prefix::IndexLongPlaces,
+    Prefix::IndexOrder,
     Prefix::Out,
     Prefix::In,
     Prefix::Between,
@@ -256,7 +283,7 @@ const COMPARED: [Prefix; 26] = [
 ];
 
 /// The prefixes whose keys belong to one index of a type, its second and third parts, compared only once it is built
-const PER_INDEX: [Prefix; 17] = [
+const PER_INDEX: [Prefix; 18] = [
     Prefix::Index,
     Prefix::IndexPlaces,
     Prefix::IndexWithout,
@@ -265,6 +292,7 @@ const PER_INDEX: [Prefix; 17] = [
     Prefix::IndexUnorderedPlaces,
     Prefix::IndexLong,
     Prefix::IndexLongPlaces,
+    Prefix::IndexOrder,
     Prefix::TextTerm,
     Prefix::TextBlock,
     Prefix::TextDocument,
@@ -292,6 +320,14 @@ fn compared(r: &impl Read, prefix: Prefix, key: &[u8]) -> Result<bool> {
     }
     let parts = decode_key(key)?;
     match (parts.get(1), parts.get(2)) {
+        // An order's keys are compared under the build a read trusts: one of another stamp is that stamp's to lay
+        // out, one not whole is still being filed, and a key under any other build is waiting to be deleted
+        (Some(Part::String(t)), Some(Part::String(i))) if prefix == Prefix::IndexOrder => {
+            let build = super::order::readable(r, t, i)?;
+            Ok(is_built(r, t, i)?
+                && build.is_some()
+                && parts.get(3) == build.map(|build| Part::Number(build as f64)).as_ref())
+        }
         (Some(Part::String(t)), Some(Part::String(i))) => is_built(r, t, i),
         _ => Ok(false),
     }
@@ -472,7 +508,27 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                 }
                 clear_value_index(t, entity_type, name)?;
                 text::clear(t, entity_type, name)?;
-                filing.finish(|key, value| t.put(&key, &value))?;
+                // Its order with it, whole under a build of this unit's: the keys of its entries' strings from the
+                // entries as they are laid out, and those of the entities filed by their places from their rows
+                super::order::clear(t, entity_type, name)?;
+                let order = match found.accounts() {
+                    true => Some(super::order::begin_whole(t, entity_type, name)?),
+                    false => None,
+                };
+                filing.ordered(order.clone()).finish(|key, value| t.put(&key, &value))?;
+                if let Some(order) = &order {
+                    let mut places = Vec::new();
+                    visit_entities(t, |e| match ids::type_of(&e.id) == entity_type {
+                        true => order_places_into(t, entity_type, &found, &[&e], order, |key| {
+                            places.push(key);
+                            Ok(())
+                        }),
+                        false => Ok(()),
+                    })?;
+                    for key in places {
+                        t.put(&key, &[])?;
+                    }
+                }
             } else if let Some(found) = text::text_indexes(t.schema, entity_type).into_iter().find(|i| i.name == name) {
                 let mut scratch = sorted::Scratch::new()?;
                 let mut text = text::Entries::new(entity_type, &found)?;
@@ -533,6 +589,9 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             for prefix in COMPARED {
                 t.clear_prefix(&prefix.key().to_vec())?;
             }
+            // Every order's marker with its keys: an index built below has its order whole under a build of this
+            // unit's, and one left unbuilt has neither
+            t.clear_prefix(&Prefix::IndexOrderBuilt.key().to_vec())?;
             // What an earlier layout left under a tag nothing reads now
             for retired in Prefix::retired() {
                 t.clear_prefix(&retired)?;
@@ -578,6 +637,21 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         }
                         Err(e) => return Err(e),
                     }
+                }
+            }
+            // The order of every built index a schema declares, a type with no entity's among them, which
+            // `derive_into` then files the keys of
+            let declared: Vec<(String, String)> = t
+                .schema
+                .types
+                .keys()
+                .flat_map(|ty| value_indexes(t.schema, ty).into_iter().map(move |index| (ty.clone(), index)))
+                .filter(|(_, index)| index.accounts())
+                .map(|(ty, index)| (ty, index.name))
+                .collect();
+            for (ty, index) in declared {
+                if is_built(t, &ty, &index)? {
+                    super::order::begin_whole(t, &ty, &index)?;
                 }
             }
             let mut scratch = sorted::Scratch::new()?;

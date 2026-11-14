@@ -66,8 +66,9 @@ fn a_field_write_reads_what_it_replaces_and_what_its_indexes_need_and_nothing_tw
     // A field no index covers, though the type's trigram index covers another: what it held, for the write and the
     // undo log both
     assert_eq!(reads_of("note", "changed"), 1);
-    // A value index's: that, the entity's place, and the undo log's reads of the index entry it removes and the one it adds
-    assert_eq!(reads_of("status", "done"), 4);
+    // A value index's: that, the entity's place, the undo log's reads of the index entry it removes and the one it
+    // adds, and the marker of the index's order, whose keys for the two strings are written with no read
+    assert_eq!(reads_of("status", "done"), 5);
     // A text index's: that, the place, the stored document, the lengths of its block of places and the statistics; and
     // for the two terms it loses and the two it gains, their places. The term it keeps, as often as it held it, is read
     // nowhere
