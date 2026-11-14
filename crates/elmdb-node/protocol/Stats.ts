@@ -20,7 +20,7 @@ indexes: { [key in string]: number },
 /**
  * Per type and value index, the bytes of its keys and their values, in every key family it is filed in: its
  * values' places, those of the entities without a value, of those it doesn't order and of those holding a long
- * string, and the blocks of each.
+ * string, the blocks of each, and the keys of the order it keeps of its strings.
  * The engine's own indexes of a type, of short codes and roles, are among them
  */
 indexBytes: { [key in string]: number }, entries: number, fileBytes: number, mapBytes: number, };
