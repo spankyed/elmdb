@@ -369,6 +369,58 @@ fn a_range_of_strings_is_read_from_the_index_s_order_alone_and_before_an_order()
 }
 
 #[test]
+fn a_whole_order_is_resolved_in_the_order_of_its_keys_as_one_handed_on_an_entity_at_a_time_is() {
+    let (_dir, db) = open();
+    // More strings than are each sought, in no order: some shared, capitals among them, with numbers, entities
+    // without a value, one filed by its place and some in the trash
+    let mut values: Vec<Option<Value>> = (0..700usize)
+        .map(|i| match i % 9 {
+            0 => Some(((i * 37) % 50).into()),
+            1 => None,
+            2 => Some(format!("shared {}", i % 4).into()),
+            _ => {
+                let word = format!("w{:03}", (i * 131) % 997);
+                Some(if i % 2 == 0 { word.to_uppercase() } else { word }.into())
+            }
+        })
+        .collect();
+    values.push(Some("z".repeat(300).into()));
+    let all = load(&db, "Item", &values);
+    db.wait_for_index_builds().unwrap();
+    write(&db, (0..all.len()).step_by(13).map(|at| op(json!({ "op": "trash", "id": all[at] }))).collect());
+    for scope in ["live", "withTrashed"] {
+        for descending in [false, true] {
+            // Every entity, each visited once: the same ids in the same order as the sorted arm, and as the
+            // order handed on an entity at a time, which a limit past them all reads
+            let (whole, visits) = same(&db, scope, |field| json!([order(field, descending)]));
+            let (limited, _) = same(&db, scope, |field| json!([order(field, descending), limit(10_000)]));
+            assert_eq!(whole, limited, "{scope}, descending {descending}");
+            assert_eq!(visits as usize, all.len(), "{scope}: each place is read once");
+            // A page with no limit goes on past its cursor: one of a shared string, one of a string of its own,
+            // the long one, a number and an entity without a value
+            for at in [2usize, 3, 0, 1, all.len() - 1, 11] {
+                let (rest, _) = same(&db, scope, |field| json!([order(field, descending), after(&all[at])]));
+                let expected = match whole.iter().position(|id| *id == all[at]) {
+                    Some(found) => &whole[found + 1..],
+                    None => &[],
+                };
+                assert_eq!(rest, expected, "{scope}, descending {descending}, after {}", all[at]);
+            }
+            // And a filter after it is of every entity too
+            same(&db, scope, |field| json!([order(field, descending), { "step": "has", "field": "k" }]));
+        }
+    }
+    // Few of a type's entities, which a range keeps, are each sought
+    let (few, visits) = same(
+        &db,
+        "live",
+        |field| json!([{ "step": "range", "field": field, "atLeast": "w100", "below": "w110" }, order(field, false)]),
+    );
+    assert!(!few.is_empty() && visits <= few.len() as u64 + 4, "{visits} read for {}", few.len());
+    clean(&db);
+}
+
+#[test]
 fn a_long_string_leaves_a_range_of_its_field_s_numbers_to_the_index() {
     let (_dir, db) = open();
     let all = load(&db, "Item", &mixed());

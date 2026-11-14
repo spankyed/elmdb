@@ -309,6 +309,14 @@ an answer:
   which is what a bound whose sort key was cut, and one the collator holds equal to a string of other bytes, ask. A build this builder began and finds
   ended is begun again after a wait that doubles, so two elmdbs of different collators writing one database leave
   its orders to the rows more of the time the longer both stay.
+- **An order taken whole is resolved in the order of its keys.** An order read from an index with no `limit` after
+  it, under a terminal that answers of every entity, reads the places first and names the entities at them by one
+  walk of the type's entities in place order, putting the ids back in the order's, where naming each as it is
+  handed on is a seek for each; the entries of its strings are met by one walk of the index's entries the same way
+  when they are 256 or more. An order of fewer than one in eight of the type's live entities, which equalities or
+  a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
+  at a time, so a page reads its own. It holds its places in memory, and a tracked read of a whole order is one a
+  commit to any entity of the type writes into.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
   field would be read from an index for (the points on either side of this one) answer the first entry under the index's least
   value or under its greatest, the first in place order of those holding it, passing over an entry of an entity the

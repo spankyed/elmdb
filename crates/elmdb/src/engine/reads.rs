@@ -609,6 +609,9 @@ struct Query<'r, R: Read> {
     /// What the stage about to run is asked for, when less than all it would hand on will do: set by a `limit` or a
     /// terminal as it pulls a search (`Query::asks`), and taken by whichever stage runs next
     asked: Cell<Option<Ask>>,
+    /// Whether the order being read from an index is read whole, every entity of it handed on: its strings are
+    /// then met in one walk of the index's entries and not sought one at a time (`Query::joined`)
+    whole: Cell<bool>,
     /// The stage that started past the cursor of the `after` it hands to (`Step::After`), handing on only the ids
     /// past it
     sought: Cell<Option<usize>>,
@@ -1240,6 +1243,11 @@ impl<R: Read> Query<'_, R> {
                         }
                         None => Begin::First,
                     };
+                    // An order every entity of which is taken is resolved in the order of its keys, where one a
+                    // step or the terminal may stop is handed on an entity at a time
+                    if self.takes_whole(upto) {
+                        return self.resolved(&ordered, *descending, begin, visit);
+                    }
                     return self.in_order(&ordered, *descending, begin, &mut |place| {
                         self.hand(&ordered.entity_type, place, visit)
                     });
@@ -2874,6 +2882,169 @@ impl<R: Read> Query<'_, R> {
         after: Option<(&str, u64)>,
         each: &mut Entry<'_>,
     ) -> Result<bool> {
+        // An order read whole has its strings' entries met in one walk of them
+        if self.whole.get() {
+            let mut held = Vec::new();
+            self.strings_held(ordered, descending, after, &mut |string, place, past| {
+                held.push((string, place, past));
+                Ok(true)
+            })?;
+            return self.joined(ordered, held, each);
+        }
+        self.strings_held(ordered, descending, after, &mut |string, place, past| match place {
+            Some(place) => each(place),
+            None => {
+                let mut parts = ordered.leading.clone();
+                parts.push(Part::String(string));
+                self.places_after(&keys::index_range(&ordered.entity_type, &ordered.index, &parts), past, each)
+            }
+        })
+    }
+
+    /// Hands on the entities at the places of an order's strings, each string with the entity filed by its place
+    /// or none for one with an entry, and the place of its entry a page goes on past (`strings_held`): the entries
+    /// of the strings are met in one walk of the index's, in the order of their keys, where a seek for each would
+    /// find its way down from the root. Few strings, and those a range keeps, are sought as an order handed on an
+    /// entity at a time seeks them: a walk would pass over every entry between them
+    fn joined(&self, ordered: &Ordered, held: Vec<Held>, each: &mut Entry<'_>) -> Result<bool> {
+        let entry = |string: &str| {
+            let mut parts = ordered.leading.clone();
+            parts.push(Part::String(string.to_owned()));
+            keys::index_range(&ordered.entity_type, &ordered.index, &parts)
+        };
+        let mut wanted: Vec<(Vec<u8>, usize)> = Vec::new();
+        if held.len() >= JOINED_AT_ONCE && ordered.within.is_none() {
+            let with_entry = held.iter().enumerate().filter(|(_, (_, place, _))| place.is_none());
+            wanted = with_entry.map(|(at, (string, _, _))| (entry(string), at)).collect();
+            wanted.sort_unstable();
+        }
+        let mut places: Vec<Option<Vec<u64>>> = vec![None; held.len()];
+        if let (Some((first, _)), Some((last, _))) = (wanted.first(), wanted.last()) {
+            let (mut at, mut failed) = (0, None);
+            self.r.visit_within(first, &past(last.clone()), |own, stored| {
+                while at < wanted.len() && wanted[at].0.as_slice() < own {
+                    at += 1;
+                }
+                if at < wanted.len() && wanted[at].0 == own {
+                    match super::places::held(self.r, own, stored) {
+                        Ok(found) => places[wanted[at].1] = Some(found.into_iter().collect()),
+                        Err(error) => failed = Some(error),
+                    }
+                }
+                failed.is_none() && at < wanted.len()
+            })?;
+            if let Some(error) = failed {
+                return Err(error);
+            }
+        }
+        for (at, (string, place, past)) in held.iter().enumerate() {
+            let more = match (place, &places[at]) {
+                (Some(place), _) => each(*place)?,
+                (None, Some(found)) => {
+                    let mut more = true;
+                    for place in found.iter().filter(|place| past.is_none_or(|past| **place > past)) {
+                        more = each(*place)?;
+                        if !more {
+                            break;
+                        }
+                    }
+                    more
+                }
+                (None, None) => self.places_after(&entry(string), *past, each)?,
+            };
+            if !more {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether every entity of the order the step before `upto` reads is taken: no `limit` among the steps after
+    /// it, and a terminal that answers of them all. An order that is, is resolved in the order of its keys
+    /// (`resolved`); one a step or the terminal may stop is handed on as it is walked, so a page reads its own
+    fn takes_whole(&self, upto: usize) -> bool {
+        let limited = self.plan.steps[upto..].iter().any(|step| matches!(step, Step::Limit { .. }));
+        let first = matches!(self.plan.terminal, Terminal::First | Terminal::Exists | Terminal::FirstRow { .. });
+        !limited && !first
+    }
+
+    /// Hands on every entity of an order read from an index, in the order: the places are read first, and the
+    /// entities at them named by one walk of the type's entities in place order, where naming each as it is handed
+    /// on is a seek for each. An order of few of the type's entities, which a range or equalities keep, names each
+    /// by its own seek: the walk would pass over every entity between them. The walk is of every entity of the
+    /// type the scope holds, so a tracked read of a whole order is one a commit to any of them writes into
+    fn resolved(&self, ordered: &Ordered, descending: bool, begin: Begin, visit: &mut Visit<'_>) -> Result<bool> {
+        let mut places: Vec<u64> = Vec::new();
+        self.whole.set(true);
+        let walked = self.in_order(ordered, descending, begin, &mut |place| {
+            places.push(place);
+            Ok(true)
+        });
+        self.whole.set(false);
+        walked?;
+        let live = match self.r.probe(&keys::count(&ordered.entity_type))? {
+            Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),
+            None => 0,
+        };
+        if (places.len() as u64).saturating_mul(NAMED_AT_ONCE) < live {
+            for place in places {
+                if !self.hand(&ordered.entity_type, place, visit)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(true);
+        }
+        // Each place with where it is in the order, in place order, met by a walk of the type's entities
+        let mut by_place: Vec<(u64, usize)> = places.iter().enumerate().map(|(at, place)| (*place, at)).collect();
+        by_place.sort_unstable();
+        let mut ids: Vec<Option<String>> = vec![None; places.len()];
+        let ranges: &[bool] = match self.plan.scope {
+            Scope::Live => &[false],
+            Scope::Trashed => &[true],
+            Scope::WithTrashed => &[false, true],
+        };
+        for &trashed in ranges {
+            let (mut at, mut failed) = (0, None);
+            self.r.visit(&keys::type_range(trashed, &ordered.entity_type), |key, stored| {
+                let named = place_of(key).and_then(|place| {
+                    while at < by_place.len() && by_place[at].0 < place {
+                        at += 1;
+                    }
+                    while at < by_place.len() && by_place[at].0 == place {
+                        ids[by_place[at].1] = values::decode(stored)?.as_str().map(str::to_owned);
+                        at += 1;
+                    }
+                    Ok(())
+                });
+                failed = named.err();
+                failed.is_none() && at < by_place.len()
+            })?;
+            if let Some(error) = failed {
+                return Err(error);
+            }
+        }
+        for id in ids {
+            self.count_visit();
+            if let Some(id) = id
+                && !visit(&id)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Hands `each` what an order's keys hold under an ordered read's leading values, in the strings' order: each
+    /// string, with the place of the entity holding it for one filed by its place and none for one with an entry,
+    /// and, for the string a page's cursor holds, the cursor's place, which its entry is read past. False when
+    /// `each` stopped the walk
+    fn strings_held(
+        &self,
+        ordered: &Ordered,
+        descending: bool,
+        after: Option<(&str, u64)>,
+        each: &mut dyn FnMut(String, Option<u64>, Option<u64>) -> Result<bool>,
+    ) -> Result<bool> {
         let Some(build) = ordered.strings else { return Ok(true) };
         let running = super::order::running(&self.r.schema().collation)?;
         let under = keys::order_range(&ordered.entity_type, &ordered.index, build, &ordered.leading);
@@ -2967,7 +3138,7 @@ impl<R: Read> Query<'_, R> {
         held: &mut Vec<(Option<String>, u64)>,
         descending: bool,
         after: Option<(&str, u64)>,
-        each: &mut Entry<'_>,
+        each: &mut dyn FnMut(String, Option<u64>, Option<u64>) -> Result<bool>,
     ) -> Result<bool> {
         let towards = |order: Ordering| if descending { order.reverse() } else { order };
         let compare =
@@ -3008,16 +3179,11 @@ impl<R: Read> Query<'_, R> {
                     Ordering::Greater => None,
                 },
             };
-            let more = match place {
-                Some(place) if past.is_some_and(|at| place <= at) => true,
-                Some(place) => each(place)?,
-                None => {
-                    let mut parts = ordered.leading.clone();
-                    parts.push(Part::String(string));
-                    self.places_after(&keys::index_range(&ordered.entity_type, &ordered.index, &parts), past, each)?
-                }
-            };
-            if !more {
+            // An entity filed by its place at or before the cursor's, under the cursor's string, is before it
+            if place.is_some_and(|place| past.is_some_and(|at| place <= at)) {
+                continue;
+            }
+            if !each(string, place, past)? {
                 return Ok(false);
             }
         }
@@ -3532,6 +3698,7 @@ impl<R: Read> Query<'_, R> {
             backward_hop: Cell::new(None),
             walked_back: Cell::new(None),
             asked: Cell::new(None),
+            whole: Cell::new(false),
             sought: Cell::new(None),
             ranked: RefCell::default(),
             within: plan.steps.iter().map(|_| OnceCell::new()).collect(),
@@ -4375,6 +4542,19 @@ const RANGE_ASKED: u64 = 16;
 /// read, where a seek finds its way down from the root
 const PASSED_OVER: u32 = 8;
 
+/// What a key of an index's order holds, as an ordered read hands it on (`Query::strings_held`): the string, the
+/// place of the entity holding it when the key is that entity's, and a page's cursor's place under its own string
+type Held = (String, Option<u64>, Option<u64>);
+
+/// How many strings of an order read whole have their entries met in one walk of the index's, where fewer are each
+/// sought: a walk reads every entry between the first and the last of them
+const JOINED_AT_ONCE: usize = 256;
+
+/// The entities of an order read whole are named by one walk of the type's when they are one in this many of its
+/// live entities or more, where fewer are each sought: a walk passes over the entities between them, each the next
+/// one read, and a seek finds its way down from the root
+const NAMED_AT_ONCE: u64 = 8;
+
 /// A type's entities as a plan reads them in a field's order from a value index (`Query::ordered`)
 struct Ordered {
     entity_type: String,
@@ -4746,6 +4926,7 @@ fn query_with(
         backward_hop: Cell::new(None),
         walked_back: Cell::new(None),
         asked: Cell::new(None),
+        whole: Cell::new(false),
         sought: Cell::new(None),
         ranked: RefCell::new(None),
         within: plan.steps.iter().map(|_| OnceCell::new()).collect(),
