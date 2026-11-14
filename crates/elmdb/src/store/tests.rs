@@ -1456,8 +1456,17 @@ fn a_writable_open_cuts_nothing_another_process_wrote_after_the_file_was_found_s
             written.set(std::fs::metadata(&data).unwrap().len());
         }
     });
-    let store = Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file");
+    // The open's map is no larger than the file it found, so what the other process wrote is past it: the write
+    // transaction the file is extended under is the first the open begins after, and takes the grown map
+    let found_grown = Rc::new(Cell::new(false));
+    failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+        let found_grown = Rc::clone(&found_grown);
+        move || found_grown.set(true)
+    });
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..quiet() })
+        .expect("a writable open of a healthy short file");
     assert!(written.get() > (last + 1) * page, "the other process wrote past the pages the open had read of");
+    assert!(found_grown.get(), "the open began its write transaction in the map the other process had outgrown");
     let held = std::fs::metadata(&data).unwrap().len();
     assert!(held >= written.get(), "the open cut the file to {held} bytes, of the {} written", written.get());
     assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));

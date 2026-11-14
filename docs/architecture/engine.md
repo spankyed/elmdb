@@ -15,7 +15,8 @@ The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it).
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
 engine can run it again without the caller. A growth also keeps out whatever else reads through the map: a sync and
 each read of the environment's sizes wait for it as a transaction does. A map another process grew is adopted by the
-first read to meet it, `committedElsewhere` included. Mapping capacity and physical file length are separate. On Windows,
+first read to meet it, `committedElsewhere` included, and by an open that meets it as it opens, each of whose
+transactions takes the grown map and is begun again. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
 adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
 the writable capacity. Writable mappings retain the normal capacity policy.

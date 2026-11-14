@@ -22,6 +22,12 @@ slow-timeout = { period = "10s", terminate-after = 1 }
 filter = "test(=store::tests::an_open_refuses_a_file_that_lost_its_commit_s_meta_page_to_no_commit)"
 slow-timeout = { period = "10s", terminate-after = 1 }
 
+# An open that never takes a map another process outgrew begins its transaction again without end: the test runs
+# another process four times, and takes a few seconds
+[[profile.default.overrides]]
+filter = "test(=store::tests::an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens)"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
 # Reader saturation children must reach their barrier or fail promptly, never hang a job.
 [[profile.default.overrides]]
 filter = "test(/^store::tests::(a_read_refuses_live_reader|a_read_only_open_recovers|reader_recovery_)/)"

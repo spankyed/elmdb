@@ -107,7 +107,11 @@ LMDB may leave its free tail out of the file, and a writable open extends it to 
 processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
 that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
 landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
-only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
+only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process).
+Another process may also grow the file past the map the open holds it in: every transaction the open begins takes
+the grown map and is begun again, which the same tests hold by growing the file before the open's first transaction
+and after its walk, for a read-only open and a writable one, and before the write transaction a short file is
+extended under. A
 torn file that is refused counts as a file that didn't survive.
 
 A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
