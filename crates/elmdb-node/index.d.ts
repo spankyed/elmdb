@@ -103,7 +103,11 @@ export declare class Database {
    * its `Changed`
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
-  /** Blocks until every index waiting to be built is built or has failed */
+  /**
+   * Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
+   * (`UNIT_OPEN`), and from the listener of the builder's commits, on the thread of the builder it would wait for
+   * (`CALLBACK_ACTIVE`): wait after the listener returns
+   */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
   purge(what: PurgeTarget): void
@@ -136,7 +140,11 @@ export declare class Database {
    * the database is closed
    */
   durable(): Promise<void>
-  /** Syncs what is owed and releases the environment; closing a closed database does nothing */
+  /**
+   * Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
+   * unit is open (`UNIT_OPEN`), and from a listener of this database, a watch's or the builder's commits'
+   * (`CALLBACK_ACTIVE`): close after the listener returns
+   */
   close(): void
 }
 

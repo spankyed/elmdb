@@ -743,6 +743,12 @@ codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compi
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 
+A code names what went wrong, not the call that met it, so one failure met by two calls is one code.
+`CALLBACK_ACTIVE` is a call that waits for what a listener of the database is called from, made by that listener:
+a `close`, from a watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the
+thread of the builder it would wait for. Either would wait for itself, and either is made after the listener
+returns (above, Change sets and watch).
+
 A panic in elmdb is a bug in elmdb, and in Node it is an error too: the binding runs every export's work where a
 panic is caught, and throws it as `PANICKED`, naming the export, where the panic was raised and what it said, or
 rejects the promise of a call whose work is on a thread of the pool. Left to unwind into Node, a panic would abort
