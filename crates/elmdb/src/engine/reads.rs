@@ -2332,12 +2332,16 @@ impl<R: Read> Query<'_, R> {
     /// each string's entry as far as it counts, and a tracked read depends on what it read: so a watch may run
     /// again for a write to a range it counted and then left to the rows, and never miss one
     fn strings_counted(&self, ordered: &Ordered, upto: u64) -> Result<u64> {
+        // mutant-skip: replace (== with !=|Query<'_, R>::strings_counted -> Result<u64> with Ok\((0|1)\))
+        // How many a range holds says which of several lists a read walks, which is its cost and not its answer
         if upto == 0 {
             return Ok(0);
         }
         let mut held = 0u64;
         self.strings(ordered, false, None, &mut |_| {
+            // mutant-skip: replace \+= with \*= in Query<'_, R>::strings_counted (as above)
             held += 1;
+            // mutant-skip: replace < with (==|>|<=) in Query<'_, R>::strings_counted (as above)
             Ok(held < upto)
         })?;
         Ok(held)
@@ -2920,48 +2924,52 @@ impl<R: Read> Query<'_, R> {
             parts.push(Part::String(string.to_owned()));
             keys::index_range(&ordered.entity_type, &ordered.index, &parts)
         };
-        let mut wanted: Vec<(Vec<u8>, usize)> = Vec::new();
-        if held.len() >= JOINED_AT_ONCE && ordered.within.is_none() {
-            let with_entry = held.iter().enumerate().filter(|(_, (_, place, _))| place.is_none());
-            wanted = with_entry.map(|(at, (string, _, _))| (entry(string), at)).collect();
-            wanted.sort_unstable();
-        }
-        let mut places: Vec<Option<Vec<u64>>> = vec![None; held.len()];
-        if let (Some((first, _)), Some((last, _))) = (wanted.first(), wanted.last()) {
-            let (mut at, mut failed) = (0, None);
-            self.r.visit_within(first, &past(last.clone()), |own, stored| {
-                while at < wanted.len() && wanted[at].0.as_slice() < own {
-                    at += 1;
+        // mutant-skip: replace (< with (==|>|<=)|\|\| with &&) in Query<'_, R>::joined
+        // Which strings are sought and which are met by a walk is what a read costs, and no part of its answer
+        if held.len() < JOINED_AT_ONCE || ordered.within.is_some() {
+            for (string, place, past) in held {
+                let more = match place {
+                    Some(place) => each(place)?,
+                    None => self.places_after(&entry(&string), past, each)?,
+                };
+                if !more {
+                    return Ok(false);
                 }
-                if at < wanted.len() && wanted[at].0 == own {
+            }
+            return Ok(true);
+        }
+        // Each string's entry by its key, and the places the walk finds it holds
+        let wanted: HashMap<Vec<u8>, usize> = held
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, place, _))| place.is_none())
+            .map(|(at, (string, _, _))| (entry(string), at))
+            .collect();
+        let mut places: Vec<Vec<u64>> = vec![Vec::new(); held.len()];
+        if let (Some(first), Some(last)) = (wanted.keys().min(), wanted.keys().max()) {
+            let mut failed = None;
+            self.r.visit_within(first, &past(last.clone()), |own, stored| {
+                if let Some(at) = wanted.get(own) {
                     match super::places::held(self.r, own, stored) {
-                        Ok(found) => places[wanted[at].1] = Some(found.into_iter().collect()),
+                        Ok(found) => places[*at] = found.into_iter().collect(),
                         Err(error) => failed = Some(error),
                     }
                 }
-                failed.is_none() && at < wanted.len()
+                failed.is_none()
             })?;
             if let Some(error) = failed {
                 return Err(error);
             }
         }
-        for (at, (string, place, past)) in held.iter().enumerate() {
-            let more = match (place, &places[at]) {
-                (Some(place), _) => each(*place)?,
-                (None, Some(found)) => {
-                    let mut more = true;
-                    for place in found.iter().filter(|place| past.is_none_or(|past| **place > past)) {
-                        more = each(*place)?;
-                        if !more {
-                            break;
-                        }
-                    }
-                    more
-                }
-                (None, None) => self.places_after(&entry(string), *past, each)?,
+        for (at, (_, place, _)) in held.iter().enumerate() {
+            let found = match place {
+                Some(place) => std::slice::from_ref(place),
+                None => places[at].as_slice(),
             };
-            if !more {
-                return Ok(false);
+            for place in found {
+                if !each(*place)? {
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -2971,9 +2979,12 @@ impl<R: Read> Query<'_, R> {
     /// it, and a terminal that answers of them all. An order that is, is resolved in the order of its keys
     /// (`resolved`); one a step or the terminal may stop is handed on as it is walked, so a page reads its own
     fn takes_whole(&self, upto: usize) -> bool {
+        // mutant-skip: replace Query<'_, R>::takes_whole -> bool with false
+        // An order handed on an entity at a time answers as one resolved does, and visits as many: only what it
+        // reads to name them differs
         let limited = self.plan.steps[upto..].iter().any(|step| matches!(step, Step::Limit { .. }));
         let first = matches!(self.plan.terminal, Terminal::First | Terminal::Exists | Terminal::FirstRow { .. });
-        !limited && !first
+        !(limited || first)
     }
 
     /// Hands on every entity of an order read from an index, in the order: the places are read first, and the
@@ -2994,6 +3005,8 @@ impl<R: Read> Query<'_, R> {
             Some(bytes) => values::decode(&bytes)?.as_u64().unwrap_or(0),
             None => 0,
         };
+        // mutant-skip: replace < with (==|>|<=) in Query<'_, R>::resolved
+        // Whether the entities are each sought or met by a walk is what the read costs, and no part of its answer
         if (places.len() as u64).saturating_mul(NAMED_AT_ONCE) < live {
             for place in places {
                 if !self.hand(&ordered.entity_type, place, visit)? {
@@ -3008,22 +3021,26 @@ impl<R: Read> Query<'_, R> {
         let mut ids: Vec<Option<String>> = vec![None; places.len()];
         // The live entities are walked, from the first place sought to the last: they are what the places were
         // counted against. One the walk doesn't name is in the trash, and is sought there where the scope holds it
+        // Every place read is a visit, whether or not what is handed it takes them all
+        for _ in &places {
+            self.count_visit();
+        }
         if let Some((first, _)) = by_place.first() {
-            let (mut at, mut failed) = (0, None);
+            let (mut sought, mut failed) = (by_place.iter().peekable(), None);
             let live = keys::type_range(false, &ordered.entity_type);
             self.r.visit_from(&live, &keys::of_type(false, &ordered.entity_type, *first), |key, stored| {
                 let named = place_of(key).and_then(|place| {
-                    while at < by_place.len() && by_place[at].0 < place {
-                        at += 1;
-                    }
-                    while at < by_place.len() && by_place[at].0 == place {
-                        ids[by_place[at].1] = values::decode(stored)?.as_str().map(str::to_owned);
-                        at += 1;
+                    // The places sought up to this entity's: its own, where it is one of them, and those of
+                    // entities that are not live, which the walk has passed
+                    while let Some((at_place, at)) = sought.next_if(|(sought, _)| *sought <= place) {
+                        if *at_place == place {
+                            ids[*at] = values::decode(stored)?.as_str().map(str::to_owned);
+                        }
                     }
                     Ok(())
                 });
                 failed = named.err();
-                failed.is_none() && at < by_place.len()
+                failed.is_none() && sought.peek().is_some()
             })?;
             if let Some(error) = failed {
                 return Err(error);
@@ -3038,11 +3055,8 @@ impl<R: Read> Query<'_, R> {
                 }
             }
         }
-        for id in ids {
-            self.count_visit();
-            if let Some(id) = id
-                && !visit(&id)?
-            {
+        for id in ids.into_iter().flatten() {
+            if !visit(&id)? {
                 return Ok(false);
             }
         }
@@ -3160,7 +3174,6 @@ impl<R: Read> Query<'_, R> {
             |a: &str, b: &str| towards(running.collator.compare(a, b).then_with(|| a.as_bytes().cmp(b.as_bytes())));
         // Each with its string and, for an entity filed by its place, the place
         let mut run: Vec<(String, Option<u64>)> = Vec::with_capacity(held.len());
-        let walked = held.iter().all(|(string, _)| string.is_some());
         for (string, place) in held.drain(..) {
             match string {
                 Some(string) => run.push((string, None)),
@@ -3174,10 +3187,8 @@ impl<R: Read> Query<'_, R> {
                 }
             }
         }
-        // Keys that each hold a string under one whole sort key came in their order already, and one key is its own
-        if !walked || run.len() > 1 {
-            run.sort_by(|(a, at), (b, other)| compare(a, b).then_with(|| at.cmp(other)));
-        }
+        // Keys that each hold a string under one whole sort key came in this order already, as one key does
+        run.sort_by(|(a, at), (b, other)| compare(a, b).then_with(|| at.cmp(other)));
         for (string, place) in run {
             // A range keeps the strings within its bounds, as the collator compares them
             if let Some(limits) = &ordered.within

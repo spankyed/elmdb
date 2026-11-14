@@ -367,11 +367,14 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
         {
             // And so is one it does trust that holds keys under another build, which a build stopped before its
             // last unit left
+            if !derive::is_built(r, entity_type, &index.name)? {
+                continue;
+            }
             let owed = match order::readable(r, entity_type, &index.name)? {
                 Some(build) => order::stale(r, entity_type, &index.name, build)?,
                 None => true,
             };
-            if owed && derive::is_built(r, entity_type, &index.name)? {
+            if owed {
                 unbuilt.push(Work::Order { entity_type: entity_type.clone(), index: index.name });
             }
         }

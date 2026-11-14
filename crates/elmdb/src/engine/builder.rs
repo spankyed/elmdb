@@ -547,3 +547,51 @@ fn build_rank(
         Ok(done)
     })
 }
+
+#[cfg(all(test, not(shuttle), not(loom)))]
+mod tests {
+    use super::*;
+
+    /// A clock that stands where a test put it
+    struct Stood(Instant);
+
+    impl Clock for Stood {
+        fn now(&self) -> Instant {
+            self.0
+        }
+
+        fn is_manual(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_build_of_an_order_begun_again_is_put_off_once_and_twice_as_long_each_time() {
+        let start = Instant::now();
+        let core = Core::new(Box::new(Stood(start)));
+        let order = |index: &str| Work::Order { entity_type: "Note".to_owned(), index: index.to_owned() };
+        let (name, title) = (order("name"), order("title"));
+        let later = |core: &Core| core.lock().later.clone();
+        // The first build of an order may begin, and once it has, the next may not: of that order alone
+        assert!(core.may_begin(&name));
+        core.began(&name);
+        assert!(!core.may_begin(&name) && core.may_begin(&title));
+        // Put off, it is due after the first wait, and is there once however often it is put off
+        core.put_off(&name);
+        core.put_off(&name);
+        core.began(&title);
+        core.put_off(&title);
+        assert_eq!(later(&core), [(start + ORDER_PUT_OFF, name.clone()), (start + ORDER_PUT_OFF, title.clone())]);
+        // Begun again, the one after waits twice as long, and so on up to the longest wait
+        core.lock().later.clear();
+        core.began(&name);
+        core.put_off(&name);
+        assert_eq!(later(&core), [(start + 2 * ORDER_PUT_OFF, name.clone())]);
+        for _ in 0..20 {
+            core.began(&name);
+        }
+        core.lock().later.clear();
+        core.put_off(&name);
+        assert_eq!(later(&core), [(start + ORDER_PUT_OFF_MOST, name)]);
+    }
+}

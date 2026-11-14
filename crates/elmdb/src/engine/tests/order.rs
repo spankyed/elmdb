@@ -797,3 +797,180 @@ fn no_read_trusts_a_build_lacking_a_key_whatever_order_the_units_of_two_elmdbs_c
     assert_eq!(strings(&db, "byTag"), ["a", "z"]);
     clean(&db);
 }
+
+/// Where a build is, said shortly: its part, the last part of the key it has read as far as, and the place it has
+/// read as far as under that key
+fn brief(step: &Step) -> String {
+    let at = |after: &Option<Vec<u8>>, past: &Option<u64>| {
+        let key = after.as_ref().map(|key| match decode(key).unwrap().pop() {
+            Some(Part::String(string)) => string.chars().take(2).collect::<String>(),
+            Some(Part::Number(n)) => n.to_string(),
+            other => format!("{other:?}"),
+        });
+        format!("{}{}", key.unwrap_or_default(), past.map(|place| format!("@{place}")).unwrap_or_default())
+    };
+    match step {
+        Step::Begin => "begin".into(),
+        Step::Entries { after, past, .. } => format!("e:{}", at(after, past)),
+        Step::Long { after, past, .. } => format!("l:{}", at(after, past)),
+        Step::Sweep { .. } => "sweep".into(),
+        Step::Done => "done".into(),
+        Step::PutOff => "put off".into(),
+    }
+}
+
+/// The units of a build of an index's order from nothing, each taking `limit` of the work: where each left it
+fn units(db: &Database, index: &str, limit: usize) -> Vec<String> {
+    unit(db, |t| order::clear(t, "Item", index));
+    let (mut step, mut said) = (Step::Begin, Vec::new());
+    while step != Step::Done {
+        step = unit(db, |t| order::build_unit(t, "Item", index, step.clone(), true, limit)).0;
+        said.push(brief(&step));
+        assert!(said.len() < 1000, "a build that doesn't end: {said:?}");
+    }
+    said
+}
+
+#[test]
+fn a_build_s_units_each_take_their_share_of_keys_and_places_and_leave_off_where_the_next_goes_on() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    // Three strings with keys of their own, one with none that three entities hold, and long ones four hold: under
+    // no leading value, where the long ones are under the range's own key, and under two, where they are under
+    // a key each
+    let zeros = format!("z{}", "\0".repeat(130));
+    assert!(!order::placed(&zeros) && !crate::engine::values::long(&zeros));
+    let long = |end: &str| format!("{}{end}", "y".repeat(300));
+    let mut items = Vec::new();
+    for (at, tag) in
+        ["a", "b", "c", &zeros, &zeros, &zeros, &long("1"), &long("1"), &long("2"), &long("3")].iter().enumerate()
+    {
+        let group = if at % 2 == 0 { "g" } else { "h" };
+        items.push(item(&format!("{at:02}"), json!({ "tag": tag, "group": group })));
+    }
+    write(&db, items).unwrap();
+    let whole = (stored(&db, "byTag").1, stored(&db, "byGroupTag").1);
+    // Where each unit leaves the build: `e` among the index's entries and `l` among its long strings, at the key
+    // it has read as far as, and past the place after `@` among those the key holds. A unit takes as many keys
+    // and places together as its share, goes on into the next part when it ends one short of it, and one that
+    // leaves off among a key's places is gone on with from the next
+    let expected: [(&str, usize, &[&str]); 10] = [
+        (
+            "byTag",
+            1,
+            &[
+                "e:a", "e:b", "e:c", "e:z\0@4", "e:z\0@5", "e:z\0@6", "e:z\0", "l:by@7", "l:by@8", "l:by@9", "l:by@10",
+                "l:by", "done",
+            ],
+        ),
+        (
+            "byGroupTag",
+            1,
+            &[
+                "e:a", "e:c", "e:z\0@5", "e:z\0", "e:b", "e:z\0@4", "e:z\0@6", "e:z\0", "l:g@7", "l:g@9", "l:g",
+                "l:h@8", "l:h@10", "l:h", "done",
+            ],
+        ),
+        ("byTag", 2, &["e:b", "e:z\0@4", "e:z\0@6", "l:by@8", "l:by@10", "done"]),
+        ("byGroupTag", 2, &["e:c", "e:z\0@5", "e:b", "e:z\0@4", "l:g@9", "l:h@8", "done"]),
+        ("byTag", 3, &["e:c", "e:z\0@5", "l:by@9", "done"]),
+        ("byGroupTag", 3, &["e:z\0@5", "e:z\0@4", "l:h@8", "done"]),
+        ("byTag", 5, &["e:z\0@4", "done"]),
+        ("byGroupTag", 5, &["e:b", "done"]),
+        ("byTag", 100, &["done"]),
+        ("byGroupTag", 100, &["done"]),
+    ];
+    for (index, limit, left) in expected {
+        assert_eq!(units(&db, index, limit), left, "{index}, {limit} a unit");
+        assert_eq!((stored(&db, "byTag").1, stored(&db, "byGroupTag").1), whole, "{index}, {limit} a unit");
+    }
+    assert_eq!((stored(&db, "byTag").1, stored(&db, "byGroupTag").1), whole);
+    clean(&db);
+}
+
+#[test]
+fn a_build_begins_under_the_sequence_its_unit_commits_as_says_that_it_began_and_begins_none_it_may_not() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![item("1", json!({ "tag": "a" })), item("2", json!({ "tag": "b" }))]).unwrap();
+    // A rebuild's build is the sequence its unit commits as
+    db.rebuild(Some(("Item", "byTag"))).unwrap();
+    assert_eq!(stored(&db, "byTag").0.unwrap().build, db.sequence().unwrap());
+    // With no marker, a build that may not begin leaves none and says it is put off
+    unit(&db, |t| order::clear(t, "Item", "byTag"));
+    let settled =
+        |step: &Step, may_begin: bool| db.snapshot(|s| order::settled(s, "Item", "byTag", step, may_begin)).unwrap();
+    assert_eq!(settled(&Step::Begin, false), Some(Step::PutOff));
+    assert_eq!(settled(&Step::Begin, true), None);
+    assert_eq!(unit(&db, |t| order::build_unit(t, "Item", "byTag", Step::Begin, false, 1)), (Step::PutOff, false));
+    assert_eq!(stored(&db, "byTag").0, None);
+    // One that may begins, under the sequence its unit commits as, and says so; the units after it began none
+    let before = db.sequence().unwrap();
+    let (step, began) = unit(&db, |t| order::build_unit(t, "Item", "byTag", Step::Begin, true, 1));
+    let begun = stored(&db, "byTag").0.unwrap();
+    assert!(began && !begun.whole && begun.build == before + 1 && db.sequence().unwrap() == before + 1, "{begun:?}");
+    assert_eq!(settled(&step, true), None);
+    let (step, began) = unit(&db, |t| order::build_unit(t, "Item", "byTag", step.clone(), true, 1));
+    assert!(!began && step != Step::Done);
+    // A build found begun is gone on with whether or not one may begin, and neither begins
+    let (found, began) = unit(&db, |t| order::build_unit(t, "Item", "byTag", Step::Begin, false, 1));
+    assert!(!began && matches!(found, Step::Entries { .. }), "{found:?}");
+    assert_eq!(settled(&Step::Begin, false), None);
+    build(&db, "byTag", 1);
+    let whole = stored(&db, "byTag").0.unwrap();
+    assert!(whole.whole && whole.build == begun.build);
+    // What a unit would leave having written nothing is said without one: an order whole with nothing under
+    // another build, and a build's end
+    assert_eq!(settled(&Step::Begin, true), Some(Step::Done));
+    assert_eq!(settled(&Step::Begin, false), Some(Step::Done));
+    assert_eq!(settled(&Step::Sweep { build: whole.build }, true), Some(Step::Done));
+    assert_eq!(settled(&Step::Done, true), Some(Step::Done));
+    assert_eq!(settled(&Step::PutOff, true), Some(Step::PutOff));
+    // A sweep of another build than the marker's has the marker to read again, in a unit
+    assert_eq!(settled(&Step::Sweep { build: whole.build + 1 }, true), None);
+    // And one with keys of another build to delete is a unit's, as is a build that finds them whole
+    let stale = keys::order_string("Item", "byTag", 1, &[], &order::SortKey { bytes: vec![0x2b], cut: false }, "x");
+    unit(&db, |t| t.put(&stale, &[]));
+    assert_eq!(settled(&Step::Sweep { build: whole.build }, true), None);
+    assert_eq!(settled(&Step::Begin, true), None);
+    // An index that keeps no order has nothing to build
+    assert_eq!(db.snapshot(|s| order::settled(s, "Item", "shortCode", &Step::Begin, true)).unwrap(), Some(Step::Done));
+    // A marker of another stamp is no build of this elmdb's
+    unit(&db, |t| t.del(&stale));
+    order::forge(1);
+    assert_eq!(settled(&Step::Begin, true), None);
+    assert_eq!(settled(&Step::Begin, false), Some(Step::PutOff));
+    assert_eq!(settled(&Step::Sweep { build: whole.build }, true), None);
+    order::forge(0);
+}
+
+#[test]
+fn a_build_the_builder_begins_again_is_put_off_and_begun_when_its_wait_is_over() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![item("1", json!({ "tag": "a" }))]).unwrap();
+    let readable = |db: &Database| db.snapshot(|s| order::readable(s, "Item", "byTag")).unwrap().is_some();
+    let ended = |db: &Database| {
+        // The marker gone, as another elmdb's write leaves it, and a write of this one's that finds none
+        unit(db, |t| t.del(&keys::order_marker("Item", "byTag")));
+        let ops = vec![json!({ "op": "create", "type": "Item", "fields": { "tag": "b" } })];
+        write(db, ops).unwrap();
+    };
+    // The first build this builder begins of the order begins at once
+    ended(&db);
+    db.wait_for_index_builds().unwrap();
+    assert!(readable(&db));
+    // The second is put off: the wait for the builds doesn't wait for it, and the order is not built
+    ended(&db);
+    db.wait_for_index_builds().unwrap();
+    assert!(!readable(&db));
+    assert_eq!(db.check().unwrap().notes, ["The order of Item.byTag's strings is not built yet, and was not compared"]);
+    // Until its wait is over, a second long
+    let began = std::time::Instant::now();
+    while !readable(&db) {
+        assert!(began.elapsed() < std::time::Duration::from_secs(20), "the build put off never began");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(began.elapsed() >= std::time::Duration::from_millis(700), "{:?}", began.elapsed());
+    clean(&db);
+}

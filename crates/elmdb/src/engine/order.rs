@@ -393,6 +393,8 @@ fn build_step(
     };
     let put = |t: &mut Txn<'_, '_>, key: Option<Vec<u8>>| -> Result<()> {
         match key {
+            // mutant-skip: replace match guard !t.contains\(&key\)\? with true in build_step
+            // A key already there is put again as it is: the same order, and a page written that needn't be
             Some(key) if !t.contains(&key)? => t.put(&key, &[]),
             _ => Ok(()),
         }
@@ -834,6 +836,16 @@ mod tests {
         assert_eq!(key("a"), [0x2b, 0x01, 0x05, 0x01, 0x05]);
         assert_eq!(key("Ab"), [0x2b, 0x2d, 0x01, 0x06, 0x01, 0xdc, 0x05]);
         assert_eq!(key("é"), [0x33, 0x01, 0x45, 0x88, 0x01, 0x06]);
+    }
+
+    #[test]
+    fn a_string_has_a_key_of_its_own_while_its_part_of_a_key_is_no_longer_than_the_longest_entry_s() {
+        // As many bytes as an index has an entry for, and no more
+        assert!(placed("") && placed(&"a".repeat(256)) && !placed(&"a".repeat(257)));
+        // A zero byte takes two: 200 bytes and 28 zeros are 258 with the part's tag and end, and one more is past it
+        assert!(placed(&format!("{}{}", "a".repeat(200), "\0".repeat(28))));
+        assert!(!placed(&format!("{}{}", "a".repeat(200), "\0".repeat(29))));
+        assert!(placed(&"\0".repeat(128)) && !placed(&"\0".repeat(129)));
     }
 
     #[test]
