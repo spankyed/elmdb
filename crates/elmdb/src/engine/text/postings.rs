@@ -375,28 +375,34 @@ fn set<'a>(list: &mut Vec<Entry<'a>>, place: u64, counts: &'a [u8]) {
     }
 }
 
-/// Files the entity at `place` under the term with these counts, in place of those it had there
-pub fn put(t: &mut Txn<'_, '_>, term: &Term, place: u64, counts: &[u8]) -> Result<()> {
+/// Files the entity at `place` under the term with these counts, in place of those it had there. True when the term
+/// held no entity until now, which is when its own key comes to be: a term that holds any has that key, its entries
+/// in it or in blocks
+pub fn put(t: &mut Txn<'_, '_>, term: &Term, place: u64, counts: &[u8]) -> Result<bool> {
     let Some(stored) = t.get(&term.own)? else {
-        return t.put_over(&term.own, &own(&[(place, counts)]), None);
+        t.put_over(&term.own, &own(&[(place, counts)]), None)?;
+        return Ok(true);
     };
     if let Some((held, stored_entries)) = own_entries(&stored)? {
         let mut list = entries(stored_entries, held, term.fields)?;
         set(&mut list, place, counts);
         if list.len() <= term.capacity {
-            return t.put_over(&term.own, &own(&list), Some(&stored));
+            t.put_over(&term.own, &own(&list), Some(&stored))?;
+            return Ok(false);
         }
         for (start, level, held) in blocks(&list, term.capacity) {
             t.put(&term.block(start), &block_value(level, start, held))?;
         }
-        return t.put_over(&term.own, &IN_BLOCKS, Some(&stored));
+        t.put_over(&term.own, &IN_BLOCKS, Some(&stored))?;
+        return Ok(false);
     }
     let before = block_upto(t, term, place)?;
     if let Some(block) = before.as_ref().filter(|block| block.holds(place)) {
         let mut list = block.entries(term.fields)?;
         set(&mut list, place, counts);
         if list.len() <= term.capacity {
-            return t.put_over(&block.key, &block_value(block.level, block.start, &list), Some(&block.stored));
+            t.put_over(&block.key, &block_value(block.level, block.start, &list), Some(&block.stored))?;
+            return Ok(false);
         }
         // One more than a block holds: two blocks, in the halves of the smallest range that parts its entries
         let mut kept = false;
@@ -409,31 +415,37 @@ pub fn put(t: &mut Txn<'_, '_>, term: &Term, place: u64, counts: &[u8]) -> Resul
                 t.put(&term.block(start), &value)?;
             }
         }
-        return if kept { Ok(()) } else { t.del_over(&block.key, Some(&block.stored)) };
+        if !kept {
+            t.del_over(&block.key, Some(&block.stored))?;
+        }
+        return Ok(false);
     }
     // No block holds the place: one of its own, as large as leaves the blocks either side alone
     let after = block_from(t, term, place)?;
     let level = room(place, before.map(|block| block.start), after.map(|block| block.start)).ok_or_else(corrupt)?;
     let start = floor(place, level);
-    t.put(&term.block(start), &block_value(level, start, &[(place, counts)]))
+    t.put(&term.block(start), &block_value(level, start, &[(place, counts)]))?;
+    Ok(false)
 }
 
-/// Takes the entity at `place` out of the term's
-pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<()> {
-    let Some(stored) = t.get(&term.own)? else { return Ok(()) };
+/// Takes the entity at `place` out of the term's. True when it was the term's last, which is when its own key goes:
+/// a term whose entries are in blocks holds more than its own key does, so the last is never taken from a block
+pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<bool> {
+    let Some(stored) = t.get(&term.own)? else { return Ok(false) };
     if let Some((held, stored_entries)) = own_entries(&stored)? {
         let mut list = entries(stored_entries, held, term.fields)?;
-        let Ok(at) = list.binary_search_by_key(&place, |(at, _)| *at) else { return Ok(()) };
+        let Ok(at) = list.binary_search_by_key(&place, |(at, _)| *at) else { return Ok(false) };
         list.remove(at);
-        return if list.is_empty() {
-            t.del_over(&term.own, Some(&stored))
-        } else {
-            t.put_over(&term.own, &own(&list), Some(&stored))
-        };
+        if list.is_empty() {
+            t.del_over(&term.own, Some(&stored))?;
+            return Ok(true);
+        }
+        t.put_over(&term.own, &own(&list), Some(&stored))?;
+        return Ok(false);
     }
-    let Some(block) = block_upto(t, term, place)?.filter(|block| block.holds(place)) else { return Ok(()) };
+    let Some(block) = block_upto(t, term, place)?.filter(|block| block.holds(place)) else { return Ok(false) };
     let mut list = block.entries(term.fields)?;
-    let Ok(at) = list.binary_search_by_key(&place, |(at, _)| *at) else { return Ok(()) };
+    let Ok(at) = list.binary_search_by_key(&place, |(at, _)| *at) else { return Ok(false) };
     list.remove(at);
     // The other half of the range twice this block's size: one block, when it and what is left here are no more
     // than a block holds, and then the two are one block of the whole range
@@ -447,11 +459,12 @@ pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<()> {
         Some(_) => None,
     };
     let Some(beside_list) = beside_list.filter(|beside_list| list.len() + beside_list.len() <= term.capacity) else {
-        return if list.is_empty() {
-            t.del_over(&block.key, Some(&block.stored))
+        if list.is_empty() {
+            t.del_over(&block.key, Some(&block.stored))?;
         } else {
-            t.put_over(&block.key, &block_value(block.level, block.start, &list), Some(&block.stored))
-        };
+            t.put_over(&block.key, &block_value(block.level, block.start, &list), Some(&block.stored))?;
+        }
+        return Ok(false);
     };
     let low = block.start.min(beside_start);
     let mut all = list;
@@ -474,11 +487,12 @@ pub fn remove(t: &mut Txn<'_, '_>, term: &Term, place: u64) -> Result<()> {
     match room(low, before.map(|block| block.start), after.map(|block| block.start)) {
         Some(level) => {
             let start = floor(low, level);
-            t.put(&term.block(start), &block_value(level, start, &all))
+            t.put(&term.block(start), &block_value(level, start, &all))?;
         }
         // No other block: every entry the term has, few enough for its own key again
-        None => t.put_over(&term.own, &own(&all), Some(&stored)),
+        None => t.put_over(&term.own, &own(&all), Some(&stored))?,
     }
+    Ok(false)
 }
 
 /// Emits what a term's keys hold, from its entries handed over in place order: the term's own key, and its blocks

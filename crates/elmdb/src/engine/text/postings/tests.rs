@@ -156,15 +156,19 @@ proptest! {
         let filed = Filed::new(fields, capacity);
         let mut model: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for (place, op) in ops {
-            filed.write(false, |t| match op {
+            let said = filed.write(false, |t| match op {
                 Some(often) => put(t, &filed.term(), place, &counts_for(fields, often)),
                 None => remove(t, &filed.term(), place),
             }).unwrap();
+            let held = !model.is_empty();
             match op {
                 Some(often) => model.insert(place, counts_for(fields, often)),
                 None => model.remove(&place),
             };
             prop_assert_eq!(filed.stored(), filed_in_order(filed.term(), &model), "after {:?} at {}", op, place);
+            // A write says the term came to be, or went, at its first entity and at its last, and at no other:
+            // not where its entries pass into blocks, nor where they come back to its own key
+            prop_assert_eq!(said, held == model.is_empty(), "after {:?} at {}", op, place);
         }
         // What a read that seeks reads of it: from any place, the first at it or after, whatever order they are
         // asked in; and asked in order, each key read once
@@ -239,12 +243,13 @@ fn a_term_moves_into_blocks_past_what_its_key_holds_and_back_when_few_hold_it() 
     let unfile = |place: u64| filed.write(false, |t| remove(t, &filed.term(), place)).unwrap();
     let own = || filed.stored()[0].1.clone();
 
-    file(0);
-    file(1);
+    // The term comes to be at its first entity, and at no other
+    assert!(file(0));
+    assert!(!file(1));
     // Two entries, each a place past the last and a count of one
     assert_eq!(filed.stored(), vec![(filed.term().own, vec![2, 0, 1, 1, 1])]);
     // A third is more than the key holds: the halves of the first range that parts them
-    file(2);
+    assert!(!file(2));
     assert_eq!(own(), IN_BLOCKS);
     assert_eq!(filed.blocks(), vec![(0, 1, vec![0, 1]), (2, 1, vec![2])]);
     // A place no block holds takes the largest range that leaves the others alone
@@ -265,14 +270,15 @@ fn a_term_moves_into_blocks_past_what_its_key_holds_and_back_when_few_hold_it() 
     unfile(6);
     unfile(3);
     assert_eq!(filed.blocks(), vec![(0, 2, vec![0, 1]), (4, 2, vec![5])]);
-    // Few enough for the term's own key again
-    unfile(5);
+    // Few enough for the term's own key again, which is not the term going
+    assert!(!unfile(5));
     assert_eq!(filed.stored(), vec![(filed.term().own, vec![2, 0, 1, 1, 1])]);
-    unfile(9);
-    unfile(0);
-    unfile(1);
+    assert!(!unfile(9));
+    assert!(!unfile(0));
+    // It goes at its last entity, and a term that isn't there has none to go
+    assert!(unfile(1));
     assert_eq!(filed.stored(), vec![]);
-    unfile(1);
+    assert!(!unfile(1));
     assert_eq!(filed.stored(), vec![]);
 }
 
@@ -329,7 +335,7 @@ fn a_savepoint_rolled_back_leaves_a_terms_keys_as_they_were() {
                     match filing {
                         true => put(t, &filed.term(), *place, &one)?,
                         false => remove(t, &filed.term(), *place)?,
-                    }
+                    };
                 }
                 t.rollback_to(1)
             })
@@ -530,7 +536,7 @@ fn a_frequency_is_each_fields_count_at_its_weight() {
 fn a_count_asked_no_further_than_some_stops_at_the_block_that_reaches_it_and_says_whether_it_is_whole() {
     // Ten places in blocks of four, four and two
     let filed = Filed::new(0, 4);
-    filed.write(false, |t| (0..10).try_for_each(|place| put(t, &filed.term(), place, &[]))).unwrap();
+    filed.write(false, |t| (0..10).try_for_each(|place| put(t, &filed.term(), place, &[]).map(drop))).unwrap();
     let counted = |upto: u64| {
         filed
             .snapshot(|s| {
@@ -547,7 +553,7 @@ fn a_count_asked_no_further_than_some_stops_at_the_block_that_reaches_it_and_say
     assert_eq!(counted(11), (10, true));
     // A term whose own key holds its places is counted whole whatever was asked
     let few = Filed::new(0, 4);
-    few.write(false, |t| (0..3).try_for_each(|place| put(t, &few.term(), place, &[]))).unwrap();
+    few.write(false, |t| (0..3).try_for_each(|place| put(t, &few.term(), place, &[]).map(drop))).unwrap();
     let own = few.snapshot(|s| Ok(crate::engine::unit::Read::get(s, &few.term().own)?.unwrap())).unwrap();
     assert_eq!(few.snapshot(|s| held_probed(s, &few.term(), &own, 2)).unwrap(), (3, true));
 }

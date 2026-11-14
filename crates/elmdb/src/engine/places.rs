@@ -20,13 +20,13 @@ pub fn term(own: Vec<u8>) -> Term {
     Term::places(own, blocks)
 }
 
-/// Files the entity at `place` under the key `own`
-pub fn file(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<()> {
+/// Files the entity at `place` under the key `own`. True when the key held no place until now
+pub fn file(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<bool> {
     postings::put(t, &term(own), place, &[])
 }
 
-/// Takes the entity at `place` out from under the key `own`
-pub fn unfile(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<()> {
+/// Takes the entity at `place` out from under the key `own`. True when it was the key's last
+pub fn unfile(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<bool> {
     postings::remove(t, &term(own), place)
 }
 
