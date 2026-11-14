@@ -563,15 +563,18 @@ node crates/elmdb-node/bench/against-sqlite.mjs --json > report.json   # a milli
 ```
 
 One workload on elmdb, through the binding, and on SQLite, through Node's built-in `node:sqlite` with FTS5 and WAL:
-notes of a title, a number and a status, the title in a text index and the other two in value indexes, loaded in units
-of 5,000 with neither engine syncing. It reads what the road to 1.0 tracks per release (`../roadmap.md`): bytes per note
+notes of a title, a name, a number and a status, the title in a text index and the other three in value indexes, the
+name a string no other note holds and the status one of two, loaded in units of 5,000 with neither engine syncing. It reads what the road to 1.0 tracks per release (`../roadmap.md`): bytes per note
 as loaded and compacted; a create's commit at a twentieth of the notes and at all of them, for a note of three terms
 and a message of thirty, as a median of wall time and as the process's CPU per commit; the best ten and the count for
 a word every note holds and one a twelfth hold, ten of the first word's matches past a cursor near the end of them,
 and whether it has a match; a misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest
 of the half of the notes a status keeps, the count of the last 500 of it, and a page of fifty near the end of creation
-order and one near the end of the number's order; a check, a rebuild and a compaction. For elmdb it also reads how
-many entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine.
+order and one near the end of the number's order; of the names' order, its first ten, a page of fifty near its end,
+the count of its last 200 by a range, and every note in it; a unit that gives a thousand notes each another name, and
+one that gives a thousand each the other status; a check, a rebuild and a compaction. For elmdb it also reads how
+many entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and
+the bytes of each value index (`stats()`).
 
 Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
 best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking

@@ -1,10 +1,11 @@
 // One workload on elmdb and on SQLite (Node's built-in `node:sqlite`, FTS5 and WAL), a million notes unless told
 // otherwise: `node crates/elmdb-node/bench/against-sqlite.mjs [--json] [--notes N] [--dir PATH]` after `npm run build`
-// (`docs/architecture/testing.md`, Against SQLite). Each note has a title in a text index and a number and a status in
-// value indexes. It reads what a note costs in bytes, what a create's commit costs at a twentieth of the notes and at
-// all of them, and what a search, a page of one past a cursor, an ordered read, one of the notes a filter keeps, a
-// range, a page in the order the notes were made and one in their number's, a check and a rebuild cost at all of
-// them. Neither engine syncs. The two answer each read alike before any is timed.
+// (`docs/architecture/testing.md`, Against SQLite). Each note has a title in a text index and a number, a status and a
+// name in value indexes: the name a string no other note holds, the status one of two. It reads what a note costs in
+// bytes, what a create's commit costs at a twentieth of the notes and at all of them, and what a search, a page of one
+// past a cursor, an ordered read, one of the notes a filter keeps, a range, a page in the order the notes were made and
+// one in their number's, the same four reads of the name's order, a unit that changes names or statuses, a check and
+// a rebuild cost at all of them. Neither engine syncs. The two answer each read alike before any is timed.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -43,10 +44,14 @@ const UNIT = 5000;
 const COMMITS = 41;
 const id = (i) => `Note-${String(i).padStart(7, '0')}`;
 const numberOf = (i) => (i * 7919) % NOTES;
+// A note's name, which no other holds: two of the words and its number, lowercase letters, digits and spaces, which
+// the root collation and SQLite's comparison of bytes order alike
+const nameOf = (i) => `${WORDS[i % 12]} ${WORDS[(i * 7) % 12]} ${i}`;
 // Six terms a note: three every note holds, two a twelfth hold, and its own number, which no other holds
 const note = (i) => ({
   id: id(i),
   title: `the ${WORDS[i % 12]} ${WORDS[(i * 7) % 12]} note number ${i}`,
+  name: nameOf(i),
   n: numberOf(i),
   status: i % 2 ? 'open' : 'done',
 });
@@ -55,6 +60,16 @@ const note = (i) => ({
 // cursor of a page near that order's end
 const numbered = Uint32Array.from({ length: NOTES }, (_, i) => i).sort((a, b) => numberOf(a) - numberOf(b) || a - b);
 const NEAR_END_BY_NUMBER = id(numbered[NOTES - 200]);
+// The same in the order of the notes' names. The last of them are the notes whose first word is the last of the
+// words, which all hold one second word, in the order of their numbers as text: the cursor is 200 from the last of
+// those, or the first of them when they are fewer
+const lastNamed = Array.from({ length: Math.ceil((NOTES - 11) / 12) }, (_, k) => 11 + 12 * k)
+  .sort((a, b) => (String(a) < String(b) ? -1 : 1));
+const NEAR_END_BY_NAME = lastNamed[Math.max(0, lastNamed.length - 200)];
+// How many notes a unit of the timed changes changes, and the notes of the unit numbered `unit`, each note in one
+// unit only: spread over the notes, as `numberOf` spreads their numbers
+const CHANGED = Math.min(1000, Math.floor(NOTES / 20));
+const changedIn = (unit) => Array.from({ length: CHANGED }, (_, k) => ((unit * CHANGED + k) * 7919) % NOTES);
 
 // Ten more notes, of ten words each, holding a word no other does from once to ten times: equally long, so either
 // engine's ranking puts the one holding it most first, whatever its formula's constants. Their numbers are past every
@@ -62,6 +77,7 @@ const NEAR_END_BY_NUMBER = id(numbered[NOTES - 200]);
 const RANKED = Array.from({ length: 10 }, (_, k) => ({
   id: `Note-r${k}`,
   title: [...Array(k + 1).fill('quokka'), ...Array(9 - k).fill('wombat')].join(' '),
+  name: `ranked ${k}`,
   n: NOTES + k,
   status: 'open',
 }));
@@ -107,6 +123,12 @@ const OPEN_LOWEST = [{ step: 'where', field: 'status', value: 'open' }, ...LOWES
 const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: NOTES }];
 const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 const pageByNumberAfter = (cursor) => [{ step: 'orderBy', field: 'n' }, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
+// The same of the names: the first ten, a page of fifty past a cursor, the names from one on that are a loaded
+// note's (the ranked notes' and the commits' are past `m`), and every note in the names' order
+const BY_NAME = [{ step: 'orderBy', field: 'name' }];
+const FIRST_BY_NAME = [...BY_NAME, { step: 'limit', n: 10 }];
+const pageByNameAfter = (cursor) => [...BY_NAME, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
+const namesFrom = (least) => [{ step: 'range', field: 'name', atLeast: least, below: 'm' }];
 
 // elmdb through the binding, as a program calls it
 function elmdb() {
@@ -115,9 +137,13 @@ function elmdb() {
     $schema: 'https://elmdb.dev/schema/1.json',
     types: {
       Note: {
-        fields: { title: { type: 'string' }, n: { type: 'number' }, status: { type: 'enum', values: ['open', 'done'] } },
+        fields: {
+          title: { type: 'string' }, name: { type: 'string' }, n: { type: 'number' },
+          status: { type: 'enum', values: ['open', 'done'] },
+        },
         indexes: {
           status: { kind: 'value', fields: ['status'] },
+          name: { kind: 'value', fields: ['name'] },
           n: { kind: 'value', fields: ['n'] },
           text: { kind: 'text', fields: { title: {} } },
         },
@@ -152,6 +178,22 @@ function elmdb() {
     atLeast: (least) => query(atLeast(least), { answer: 'count' }).n,
     pageAfter: (cursor) => query(pageAfter(cursor), { answer: 'ids' }).ids,
     pageByNumberAfter: (cursor) => query(pageByNumberAfter(cursor), { answer: 'ids' }).ids,
+    firstByName: () => query(FIRST_BY_NAME, { answer: 'rows', fields: ['name'] }).rows.map((row) => row.name),
+    pageByNameAfter: (cursor) => query(pageByNameAfter(cursor), { answer: 'ids' }).ids,
+    namesFrom: (least) => query(namesFrom(least), { answer: 'count' }).n,
+    allByName: () => query(BY_NAME, { answer: 'ids' }).ids,
+    // A unit that gives each of the notes another name, and one that gives each the other status
+    rename: (notes, mark) => db.writeSync(packr.pack({
+      ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { name: `${nameOf(i)} ${mark}` }, touch: false })),
+    })),
+    restatus: (notes) => db.writeSync(packr.pack({
+      ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { status: i % 2 ? 'done' : 'open' }, touch: false })),
+    })),
+    // The bytes of each value index's keys and their values
+    indexBytes: () => {
+      const bytes = db.stats().indexBytes;
+      return { nameIndexBytes: bytes['Note.name'], statusIndexBytes: bytes['Note.status'], numberIndexBytes: bytes['Note.n'] };
+    },
     // How many entities each of those plans visited
     visits: () => {
       const visited = (steps) => query(steps, { answer: 'ids' }, { visits: true }).visited;
@@ -162,6 +204,10 @@ function elmdb() {
         last500Visited: visited(atLeast(NOTES - 500)),
         pageNearEndVisited: visited(pageAfter(id(NOTES - 200))),
         pageByNumberNearEndVisited: visited(pageByNumberAfter(NEAR_END_BY_NUMBER)),
+        firstTenByNameVisited: visited(FIRST_BY_NAME),
+        pageByNameNearEndVisited: visited(pageByNameAfter(id(NEAR_END_BY_NAME))),
+        last200NamesVisited: visited(namesFrom(nameOf(NEAR_END_BY_NAME))),
+        allByNameVisited: visited(BY_NAME),
       };
     },
     check: () => {
@@ -184,9 +230,10 @@ function sqlite() {
   const db = new DatabaseSync(file);
   db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=OFF;');
   db.exec(`
-    CREATE TABLE notes(id TEXT PRIMARY KEY, title TEXT NOT NULL, n REAL NOT NULL,
+    CREATE TABLE notes(id TEXT PRIMARY KEY, title TEXT NOT NULL, name TEXT NOT NULL, n REAL NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('open','done')));
     CREATE INDEX notes_status ON notes(status);
+    CREATE INDEX notes_name ON notes(name);
     CREATE INDEX notes_n ON notes(n);`);
   // Some Node releases build SQLite without FTS5 (23.11 does): there SQLite keeps no text index and answers no search
   let text = true;
@@ -201,8 +248,8 @@ function sqlite() {
     if (!/fts5/i.test(String(error?.message))) throw error;
     text = false;
   }
-  const insert = db.prepare('INSERT INTO notes(id, title, n, status) VALUES (?, ?, ?, ?)');
-  const create = (one) => insert.run(one.id, one.title, one.n, one.status);
+  const insert = db.prepare('INSERT INTO notes(id, title, name, n, status) VALUES (?, ?, ?, ?, ?)');
+  const create = (one) => insert.run(one.id, one.title, one.name, one.n, one.status);
   const best = text && db.prepare('SELECT n.id FROM notes_fts f JOIN notes n ON n.rowid = f.rowid WHERE notes_fts MATCH ? ORDER BY f.rank LIMIT 10');
   const count = text && db.prepare('SELECT count(*) AS n FROM notes_fts WHERE notes_fts MATCH ?');
   // FTS5 ranks as it reads, with no key to seek a rank by. A page is read two ways: past its offset, the common
@@ -221,14 +268,23 @@ function sqlite() {
   const pageByNumberAfter = db.prepare(
     'SELECT id FROM notes WHERE (n, rowid) > (SELECT n, rowid FROM notes WHERE id = ?) ORDER BY n, rowid LIMIT 50',
   );
+  const firstByName = db.prepare('SELECT name FROM notes ORDER BY name LIMIT 10');
+  const pageByNameAfter = db.prepare(
+    'SELECT id FROM notes WHERE (name, rowid) > (SELECT name, rowid FROM notes WHERE id = ?) ORDER BY name, rowid LIMIT 50',
+  );
+  const namesFrom = db.prepare('SELECT count(*) AS n FROM notes WHERE name >= ? AND name < ?');
+  const allByName = db.prepare('SELECT id FROM notes ORDER BY name, rowid');
+  const rename = db.prepare('UPDATE notes SET name = ? WHERE id = ?');
+  const restatus = db.prepare('UPDATE notes SET status = ? WHERE id = ?');
+  const unit = (work) => {
+    db.exec('BEGIN');
+    work();
+    db.exec('COMMIT');
+  };
   return {
     version: db.prepare('SELECT sqlite_version() AS v').get().v,
     text,
-    load: (notes) => {
-      db.exec('BEGIN');
-      notes.forEach(create);
-      db.exec('COMMIT');
-    },
+    load: (notes) => unit(() => notes.forEach(create)),
     create,
     settle: () => {},
     best: (text) => best.all(text).map((row) => row.id),
@@ -248,6 +304,12 @@ function sqlite() {
     atLeast: (least) => atLeast.get(least, NOTES).n,
     pageAfter: (cursor) => pageAfter.all(cursor).map((row) => row.id),
     pageByNumberAfter: (cursor) => pageByNumberAfter.all(cursor).map((row) => row.id),
+    firstByName: () => firstByName.all().map((row) => row.name),
+    pageByNameAfter: (cursor) => pageByNameAfter.all(cursor).map((row) => row.id),
+    namesFrom: (least) => namesFrom.get(least, 'm').n,
+    allByName: () => allByName.all().map((row) => row.id),
+    rename: (notes, mark) => unit(() => notes.forEach((i) => rename.run(`${nameOf(i)} ${mark}`, id(i)))),
+    restatus: (notes) => unit(() => notes.forEach((i) => restatus.run(i % 2 ? 'done' : 'open', id(i)))),
     check: () => assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok', 'sqlite: integrity_check'),
     rebuild: () => db.exec(`${text ? "INSERT INTO notes_fts(notes_fts) VALUES ('rebuild');" : ''} REINDEX;`),
     bytes: () => {
@@ -283,7 +345,7 @@ function measure(name, engine) {
       const samples = [];
       const cpu = process.cpuUsage();
       for (let i = 0; i < COMMITS; i++) {
-        const one = { id: `Note-x${extra}`, title: title(), n: -1 - extra, status: 'open' };
+        const one = { id: `Note-x${extra}`, title: title(), name: `zulu ${extra}`, n: -1 - extra, status: 'open' };
         extra++;
         const from = process.hrtime.bigint();
         engine.create(one);
@@ -323,6 +385,10 @@ function measure(name, engine) {
     atLeast: engine.atLeast(NOTES - 500),
     page: engine.pageAfter(id(NOTES - 200)),
     pageByNumber: engine.pageByNumberAfter(NEAR_END_BY_NUMBER),
+    firstByName: engine.firstByName(),
+    pageByName: engine.pageByNameAfter(id(NEAR_END_BY_NAME)),
+    namesFrom: engine.namesFrom(nameOf(NEAR_END_BY_NAME)),
+    allByName: engine.allByName(),
   };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
@@ -354,14 +420,36 @@ function measure(name, engine) {
     last500Ms: timed(5, () => engine.atLeast(NOTES - 500)).ms,
     pageNearEndMs: timed(5, () => engine.pageAfter(id(NOTES - 200))).ms,
     pageByNumberNearEndMs: timed(5, () => engine.pageByNumberAfter(NEAR_END_BY_NUMBER)).ms,
+    firstTenByNameMs: timed(5, () => engine.firstByName()).ms,
+    pageByNameNearEndMs: timed(5, () => engine.pageByNameAfter(id(NEAR_END_BY_NAME))).ms,
+    last200NamesMs: timed(5, () => engine.namesFrom(nameOf(NEAR_END_BY_NAME))).ms,
+    allByNameMs: timed(3, () => engine.allByName()).ms,
   };
   if (engine.visited) {
     out.searches.everyBestTenVisited = engine.visited('the');
     out.searches.everyPageNearEndVisited = engine.bestAfterVisited('the', EVERY_PAGE);
     Object.assign(out.reads, engine.visits());
   }
+  if (engine.indexBytes) out.indexes = engine.indexBytes();
   progress(`${name}: read`);
   commits();
+  // What a unit costs that changes the names of `CHANGED` notes, each to a name no note holds, and one that changes
+  // their statuses, each to the other: five units of each, no note in two of them. Wall time as a median, and the
+  // process's CPU over the five
+  out.units = { notes: CHANGED };
+  const changes = { rename: (unit) => engine.rename(changedIn(unit), 'renamed'), restatus: (unit) => engine.restatus(changedIn(5 + unit)) };
+  for (const [change, work] of Object.entries(changes)) {
+    const samples = [];
+    const cpu = process.cpuUsage();
+    for (let unit = 0; unit < 5; unit++) {
+      const from = process.hrtime.bigint();
+      work(unit);
+      samples.push(ms(from));
+    }
+    const used = process.cpuUsage(cpu);
+    out.units[`${change}Ms`] = round(median(samples));
+    out.units[`${change}CpuMicros`] = round((used.user + used.system) / 5, 1);
+  }
   out.checkSeconds = seconds(engine.check);
   out.rebuildSeconds = seconds(() => {
     engine.rebuild();
@@ -376,7 +464,7 @@ function measure(name, engine) {
 const git = (...words) => execFileSync('git', words, { cwd: fileURLToPath(new URL('../../../', import.meta.url)), encoding: 'utf8' }).trim();
 const report = {
   benchmark: 'against-sqlite',
-  fixtureVersion: 2,
+  fixtureVersion: 3,
   notes: NOTES,
   source: { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=normal')) },
   host: {
