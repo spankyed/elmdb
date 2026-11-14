@@ -68,7 +68,7 @@ pub struct Stats {
     pub indexes: BTreeMap<String, u64>,
     /// Per type and value index, the bytes of its keys and their values, in every key family it is filed in: its
     /// values' places, those of the entities without a value, of those it doesn't order and of those holding a long
-    /// string, and the blocks of each.
+    /// string, the blocks of each, and the keys of the order it keeps of its strings.
     /// The engine's own indexes of a type, of short codes and roles, are among them
     pub index_bytes: BTreeMap<String, u64>,
     pub entries: u64,
@@ -288,7 +288,7 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
         }
     }
     // A value index's keys: its values' places, the places of the entities without a value, of those it doesn't
-    // order and of those holding a long string, and the blocks of each
+    // order and of those holding a long string, the blocks of each, and the keys of the order it keeps of its strings
     let filed = [
         Prefix::Index,
         Prefix::IndexPlaces,
@@ -298,6 +298,7 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
         Prefix::IndexUnorderedPlaces,
         Prefix::IndexLong,
         Prefix::IndexLongPlaces,
+        Prefix::IndexOrder,
     ];
     for prefix in filed {
         r.try_visit(&prefix.key().to_vec(), |key, stored| {

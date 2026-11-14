@@ -1046,9 +1046,10 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     db.bulk_load(&[odd]).unwrap();
     let ranked = ordering(json!([is("owner", json!(7)), order("rank", false), limit(2)]));
     assert_eq!(ranked, (json!("ownerRank"), Json::Null, json!(2)));
-    // And none is named where an index wouldn't have the order: a string's is the collation's, an `any` field holds
-    // what it holds, and a filter that is no equality is no part of an index
-    assert_eq!(ordering(json!([open, order("note", false)])).1, Json::Null);
+    // A string's order is one an index keeps too
+    assert_eq!(ordering(json!([open, order("note", false)])).1, "status, note");
+    // And none is named where an index wouldn't have the order: an `any` field holds what it holds, and a filter
+    // that is no equality is no part of an index
     assert_eq!(ordering(json!([open, order("m", false)])).1, Json::Null);
     assert_eq!(ordering(json!([{ "step": "has", "field": "note" }, order("rank", false)])).1, Json::Null);
     let trash =

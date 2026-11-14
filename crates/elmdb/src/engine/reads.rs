@@ -3181,8 +3181,8 @@ impl<R: Read> Query<'_, R> {
     /// Tells a read asked to explain itself which value index would have read the order of `name` that stage `stage`
     /// sorts, the set after the first `before` steps: the fields the equalities before it ask of, then `name`. Only
     /// where such an index is all that is missing: one type's entities kept by equalities and a range of the field,
-    /// a field declared a number or a boolean, or a time the engine writes, whose order an index's entries have, and
-    /// no index of the type on those fields
+    /// a field declared a number, a boolean, a string, an enum or a `ref`, or a time the engine writes, whose order
+    /// an index has, and no index of the type on those fields
     fn note_wanted(&self, stage: usize, before: usize, name: &str) -> Result<()> {
         let Some(stages) = self.stages else { return Ok(()) };
         let Some(entity_type) = self.ordered_type() else { return Ok(()) };
@@ -3192,7 +3192,8 @@ impl<R: Read> Query<'_, R> {
             || name == field::UPDATED_AT
             || declared.fields.get(name).is_some_and(|field| {
                 use crate::schema::ValueType;
-                matches!(field.value, ValueType::Number | ValueType::Integer | ValueType::Boolean)
+                use ValueType::{Boolean, Enum, Integer, Number, Ref, String};
+                matches!(field.value, Number | Integer | Boolean | String | Enum { .. } | Ref { .. })
             });
         let held = declared.indexes.values().any(|index| match index {
             crate::schema::IndexDef::Value { fields, .. } => fields.split_last().is_some_and(|(last, leading)| {
