@@ -2327,7 +2327,14 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// How many entities hold a string within the bounds of a range of them, counted no further than `upto`
+    ///
+    /// Unlike a count of a number range's entries, which reads only their keys, this reads the order's keys and
+    /// each string's entry as far as it counts, and a tracked read depends on what it read: so a watch may run
+    /// again for a write to a range it counted and then left to the rows, and never miss one
     fn strings_counted(&self, ordered: &Ordered, upto: u64) -> Result<u64> {
+        if upto == 0 {
+            return Ok(0);
+        }
         let mut held = 0u64;
         self.strings(ordered, false, None, &mut |_| {
             held += 1;
@@ -2882,8 +2889,9 @@ impl<R: Read> Query<'_, R> {
         after: Option<(&str, u64)>,
         each: &mut Entry<'_>,
     ) -> Result<bool> {
-        // An order read whole has its strings' entries met in one walk of them
-        if self.whole.get() {
+        // An order read whole has its strings' entries met in one walk of them. A page's rest is not one: the
+        // strings past a cursor are spread over the entries, whose order is their bytes'
+        if self.whole.get() && after.is_none() {
             let mut held = Vec::new();
             self.strings_held(ordered, descending, after, &mut |string, place, past| {
                 held.push((string, place, past));
@@ -2998,14 +3006,12 @@ impl<R: Read> Query<'_, R> {
         let mut by_place: Vec<(u64, usize)> = places.iter().enumerate().map(|(at, place)| (*place, at)).collect();
         by_place.sort_unstable();
         let mut ids: Vec<Option<String>> = vec![None; places.len()];
-        let ranges: &[bool] = match self.plan.scope {
-            Scope::Live => &[false],
-            Scope::Trashed => &[true],
-            Scope::WithTrashed => &[false, true],
-        };
-        for &trashed in ranges {
+        // The live entities are walked, from the first place sought to the last: they are what the places were
+        // counted against. One the walk doesn't name is in the trash, and is sought there where the scope holds it
+        if let Some((first, _)) = by_place.first() {
             let (mut at, mut failed) = (0, None);
-            self.r.visit(&keys::type_range(trashed, &ordered.entity_type), |key, stored| {
+            let live = keys::type_range(false, &ordered.entity_type);
+            self.r.visit_from(&live, &keys::of_type(false, &ordered.entity_type, *first), |key, stored| {
                 let named = place_of(key).and_then(|place| {
                     while at < by_place.len() && by_place[at].0 < place {
                         at += 1;
@@ -3021,6 +3027,15 @@ impl<R: Read> Query<'_, R> {
             })?;
             if let Some(error) = failed {
                 return Err(error);
+            }
+        }
+        if self.plan.scope == Scope::WithTrashed {
+            for (place, at) in &by_place {
+                if ids[*at].is_none()
+                    && let Some(held) = self.r.get(&keys::of_type(true, &ordered.entity_type, *place))?
+                {
+                    ids[*at] = values::decode(&held)?.as_str().map(str::to_owned);
+                }
             }
         }
         for id in ids {

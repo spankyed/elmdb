@@ -467,12 +467,19 @@ fn check_icu_exact(root: &Path) -> Result<(), String> {
         }
         let version = lines.next().and_then(|line| line.strip_prefix("version = \"")).unwrap_or_default();
         let version = version.trim_end_matches('"');
-        let required = workspace.lines().find(|line| line.starts_with(&format!("{name} = ")));
-        if !required.is_some_and(|line| line.contains(&format!("\"={version}\""))) {
-            problems.push(format!("Cargo.toml doesn't require {name} at exactly {version}"));
+        // From the registry, where a version is one thing: a path or a git source under the version is another crate
+        if !lines.next().is_some_and(|line| line.starts_with("source = \"registry+")) {
+            problems.push(format!("Cargo.lock doesn't take {name} from the registry"));
         }
-        if !elmdb.lines().any(|line| line.trim() == format!("{name}.workspace = true")) {
-            problems.push(format!("crates/elmdb/Cargo.toml doesn't depend on {name}"));
+        // Each in the table a build of the crate reads: one under a table of development or a target's
+        // dependencies would hold no one who depends on elmdb
+        let required =
+            table(&workspace, "[workspace.dependencies]").find(|line| line.starts_with(&format!("{name} = ")));
+        if !required.is_some_and(|line| line.contains(&format!("\"={version}\""))) {
+            problems.push(format!("Cargo.toml's [workspace.dependencies] doesn't require {name} at exactly {version}"));
+        }
+        if !table(&elmdb, "[dependencies]").any(|line| line.trim() == format!("{name}.workspace = true")) {
+            problems.push(format!("crates/elmdb/Cargo.toml's [dependencies] doesn't name {name}"));
         }
     }
     match problems.is_empty() {
@@ -483,6 +490,11 @@ fn check_icu_exact(root: &Path) -> Result<(), String> {
             problems.join("\n  ")
         )),
     }
+}
+
+/// The lines of one table of a manifest: those after its header, up to the next table's
+fn table<'a>(manifest: &'a str, header: &'a str) -> impl Iterator<Item = &'a str> {
+    manifest.lines().skip_while(move |line| line.trim() != header).skip(1).take_while(|line| !line.starts_with('['))
 }
 
 /// The workspace's crates at their default features and what they build with, one `<name> v<version>` a line;
