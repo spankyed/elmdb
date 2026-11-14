@@ -11,6 +11,7 @@
 //! unmapping the file and mapping it again. Each of those holds the gate for reading too.
 
 mod backup;
+mod commits;
 mod idle_reads;
 mod reach;
 #[cfg(unix)]
@@ -428,6 +429,13 @@ fn registered(env: &Env<WithoutTls>, path: &Path, _reader: &RoTxn<'_, WithoutTls
     Ok(())
 }
 
+/// Syncs what an open committed, before the open goes on: a new environment's stamp, and the graphs' databases
+fn opened_synced(env: &Env<WithoutTls>) -> Result<()> {
+    env.force_sync()?;
+    run_point!(OPEN_SYNCED);
+    Ok(())
+}
+
 impl Store {
     pub fn open(path: &Path, options: StoreOptions) -> Result<Self> {
         let data = path.join("data.mdb");
@@ -610,22 +618,21 @@ impl Store {
         // A new environment: its database and stamp in one unit, synced, before anything else is written
         let writer = writers.hold()?;
         let wtxn = opening.write()?;
-        let db = env
-            .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
-                let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
-                // A test's stand-in for a disk that fills while a new environment is stamped
-                failure_point!(STAMP at path, Error::new(ErrorCode::Io, "No space left on device"));
-                put_meta(wtxn, db, meta::KIND, format::KIND.as_bytes())?;
-                put_meta(wtxn, db, meta::FORMAT, &format::FORMAT_VERSION.to_be_bytes())?;
-                Ok(CommitOrAbort::<_, ()>::Commit(db))
-            })
-            .map_err(|e: Error| {
-                Error::new(e.code, format!("Couldn't record the storage format of {}: {}", path.display(), e.message))
-            })?
-            .unwrap_commit();
+        let db = commits::create_databases(env, wtxn, |opener, wtxn| -> Result<_> {
+            let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
+            // A test's stand-in for a disk that fills while a new environment is stamped
+            failure_point!(STAMP at path, Error::new(ErrorCode::Io, "No space left on device"));
+            put_meta(wtxn, db, meta::KIND, format::KIND.as_bytes())?;
+            put_meta(wtxn, db, meta::FORMAT, &format::FORMAT_VERSION.to_be_bytes())?;
+            Ok(CommitOrAbort::<_, ()>::Commit(db))
+        })
+        .map_err(|e: Error| {
+            Error::new(e.code, format!("Couldn't record the storage format of {}: {}", path.display(), e.message))
+        })?
+        .unwrap_commit();
         // Let go before the graphs' transaction, which takes it again
         writer.release();
-        env.force_sync()?;
+        opened_synced(env)?;
         Self::with_graphs(opening, db, writers)
     }
 
@@ -648,15 +655,18 @@ impl Store {
         if read_only || (cosine.is_some() && euclidean.is_some()) {
             return Ok(Db { main, cosine, euclidean });
         }
-        let _writer = writers.hold()?;
+        let writer = writers.hold()?;
         let wtxn = opening.write()?;
-        let (cosine, euclidean) = env
-            .create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
-                let cosine = opener.create_database(wtxn, Some(format::COSINE_GRAPHS))?;
-                let euclidean = opener.create_database(wtxn, Some(format::EUCLIDEAN_GRAPHS))?;
-                Ok(CommitOrAbort::<_, ()>::Commit((cosine, euclidean)))
-            })?
-            .unwrap_commit();
+        let (cosine, euclidean) = commits::create_databases(env, wtxn, |opener, wtxn| -> heed::Result<_> {
+            let cosine = opener.create_database(wtxn, Some(format::COSINE_GRAPHS))?;
+            let euclidean = opener.create_database(wtxn, Some(format::EUCLIDEAN_GRAPHS))?;
+            Ok(CommitOrAbort::<_, ()>::Commit((cosine, euclidean)))
+        })?
+        .unwrap_commit();
+        // The open's last commit, and synced as its first is: group commit, which syncs a unit's, isn't started yet
+        // and hears of neither, so left unsynced it would stay so until some unit's commit brought a sync
+        writer.release();
+        opened_synced(env)?;
         Ok(Db { main, cosine: Some(cosine), euclidean: Some(euclidean) })
     }
 
@@ -831,7 +841,7 @@ impl Store {
         // Held from before the commit is visible until it is accounted for, so an answer never sees it half done
         let mut accounted = self.accounted.lock();
         let skipped = last > accounted.through;
-        txn.commit()?;
+        commits::commit(txn)?;
         accounted.elsewhere |= skipped;
         accounted.through = next;
         drop(accounted);
@@ -1021,7 +1031,7 @@ impl Store {
             .to_vec();
         self.db.put(&mut txn, &key, &value)?;
         failure_point!(RESET_CHECKPOINT, Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
-        txn.commit()?;
+        commits::commit(txn)?;
         Ok(())
     }
 
