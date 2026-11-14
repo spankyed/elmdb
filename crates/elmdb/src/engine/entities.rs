@@ -325,13 +325,15 @@ impl ValueIndex {
     ///
     /// An index on one field has an entry for the field's value, or for each distinct element of its list; an
     /// index that accounts for its entities also files the entity among those without a value when the field is
-    /// missing or null, and among those it doesn't order when it holds a list or a value no index holds.
+    /// missing or null, among those holding a long string when it holds one (`values::long`), with or without an
+    /// entry, and among those it doesn't order when it holds a list or any other value no index holds.
     ///
     /// An index on several fields files the entity under each tuple its fields before the last name
     /// (`leading_of`), which is each tuple of values that equalities on those fields can ask for: an entry there
     /// when the last field holds a boolean, a number or a string the index holds; among those without a value
-    /// when the last is missing or null; among those it doesn't order when the last holds anything else. Under a
-    /// tuple it files the entity in one of those places, so what one entity holds decides only how its own tuples are
+    /// when the last is missing or null; among those holding a long string when it is one; among those it doesn't
+    /// order when the last holds anything else. Under a tuple it files the entity in one of those places, and a long
+    /// string that has an entry in both of its two, so what one entity holds decides only how its own tuples are
     /// read.
     ///
     /// A unique index on several fields holds an entity to one tuple of values (`unique_keys`), and that tuple is
@@ -344,10 +346,12 @@ impl ValueIndex {
             None | Some(Value::Nil) => Place::Without,
             Some(held) => values::index_part(held).map_or(Place::Unordered, Place::Entry),
         };
+        let long = matches!(last, Some(Value::String(string)) if string.as_str().is_some_and(values::long));
         if before.is_empty() {
             filed.entries = values::index_parts(last.as_ref()).into_iter().map(|part| vec![part]).collect();
             match place(last) {
                 Place::Without => filed.others.push(Other::Without(Vec::new())),
+                _ if long => filed.others.push(Other::Long(Vec::new())),
                 Place::Unordered => filed.others.push(Other::Unordered(Vec::new())),
                 Place::Entry(_) => {}
             }
@@ -361,9 +365,13 @@ impl ValueIndex {
                 match place(last) {
                     _ if self.unique && listed => filed.others.push(Other::Unordered(tuple)),
                     Place::Without => filed.others.push(Other::Without(tuple)),
+                    Place::Unordered if long => filed.others.push(Other::Long(tuple)),
                     Place::Unordered => filed.others.push(Other::Unordered(tuple)),
                     // A unique index's one entry is its tuple, filed above
                     Place::Entry(part) => {
+                        if long {
+                            filed.others.push(Other::Long(tuple.clone()));
+                        }
                         if !self.unique {
                             tuple.push(part);
                             filed.entries.push(tuple);
@@ -416,8 +424,12 @@ pub enum Other {
     /// Among those without a value in the index's last field, under the parts its fields before that one hold
     Without(Vec<Part>),
     /// Among those the index doesn't order, under the parts its fields before the last hold: its last field holds
-    /// a list or a value no index holds, or it is a unique index and a field before the last holds a list
+    /// a list or a value no index holds but a long string, or it is a unique index and a field before the last
+    /// holds a list
     Unordered(Vec<Part>),
+    /// Among those whose last field holds a long string (`values::long`), under the parts its fields before the
+    /// last hold: a string is ordered among strings, so an order of the field's numbers reads past it
+    Long(Vec<Part>),
 }
 
 impl Other {
@@ -426,6 +438,7 @@ impl Other {
         match self {
             Other::Without(leading) => keys::index_others(Prefix::IndexWithout, entity_type, index, leading),
             Other::Unordered(leading) => keys::index_others(Prefix::IndexUnordered, entity_type, index, leading),
+            Other::Long(leading) => keys::index_others(Prefix::IndexLong, entity_type, index, leading),
         }
     }
 }

@@ -68,6 +68,13 @@ pub enum Prefix {
     IndexUnordered,
     /// `d/xup type index values start` → a block of those places
     IndexUnorderedPlaces,
+    /// `d/xl type index values` → the places of the type's entities whose last field in a value index is a string
+    /// longer than the index files strings by (`engine::values::long`), under what its fields before the last
+    /// hold: a string, as the index's entries for strings are, and none it has an entry of that length for. Laid
+    /// out as `d/x` is
+    IndexLong,
+    /// `d/xlp type index values start` → a block of those places
+    IndexLongPlaces,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
@@ -122,7 +129,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 41] = [
+    pub const ALL: [Prefix; 43] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -140,6 +147,8 @@ impl Prefix {
         Prefix::IndexWithoutPlaces,
         Prefix::IndexUnordered,
         Prefix::IndexUnorderedPlaces,
+        Prefix::IndexLong,
+        Prefix::IndexLongPlaces,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
@@ -186,6 +195,8 @@ impl Prefix {
             Prefix::IndexWithoutPlaces => "d/xwp",
             Prefix::IndexUnordered => "d/xu",
             Prefix::IndexUnorderedPlaces => "d/xup",
+            Prefix::IndexLong => "d/xl",
+            Prefix::IndexLongPlaces => "d/xlp",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",

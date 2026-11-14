@@ -281,8 +281,9 @@ an answer:
   an index accounts for every entity of its type (`schema.md`, Indexes), which is what lets the walk leave none out.
   Each entity is handed on as its entry is read, so a `limit`, `first` or `exists` after it reads no further than its
   answer: the first ten of a million read ten. A field holding a string, whose order is the collation's and not its
-  entry's bytes', or a list or another value the index doesn't order, is sorted as before, as are several types, a
-  start of ids, and the trash alone.
+  entry's bytes', one the index has an entry for or a long one it has none for, or a list or another value the
+  index doesn't order, is sorted as before, as are several types, a start of ids, and the trash alone. A range of
+  numbers holds no string, and is read from the index whatever strings the field holds.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
   field would be read from an index for (the points on either side of this one) answer the first entry under the index's least
   value or under its greatest, the first in place order of those holding it, passing over an entry of an entity the
@@ -295,7 +296,8 @@ an answer:
   `orderBy n`, then `limit 10` reads ten entries of an index on `[status, n]`, and a page after a cursor is sought
   in it as in any order read from an index. A list in an equality's field is under each of its elements
   (`schema.md`, Indexes), so `where tags = x`, then `orderBy updatedAt`, reads an index on `[tags, updatedAt]`.
-  The index is read while, under those values, it holds no entity it doesn't order and no entry of a string;
+  The index is read while, under those values, it holds no entity it doesn't order and no string, in an entry or
+  among the long ones;
   otherwise the equalities are filtered and their matches sorted. What an entity under other values holds leaves
   the read alone: one task with a list for its number has its own status sorted, and no other.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,

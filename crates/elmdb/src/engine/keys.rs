@@ -133,8 +133,9 @@ pub fn index_strings(entity_type: &str, index: &str, parts: &[crate::format::key
 }
 
 /// The key a value index files entities under besides its entries: those without a value in its last field
-/// (`Prefix::IndexWithout`), or those it doesn't order (`Prefix::IndexUnordered`), each under the parts its fields
-/// before the last hold. The key holds their places, as a value's does (`engine/places.rs`)
+/// (`Prefix::IndexWithout`), those it doesn't order (`Prefix::IndexUnordered`), or those holding a long string there
+/// (`Prefix::IndexLong`), each under the parts its fields before the last hold. The key holds their places, as a
+/// value's does (`engine/places.rs`)
 pub fn index_others(prefix: Prefix, entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Vec<u8> {
     with(prefix, |w| {
         w.string(entity_type).string(index);
@@ -144,24 +145,26 @@ pub fn index_others(prefix: Prefix, entity_type: &str, index: &str, leading: &[c
     })
 }
 
-/// The ranges a value index's keys are in: its entries, the entities without a value and those whose value it doesn't
-/// order; that it is built is the one key `index_built` builds
-pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
+/// The ranges a value index's keys are in: its entries, the entities without a value, those whose value it doesn't
+/// order and those holding a long string; that it is built is the one key `index_built` builds
+pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 4] {
     [
         index_range(entity_type, index, &[]),
         index_others(Prefix::IndexWithout, entity_type, index, &[]),
         index_others(Prefix::IndexUnordered, entity_type, index, &[]),
+        index_others(Prefix::IndexLong, entity_type, index, &[]),
     ]
 }
 
 /// The key the blocks of a value's places are under, for a value whose own key is `own`: the same parts under the
-/// tag for the blocks of its kind, `d/x`'s, `d/xw`'s or `d/xu`'s. A block's key is this and where it starts
+/// tag for the blocks of its kind, `d/x`'s, `d/xw`'s, `d/xu`'s or `d/xl`'s. A block's key is this and where it starts
 /// (`place_under`)
 pub fn index_blocks(own: &[u8]) -> Vec<u8> {
     let kinds = [
         (Prefix::Index, Prefix::IndexPlaces),
         (Prefix::IndexWithout, Prefix::IndexWithoutPlaces),
         (Prefix::IndexUnordered, Prefix::IndexUnorderedPlaces),
+        (Prefix::IndexLong, Prefix::IndexLongPlaces),
     ];
     for (of, blocks) in kinds {
         if let Some(parts) = own.strip_prefix(of.key().to_vec().as_slice()) {

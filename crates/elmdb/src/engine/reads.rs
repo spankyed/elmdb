@@ -2643,7 +2643,8 @@ impl<R: Read> Query<'_, R> {
     /// A type's entities that `equals` names, within `limits` when a range keeps them, as an index reads them in
     /// `name`'s order: its entries for them, which hold no string. The index's order is then the step's: false, true
     /// and the numbers, each value's entities in place order, then the entities without a value. A string's order is
-    /// the schema's collation's, which the order of an entry's bytes isn't, so entities holding one are sorted
+    /// the schema's collation's, which the order of an entry's bytes isn't, so entities holding one are sorted: one
+    /// the index has an entry for, or a long one it has none for. A range of numbers holds neither, and is read
     fn ordered_under<'q>(
         &self,
         entity_type: &'q String,
@@ -2661,7 +2662,7 @@ impl<R: Read> Query<'_, R> {
                     held = true;
                     false
                 })?;
-                if held {
+                if held || self.r.contains(&keys::index_others(Prefix::IndexLong, entity_type, &index, &leading))? {
                     return Ok(None);
                 }
                 let mut least = leading.clone();

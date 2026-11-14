@@ -458,6 +458,22 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     write(&db, vec![set(1, "n", json!(1))]);
     assert_eq!(first(&db, &done), 2, "gone, the index is read");
 
+    // A long string in the ordered field is among the strings under its status, one the index has no entry for or
+    // one it has: the tasks there are sorted as with any string, and a range of numbers is read from the index's
+    // entries, which hold none of it
+    for long in ["x".repeat(300), "\0".repeat(200)] {
+        write(&db, vec![set(1, "n", json!(long))]);
+        assert_eq!(filed(&db, Prefix::IndexLong, "statusN"), [id(1)]);
+        assert!(filed(&db, Prefix::IndexUnordered, "statusN").is_empty());
+        assert_eq!((first(&db, &open), first(&db, &done)), (2, holding("done")));
+        let ranged = |field: &str| json!([done, { "step": "range", "field": field, "atLeast": 0 }]);
+        let (held, visits) = same(&db, "live", N, ranged);
+        assert!(!held.contains(&id(1)) && visits as usize == held.len(), "{held:?} of {visits} read");
+        clean(&db);
+    }
+    write(&db, vec![set(1, "n", json!(1))]);
+    assert!(filed(&db, Prefix::IndexLong, "statusN").is_empty());
+
     // What no index holds, in the equality's field, is nothing an equality the index answers can ask for: the task
     // is under what else its list holds, or under nothing, and every status is read in order as before
     for (status, under_open) in [(json!(["open", { "a": 1 }]), 1), (json!({ "a": 1 }), 0), (json!("x".repeat(300)), 0)]

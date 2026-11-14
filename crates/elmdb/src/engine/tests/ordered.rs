@@ -211,6 +211,7 @@ fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
     let unordered: Vec<(&str, Value)> = vec![
         ("a string", "pear".into()),
         ("a string past what an index holds", "p".repeat(300).into()),
+        ("a string its zero bytes make as long", "\0".repeat(200).into()),
         ("a list", Value::Array(vec![1.into()])),
         ("an empty list", Value::Array(vec![])),
         ("a map", Value::Map(vec![("k".into(), 1.into())])),
@@ -234,6 +235,25 @@ fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
         let (first, visits) = same(&db, "live", |field| json!([order(field, true), limit(3)]));
         assert_eq!(visits, 3, "{what}: gone, the index orders every value");
         assert_eq!(first, of(&all, &[2, 3, 11]), "{what}");
+        clean(&db);
+    }
+}
+
+#[test]
+fn a_long_string_leaves_a_range_of_its_field_s_numbers_to_the_index() {
+    for (what, long) in
+        [("past what an index holds", "p".repeat(300)), ("its zero bytes make as long", "\0".repeat(200))]
+    {
+        let (_dir, db) = open();
+        let all = load(&db, "Item", &mixed());
+        write(&db, vec![create("Item", "Item-long", Some(long.as_str().into()), &[])]);
+        // A string is no number, so the range holds none of it: its entries are read, and no entity besides
+        let range = |field: &str| json!({ "step": "range", "field": field, "atLeast": 1, "below": 3 });
+        let (held, visits) = same(&db, "live", |field| json!([range(field)]));
+        assert_eq!((held, visits), (of(&all, &[1, 4, 6, 13]), 4), "a string {what}");
+        // And the range's order is the index's
+        let (first, visits) = same(&db, "live", |field| json!([range(field), order(field, true), limit(2)]));
+        assert_eq!((first, visits), (of(&all, &[4, 1]), 2), "a string {what}");
         clean(&db);
     }
 }
@@ -780,6 +800,8 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
         assert_eq!(unordered(db), odd, "not ordered: {what}");
         clean(db);
     };
+    // The entities holding a long string, which are apart from those the index doesn't order
+    let long = |db: &Database| filed(db, Prefix::IndexLong, "Item", "byN");
     write(
         &db,
         vec![
@@ -792,7 +814,8 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
             create("Item", "Item-flag", Some(false.into()), &[]),
         ],
     );
-    expect(&db, &["Item-none", "Item-null"], &["Item-list", "Item-long"], "as created");
+    expect(&db, &["Item-none", "Item-null"], &["Item-list"], "as created");
+    assert_eq!(long(&db), ["Item-long"]);
     // Each other index of the type files each entity by its own field, the times every entity holds leaving none
     // without a value; and the short code's and the roles' file none
     assert_eq!(filed(&db, Prefix::IndexWithout, "Item", "byTag").len(), 7);
@@ -801,17 +824,24 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
     assert_eq!(every, 2 + 7, "byN's two and byTag's seven");
 
     write(&db, vec![set("Item-none", 1.into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a value given");
+    expect(&db, &["Item-null"], &["Item-list"], "a value given");
     write(&db, vec![set("Item-none", 2.into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a number for a number");
+    expect(&db, &["Item-null"], &["Item-list"], "a number for a number");
     write(&db, vec![set("Item-none", Value::Nil)]);
-    expect(&db, &["Item-none", "Item-null"], &["Item-list", "Item-long"], "null for a number");
+    expect(&db, &["Item-none", "Item-null"], &["Item-list"], "null for a number");
     write(&db, vec![set("Item-none", Value::Array(vec![]))]);
-    expect(&db, &["Item-null"], &["Item-none", "Item-list", "Item-long"], "a list for null");
+    expect(&db, &["Item-null"], &["Item-none", "Item-list"], "a list for null");
+    // A string of fewer bytes than an index holds, which its zero bytes make long, has an entry and is among the
+    // long ones too; one of no zero byte is in its entry alone
+    write(&db, vec![set("Item-none", "\0".repeat(200).into())]);
+    expect(&db, &["Item-null"], &["Item-list"], "a string of zero bytes for a list");
+    assert_eq!(long(&db), ["Item-none", "Item-long"]);
     write(&db, vec![set("Item-none", "text".into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a string for a list");
+    expect(&db, &["Item-null"], &["Item-list"], "a string for a long one");
+    assert_eq!(long(&db), ["Item-long"]);
     write(&db, vec![set("Item-long", Value::Map(vec![]))]);
     expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a map for a long string");
+    assert!(long(&db).is_empty());
     write(&db, vec![set("Item-long", true.into())]);
     expect(&db, &["Item-null"], &["Item-list"], "a boolean for a map");
     write(&db, vec![op(json!({ "op": "delete", "id": "Item-list", "field": "n" }))]);
