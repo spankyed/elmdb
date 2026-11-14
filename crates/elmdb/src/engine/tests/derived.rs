@@ -1095,6 +1095,141 @@ fn an_index_declared_on_an_open_database_is_built_and_read_and_writes_go_on_to_t
 }
 
 #[test]
+fn rename_type_refuses_a_rename_whose_rows_the_schema_refuses_under_the_new_name_and_moves_nothing() {
+    use crate::engine::maintenance::Load;
+    let plain =
+        || json!({ "title": { "type": "string", "optional": true }, "slug": { "type": "string", "optional": true } });
+    let schema = json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "relations": {
+            "pins": { "cardinality": "many-to-one", "endpoints": [{ "source": "Note", "target": "Task" }] },
+            "blocks": { "cardinality": "many-to-many" },
+            "cites": { "cardinality": "many-to-many", "info": { "type": "ref", "to": ["Note", "Page"] } }
+        },
+        "types": {
+            "Note": { "fields": plain() },
+            "Page": { "fields": plain() },
+            "Memo": { "fields": { "title": { "type": "string" }, "slug": { "type": "string", "optional": true } } },
+            "Card": { "fields": plain(), "indexes": { "slug": { "kind": "value", "fields": ["slug"], "unique": true } } },
+            "Task": { "fields": {
+                "about": { "type": "ref", "to": ["Note"], "optional": true },
+                "on": { "type": "ref", "to": ["Note", "Page"], "optional": true },
+                "n": { "type": "number", "optional": true }
+            } }
+        }
+    });
+    let create = |id: &str, fields: Json| json!({ "op": "create", "type": id.split('-').next().unwrap(), "id": id, "fields": fields });
+    // Each case: the rows written, the type renamed to, and what the refusal says of the row the schema refuses
+    let cases = [
+        (
+            vec![create("Note-1", json!({ "slug": "s" }))],
+            "Memo",
+            vec![
+                "renameType(\"Note\" to \"Memo\"): renamed, Memo-1 (now Note-1) lacks title, which every Memo holds, \
+                 which the schema refuses, and nothing was moved. Change what is named so that the rule holds, or \
+                 change the declaration the rule is of, then rename again",
+            ],
+        ),
+        (
+            vec![create("Note-1", json!({ "slug": "s" })), create("Card-9", json!({ "slug": "s" }))],
+            "Card",
+            vec!["renamed, Card-1 (now Note-1), Card-9 hold the same Card.slug value, which is unique, which"],
+        ),
+        (
+            vec![
+                create("Note-1", json!({})),
+                create("Task-1", json!({})),
+                json!({ "op": "link", "source": "Note-1", "kind": "pins", "target": "Task-1" }),
+            ],
+            "Page",
+            vec!["renamed, the relation Relation-", " pins doesn't join a Page to a Task, which the schema refuses"],
+        ),
+        (
+            vec![create("Note-1", json!({})), create("Task-1", json!({ "about": "Note-1" }))],
+            "Page",
+            vec!["renamed, Task-1 ", "\"Page-1\" is an id of Page"],
+        ),
+    ];
+    for (ops, to, told) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let db = with_schema(&dir, schema.clone()).unwrap();
+        write(&db, ops).unwrap();
+        let before = db.sequence().unwrap();
+        let error = db.rename_type("Note", to).unwrap_err();
+        assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+        assert!(told.iter().all(|part| error.message.contains(part)), "{error}");
+        assert!(row(&db, "Note-1").is_some() && row(&db, &format!("{to}-1")).is_none(), "nothing moved");
+        assert_eq!(db.sequence().unwrap(), before, "and nothing was committed");
+        let report = db.check().unwrap();
+        assert!(report.is_clean(), "{report:?}");
+    }
+    // A rule broken as the rename began is left to `check()`, whatever the rename writes of its row: a load's edge
+    // from an entity to itself, which no link is given, and a loaded entity, whose `ref` the rename rewrites, holding
+    // a value its field doesn't take. A relation's info that is a `ref` to the type follows the rename as a field does
+    let dir = tempfile::tempdir().unwrap();
+    let db = with_schema(&dir, schema.clone()).unwrap();
+    write(
+        &db,
+        vec![
+            create("Note-1", json!({})),
+            create("Task-1", json!({})),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": "Note-1" }),
+            create("Task-2", json!({})),
+        ],
+    )
+    .unwrap();
+    db.bulk_load(&[
+        Load::Relation {
+            id: "Relation-own".into(),
+            kind: "blocks".into(),
+            source: "Task-1".into(),
+            target: "Task-1".into(),
+            info: None,
+            weight: None,
+        },
+        Load::Entity {
+            id: "Task-3".into(),
+            fields: serde_json::from_value(json!({ "on": "Note-1", "n": "many" })).unwrap(),
+            trashed: false,
+        },
+    ])
+    .unwrap();
+    let broken =
+        |db: &Database| -> Vec<String> { db.check().unwrap().violations.into_iter().map(|v| v.subject).collect() };
+    assert_eq!(broken(&db), ["Task-3", "p/r Relation-own"]);
+    db.rename_type("Note", "Page").unwrap();
+    assert!(row(&db, "Page-1").is_some());
+    assert_eq!(row(&db, "Task-3").unwrap()["on"], "Page-1");
+    let cited: Vec<_> = relations(&db).into_iter().filter(|(_, stored)| stored.kind == "cites").collect();
+    assert_eq!(cited[0].1.info, Some(rmpv::Value::from("Page-1")));
+    let report = db.check().unwrap();
+    assert!(report.differences.is_empty(), "{report:?}");
+    assert_eq!(broken(&db), ["Task-3", "p/r Relation-own"], "what was broken before, and nothing more");
+    // A rule a load left broken that names a moved entity is reported in other words once the entity has another
+    // id, and the rename is held to it: an edge from a Page to itself
+    db.bulk_load(&[Load::Relation {
+        id: "Relation-self".into(),
+        kind: "blocks".into(),
+        source: "Page-1".into(),
+        target: "Page-1".into(),
+        info: None,
+        weight: None,
+    }])
+    .unwrap();
+    let error = db.rename_type("Page", "Note").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+    assert!(error.message.contains("the relation Relation-self a blocks relation links Note-1 to itself"), "{error}");
+    assert!(row(&db, "Page-1").is_some());
+    // A row of a type the schema doesn't declare is changed by a load, which the refusal says
+    db.bulk_load(&[Load::Entity { id: "Old-1".into(), fields: Default::default(), trashed: false }]).unwrap();
+    let error = db.rename_type("Old", "Memo").unwrap_err();
+    assert_eq!(error.code, ErrorCode::SchemaChangeRefused, "{error}");
+    let told = "Change what is named so that the rule holds, a row of type Old by a bulkLoad of it under its id, the \
+                schema not declaring the type, or change the declaration the rule is of, then rename again";
+    assert!(error.message.contains(told), "{error}");
+}
+
+#[test]
 fn rename_type_rewrites_a_type_s_refs_to_itself_and_moves_its_embeddings() {
     let dir = tempfile::tempdir().unwrap();
     let folder = |indexes: Json| {
