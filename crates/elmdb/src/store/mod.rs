@@ -1337,4 +1337,6 @@ fn check_stamp(opening: &Opening<'_>, db: heed::Database<'_, Bytes, Bytes>) -> R
 #[cfg(test)]
 mod retention_tests;
 #[cfg(test)]
+mod synced_model;
+#[cfg(test)]
 mod tests;
