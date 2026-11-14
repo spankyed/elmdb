@@ -85,6 +85,49 @@ unit spread over the type would write a block of its own under each value, which
 value costs: 35.3 µs for a change of the enum one index files and 54.9 for the one two file, 19.6 µs and 56% of the
 unit, where a second filing of a string no other entity holds added 13.2 in that run.
 
+The fifth, of this draft's key by a disposable prototype over `main`'s readings program (`change-cost`): an index
+whose order's key is put where the list of places says an entry came to be and deleted where it says it went, the
+key's value the place, the marker read once for each entity, and the sort key made whole and then cut (Apple M1
+Pro, 2026-11-14, built in release, one run each at loads of 34 to 62, so CPU, and figures compared within a run
+only). Fifteen units of each field in turn over the same thousand entities, CPU for each entity changed, the
+differences the medians of the paired ones:
+
+| What a unit changes | A million, strings of 12 bytes | 300,000, strings of 100 bytes |
+|---|---:|---:|
+| A string one index files | 33.9 µs | 31.1 µs |
+| A string two indexes file | 53.0 µs, 18.6 more | 47.9 µs, 15.7 more |
+| A string one index files and orders | 52.6 µs, 19.3 more | 53.0 µs, 22.9 more |
+| An enum of two values one index files | 37.9 µs | 33.2 µs |
+| An enum two indexes file | 57.3 µs, 20.7 more | 49.8 µs, 18.0 more |
+| An enum one index files and orders | 38.9 µs, 1.4 more | 33.7 µs, 1.4 more |
+
+The order's keys were 82.1 MB for the million strings beside 42.8 MB for their `d/x`, and 80.2 MB for the 300,000
+beside 40.0 MB. A room capped at 64 and at 32 bytes changed the 100-byte strings' 22.9 µs to 22.7 and 21.1, and
+their keys to 66.1 and 56.5 MB.
+
+And every entity of the million in the strings' order, each other string capitalized so the order isn't the
+bytes', as loops in a read transaction and not a plan's read, CPU of the thread, three repeats of each within 5%:
+
+| How the order is read | Reading |
+|---|---|
+| The order's keys walked, and nothing else | 37 to 42 ms |
+| Each key's `d/x` entry sought and its place read | 530 to 548 ms |
+| That, and each entity named by its place | 1,449 to 1,576 ms |
+| The place taken from the key's value, and each entity named | 875 to 990 ms |
+| The strings sorted as `d/x` has them and met in one walk of it, the places sorted and met in one walk of the type's entities, the ids put back in order | 416 to 422 ms |
+| A plan's `orderBy` of the indexed number, and of the string by the sorted arm, beside them | 1,711 to 1,816 ms, and 2,802 to 2,951 ms |
+
+And the room by the keys as phase 2 lays them out, for a type `Note` and an index `title`: 222 bytes with no value
+before the last field; 172 with one of 40 bytes; 84 with one of 128, the longest id; 59 with that and the names
+`ConversationMessage` and `byConversationAndSender`; 42 with values of 128 and 40 bytes.
+
+What they say. The order costs a change of a string another entity holds 1.4 µs, under a twentieth of it, and a
+change of one no other holds what a second index does at 12 bytes and one and a half times that at 100, where the
+difference is the two sort keys a change makes. A seek is about half a microsecond a string and two fifths of a
+read of every entity; naming an entity by its place costs more than the seek; and resolving both in the order of
+their keys costs less than either saved alone. And a compound index's room is small where its leading values are
+ids.
+
 ## The design
 
 **Every value index a schema declares keeps the order of the strings its last field holds, a key for each distinct
@@ -122,12 +165,16 @@ string some entity holds files no key for the order. The derived families, each 
   bytes holds the figure in phase 2. It is one room and not one for each string, because two keys cut at different
   lengths can't be ordered by their bytes: a cut key is exactly the room long, and a whole one no longer. No `d/xo`
   key is longer than 511 bytes, whatever the names, the values and the strings.
-- **Under 64 bytes of room the order of that tuple isn't kept**: no `d/xo` key is filed under it, of either kind,
-  and a read of it reads the rows. A write and a read each work the room out from the names and the leading parts
-  they hold, so nothing stored says it, and an order on the field's numbers is read from the index as now. Of an
-  index whose names alone leave less, `indexStatus()` says its order isn't kept and that shorter names keep it.
+- **An order is kept wherever its keys fit.** Under names and leading values that leave a sort key little room,
+  more keys are cut and more runs are ordered as they are read, from the strings in their keys and with no row
+  read: never more than the rows the order stands in for. Where they leave no room for a key at all, no `d/xo` key
+  is filed under the tuple, of either kind, and a read of it reads the rows. A write and a read each work the room
+  out from the names and the leading parts they hold, so nothing stored says it, and an order on the field's
+  numbers is read from the index as now. `indexStatus()` says of an index what room its names leave, and EXPLAIN
+  says of a plan that its order was sorted for want of room. A schema is never refused for it: a figure of the
+  layout is no part of what a schema may say.
 - **The layout is its stamp's, and only its envelope is the format's.** Which strings have keys of their own, the
-  258 bytes, the room, the 64 and what a key's value holds are all under a build, and the stamp holds a number for
+  258 bytes, the room and what a key's value holds are all under a build, and the stamp holds a number for
   them (below): an elmdb that lays an order out another way files under another stamp, and builds its orders again
   in the background, with no change to the format. What the format holds, and freezes with format 1, is the
   families' tags, the marker and the rule every write keeps towards it, and `d/xl` as the strings `d/x` has no
@@ -250,9 +297,10 @@ backstop, not the proof. The collator is made once for a collation in a process 
 
 **`check()`** derives, under a whole build of its own stamp, the `d/xo` keys from the `d/x` keys it has derived
 from the rows and from the entities holding unplaced strings, and `d/xl`, and reports a key missing, one too many
-and one under the wrong sort key, each by name. Under another stamp it compares the strings and the places the keys
-hold, says the sort keys were filed by another collator and were not compared, which is what `elmdb-cli` of another
-build meets. `indexStatus()` and the wait for index builds cover an order as they cover an index.
+and one under the wrong sort key, each by name. Under another stamp it reads nothing past the marker and says the
+order was filed under another stamp and was not compared, which is what `elmdb-cli` of another build meets: what
+is under a build is its stamp's to lay out, and a key another layout gives a value is not this one's to read.
+`indexStatus()` and the wait for index builds cover an order as they cover an index.
 
 **What it costs**, by the fourth reading. A write that repeats a string another entity holds: the marker read, a
 key every such write of the unit reads, and no key written, where a second place for every entity would have paid
@@ -262,25 +310,26 @@ read, one sort key and one key put, and one deleted when the string it had goes 
 string of characters the collation ignores is read to its end. The key is a leaf written and another when one is
 deleted, as a second index of the string is, which cost 13.5 to 15.9 µs on a change of 32.2 to 33.2 at a million
 entities and 3.7 µs on a create; this key is longer than that index's, holding the sort key and the string, and
-what that adds is read in phase 2. An index grows by a key for each distinct string, holding its sort key and the
-string: for names nearly all different, of a dozen bytes, something under twice its `d/x` by the parts' sizes,
-which is an estimate and no reading; for a field of few values, nothing to speak of. An update of the collator's
-crates builds every index's order again, once, in the background, from the index's keys. A read pays one seek for
-each distinct string it hands on.
+by the fifth reading costs what that index does for strings of 12 bytes and one and a half times it for strings
+of 100. An index grows by a key for each distinct string, holding its sort key and the string: by the fifth
+reading twice its `d/x` for strings nearly all different; for a field of few values, nothing to speak of. An
+update of the collator's crates builds every index's order again, once, in the background, from the index's keys.
+A read pays one seek for each distinct string it hands on.
 
 **The decisions the readings make**, in phase 2:
 
-- *The seek.* Every note of a million in the names' order is read from the index and its time recorded beside the
-  sorted arm's (2,534 ms in the reading of 2026-11-13, `../evidence/million-notes.md`). If the seeks to `d/x` are
-  more than a third of it, a string one entity holds keeps that entity's place as its key's value: written with
-  the key, replaced by nothing when a second entity takes the string, and written again when the second-last
-  leaves. A read then seeks only for a string several hold. It is a layout of three states for a string, no
-  holder, one and several, with a write as the second holder comes and as it goes, and gates of its own. Being a
-  layout it is under the stamp's number: it can be taken up after the freeze, by a build in the background.
+- *The seek.* Every note of a million in the names' order is read from the index by a plan and its time recorded
+  beside the sorted arm's in the same run: the fifth reading has the seeks at two fifths of such a read, and the
+  read no slower than the sorted arm, which is what phase 2 holds it to. Nothing is added to the layout for it. The
+  place of a string one entity holds, kept in its key's value, saves the seek and not the naming of each entity,
+  and makes three states of a string with a write as its second holder comes and goes; resolving the keys in their
+  own order saves more of both and is no part of the layout (phase 4).
 - *The writes.* The fourth reading's program is run with the order and without, in one run, the runs above
   differing by as much as a fifth between them. The unit that changes a thousand statuses costs no more than a
   tenth over what it costs without the order, the marker's read being all it adds, and what the order adds to the
-  unit that changes a thousand names is no more than half as much again as what a second index adds. Past either,
+  unit that changes a thousand names is no more than half as much again as what a second index adds. The fifth
+  reading's prototype held both, the second only just for strings of 100 bytes, with a sort key made whole where
+  phase 2's is cut. Each is read again inside a unit with a savepoint, where a put and a delete read first. Past either,
   something files that this design says doesn't, and it is found before anything else is built.
 - *The file.* More than a tenth larger at a million notes, and the keys are made smaller before the freeze.
 
@@ -316,6 +365,20 @@ each distinct string it hands on.
   another has no total order; a `range` would go on comparing by the collation and disagree with the order; and a
   narrowed field is enforced and not refused, so rows past the type's bound would stand. What it would save is
   small: an identifier is set when its entity is made, where the order's key costs 3.7 µs.
+- **The place of a string one entity holds, kept in its key's value.** By the fifth reading it takes a read of
+  every entity from some 1,500 ms to 930, where resolving the keys in their own order takes it to 420, for three
+  states of a string and two more writes to verify. The layout being the stamp's, it can still come.
+- **A least room, 64 bytes, under which no order is kept.** A cut run is ordered from its keys and reads no row,
+  so an order in little room is never worse than the rows; and by the fifth reading two ids before the last field
+  leave less than that.
+- **A room capped below what the key has.** At 32 bytes it saved a twelfth of a change and three tenths of the
+  keys' bytes (fifth reading), and would put strings that share a long beginning, paths and addresses, in one run.
+- **A digest of the leading values in their place**, which would make the room the names' alone. A read never
+  needs those values in order, but two tuples of one digest would be read as one, a key holding a place would
+  hand on the other tuple's entity unless its row were read, and whoever supplies the values could make them
+  collide at 128 bits. It is wanted only where two leading ids of the greatest length leave a key no room at all,
+  and can come under a later stamp.
+- **A schema refused for names that leave no room.** It would put a figure of the layout in the schema's contract.
 - **An index that asks for no order.** It adds no key and can't give a wrong order, so it can come after the
   freeze if a program's readings ask for it.
 - **The order's changes kept in a journal the builder folds in.** The one arrangement that costs a write of a new
@@ -376,14 +439,15 @@ each distinct string it hands on.
   that file are named above and each is a gate below; the harness has six entities, so none of its entries is ever
   in blocks, and the first and last place of an entry in blocks is tested apart.
 - **The seek for each string**, on a read that hands on every entity, each of which already costs a get of its id
-  by its place. The first decision above reads it.
+  by its place: two fifths of such a read by the fifth reading, until phase 4. A page pays a seek for each of its
+  strings whatever is done.
 - **A list's strings.** Each distinct element of a list has an entry, so a field of tags files and deletes an
   order's key at each tag's first and last holder, for an order no read takes while a list is there. The layout
   being the stamp's, a later one can leave them out.
-- **Long names and leading values.** The string in the key leaves a compound index's order about 165 bytes for its
-  names and the values before its last field, where the fourth draft left about 420; past them the tuple's order
-  is read from the rows. `indexStatus()` says so of names alone, and EXPLAIN says of a plan that its order was
-  sorted for want of room.
+- **Long names and leading values.** The string in the key leaves a compound index's sort keys little room where
+  the values before its last field are ids: 84 bytes after one of 128, 42 after two (fifth reading), where the
+  fourth draft had 258 more. More of its runs are cut and ordered as they are read; `indexStatus()` and EXPLAIN
+  say so.
 - **Half the fourth draft's room**, the string being in the key: more runs are cut. A cut run of placed strings is
   ordered from its keys, and reads a row only for an unplaced string.
 - **A change of an indexed string no other entity holds** costs what a second index would. By the readings the
@@ -404,7 +468,11 @@ each distinct string it hands on.
    bytes in both arms; `orderBy`, `after`, `least` and `greatest` reading it. Done when:
    - the readings are recorded again, the first ten of a million reading ten keys and ten entries where no entry is
      trashed, with both indexes' sizes and both units' times, what the marker's read adds to a unit that repeats
-     strings, and the three decisions above are made on them;
+     strings, in a unit with a savepoint and in one without, and every note in the names' order no slower than the
+     sorted arm reads it; and the decisions above are made on them;
+   - under names and leading values that leave a sort key a byte of room, and under ones that leave it none, an
+     order answers as the rows do, EXPLAIN saying which it read; and the property test above holds a key's order at
+     rooms from none up;
    - a property test holds the sign of the collator's comparison, then the bytes', to the order of the keys as they
      are filed, cut and whole, and the cut to the whole key's first bytes and to exactly the room's length, with no
      zero byte in any sort key, over random strings in the collations of the third reading; and holds every key to
@@ -448,3 +516,11 @@ each distinct string it hands on.
    rows for bounds on either side, inclusive and exclusive, a bound equal to the collator and of other bytes than a
    string held, and a bound whose key is cut; and the benchmark's range reads no entity outside its bounds but those
    of an unplaced string in a run at a bound.
+4. **An order that takes most of a set, resolved in the order of its keys.** A read with no limit, or a large one,
+   walks the order's keys, sorts their strings as `d/x` has them and meets its entries in one walk, then sorts the
+   places and meets the type's entities in one walk, and puts the ids back in the order's. It adds no key, and an
+   order of numbers gains as an order of strings does. It holds its answer in memory where the walk it replaces
+   hands each entity on, and the fifth reading read live entities only, by loops and not a plan: its recorded
+   reads, the trash, and the size of limit at which it pays are designed when it is built. Done when every note of
+   a million in the names' order, and in the number's, is read in under half the time phase 2 recorded, and the
+   model harness holds both to the rows.
