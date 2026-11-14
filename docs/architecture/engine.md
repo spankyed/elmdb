@@ -181,8 +181,9 @@ A plan is a scope, a start, steps and a terminal:
   more). `to` itself and an entity sharing nothing aren't answered, and a `to` the scope doesn't reach answers
   nothing. Each score is a hit's, as a rank's is. It reads from `to` two edges out, not the whole set: straight after a type start an entity's membership is its type and the scope, read per candidate, so it costs what `to`'s neighbourhood holds; after other steps it collects the set. Adamic–Adar's logarithm is libm's, so its scores are the same bits on every platform. Unlike `like`,
   which ranks by embedding, it ranks by links.
-- **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation, anything else by its JSON,
-  then a missing or null value; ties keep the query's order, and `descending` reverses the values and not the ties),
+- **Shaping:** `orderBy` (booleans, numbers, timestamps, strings by the schema's collation and, where it holds two
+  equal, by their bytes, anything else by its JSON, then a missing or null value; ties keep the query's order, two
+  strings tying only when they are the same bytes, and `descending` reverses the values and not the ties),
   `reverse`, `limit`, `distinct`, `after` (the entities after an id, a page's cursor; an id no longer in the answer
   answers nothing, so a caller pages again from the start).
 - **Search:** `search` (a text index's matches, most relevant first; `search.md`, Text search as built); `containing`

@@ -571,6 +571,45 @@ fn a_range_of_strings_is_in_the_collation_s_order() {
 }
 
 #[test]
+fn strings_the_collation_holds_equal_are_ordered_by_their_bytes() {
+    let (_dir, db) = open();
+    // é as one character and as an e with a combining accent: one string to the root collation, of different bytes,
+    // the combined one's the lesser
+    let (composed, combined) = ("\u{e9}", "e\u{301}");
+    let notes = [composed, "f", combined, composed, "d", combined];
+    let all: Vec<String> = (0..notes.len()).map(|at| format!("Item-{at:02}")).collect();
+    let made = all.iter().zip(notes).map(|(id, note)| create("Item", id, Some(note.into()), &[("tag", note.into())]));
+    write(&db, made.collect());
+    for field in ["n", "m", "tag"] {
+        let by = |descending: bool, more: Vec<Json>| {
+            let steps: Vec<Json> = [order(field, descending)].into_iter().chain(more).collect();
+            ids(&db, plan("live", &["Item"], Json::Array(steps)))
+        };
+        // The bytes part what the collation holds equal, and strings of the same bytes stay as they came
+        assert_eq!(by(false, vec![]), of(&all, &[4, 2, 5, 0, 3, 1]), "{field}");
+        // Descending reverses the values, their bytes with them, and not the ties
+        assert_eq!(by(true, vec![]), of(&all, &[1, 0, 3, 2, 5, 4]), "{field}");
+        // The first few kept in one pass, and a page past a cursor, are of the same order
+        assert_eq!(by(false, vec![limit(3)]), of(&all, &[4, 2, 5]), "{field}");
+        assert_eq!(by(false, vec![after(&all[2]), limit(2)]), of(&all, &[5, 0]), "{field}");
+        assert_eq!(by(true, vec![after(&all[3]), limit(2)]), of(&all, &[2, 5]), "{field}");
+        // The least of the four the collation holds equal is the first of the lesser bytes, and the greatest the
+        // first of the greater: a range's bounds are the collation's alone, and hold all four
+        let extreme = |answer: &str| {
+            let mut plan = plan(
+                "live",
+                &["Item"],
+                json!([{ "step": "range", "field": field, "atLeast": "\u{e9}", "atMost": "\u{e9}" }]),
+            );
+            plan["terminal"] = json!({ "answer": answer, "field": field });
+            read(&db, json!({ "read": "query", "plan": plan })).unwrap()
+        };
+        assert_eq!(extreme("least"), json!({ "kind": "least", "id": all[2], "value": combined }), "{field}");
+        assert_eq!(extreme("greatest"), json!({ "kind": "greatest", "id": all[0], "value": composed }), "{field}");
+    }
+}
+
+#[test]
 fn a_range_without_a_bound_or_with_bounds_of_two_kinds_is_refused() {
     let (_dir, db) = open();
     load(&db, "Item", &mixed());
