@@ -119,7 +119,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::engine::collator;
+    use crate::engine::{collator, keys};
+    use crate::format::key::Part;
 
     /// The collations the cut was read in (`docs/roadmap/string-order.md`, the third reading): the root's, locales
     /// that tailor it, one that reads its accents backwards, and ones that order digits as numbers, capitals first, a
@@ -185,6 +186,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A part before an index's last: a string, a number, a boolean or null
+    fn leading_part() -> impl Strategy<Value = Part> {
+        prop_oneof![
+            "[a-z\\x00é]{0,90}".prop_map(Part::String),
+            (-1e9f64..1e9).prop_map(Part::Number),
+            any::<bool>().prop_map(Part::Bool),
+            Just(Part::Null),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn no_key_of_an_order_is_longer_than_a_key_may_be_and_one_fills_it(
+            entity_type in "[A-Za-z]{1,70}",
+            index in "[A-Za-z]{1,70}",
+            leading in prop::collection::vec(leading_part(), 0..3),
+            build in 0u64..(1 << 53),
+            place in 0u64..(1 << 53),
+            string in "[a-zé\\x00]{0,256}",
+            filled in 0usize..600,
+            cut in any::<bool>(),
+        ) {
+            let most = crate::engine::values::MAX_KEY_BYTES;
+            let Some(room) = keys::order_room(&entity_type, &index, &leading) else {
+                // Under these names and values a sort key of the least room wouldn't fit before a string
+                let begins = keys::order_range(&entity_type, &index, build, &leading).len();
+                prop_assert!(begins + 2 + keys::LEAST_ORDER_ROOM + 1 + 258 > most);
+                return Ok(());
+            };
+            prop_assert!(room >= keys::LEAST_ORDER_ROOM);
+            // A sort key holds no zero byte, and is no longer than its room
+            let sort_key = SortKey { bytes: vec![0x2b; filled.min(room)], cut };
+            let of_place = keys::order_place(&entity_type, &index, build, &leading, &sort_key, place);
+            prop_assert!(of_place.len() <= most);
+            if !crate::engine::values::long(&string) {
+                let of_string = keys::order_string(&entity_type, &index, build, &leading, &sort_key, &string);
+                prop_assert!(of_string.len() <= most, "{} bytes", of_string.len());
+            }
+            // The longest string that isn't long, after a sort key that fills its room, is a key of exactly the
+            // most bytes: the room is all there is, and no more
+            let full = SortKey { bytes: vec![0x2b; room], cut };
+            let longest = keys::order_string(&entity_type, &index, build, &leading, &full, &"a".repeat(256));
+            prop_assert_eq!(longest.len(), most);
+        }
+    }
+
+    #[test]
+    fn an_order_s_keys_are_in_the_order_of_their_build_sort_key_cut_and_string() {
+        let key = |bytes: &[u8], cut: bool| SortKey { bytes: bytes.to_vec(), cut };
+        let string = |build, leading: &[Part], sort_key: &SortKey, string: &str| {
+            keys::order_string("Note", "name", build, leading, sort_key, string)
+        };
+        let ordered = [
+            // A place is before a string under one sort key, and strings are in the order of their bytes
+            keys::order_place("Note", "name", 7, &[], &key(&[0x2b], false), 9),
+            string(7, &[], &key(&[0x2b], false), "a"),
+            string(7, &[], &key(&[0x2b], false), "a\0"),
+            string(7, &[], &key(&[0x2b], false), "b"),
+            // A whole key before the same bytes cut, and a key that goes on after either
+            string(7, &[], &key(&[0x2b], true), "a"),
+            string(7, &[], &key(&[0x2b, 0x05], false), "a"),
+            string(7, &[], &key(&[0x2c], false), "a"),
+            // And a later build after them all
+            string(8, &[], &key(&[0x2b], false), "a"),
+        ];
+        for pair in ordered.windows(2) {
+            assert!(pair[0] < pair[1], "{:?} and {:?}", pair[0], pair[1]);
+        }
+        // Each is under its build's and its index's keys, and the marker is no key of the order's
+        assert!(ordered[..7].iter().all(|one| one.starts_with(&keys::order_range("Note", "name", 7, &[]))));
+        assert!(ordered.iter().all(|one| one.starts_with(&keys::order_of("Note", "name"))));
+        // Under the values an index's fields before the last hold, the values first: every key of one tuple before
+        // any of the next, whatever their sort keys
+        let (done, open) = ([Part::String("done".into())], [Part::String("open".into())]);
+        let under_done = string(7, &done, &key(&[0x2c], true), "z");
+        let under_open = string(7, &open, &key(&[0x2b], false), "a");
+        assert!(under_done < under_open);
+        assert!(under_done.starts_with(&keys::order_range("Note", "name", 7, &done)));
+        assert!(!under_done.starts_with(&keys::order_range("Note", "name", 7, &open)));
+        assert!(!keys::order_marker("Note", "name").starts_with(&keys::order_of("Note", "name")));
     }
 
     #[test]

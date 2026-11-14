@@ -75,6 +75,14 @@ pub enum Prefix {
     IndexLong,
     /// `d/xlp type index values start` → a block of those places
     IndexLongPlaces,
+    /// `d/xo type index build values sortkey cut string` → nothing: that a value index has an entry for the string
+    /// under these values, filed where the schema's collation orders it, by its sort key as far as the key has room
+    /// for it and whether that is all of it (`engine/order.rs`). `d/xo type index build values sortkey cut place`
+    /// → nothing: that the entity at the place holds a long string there, which has no key of the first kind
+    IndexOrder,
+    /// `d/xob type index` → the stamp of the collator an index's `d/xo` keys were made by, the build they are
+    /// under, and whether that build is whole
+    IndexOrderBuilt,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
@@ -129,7 +137,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 43] = [
+    pub const ALL: [Prefix; 45] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -149,6 +157,8 @@ impl Prefix {
         Prefix::IndexUnorderedPlaces,
         Prefix::IndexLong,
         Prefix::IndexLongPlaces,
+        Prefix::IndexOrder,
+        Prefix::IndexOrderBuilt,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
@@ -197,6 +207,8 @@ impl Prefix {
             Prefix::IndexUnorderedPlaces => "d/xup",
             Prefix::IndexLong => "d/xl",
             Prefix::IndexLongPlaces => "d/xlp",
+            Prefix::IndexOrder => "d/xo",
+            Prefix::IndexOrderBuilt => "d/xob",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",

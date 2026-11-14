@@ -176,6 +176,76 @@ pub fn index_blocks(own: &[u8]) -> Vec<u8> {
     unreachable!("a value index's key")
 }
 
+/// The least room a sort key is filed in: under values that leave it less, an index keeps no order of its strings
+pub const LEAST_ORDER_ROOM: usize = 64;
+
+/// What the keys of an index's order begin with, under one build and these leading parts
+pub fn order_range(entity_type: &str, index: &str, build: u64, leading: &[crate::format::key::Part]) -> Vec<u8> {
+    with(Prefix::IndexOrder, |w| {
+        w.string(entity_type).string(index).number(build as f64);
+        for part in leading {
+            w.part(part);
+        }
+    })
+}
+
+/// What every key of an index's order begins with, whatever its build
+pub fn order_of(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::IndexOrder, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
+/// How many bytes of a sort key a key of an index's order holds under these leading parts: what a key's length
+/// leaves after what the key begins with, the sort key's tag and its end, the part saying whether it was cut, and
+/// the longest string that isn't long (`values::long`) after them. It is one room for every string under the
+/// parts, since keys cut at different lengths can't be ordered by their bytes. None when it is under
+/// `LEAST_ORDER_ROOM`: long names or long leading values, under which no order is kept
+pub fn order_room(entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Option<usize> {
+    let string = super::values::MAX_INDEXED_STRING + 2;
+    let taken = order_range(entity_type, index, 0, leading).len() + 2 + 1 + string;
+    super::values::MAX_KEY_BYTES.checked_sub(taken).filter(|room| *room >= LEAST_ORDER_ROOM)
+}
+
+/// The key that says an index has an entry for `string` under these leading parts, where `sort_key` orders it
+pub fn order_string(
+    entity_type: &str,
+    index: &str,
+    build: u64,
+    leading: &[crate::format::key::Part],
+    sort_key: &super::order::SortKey,
+    string: &str,
+) -> Vec<u8> {
+    let mut key = order_range(entity_type, index, build, leading);
+    let mut w = KeyWriter::new();
+    w.bytes(&sort_key.bytes).bool(sort_key.cut).string(string);
+    key.extend_from_slice(&w.to_vec());
+    key
+}
+
+/// The key that says the entity at `place` holds a long string under these leading parts, where `sort_key` orders it
+pub fn order_place(
+    entity_type: &str,
+    index: &str,
+    build: u64,
+    leading: &[crate::format::key::Part],
+    sort_key: &super::order::SortKey,
+    place: u64,
+) -> Vec<u8> {
+    let mut key = order_range(entity_type, index, build, leading);
+    let mut w = KeyWriter::new();
+    w.bytes(&sort_key.bytes).bool(sort_key.cut).number(place as f64);
+    key.extend_from_slice(&w.to_vec());
+    key
+}
+
+/// The marker of an index's order: the stamp its keys were made under, their build, and whether it is whole
+pub fn order_marker(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::IndexOrderBuilt, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
 /// That an index of a type is built
 pub fn index_built(entity_type: &str, index: &str) -> Vec<u8> {
     with(Prefix::IndexBuilt, |w| {
