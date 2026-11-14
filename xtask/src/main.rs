@@ -114,6 +114,7 @@ const UNMODELLED: &[(&str, &str)] = &[
     ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
     ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
     ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
+    ("engine/order.rs", "a per-thread cache of each collation's collator and its stamp, no shared state"),
     ("engine/values.rs", "a per-thread decompression buffer, no shared state"),
     ("engine/watch.rs", "the schema read lock; the tracks and their delivery go through crate::sync"),
     ("failpoints.rs", "test-only failure points, armed per thread"),
