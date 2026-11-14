@@ -385,7 +385,7 @@ the second only, and one at 100,000, load about 30).
 | Create, the string in two | | 23.1 µs | 22.1 µs |
 
 A change's time is the pages it is the first of its unit to write. An entity next to the last one changed costs 5 µs,
-one in a page of its own 11 to 15, and an index adds 6 to 19 for the place it takes out and the one it puts in, each
+one in a page of its own 11 to 15, and an index adds 5 to 23 for the place it takes out and the one it puts in, each
 in a leaf no other change of the unit touches. So about half of a change of an indexed string is its index's. A
 second index of the same string is what a second place filed for an order is, but for the sort key. It adds 13.5 and
 15.9 µs to a change of that string at a million, 42% and 48% of the unit, and 8.5 µs at 100,000. To a create it adds
