@@ -163,8 +163,9 @@ for a compound index equalities on the fields before the last):
   bytes. Any other run, of cut keys or with a key holding a place, is held whole and ordered before any of it is
   handed on: by the collator's comparison of the strings, then their bytes, then the place, each string from its
   key, or from its entity's row for a key holding a place. It is held whole because the keys' own order within it
-  says nothing: a key holding a place is before every key holding a string, whatever their strings. The collator compares them and no whole sort key is made, an unplaced string having no bound. A row is
-  read only for an unplaced string in a run the walk reaches.
+  says nothing: a key holding a place is before every key holding a string, whatever their strings. The collator
+  compares them and no whole sort key is made, an unplaced string having no bound. A row is read only for an
+  unplaced string in a run the walk reaches.
 - `after`, a page's cursor, is an entity: its string is read from its row, and the walk begins at that string's key
   and the entity's place in its entry, or at the entity's own key when the string is unplaced. In a run that is
   ordered first, the run is ordered again for each page, and the page goes on past the cursor in that order.
@@ -196,11 +197,12 @@ back restores it:
   whenever an entity holding an unplaced string is filed under a tuple or taken out from under one, or its string
   changes, whether or not a key of its own stamp would change: two unplaced strings of one cut sort key to this
   collator may be of two to another, and a change to a field before the last moves the entity's key to another
-  tuple with its string as it was. Under a tuple without room no stamp files a key, and a write reads no marker. It files under the marker's build when the
-  marker's stamp is its own, whole or not. Under a marker of another stamp it deletes the marker, once, and files
-  nothing; with no marker it files nothing. So no build is whole that lacks a key, whoever wrote. A write that
-  gives an entity a placed string another holds reads no marker and ends no build: which strings have keys depends
-  on no collator, and the entity is found through the string's `d/x` entry.
+  tuple with its string as it was. It files under the marker's build when the marker's stamp is its own, whole or
+  not. Under a marker of another stamp it deletes the marker, once, and files nothing; with no marker it files
+  nothing. So no build is whole that lacks a key, whoever wrote. A write that gives an entity a placed string
+  another holds reads no marker and ends no build: which strings have keys depends on no collator, and the entity
+  is found through the string's `d/x` entry. Nor does a write under a tuple without room, where no stamp files a
+  key.
 - *An index's order begins whole.* The unit that declares an index, whose `d/x` is empty, writes the marker with
   its stamp, its sequence as the build, and whole: an empty `d/x` has an empty order. What fills `d/x` after it,
   the value index's builder and the writes beside it, files the order by the functions above, so the two are whole
