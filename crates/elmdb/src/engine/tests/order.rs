@@ -654,3 +654,138 @@ fn a_read_of_an_order_is_one_a_commit_writes_into_where_it_changes_what_the_read
     assert_eq!(touched(vec![item("y", json!({ "tag": "y" }))]), [1]);
     order::forge(0);
 }
+
+/// One unit of the model below: a write by one of two elmdbs, a unit of one's builder, a `rebuild()` of the index,
+/// or the index dropped
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Act {
+    /// The elmdb, the entity, and the string it is given, none taking its string away
+    Write(usize, u8, Option<&'static str>),
+    Build(usize),
+    Rebuild,
+    Drop,
+}
+
+const ACTS: [Act; 12] = [
+    Act::Write(0, 1, Some("å")),
+    Act::Write(0, 1, None),
+    Act::Write(0, 2, Some("å")),
+    Act::Write(0, 2, Some("z")),
+    Act::Write(1, 1, Some("å")),
+    Act::Write(1, 1, None),
+    Act::Write(1, 2, Some("å")),
+    Act::Write(1, 2, Some("z")),
+    Act::Build(0),
+    Act::Build(1),
+    Act::Rebuild,
+    Act::Drop,
+];
+
+/// Runs `acts` in turn as units of one transaction, which is then rolled back, holding after each that no elmdb
+/// reads an order lacking a key or holding one too many: under a marker of its own stamp that is whole, the keys
+/// under the marker's build are those of the strings the index has entries for, each where its collator puts it;
+/// and that an index that isn't built has neither marker nor key. The two elmdbs differ in their collation, so in
+/// their stamps and in where they file a string. Each unit commits as the next sequence, as a unit does
+fn holds_through(db: &Database, schemas: &[Schema; 2], acts: &[Act]) {
+    use crate::engine::derive;
+    let sequence = crate::store::meta_key(crate::format::meta::SEQUENCE);
+    let rolled_back = db.store().unwrap().write(
+        |txn, store| {
+            let mut steps = [Step::Begin, Step::Begin];
+            for (at, act) in acts.iter().enumerate() {
+                let mut state = UnitState::new(false);
+                let schema = match act {
+                    Act::Write(elmdb, ..) | Act::Build(elmdb) => &schemas[*elmdb],
+                    Act::Rebuild | Act::Drop => &schemas[0],
+                };
+                let mut t = Txn { txn: &mut *txn, db: store, state: &mut state, schema, now: 0.0 };
+                match act {
+                    Act::Write(_, entity, string) => {
+                        let value = string.map_or(rmpv::Value::Nil, rmpv::Value::from);
+                        entities::put_field(&mut t, &format!("Item-{entity}"), "tag", &value)?;
+                    }
+                    Act::Build(elmdb) => {
+                        let step = std::mem::replace(&mut steps[*elmdb], Step::Begin);
+                        steps[*elmdb] = match order::build_unit(&mut t, "Item", "byTag", step, true, 1)?.0 {
+                            Step::Done => Step::Begin,
+                            step => step,
+                        };
+                    }
+                    Act::Rebuild => derive::rebuild(&mut t, Some(("Item", "byTag")))?,
+                    Act::Drop => {
+                        derive::clear_value_index(&mut t, "Item", "byTag")?;
+                        order::clear(&mut t, "Item", "byTag")?;
+                        t.del(&keys::index_built("Item", "byTag"))?;
+                    }
+                }
+                let committed = crate::engine::mirror::stored_sequence(&t)? + 1;
+                t.put(&sequence, &committed.to_be_bytes())?;
+                let built = derive::is_built(&t, "Item", "byTag")?;
+                for (elmdb, schema) in schemas.iter().enumerate() {
+                    let mut state = UnitState::new(false);
+                    let t = Txn { txn: &mut *txn, db: store, state: &mut state, schema, now: 0.0 };
+                    let said = || format!("elmdb {elmdb} after {:?}", &acts[..=at]);
+                    if !built {
+                        assert_eq!(order::marker(&t, "Item", "byTag")?, None, "{}", said());
+                        assert!(t.scan(&keys::order_of("Item", "byTag"))?.is_empty(), "{}", said());
+                        continue;
+                    }
+                    let Some(build) = order::readable(&t, "Item", "byTag")? else { continue };
+                    let running = order::running(&schema.collation)?;
+                    let mut wanted = Vec::new();
+                    for (own, _) in t.scan(&keys::index_range("Item", "byTag", &[]))? {
+                        let parts = decode(&own)?;
+                        wanted.extend(order::string_key(&running.collator, "Item", "byTag", build, &parts[3..]));
+                    }
+                    wanted.sort();
+                    let filed: Vec<Vec<u8>> = t
+                        .scan(&keys::order_range("Item", "byTag", build, &[]))?
+                        .into_iter()
+                        .map(|(key, _)| key)
+                        .collect();
+                    assert_eq!(filed, wanted, "{}", said());
+                }
+            }
+            Err::<(), _>(crate::Error::new(crate::ErrorCode::Io, "the model's units are rolled back"))
+        },
+        false,
+    );
+    assert_eq!(rolled_back.unwrap_err().message, "the model's units are rolled back");
+}
+
+#[test]
+fn no_read_trusts_a_build_lacking_a_key_whatever_order_the_units_of_two_elmdbs_come_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_at(&dir, schema_json());
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![item("1", json!({})), item("2", json!({ "tag": "z" })), item("3", json!({ "tag": "a" }))]).unwrap();
+    let mut swedish = schema_json();
+    swedish["collation"] = json!("sv");
+    let schemas = [Schema::from_json(&schema_json()).unwrap(), Schema::from_json(&swedish).unwrap()];
+    // The two file a string in different places, or the model would hold whichever wrote
+    let key = |collation: &str| {
+        let running = order::running(collation).unwrap();
+        order::string_key(&running.collator, "Item", "byTag", 1, &[Part::String("å".into())])
+    };
+    assert_ne!(key("root"), key("sv"));
+    // Every order of four units
+    let n = ACTS.len();
+    for at in 0..n.pow(4) {
+        let acts: Vec<Act> = (0..4).map(|place| ACTS[(at / n.pow(place)) % n]).collect();
+        holds_through(&db, &schemas, &acts);
+    }
+    // And longer ones, each unit drawn by a generator a seed fixes: a builder's several units among the others'
+    let mut drawn = 0x9e37_79b9_7f4a_7c15_u64;
+    for _ in 0..3000 {
+        let acts: Vec<Act> = (0..12)
+            .map(|_| {
+                drawn = drawn.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                ACTS[(drawn >> 33) as usize % n]
+            })
+            .collect();
+        holds_through(&db, &schemas, &acts);
+    }
+    // Nothing of them was kept
+    assert_eq!(strings(&db, "byTag"), ["a", "z"]);
+    clean(&db);
+}

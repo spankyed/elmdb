@@ -268,6 +268,23 @@ one too, over every entity and kind of edge its workload writes: after each step
 the index's nodes to the model's live entities and its scores within their bound of `rank`, and the bound itself within
 the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
+The order a value index keeps of its strings has its specs in `engine/tests/order.rs` and `engine/order.rs`
+(`../roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
+collations, cut at any room, and every key to 511 bytes over random names, values and strings; a key there while
+its entry holds a place, through an entry that passes into blocks and back; the keys of entities filed by their
+place; a `rebuild()`, a builder's units of one key each and a build gone on with, each held to the same keys; and
+`check()` reporting a key removed, added and moved. Of its marker: a model
+(`no_read_trusts_a_build_lacking_a_key_whatever_order_the_units_of_two_elmdbs_come_in`) runs every order of four
+units, and three thousand of twelve, drawn from the writes of two elmdbs whose collations differ, a unit of each
+one's builder, a `rebuild()` and the index dropped, in one transaction it rolls back, and holds after each unit
+that under a whole marker of an elmdb's own stamp the keys are exactly those of the index's strings as that
+elmdb's collator files them, and that an unbuilt index has neither marker nor key. It fails on a copy in which a
+write files under another stamp's marker, and on one in which a build's number is used twice; a copy in which a
+build's units hold the marker to their build and not their stamp passes it, no two builds of a database sharing a
+number, so that check is held by no test. Of its reads: `engine/tests/ordered.rs` holds an order, a page, a range
+and a count of strings read from the index to the same plan over a field with no index, which is sorted and
+filtered from the rows, with what each visited.
+
 ## Tracked reads
 
 `engine/tracking/tests.rs` holds the interval index to a brute-force scan of every read set, through random adds,
