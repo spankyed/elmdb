@@ -329,3 +329,38 @@ machine otherwise quiet: the rebuild on the pool held the event loop for at most
 other, while the rebuild took 3.6 and 3.7 s; the calling-thread form held it for the whole 3.5 s in both. An idle run of
 the timer at the same load showed one gap of 10.0 ms, so the timer's own noise is of the gate's size even at this load:
 the pool's holds were below it in both rebuild runs. The calling-thread form held the loop for the whole rebuild each time.
+
+## A string's order, before an index reads it
+
+The benchmark with a name in a value index, a string no other note holds, beside the status, one of two
+(`fixtureVersion` 3), on `session/string-order-readings` at `d4e6544` with two untracked files of no part in it, a
+million notes, one run (Apple M1 Pro, 2026-11-13, load 9.5 as it began and 6.7 as it ended, Node 24.16.0, SQLite
+3.53.0, the binding built in release). These are the readings `../roadmap/string-order.md` starts from: an order on a
+string is answered from the rows, as is a range of strings.
+
+| | elmdb | SQLite | elmdb visited |
+|---|---:|---:|---:|
+| The first ten of the names' order | 976 ms | 0.005 ms | 1,000,092 |
+| A page of 50 near the end of the loaded notes' names | 990 ms | 0.027 ms | 1,000,092 |
+| The count of the last 200 names, by a range | 1,108 ms | 0.006 ms | 1,000,092 |
+| Every note in the names' order, a million ids handed over | 2,534 ms | 817 ms | 1,000,092 |
+| The ten lowest of the indexed number, beside them | 0.027 ms | 0.008 ms | 10 |
+| A unit that gives 1,000 notes each a name elsewhere in the order | 22.6 ms | 35.3 ms | |
+| The process's CPU for that unit | 23.9 ms | 34.2 ms | |
+| A unit that gives 1,000 notes each the other status | 30.1 ms | 27.8 ms | |
+| The process's CPU for that unit | 31.1 ms | 29.0 ms | |
+| A create of three terms every note holds, at a million | 0.176 ms | 0.058 ms | |
+| A create of thirty terms, fifteen widely held, at a million | 0.437 ms | 0.066 ms | |
+| Load | 77.5 s | 50.5 s | |
+| Bytes a note, as loaded | 1,304 | 199 | |
+| Bytes a note, compacted | 1,003 | 191 | |
+| A check | 44.4 s | 2.6 s | |
+| A rebuild | 50.9 s | 2.7 s | |
+
+The bytes of each of elmdb's value indexes, keys and values in every family it is filed in (`stats()`): the name's
+41.0 MB, 41 bytes a note; the number's 27.0 MB; the status's 1.1 MB, a little over a byte a note.
+
+What they say for that design. Each read of the names' order visits every note, where the number's visits ten. A
+change of one indexed string costs 23 to 30 µs of a unit, the status's no less than the name's though its index is a
+thirty-sixth the size: a note's place moves between two blocks of places, each written again. A second place filed
+for an order would cost about that again for every such change, which is the cost the design's decision is made on.
