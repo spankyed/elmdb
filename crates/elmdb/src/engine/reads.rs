@@ -4295,13 +4295,18 @@ fn sort_key(value: Option<&Value>) -> SortKey {
     }
 }
 
+/// How an order has two values: by their kinds, then booleans and numbers by their value, strings by the collation
+/// and, where it holds two equal, by their bytes, and anything else by the collation of its JSON. So two strings are
+/// equal here only when they are the same bytes, and an order of strings doesn't depend on the order they came in
+/// but for those
 fn compare(collator: &icu_collator::CollatorBorrowed<'static>, a: &SortKey, b: &SortKey) -> Ordering {
     a.rank().cmp(&b.rank()).then_with(|| match (a, b) {
         (SortKey::Bool(x), SortKey::Bool(y)) => x.cmp(y),
         (SortKey::Number(x), SortKey::Number(y)) | (SortKey::Time(x), SortKey::Time(y)) => {
             x.partial_cmp(y).unwrap_or(Ordering::Equal)
         }
-        (SortKey::Text(x), SortKey::Text(y)) | (SortKey::Json(x), SortKey::Json(y)) => collator.compare(x, y),
+        (SortKey::Text(x), SortKey::Text(y)) => collator.compare(x, y).then_with(|| x.as_bytes().cmp(y.as_bytes())),
+        (SortKey::Json(x), SortKey::Json(y)) => collator.compare(x, y),
         _ => Ordering::Equal,
     })
 }

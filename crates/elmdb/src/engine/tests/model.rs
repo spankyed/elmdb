@@ -1334,8 +1334,8 @@ fn plans_of(db: &Database) -> BTreeMap<String, Json> {
         .collect()
 }
 
-/// How `orderBy` orders two values: booleans, numbers, strings by the root collation, a list or map by its JSON, then
-/// a missing or null value
+/// How `orderBy` orders two values: booleans, numbers, strings by the root collation and then their bytes, a list or
+/// map by its JSON, then a missing or null value
 fn ordered_as(
     collator: &icu_collator::CollatorBorrowed<'static>,
     a: Option<&Json>,
@@ -1351,7 +1351,7 @@ fn ordered_as(
     class(a).cmp(&class(b)).then_with(|| match (a, b) {
         (Some(Json::Bool(x)), Some(Json::Bool(y))) => x.cmp(y),
         (Some(Json::Number(x)), Some(Json::Number(y))) => x.as_f64().partial_cmp(&y.as_f64()).unwrap(),
-        (Some(Json::String(x)), Some(Json::String(y))) => collator.compare(x, y),
+        (Some(Json::String(x)), Some(Json::String(y))) => collator.compare(x, y).then_with(|| x.cmp(y)),
         (Some(x), Some(y)) if class(a) == 3 => collator.compare(&x.to_string(), &y.to_string()),
         _ => std::cmp::Ordering::Equal,
     })
