@@ -280,10 +280,32 @@ an answer:
   in place order, then the entities without a value; `descending`, those first and the values from the greatest. Such
   an index accounts for every entity of its type (`schema.md`, Indexes), which is what lets the walk leave none out.
   Each entity is handed on as its entry is read, so a `limit`, `first` or `exists` after it reads no further than its
-  answer: the first ten of a million read ten. A field holding a string, whose order is the collation's and not its
-  entry's bytes', one the index has an entry for or a long one it has none for, or a list or another value the
-  index doesn't order, is sorted as before, as are several types, a start of ids, and the trash alone. A range of
-  numbers holds no string, and is read from the index whatever strings the field holds.
+  answer: the first ten of a million read ten. A string is after every number and before the entities without a
+  value, and its order is the collation's, which its entry's bytes don't have: it is read from the order the index
+  keeps of its strings (the next point), where this elmdb filed that order and holds it whole; under any other
+  marker, and under names and values that leave its keys no room, the set is sorted as before. So are a field
+  holding a list or another value the index doesn't order, several types, a start of ids, and the trash alone. A
+  range of numbers holds no string, and is read from the index whatever strings the field holds.
+- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../roadmap/string-order.md`). A
+  value index a schema declares has, under each tuple of the values before its last field, a key for each string an
+  entry is for, where the collation orders it: the string's sort key as far as the key has room, whether it was cut,
+  and the string (`format.md`, `d/xo`). A write puts the key with the entry's first place and deletes it with its
+  last, so a write that repeats a string another entity holds files nothing. An entity holding a string with no
+  such key, one past 256 bytes or one whose zero bytes make it as long in a key, has a key of its own, by its place.
+  A read walks the keys, forwards or from the last, and reads each string's entities from its entry, in place
+  order. Keys of one sort key are a run: strings the collator holds equal, in the order of their bytes, are handed
+  on as they are walked, and a run whose sort key was cut, or that holds an entity filed by its place, is ordered
+  by the collator and then the bytes before any of it is, from the strings in its keys and the rows of the entities
+  filed by place. A sort key is the collator's output and is stale after any change to it, so an order has a marker
+  (`d/xob`): the stamp of the collator that filed it, a build, and whether the build is whole. A read trusts keys
+  under a whole build of its own stamp. A write that files a string or takes one out reads the marker: under its own
+  stamp it files under the marker's build, and under another's it deletes the marker and files nothing, which ends
+  that build, since what the other would have filed is its layout's. The builder builds the order of a built index
+  whose marker isn't its own and whole, from the index's entries and the rows of its long strings, beside the writes
+  that keep it, and deletes what is under any other build; `rebuild()` files an order whole under a build of its
+  own, and an index marked built with no entity has its order whole with it. A build this builder began and finds
+  ended is begun again after a wait that doubles, so two elmdbs of different collators writing one database leave
+  its orders to the rows more of the time the longer both stay.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
   field would be read from an index for (the points on either side of this one) answer the first entry under the index's least
   value or under its greatest, the first in place order of those holding it, passing over an entry of an entity the
