@@ -141,9 +141,9 @@ entities holding unplaced strings. Nothing but these writes the family:
   own, `postings::remove` deleting it. A list moved between the entry's own key and its blocks is neither. It puts
   the string's `d/xo` key at the first and deletes it at the second. Text terms, `d/xw` and `d/xu` are lists of
   the same kind and file no order, so it is this function's to do and not the list's.
-- *The function that derives an entity's keys for an index* (`ValueIndex::files`) hands on, with `d/xl`, the key of
-  an unplaced string under a tuple with room, and a write, the builder, `rebuild()` and `check()` file what it
-  gives.
+- *The function that derives an entity's keys for an index* (`ValueIndex::files`) hands on, with `d/xl`, that the
+  entity holds an unplaced string under a tuple, and a write, the builder, `rebuild()` and `check()` file its key
+  where they build the others, with the type's name, under a tuple with room.
 - *What clears or files `d/x` in bulk* does the same to `d/xo` in the same unit, deriving it from the `d/x` keys it
   files: `rebuild()` of one index and of all, which `renameType` and a database replaced by another's
   (`replace_with`) run; a dropped or changed index; `reset()`; and the unit that marks an empty type's index built.
@@ -161,9 +161,9 @@ for a compound index equalities on the fields before the last):
 - A run is the keys of one sort key and one cut. One whose cut is `false` and whose keys each hold a string is
   handed on as it is walked: its strings are equal to the collator, and their keys are in the order of their
   bytes. Any other run, of cut keys or with a key holding a place, is held whole and ordered before any of it is
-  handed on, a key holding a place sorting before every key holding a string: by the collator's comparison of the
-  strings, then their bytes, then the place, each string from its key, or from its entity's row for a key holding
-  a place. The collator compares them and no whole sort key is made, an unplaced string having no bound. A row is
+  handed on: by the collator's comparison of the strings, then their bytes, then the place, each string from its
+  key, or from its entity's row for a key holding a place. It is held whole because the keys' own order within it
+  says nothing: a key holding a place is before every key holding a string, whatever their strings. The collator compares them and no whole sort key is made, an unplaced string having no bound. A row is
   read only for an unplaced string in a run the walk reaches.
 - `after`, a page's cursor, is an entity: its string is read from its row, and the walk begins at that string's key
   and the entity's place in its entry, or at the entity's own key when the string is unplaced. In a run that is
@@ -192,9 +192,11 @@ error. The rules, each unit reading the marker in its own transaction and throug
 back restores it:
 
 - *A read* uses `d/xo` under the marker's build only when the marker's stamp is its own and the build is whole.
-- *A write* reads the marker when a placed string gains its first holder or loses its last, and whenever it sets,
-  changes or removes an unplaced string, whether or not a key of its own stamp would change: two unplaced strings
-  of one cut sort key to this collator may be of two to another. It files under the marker's build when the
+- *A write* reads the marker when a placed string gains its first holder or loses its last under a tuple, and
+  whenever an entity holding an unplaced string is filed under a tuple or taken out from under one, or its string
+  changes, whether or not a key of its own stamp would change: two unplaced strings of one cut sort key to this
+  collator may be of two to another, and a change to a field before the last moves the entity's key to another
+  tuple with its string as it was. Under a tuple without room no stamp files a key, and a write reads no marker. It files under the marker's build when the
   marker's stamp is its own, whole or not. Under a marker of another stamp it deletes the marker, once, and files
   nothing; with no marker it files nothing. So no build is whole that lacks a key, whoever wrote. A write that
   gives an entity a placed string another holds reads no marker and ends no build: which strings have keys depends
@@ -390,9 +392,10 @@ each distinct string it hands on.
    - `check()` reports a `d/xo` key removed, one added and one moved, each by hand; and a copy of the code in which
      each of these in turn writes `d/x` alone fails it: a write, the builder, `rebuild()` of one index and of all,
      `renameType`, a database replaced and a changed index. `check()` can't see the other three, so each has its
-     own: after a dropped index no key is left under its `d/xo`, `d/xob`, `d/xl` and `d/xlp`; and an ordered read
-     straight after `reset()`, and one after an index is declared on an empty type, reads the index and no row,
-     which a copy that writes no marker there fails;
+     own: after a dropped index no key is left under its `d/xo`, `d/xob`, `d/xl` and `d/xlp`; and after `reset()`,
+     and after an index is declared on an empty type, entities are made with strings and ordered before the
+     builder can run, in the unit that made them, and the read visits as many entities as its limit, which a copy
+     that writes no marker there fails;
    - a database filed under another collation with its stamp forged to this one's is shown ordered wrongly, which
      proves the test's keys differ; with its true stamp it orders from the rows until the builder ends and from the
      index after, as does a database whose collation changed, one copied by a backup in the middle of a build, and
@@ -402,8 +405,9 @@ each distinct string it hands on.
      read-only;
    - a watch on an ordered read is told when a commit files a string before the first it read, when an entity
      takes a string it read, and when a write of another stamp ends the build it read;
-   - a write of another stamp that changes an unplaced string to one of the same cut sort key ends the build, and
-     one that gives an entity a placed string another holds doesn't, the order read after it being right; and a
+   - a write of another stamp ends the build when it changes an unplaced string to one of the same cut sort key,
+     and when it changes a field before the last of a compound index for an entity holding an unplaced string; one
+     that gives an entity a placed string another holds doesn't, the order read after it being right; and a
      process whose writes only repeat strings has an order another stamp ended built again after an ordered read.
 3. **Ranges.** A string `range` reads `d/xo`, alone and before an order. Done when the model harness holds it to the
    rows for bounds on either side, inclusive and exclusive, a bound equal to the collator and of other bytes than a
