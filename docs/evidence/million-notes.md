@@ -362,6 +362,27 @@ The bytes of each of elmdb's value indexes, keys and values in every family it i
 
 What they say for that design. Each read of the names' order visits every note, where the number's visits ten. A
 change of one indexed string costs 23 to 30 µs of a unit, the status's no less than the name's though its index is a
-thirty-sixth the size. Where those microseconds go was not read here, and is read before the design's second place is
-costed: if they are the index's, a second place filed for an order costs about that again for every such change, which
-is the cost the design's decision is made on.
+thirty-sixth the size.
+
+Where those microseconds go, read apart from the benchmark by `crates/elmdb/examples/change-cost.rs`: a type of a
+million entities with a title of 94 bytes, a string no index reads, one a value index files, one two value indexes
+file, an enum of two values and a number, each unit setting one field of 1,000 entities spread over the type, the
+median of five units, CPU of the process for each entity changed (Apple M1 Pro, 2026-11-14, load 24 to 25 throughout,
+so the wall times are left out; built in release, one run, at the commit that adds the example). The same at 100,000 entities, load 30, beside it.
+
+| Field a unit sets | A million | 100,000 |
+|---|---:|---:|
+| A string no index reads | 14.7 µs | 10.8 µs |
+| The same, of 1,000 entities next to each other | 5.2 µs | 4.9 µs |
+| A string one value index files | 32.2 µs | 19.5 µs |
+| A string two value indexes file | 45.7 µs | 29.3 µs |
+| The enum of two values, in one index | 33.8 µs | 28.2 µs |
+| The number, in one index | 31.5 µs | 18.9 µs |
+
+A change's time is the pages it is the first of its unit to write. An entity next to the last one changed costs 5 µs,
+one a page of its own 11 to 15, and an index adds 8 to 18 for the place it takes out and the one it puts in, each in
+a leaf no other change of the unit touches. So about half of a change of an indexed string is its index's, and a
+second index of the same string, which is what a second place filed for an order is but for the sort key, adds 13.5 µs
+at a million and 9.8 at 100,000: 42% and 50% of the unit. That is past the tenth `../roadmap/string-order.md` decides
+on. Not read: what a create pays for a second place, and why the enum's index of two values costs as much as one of
+strings all different, and more at 100,000.
