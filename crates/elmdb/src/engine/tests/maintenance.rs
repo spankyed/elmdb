@@ -108,6 +108,39 @@ fn stats_count_entities_fields_relations_and_index_entries() {
 }
 
 #[test]
+fn stats_sum_a_value_index_s_bytes_in_every_family_it_is_filed_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let bytes = |db: &Database| db.stats().unwrap().index_bytes.get("Task.a").copied().unwrap_or(0);
+    let mut made = 0;
+    // A unit of `count` tasks holding `a`, and how many bytes the index grew by
+    let mut grown_by = |a: serde_json::Value, count: usize| {
+        let before = bytes(&db);
+        let ops = (0..count)
+            .map(|_| {
+                made += 1;
+                json!({ "op": "create", "type": "Task", "id": format!("Task-{made}"), "fields": { "a": a } })
+            })
+            .collect();
+        write(&db, ops).unwrap();
+        bytes(&db) - before
+    };
+    // A value's own key, with the type's and the index's names in it
+    assert!(grown_by(json!("a value"), 1) > "Task".len() as u64 + "a value".len() as u64);
+    // An entity the index doesn't order: a key of that kind. And one without a value, which is filed twice, among
+    // the values, where an equality for null finds it, and among the entities without one
+    let unordered = grown_by(json!({ "k": 1 }), 1);
+    assert!(unordered > "Task".len() as u64);
+    assert!(grown_by(serde_json::Value::Null, 1) >= 2 * unordered - 2);
+    // Past 256 places a key's places are in blocks, a byte a place at the least, in a family of their own for each
+    // kind: one for a value's and one for the unordered, and both a value's and the family of those without one for
+    // a null
+    assert!(grown_by(json!("another"), 600) >= 600);
+    assert!(grown_by(json!({ "k": 1 }), 600) >= 600);
+    assert!(grown_by(serde_json::Value::Null, 600) >= 1200);
+}
+
+#[test]
 fn a_bulk_load_takes_rows_the_checks_would_refuse() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
