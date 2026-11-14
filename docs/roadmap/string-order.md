@@ -2,9 +2,9 @@
 
 Status: designed, 2026-11-14, and not built. It is the part of roadmap change 5 still open (`../roadmap.md`): an
 `orderBy` on a string field reads every entity of the set, where one on a number reads ten entries for its first ten.
-It adds derived keys and raises the format's version, so it is built before format 1 is frozen (change 8). This is
-the fifth draft: each before it was read against the code by a second reader, the fourth was priced by a reading of
-what its writes cost, and what each changed is under What was set aside.
+It adds derived keys to format 1 and moves what one of its keys holds, so it is built before format 1 is frozen
+(change 8). This is the fifth draft: each before it was read against the code by a second reader, the fourth was
+priced by a reading of what its writes cost, and what each changed is under What was set aside.
 
 ## Where it stands
 
@@ -123,14 +123,17 @@ string some entity holds files no key for the order. The derived families, each 
   they hold, so nothing stored says it, and an order on the field's numbers is read from the index as now. Of an
   index whose names alone leave less, `indexStatus()` says its order isn't kept and that shorter names keep it.
 - **What decides where a string is filed is the format's**: the 258 bytes, the room and the 64. `d/xl` is under no
-  build, and two elmdbs that differed in any of the three would misfile each other's keys, so a change to one
-  raises the format's version and not the stamp.
+  build, and two elmdbs that differed in any of the three would misfile each other's keys, so a change to one is
+  a change to the format (`../architecture/format.md`, Versions) and not to the stamp.
 - **A list's strings have keys too.** `d/x` files each element of a list for an equality and the entity in `d/xu`,
   so no read reaches those keys while the list is there. They are filed all the same: the rule is every `d/x` entry
   of a placed string, with no exception to verify.
 - **`build`** is the commit sequence of the unit that began the build, so no two builds of a database share one.
-- **The format's version is raised with these keys**, so an elmdb from before them refuses the file where it would
-  have written strings and filed no order.
+- **The keys are format 1's, added in place**, as the format's rule has it until a release has users: its number
+  doesn't move, and `rebuild()` makes the keys of a database from before them. The cost that rule accepts is here
+  an elmdb from before these keys writing a string to a database that has them: it files no order and ends no
+  build, so the order is wrong until a `rebuild()`, which `check()` says. It is why this is built before the
+  freeze, after which such a change is a new format an older elmdb refuses.
 
 **What keeps it.** Under a marker of the running stamp and a tuple with room, the `d/xo` keys holding a string are
 those of `d/x`'s entries of placed strings, each under its sort key, and the keys holding a place are those of the
@@ -368,7 +371,7 @@ each distinct string it hands on.
 1. **The readings.** Taken on 2026-11-13 and 2026-11-14 and recorded in `../evidence/million-notes.md` (A string's
    order, before an index reads it): the four reads of the names' order as the sorted arm answers them, each
    index's bytes, the time of a unit that changes each, and the fourth reading above.
-2. **The keys, the stamp and the order.** The families in `format`'s table and the version raised; the keys
+2. **The keys, the stamp and the order.** The families in `format`'s table; the keys
    filed by the two functions and at each bulk site; the marker's rules, the stamp, the exact requirements and their
    `xtask` check; the tie by bytes in both arms; `orderBy`, `after`, `least` and `greatest` reading it. Done when:
    - the readings are recorded again, the first ten of a million reading ten keys and ten entries where no entry is
