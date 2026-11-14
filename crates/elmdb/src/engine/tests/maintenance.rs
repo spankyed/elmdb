@@ -131,7 +131,7 @@ fn stats_sum_a_value_index_s_bytes_in_every_family_it_is_filed_in() {
     // the values, where an equality for null finds it, and among the entities without one
     let unordered = grown_by(json!({ "k": 1 }), 1);
     assert!(unordered > "Task".len() as u64);
-    assert!(grown_by(serde_json::Value::Null, 1) > unordered);
+    assert!(grown_by(serde_json::Value::Null, 1) >= 2 * unordered - 2);
     // Past 256 places a key's places are in blocks, a byte a place at the least, in a family of their own for each
     // kind: one for a value's and one for the unordered, and both a value's and the family of those without one for
     // a null

@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir, cpus, totalmem, loadavg, platform, arch } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -37,6 +38,8 @@ while (args.length) {
 }
 // A range's last 500 and a first checkpoint of a twentieth need this many
 assert.ok(Number.isSafeInteger(NOTES) && NOTES >= 2000, 'notes must be a whole number, 2000 or more');
+// The notes' numbers and the notes a timed unit changes are spread by this stride, each note once
+assert.ok(NOTES % 7919 !== 0, 'notes must be no multiple of 7919');
 assert.ok(parent, USAGE);
 
 const WORDS = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot', 'golf', 'hotel', 'india', 'juliet', 'kilo', 'lima'];
@@ -67,9 +70,13 @@ const lastNamed = Array.from({ length: Math.ceil((NOTES - 11) / 12) }, (_, k) =>
   .sort((a, b) => (String(a) < String(b) ? -1 : 1));
 const NEAR_END_BY_NAME = lastNamed[Math.max(0, lastNamed.length - 200)];
 // How many notes a unit of the timed changes changes, and the notes of the unit numbered `unit`, each note in one
-// unit only: spread over the notes, as `numberOf` spreads their numbers
+// unit only: spread over the notes, as `numberOf` spreads their numbers. A note's other name begins with another of
+// the words, so the change moves it elsewhere in the names' order
 const CHANGED = Math.min(1000, Math.floor(NOTES / 20));
 const changedIn = (unit) => Array.from({ length: CHANGED }, (_, k) => ((unit * CHANGED + k) * 7919) % NOTES);
+const otherNameOf = (i) => `${WORDS[(i + 5) % 12]} ${nameOf(i)}`;
+// Many ids as one value to compare: how many, and a hash of them in their order
+const digest = (ids) => `${ids.length} ${createHash('sha256').update(ids.join(' ')).digest('hex')}`;
 
 // Ten more notes, of ten words each, holding a word no other does from once to ten times: equally long, so either
 // engine's ranking puts the one holding it most first, whatever its formula's constants. Their numbers are past every
@@ -124,7 +131,8 @@ const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: 
 const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 const pageByNumberAfter = (cursor) => [{ step: 'orderBy', field: 'n' }, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 // The same of the names: the first ten, a page of fifty past a cursor, the names from one on that are a loaded
-// note's (the ranked notes' and the commits' are past `m`), and every note in the names' order
+// note's (the ranked notes' and the commits' are past `m`), and every note in the names' order, which is mostly the
+// time to hand a caller that many ids
 const BY_NAME = [{ step: 'orderBy', field: 'name' }];
 const FIRST_BY_NAME = [...BY_NAME, { step: 'limit', n: 10 }];
 const pageByNameAfter = (cursor) => [...BY_NAME, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
@@ -183,8 +191,8 @@ function elmdb() {
     namesFrom: (least) => query(namesFrom(least), { answer: 'count' }).n,
     allByName: () => query(BY_NAME, { answer: 'ids' }).ids,
     // A unit that gives each of the notes another name, and one that gives each the other status
-    rename: (notes, mark) => db.writeSync(packr.pack({
-      ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { name: `${nameOf(i)} ${mark}` }, touch: false })),
+    rename: (notes) => db.writeSync(packr.pack({
+      ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { name: otherNameOf(i) }, touch: false })),
     })),
     restatus: (notes) => db.writeSync(packr.pack({
       ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { status: i % 2 ? 'done' : 'open' }, touch: false })),
@@ -206,7 +214,7 @@ function elmdb() {
         pageByNumberNearEndVisited: visited(pageByNumberAfter(NEAR_END_BY_NUMBER)),
         firstTenByNameVisited: visited(FIRST_BY_NAME),
         pageByNameNearEndVisited: visited(pageByNameAfter(id(NEAR_END_BY_NAME))),
-        last200NamesVisited: visited(namesFrom(nameOf(NEAR_END_BY_NAME))),
+        lastNamesVisited: visited(namesFrom(nameOf(NEAR_END_BY_NAME))),
         allByNameVisited: visited(BY_NAME),
       };
     },
@@ -308,7 +316,7 @@ function sqlite() {
     pageByNameAfter: (cursor) => pageByNameAfter.all(cursor).map((row) => row.id),
     namesFrom: (least) => namesFrom.get(least, 'm').n,
     allByName: () => allByName.all().map((row) => row.id),
-    rename: (notes, mark) => unit(() => notes.forEach((i) => rename.run(`${nameOf(i)} ${mark}`, id(i)))),
+    rename: (notes) => unit(() => notes.forEach((i) => rename.run(otherNameOf(i), id(i)))),
     restatus: (notes) => unit(() => notes.forEach((i) => restatus.run(i % 2 ? 'done' : 'open', id(i)))),
     check: () => assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok', 'sqlite: integrity_check'),
     rebuild: () => db.exec(`${text ? "INSERT INTO notes_fts(notes_fts) VALUES ('rebuild');" : ''} REINDEX;`),
@@ -388,7 +396,7 @@ function measure(name, engine) {
     firstByName: engine.firstByName(),
     pageByName: engine.pageByNameAfter(id(NEAR_END_BY_NAME)),
     namesFrom: engine.namesFrom(nameOf(NEAR_END_BY_NAME)),
-    allByName: engine.allByName(),
+    allByName: digest(engine.allByName()),
   };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
@@ -422,7 +430,7 @@ function measure(name, engine) {
     pageByNumberNearEndMs: timed(5, () => engine.pageByNumberAfter(NEAR_END_BY_NUMBER)).ms,
     firstTenByNameMs: timed(5, () => engine.firstByName()).ms,
     pageByNameNearEndMs: timed(5, () => engine.pageByNameAfter(id(NEAR_END_BY_NAME))).ms,
-    last200NamesMs: timed(5, () => engine.namesFrom(nameOf(NEAR_END_BY_NAME))).ms,
+    lastNamesMs: timed(5, () => engine.namesFrom(nameOf(NEAR_END_BY_NAME))).ms,
     allByNameMs: timed(3, () => engine.allByName()).ms,
   };
   if (engine.visited) {
@@ -437,7 +445,7 @@ function measure(name, engine) {
   // their statuses, each to the other: five units of each, no note in two of them. Wall time as a median, and the
   // process's CPU over the five
   out.units = { notes: CHANGED };
-  const changes = { rename: (unit) => engine.rename(changedIn(unit), 'renamed'), restatus: (unit) => engine.restatus(changedIn(5 + unit)) };
+  const changes = { rename: (unit) => engine.rename(changedIn(unit)), restatus: (unit) => engine.restatus(changedIn(5 + unit)) };
   for (const [change, work] of Object.entries(changes)) {
     const samples = [];
     const cpu = process.cpuUsage();
