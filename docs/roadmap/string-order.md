@@ -4,7 +4,8 @@ Status: designed, 2026-11-13, and not built. It is the part of roadmap change 5 
 `orderBy` on a string field reads every entity of the set, where one on a number reads ten entries for its first ten.
 It adds derived keys and raises the format's version, so it is built before format 1 is frozen (change 8). This is
 the fourth draft: each of the three before was read against the code by a second reader, and what that changed is
-under What was set aside.
+under What was set aside. Phase 1's readings are in (2026-11-14) and priced the second place: the design stands,
+and the field type for identifiers the draft held in reserve is set aside.
 
 ## Where it stands
 
@@ -160,15 +161,35 @@ builds cover an order as they cover an index.
 
 **What it costs.** For each write that changes an indexed string or the values before it: the marker read, one sort
 key (775 ns for a title by the first reading, 21 µs at most for a long string by the third), and one place filed a
-second time. An index grows by a sort key for each distinct string and a place for each entity: for strings nearly
-all different, a little more than its `d/x` again; for a field of few values, the places alone. An update of the
-collator's crates builds every index's order again, once, in the background. Each is read in phase 2.
+second time. The place is the cost. A change's time is the pages it is the first of its unit to write, and a place
+taken out of one leaf and put into another is two. Read by `crates/elmdb/examples/change-cost.rs` on
+`session/string-order-readings`, where a second index of one string stands for the second place, being it but for
+the sort key (a million entities, units of 1,000 spread over them, CPU for each entity, Apple M1 Pro, 2026-11-14,
+built in release, two runs at load 24 to 25 and 13.5 to 14.8, the creates in the second only;
+`../evidence/million-notes.md` once that branch is merged):
 
-**The decision the readings make.** If phase 2 shows a unit that writes strings nearly all different, the
-benchmark's ids, more than a tenth slower, or its file more than a tenth larger, a field type for identifiers is
-built before the freeze: its strings are ordered by their bytes, from `d/x`, with no second family. It is a
-declaration of what the field means, in the schema, so what is stored still follows from the rows and the schema
-alone.
+| A unit of 1,000 | CPU for each entity |
+|---|---:|
+| Sets a string no index reads | 14.7 and 14.4 µs |
+| Sets a string one value index files | 32.2 and 33.2 µs |
+| Sets a string two value indexes file | 45.7 and 49.1 µs |
+| Creates an entity of a title and a string one index files | 19.4 µs |
+| Creates one whose string two indexes file | 23.1 µs |
+
+So an order adds some 13.5 to 15.9 µs to a change of an indexed string, 42% to 48% of that unit; 3.7 µs to a create,
+19% of the barest and 2% of the 176 µs the benchmark's create of a note took; and nothing to a write that changes
+another field. An index grows by a sort key for each distinct string and a place for each entity: for strings nearly
+all different, a little more than its `d/x` again, which was 41 bytes a note of the benchmark's 1,304; for a field of
+few values, the places alone. An update of the collator's crates builds every index's order again, once, in the
+background. Phase 2 reads each again with the order itself filed.
+
+**The decision the readings made.** The draft held a field type for identifiers in reserve, its strings ordered by
+their bytes from `d/x`, for a unit of strings nearly all different more than a tenth slower. The change is four
+tenths slower and the type is still not built. An identifier is set when its entity is made, where the second place
+is 3.7 µs. The four tenths fall on a change of the indexed string itself, which with them costs what SQLite's one
+index cost the same unit of the benchmark (35.3 ms a thousand against elmdb's 22.6). No arrangement of the keys
+files an order for less, since an order by another key is another leaf. And the type, drafted and read against the
+code, is under What was set aside for what it needed.
 
 ## What was set aside
 
@@ -197,6 +218,12 @@ alone.
   have waited on the collator's stamp, which it has nothing to do with.
 - **Leaving out a field declared a `ref`.** The third draft. A field declared a string, then a `ref`, then a string
   again would have a whole build its `ref` years never filed.
+- **A field type for identifiers, and a `ref`, ordered by their bytes from `d/x`.** Drafted on the readings and read
+  against the code by a second reader. The sorted arm compares values and not declarations, over sets of several
+  types, so a field an identifier in one type and a string in another had no order; a narrowed field is enforced
+  and not refused, so strings past the type's limit would have stayed; a `ref`'s length is not bounded; and a
+  declaration changed there and back with no write between left a whole marker over cleared keys. It saved 3.7 µs
+  of a create.
 - **The entities an order can't place read from their rows where they belong.** The third draft's fourth phase.
   They don't belong in one place: a time sorts between the numbers and the strings, a list after them, a unique
   index's list before any, and a range keeps a list holding a value in its bounds. It is another design.
@@ -213,7 +240,8 @@ alone.
 
 - **The two arms must agree.** The sorted arm stays, for sets no index orders, and is what the model harness holds
   the index's order to.
-- **The second place filed**, on every write of an indexed string. The decision above is what answers it.
+- **The second place filed**, on every write of an indexed string: four tenths more for a change of that string and
+  3.7 µs for a create, by the readings above. It is what an index costs, and an order read from it is what it buys.
 - **A cut entry.** Its entities' fields are read whenever an order or a page reaches it. Strings that agree for some
   two hundred characters are few in a title and may be many in a field of paths or of log lines; a plan that walks
   the order counts an entry's places before it reads its rows, and EXPLAIN counts the rows read.
@@ -227,12 +255,13 @@ alone.
    its indexed string with `limit 10`, a page of fifty near the order's end, a string `range`, and an order with no
    limit. Done when the four are recorded in `../evidence/million-notes.md` as the sorted arm answers them, with the
    size of the `d/x` of an index of strings nearly all different and of one of few values, and the time of a unit
-   that writes each.
+   that writes each. Done on `session/string-order-readings`, with what a second index of one string adds to a
+   change and to a create.
 2. **The keys, the stamp and the order.** The three families in `format`'s table and the version raised; the keys
    filed through the one function by writes, `rebuild()` and the builder; the marker's rules, the stamp, the exact
    requirements and their `xtask` check; `orderBy`, `after`, `least` and `greatest` reading it. Done when:
    - the readings are recorded again, the first ten of a million reading ten entries where no entry is trashed, with
-     both indexes' sizes and both units' times, and the decision above is made on them;
+     both indexes' sizes and both units' times, the name's unit no more than a half above its time before;
    - a property test holds the sign of the collator's comparison to the order of the keys as they are filed, cut and
      whole, and the cut to the whole key's first bytes, with no zero byte in any, over random strings in the
      collations of the third reading;
