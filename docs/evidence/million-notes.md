@@ -362,5 +362,6 @@ The bytes of each of elmdb's value indexes, keys and values in every family it i
 
 What they say for that design. Each read of the names' order visits every note, where the number's visits ten. A
 change of one indexed string costs 23 to 30 µs of a unit, the status's no less than the name's though its index is a
-thirty-sixth the size: a note's place moves between two blocks of places, each written again. A second place filed
-for an order would cost about that again for every such change, which is the cost the design's decision is made on.
+thirty-sixth the size. Where those microseconds go was not read here, and is read before the design's second place is
+costed: if they are the index's, a second place filed for an order costs about that again for every such change, which
+is the cost the design's decision is made on.
