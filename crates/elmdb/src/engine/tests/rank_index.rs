@@ -141,6 +141,9 @@ fn ranked_reads_the_top_alone_and_refuses_what_it_cannot_answer() {
     assert_eq!(explained["visited"], json!(3), "read three of the index's keys and nothing else: {explained}");
     assert_eq!(explained["stages"][1]["index"], json!("taskRank"));
     assert!(explained["stages"][1]["error"].as_f64().unwrap() <= 1e-9);
+    // Each stage is whole: one that says it holds fewer keys than it writes leaves its last outside it
+    let stages = explained["stages"].as_array().unwrap();
+    assert!(stages.iter().all(|stage| stage["kept"].is_number() && stage["ms"].is_number()), "{explained}");
     // Ranked over a set the index doesn't hold entirely: a type it doesn't cover is refused
     let refused = read(
         &db,
@@ -222,6 +225,8 @@ fn an_index_not_built_yet_answers_as_it_will_once_built_and_says_so() {
     assert_eq!(stage["index"], "taskRank");
     assert_eq!(stage["building"], true);
     assert!(stage["error"].as_f64().unwrap() >= tolerance);
+    // And whole, with the keys every stage ends with
+    assert!(stage["kept"].is_number() && stage["ms"].is_number(), "{stage}");
 
     // A read that asked not to compute them is refused, and one whose index is built is answered regardless
     let refusing = |steps: Json| plan(steps, json!({ "answer": "ids" }));
@@ -1393,10 +1398,14 @@ fn the_totals_are_counted_afresh_once_as_many_changes_as_nodes_have_added_to_the
 
 /// A ring of `nodes` tasks each linking the `degree` after it, built at a tolerance whose drains stay near a change, its
 /// sequence starting from `from`
-fn near_links(dir: &tempfile::TempDir, nodes: usize, degree: usize, from: u64) -> Database {
+fn near_schema() -> Schema {
     let mut near = serde_json::to_value(schema("out", true)).unwrap();
     near["ranks"]["taskRank"]["tolerance"] = json!(1e-6);
-    let db = open_with(dir, Schema::from_json(&near).unwrap());
+    Schema::from_json(&near).unwrap()
+}
+
+fn near_links(dir: &tempfile::TempDir, nodes: usize, degree: usize, from: u64) -> Database {
+    let db = open_with(dir, near_schema());
     db.store()
         .unwrap()
         .write(
@@ -2579,4 +2588,249 @@ fn a_read_only_open_drains_nothing() {
     db.wait_for_index_builds().unwrap();
     let status = db.index_status().unwrap();
     assert!(status.iter().any(|s| s.index == "taskRank" && !s.built && s.failure.is_none()), "{status:?}");
+}
+
+#[test]
+fn a_tracked_read_hears_what_the_builder_writes_into_it_and_nothing_else() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let mut ops: Vec<Json> =
+        (0..200).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+    ops.push(json!({ "op": "create", "type": "Tag", "id": "Tag-0" }));
+    write(&db, ops).unwrap();
+    db.wait_for_index_builds().unwrap();
+
+    let tracked = |plan: Json, token: u32| -> Reads {
+        serde_json::from_value(json!({ "reads": [{ "read": "query", "plan": plan }], "track": token })).unwrap()
+    };
+    let top = json!({ "start": { "from": "types", "types": ["Task", "Note"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }], "terminal": { "answer": "ids" } });
+    let tags = json!({ "start": { "from": "types", "types": ["Tag"] }, "terminal": { "answer": "ids" } });
+    db.read(&tracked(top, 7)).unwrap();
+    db.read(&tracked(tags, 8)).unwrap();
+
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(u64, Vec<u32>)>::new()));
+    let hearing = std::sync::Arc::clone(&heard);
+    db.hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
+        hearing.lock().unwrap().push((sequence, touched));
+    })))
+    .unwrap();
+    // One at a time, so the first isn't left unheard
+    let second = db.hear_builder_commits(Some(std::sync::Arc::new(|_, _| {}))).unwrap_err();
+    assert_eq!(second.code, ErrorCode::AlreadyListening);
+
+    let links: Vec<Json> = (1..200)
+        .map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }))
+        .collect();
+    write(&db, links).unwrap();
+    db.wait_for_index_builds().unwrap();
+
+    let commits = heard.lock().unwrap().clone();
+    assert!(!commits.is_empty(), "the drain's commits told nobody");
+    assert!(commits.iter().all(|(_, touched)| touched == &vec![7]), "{commits:?}");
+    assert!(commits.windows(2).all(|pair| pair[0].0 < pair[1].0), "{commits:?}");
+    assert!(commits.iter().all(|(sequence, _)| *sequence <= db.sequence().unwrap()), "{commits:?}");
+
+    // A commit that wrote into no tracked read tells nobody
+    heard.lock().unwrap().clear();
+    db.untrack(7);
+    let unlinks: Vec<Json> = (2..200)
+        .map(|i| json!({ "op": "unlink", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }))
+        .collect();
+    write(&db, unlinks).unwrap();
+    let written = db.sequence().unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(db.sequence().unwrap() > written, "the builder committed nothing, so this looked at nothing");
+    assert!(heard.lock().unwrap().is_empty(), "{:?}", heard.lock().unwrap());
+
+    // Stops at the caller's word
+    db.read(&tracked(json!({ "start": { "from": "types", "types": ["Task", "Note"] },
+        "steps": [{ "step": "ranked", "index": "taskRank" }, { "step": "limit", "n": 5 }], "terminal": { "answer": "ids" } }), 7)).unwrap();
+    db.hear_builder_commits(None).unwrap();
+    write(&db, vec![json!({ "op": "unlink", "source": "Task-1", "kind": "refs", "target": "Task-0" })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(heard.lock().unwrap().is_empty());
+
+    // Closing drops whoever is listening
+    let listener: crate::engine::watch::BuilderCommitListener = std::sync::Arc::new(|_, _| {});
+    db.hear_builder_commits(Some(std::sync::Arc::clone(&listener))).unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&listener), 2);
+    db.close().unwrap();
+    assert_eq!(std::sync::Arc::strong_count(&listener), 1);
+}
+
+/// What a process leaves when it exits straight after a commit: the commit's pushes owed, its builder gone
+#[test]
+#[ignore = "run by leaves_an_owed_index, as a process of its own"]
+fn child_exits_owing_a_rank_index() {
+    let Ok(path) = std::env::var("ELMDB_OWING_DB") else { return };
+    // Its own builder can't take the work, however fast this machine runs it: it is owed when this process exits
+    let canonical = std::fs::canonicalize(&path).unwrap();
+    let _owing = crate::failpoints::fail_while_at(crate::failpoints::points::BUILD_RANK, &canonical);
+    let db = Database::open(
+        std::path::Path::new(&path),
+        OpenOptions { schema: Some(near_schema()), syncs: false, ..Default::default() },
+    )
+    .unwrap();
+    let ops = (0..400)
+        .flat_map(|i| {
+            (6..12).map(move |step| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": format!("Task-{}", (i + step) % 400) }))
+        })
+        .collect();
+    write(&db, ops).unwrap();
+    std::process::exit(0);
+}
+
+fn run_owing_child(dir: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::rank_index::child_exits_owing_a_rank_index",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_OWING_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the owing process failed");
+}
+
+fn owes(db: &Database) -> bool {
+    db.snapshot(|s| ranks::owes_work(s, "taskRank")).unwrap()
+}
+
+#[test]
+fn the_index_builders_commits_are_this_handles_own() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    db.wait_for_index_builds().unwrap();
+    assert!(!db.committed_elsewhere().unwrap(), "the builder drained in commits of its own");
+}
+
+#[test]
+fn a_read_only_handle_woken_by_another_process_starts_no_build() {
+    let dir = tempfile::tempdir().unwrap();
+    near_links(&dir, 400, 5, 0).close().unwrap();
+    run_owing_child(&dir);
+    let db = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("woken");
+    db.wait_for_index_builds().unwrap();
+    let status = db.index_status().unwrap();
+    assert!(
+        status.iter().all(|s| s.failure.is_none()),
+        "no build started, so none failed for want of a write: {status:?}"
+    );
+    assert!(owes(&db), "and the work is still owed, for a handle that can write");
+}
+
+#[test]
+fn being_woken_finishes_what_a_process_left_owed_without_a_commit_here() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("woken");
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained without a commit here");
+}
+
+#[test]
+fn a_commit_here_finishes_what_a_process_that_exited_left_owed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    // Its own work done first, so a builder still draining it can't take the other process's work as well
+    db.wait_for_index_builds().unwrap();
+    run_owing_child(&dir);
+    assert!(owes(&db), "the process left the index owed");
+    // A commit that pushes nothing of its own: a commit queues the pushes the store owes, whoever left them
+    let unit = db.begin().unwrap();
+    unit.commit(false).unwrap();
+    db.wait_for_index_builds().unwrap();
+    assert!(!owes(&db), "drained after a commit here, with no wake heard");
+}
+
+#[test]
+fn a_close_refused_for_an_open_unit_goes_on_hearing_other_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = near_links(&dir, 400, 5, 0);
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
+    let unit = db.begin().unwrap();
+    assert_eq!(db.close().unwrap_err().code, crate::error::ErrorCode::UnitOpen);
+    drop(unit);
+    run_owing_child(&dir);
+    heard.recv_timeout(std::time::Duration::from_secs(10)).expect("still woken");
+}
+
+#[test]
+fn a_loaded_weight_that_is_no_number_is_refused_before_the_index_reads_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-0", "kind": "rates", "target": "Task-1", "weight": 2.0 })])
+        .unwrap();
+    assert_within_bound(&db, "out", true);
+    // A second arc out of a node that holds one, its weight NaN: the index would have added it to that node's
+    // out-weight and filed the node under a score that is no number
+    let error = db
+        .bulk_load(&[crate::engine::maintenance::Load::Relation {
+            id: "Relation-nan".into(),
+            kind: "rates".into(),
+            source: "Task-0".into(),
+            target: "Task-2".into(),
+            info: None,
+            weight: Some(f64::NAN),
+        }])
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::ValueInvalid, "{error}");
+    assert_within_bound(&db, "out", true);
+}
+
+#[test]
+fn a_close_that_leaves_the_database_open_leaves_its_builder_s_commits_heard() {
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    let listener: crate::engine::watch::BuilderCommitListener = Arc::new(|_, _| {});
+    db.hear_builder_commits(Some(Arc::clone(&listener))).unwrap();
+
+    // Refused for an open unit
+    let unit = db.begin().unwrap();
+    assert_eq!(db.close().unwrap_err().code, ErrorCode::UnitOpen);
+    assert!(db.is_open());
+    assert_eq!(Arc::strong_count(&listener), 2, "the database is open and holds its listener still");
+    drop(unit);
+
+    // Given up on while an operation holds the store
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
+    assert!(db.is_open());
+    assert_eq!(Arc::strong_count(&listener), 2, "as it is after a close that gave up");
+    drop(held);
+
+    db.close().unwrap();
+    assert_eq!(Arc::strong_count(&listener), 1, "a close that closes drops whoever is listening");
+}
+
+#[test]
+fn a_close_stops_a_builder_started_after_it_stopped_the_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // As a commit, or another process's wake, does that took the store before the close and queues index work after it
+    let builders = db.builders().unwrap().expect("a writable database starts builders");
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_TAKEN, move || {
+        builders.queue(vec![crate::engine::Work::Rank { name: "taskRank".into() }]);
+    });
+    let closed = db.close_within(Some(std::time::Duration::from_secs(3))).unwrap();
+    assert!(closed, "the close waited on a store the builder it left running held");
+    assert!(!db.is_open());
 }

@@ -1,19 +1,38 @@
-"""Mutate what a change touches, each crate against its own suite, and report the survivors without failing on them.
+"""Mutate what a change touches, each crate against its own suite, and fail on a survivor.
 
-`python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only]`: cargo-mutants over
+`python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only] [--resume]`: cargo-mutants over
 `git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, since `.cargo/mutants.toml` tests
-every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero only
-when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass); a missed mutant or a timeout is listed, and in
-GitHub Actions annotated on its line and written to the step summary.
+every mutant against the engine's suite and a binding's or the CLI's mutant is tested by its own. Exits nonzero when a
+mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass): a survivor is a test
+missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed and doesn't fail the run, since
+load alone can cause one. In GitHub Actions each is annotated on its line and written to the step summary.
+
+The configuration every run here reads is the one `cargo xtask mutant-exclusions` writes: `.cargo/mutants.toml` with an
+exclusion for each `// mutant-skip:` comment, which only the source holds.
+
+It also exits nonzero when a mutant failed to build for want of a file or a manifest that reads, and not for what
+the mutant changed: cargo-mutants lists such a mutant as unviable, as it does one whose replacement doesn't compile, but
+it means the copy of the tree the mutant was built in was damaged, and the mutant was never tested.
+
+`--resume` leaves out the mutants an earlier run of the same change caught, so a run that was stopped, or one of
+several shares run again, tests only what is left. What was caught is kept in `target/mutants-in-diff/<crate>/caught.txt`
+beside the diff it was caught in, and forgotten when the diff is another.
 
 `--shard K/N` tests the Kth of N shares of the mutants, so N runners split them; each runs the unmutated baseline,
-which is what its timeouts are measured from. `--windows-only` mutates only the changed files holding code that compiles on Windows alone, which a Linux run
-can't build: the rest of the change is Linux's to mutate.
+which is what its timeouts are measured from. `--windows-only` mutates only the code that compiles on Windows alone,
+which a Linux run can't build: the rest of the change is Linux's to mutate.
+
+A mutant of code the runner doesn't compile, behind a `#[cfg(...)]` for another platform, builds unchanged and passes
+every test, so it would be reported missed whatever the tests: a Linux run leaves out code compiled only on another
+platform, and a Windows run takes only code compiled on Windows alone. macOS-only code is read on a Mac
+(`docs/architecture/testing.md`, Mutation testing).
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -23,30 +42,130 @@ TESTED = {0, 2, 3}
 # (`docs/evidence/mutation-baseline.md`) and is most of its time
 SUITE_ARGS = {"elmdb": ["--", "--", "--skip", "model::the_engine"]}
 
-# What marks code that compiles on Windows alone
-WINDOWS_ONLY = ("cfg(windows)", 'target_os = "windows"')
-
 parser = argparse.ArgumentParser()
 parser.add_argument("base")
 parser.add_argument("jobs", nargs="?", default="3")
 parser.add_argument("--shard", help="K/N: the Kth of N shares of the mutants")
 parser.add_argument("--windows-only", action="store_true")
+parser.add_argument("--resume", action="store_true", help="leave out what an earlier run of the same change caught")
 args = parser.parse_args()
 
 root = Path.cwd()
 out = root / "target/mutants-in-diff"
 out.mkdir(parents=True, exist_ok=True)
 diff = out / "branch.diff"
-diff.write_bytes(subprocess.check_output(["git", "diff", f"{args.base}...HEAD"]))
+change = subprocess.check_output(["git", "diff", f"{args.base}...HEAD"])
+# What an earlier run caught holds only for the diff it was caught in
+same_change = diff.exists() and diff.read_bytes() == change
+if not same_change:
+    # Forgotten before the diff is written: a run of the new diff that is stopped before it has kept anything would
+    # otherwise find the diff its own on a resume, and the last diff's catches beside it
+    for kept in out.glob("*/caught.txt"):
+        kept.unlink()
+    for results in out.glob("*/mutants.out"):
+        shutil.rmtree(results, ignore_errors=True)
+diff.write_bytes(change)
 changed = subprocess.check_output(["git", "diff", "--name-only", f"{args.base}...HEAD"], text=True).split()
 
 
-def windows_only(path):
-    file = root / path
-    return path.endswith(".rs") and file.exists() and any(mark in file.read_text(encoding="utf-8") for mark in WINDOWS_ONLY)
+# What each runner's platform answers for the cfg predicates that name one; anything else (test, a feature, loom) is
+# unknown, and code behind an unknown predicate is never taken for another platform's
+PLATFORMS = {
+    "linux": {"unix": True, "windows": False, "target_os": "linux", "target_family": "unix"},
+    "windows": {"unix": False, "windows": True, "target_os": "windows", "target_family": "windows"},
+}
 
 
-scope = [path for path in changed if windows_only(path)] if args.windows_only else None
+def holds(predicate, platform):
+    """Whether a cfg predicate holds on `platform`: True, False, or None when it names something else"""
+    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', predicate)
+    at = 0
+
+    def parse():
+        nonlocal at
+        name = tokens[at]
+        at += 1
+        if at < len(tokens) and tokens[at] == "(":
+            at += 1
+            values = []
+            while tokens[at] != ")":
+                values.append(parse())
+                if tokens[at] == ",":
+                    at += 1
+            at += 1
+            if name == "all":
+                return False if False in values else (True if all(v is True for v in values) else None)
+            if name == "any":
+                return True if True in values else (False if all(v is False for v in values) else None)
+            if name == "not":
+                return None if values[0] is None else not values[0]
+            return None
+        if at < len(tokens) and tokens[at] == "=":
+            value = tokens[at + 1].strip('"')
+            at += 2
+            known = PLATFORMS[platform].get(name)
+            return None if known is None else known == value
+        return PLATFORMS[platform].get(name)
+
+    return parse()
+
+
+def compiled_out(path, platform):
+    """The lines of a source file behind a `#[cfg(...)]` that doesn't hold on `platform`"""
+    lines = (root / path).read_text(encoding="utf-8").splitlines()
+    out = set()
+    if any(re.match(r"\s*#!\[cfg\((.*)\)\]\s*$", line) and holds(re.match(r"\s*#!\[cfg\((.*)\)\]", line).group(1), platform) is False
+           for line in lines):
+        return set(range(1, len(lines) + 1))
+    for at, line in enumerate(lines):
+        found = re.match(r"\s*#\[cfg\((.*)\)\](.*)$", line)
+        if not found or holds(found.group(1), platform) is not False:
+            continue
+        # The item the attribute is on: to its closing brace, to the `;` or `,` that ends a statement or a field first,
+        # or to the brace closing what holds it
+        depth, parens, opened, end = 0, 0, False, None
+        rest = [found.group(2)] + lines[at + 1:]
+        for offset, text in enumerate(rest):
+            code = re.sub(r'"(\\.|[^"\\])*"', '""', text.split("//")[0])
+            if code.lstrip().startswith("#["):
+                continue
+            for char in code:
+                if char in "([":
+                    parens += 1
+                elif char in ")]":
+                    parens -= 1
+                elif char == "{":
+                    depth, opened = depth + 1, True
+                elif char == "}":
+                    depth -= 1
+                elif char in ";," and depth == 0 and parens == 0 and not opened:
+                    end = offset
+                    break
+                if (opened and depth == 0) or depth < 0:
+                    end = offset
+                    break
+            if end is not None:
+                break
+        out.update(range(at + 1, at + 1 + (end if end is not None else len(rest) - 1) + 1))
+    return out
+
+
+def lines_pattern(path, numbers):
+    """A regex over cargo-mutants' names for the mutants on these lines of `path`"""
+    return f"^{re.escape(path)}:({'|'.join(str(n) for n in sorted(numbers))}):"
+
+
+rust = [path for path in changed if path.endswith(".rs") and (root / path).exists()]
+if args.windows_only:
+    # Only what compiles on Windows and not on Linux
+    only_windows = {path: compiled_out(path, "linux") - compiled_out(path, "windows") for path in rust}
+    only_windows = {path: numbers for path, numbers in only_windows.items() if numbers}
+    scope = sorted(only_windows)
+    platform_args = [arg for path, numbers in only_windows.items() for arg in ("--re", lines_pattern(path, numbers))]
+else:
+    scope = None
+    elsewhere = {path: numbers for path in rust if (numbers := compiled_out(path, "linux"))}
+    platform_args = [arg for path, numbers in elsewhere.items() for arg in ("--exclude-re", lines_pattern(path, numbers))]
 
 metadata = json.loads(subprocess.check_output(["cargo", "metadata", "--no-deps", "--format-version", "1"]))
 crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as_posix(), p["features"])
@@ -56,24 +175,59 @@ assert crates, "the workspace names no crate"
 # cargo-mutants builds each job's copy of the tree in a directory of its own; a CARGO_TARGET_DIR from the caller would
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}
+# The committed configuration with the exclusions the source's `// mutant-skip:` comments make, which are in no file
+# cargo-mutants reads by itself; the task prints where it wrote it. A change with nothing in scope runs nothing below,
+# and doesn't build the task to find that out
+configuration = [] if scope == [] else [
+    "--config", subprocess.check_output(["cargo", "xtask", "mutant-exclusions"], text=True).strip()]
 sharding = ["--shard", args.shard] if args.shard else []
-missed, timeouts = [], []
+# What a build's log says when a file of the tree it was built in is missing or doesn't read
+DAMAGED = re.compile(r"could not parse .* \(manifest\)|failed to (read|load) |No such file or directory")
+
+
+def lines_of(path):
+    return path.read_text().splitlines() if path.exists() else []
+
+
+missed, timeouts, damaged = [], [], []
 for name, path, features in crates:
     files = [f"{path}/**"] if scope is None else [file for file in scope if file.startswith(f"{path}/")]
     if not files:
         continue
     # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
     with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
-    run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), "--in-diff", str(diff),
-                          *(arg for file in files for arg in ("--file", file)), *sharding, "--test-package", name,
-                          *with_features, *SUITE_ARGS.get(name, [])],
+    results = out / name / "mutants.out"
+    # Every mutant a run of this diff caught, the last run's among them, which a run that was stopped never added
+    kept = out / name / "caught.txt"
+    caught = set(lines_of(kept) + lines_of(results / "caught.txt")) if same_change else set()
+    selection = [*configuration, "--in-diff", str(diff), *(arg for file in files for arg in ("--file", file))]
+    chosen = [*sharding, *platform_args]
+    if args.resume and caught:
+        # The mutants this run would test, less those caught: named one by one, since a share of what is left is not
+        # what is left of a share
+        listed = subprocess.check_output(["cargo", "mutants", "--list", *selection, *chosen], env=env, text=True)
+        left = [mutant for mutant in listed.splitlines() if mutant not in caught]
+        print(f"{name}: {len(left)} mutants left of {len(listed.splitlines())}")
+        if not left:
+            continue
+        chosen = [arg for mutant in left for arg in ("--re", f"^{re.escape(mutant)}$")]
+    # A change that holds no mutant of the crate has cargo-mutants write no results, and those an earlier run left
+    # would be read as this one's: what that run caught is already taken, above
+    shutil.rmtree(results, ignore_errors=True)
+    run = subprocess.run(["cargo", "mutants", "-j", args.jobs, "-o", str(out / name), *selection, *chosen,
+                          "--test-package", name, *with_features, *SUITE_ARGS.get(name, [])],
                          env=env)
+    kept.parent.mkdir(parents=True, exist_ok=True)
+    kept.write_text("".join(f"{mutant}\n" for mutant in sorted(caught | set(lines_of(results / "caught.txt")))))
     if run.returncode not in TESTED:
         sys.exit(f"cargo-mutants failed for {name} with exit code {run.returncode}")
-    results = out / name / "mutants.out"
     for found, file in ((missed, "missed.txt"), (timeouts, "timeout.txt")):
-        if (results / file).exists():
-            found += (results / file).read_text().splitlines()
+        found += lines_of(results / file)
+    if (results / "outcomes.json").exists():
+        for outcome in json.loads((results / "outcomes.json").read_text())["outcomes"]:
+            log = results / outcome.get("log_path", "")
+            if outcome["summary"] == "Unviable" and log.is_file() and DAMAGED.search(log.read_text(errors="replace")):
+                damaged.append(outcome["scenario"]["Mutant"]["name"])
 
 what = "Windows-only code" if args.windows_only else "the change"
 what += f", shard {args.shard}" if args.shard else ""
@@ -84,13 +238,20 @@ for line in missed:
     print(f"MISSED  {line}")
 for line in timeouts:
     print(f"TIMEOUT {line}")
+for line in damaged:
+    print(f"UNTESTED {line}")
+if damaged:
+    print(f"{len(damaged)} mutants were never tested: the tree they were built in lacked a file. Run again with --resume")
 
 if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
     for line in missed:
         file, number, _ = line.split(":", 2)
-        print(f"::warning file={file},line={number},title=Missed mutant::{line}")
+        print(f"::error file={file},line={number},title=Missed mutant::{line}")
     with open(summary, "a", encoding="utf-8") as written:
         written.write(f"## Mutants in {what}\n\n{len(missed)} missed, {len(timeouts)} timeouts\n\n")
         for heading, lines in (("Missed", missed), ("Timeouts", timeouts)):
             if lines:
                 written.write(f"### {heading}\n\n" + "".join(f"- `{line}`\n" for line in lines) + "\n")
+
+# A survivor fails the run: kill it with a test, or name it in a `// mutant-skip:` with why it is equivalent
+sys.exit(1 if missed or damaged else 0)

@@ -16,7 +16,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// What a database holds: entities per type and field, relations per kind, entries per index, its sizes
+    /// What a database holds: entities per type and field, relations per kind, entries per index and the bytes of
+    /// each value index, its sizes
     Inspect { dir: PathBuf },
     /// Compares derived data with primary data and every row with the schema's rules; exits 1 when it finds anything
     Check { dir: PathBuf },

@@ -10,6 +10,7 @@ mod algorithms;
 mod apply;
 pub mod batch;
 mod builder;
+pub mod changed;
 pub mod changes;
 pub mod derive;
 mod entities;
@@ -18,10 +19,12 @@ mod keys;
 pub mod maintenance;
 pub(crate) mod mirror;
 mod numbering;
+mod places;
 pub mod plan;
 mod ranks;
 mod reads;
 mod relations;
+mod sum;
 mod text;
 pub mod tracking;
 mod trigram;
@@ -65,15 +68,16 @@ fn finish_commit(
     Ok(changes)
 }
 
-/// How the builder's rank chunks commit: as a write does, each telling the watches whose reads it wrote into
-pub(crate) fn drain_commits(
+/// How the builder's chunks commit, an index's and a rank index's: as a write does, each telling the watches and the
+/// tracked reads whose reads it wrote into
+pub(crate) fn builder_commits(
     tracks: watch::SharedTracks,
     store: Arc<Store>,
     observing: Arc<RwLock<Arc<EngineSchema>>>,
     schema: Arc<EngineSchema>,
 ) -> builder::Commits {
     Arc::new(move |chunk| {
-        // mutant-skip: delete ! in drain_commits
+        // mutant-skip: delete ! in builder_commits
         // The rank index (`docs/archive/roadmap/rank-index.md`). How the builder's chunks commit: logging narrows which watches
         // run again, and a watch delivers only an answer that changed, so a commit that logs nothing tells every watch
         // and each hears the same
@@ -90,7 +94,25 @@ pub(crate) fn drain_commits(
             },
             false,
         )?;
-        finish_commit(&tracks, &store, &observing, ChangeSet::default(), written.as_ref(), commit)?;
+        let changes = finish_commit(&tracks, &store, &observing, ChangeSet::default(), written.as_ref(), commit)?;
+        if !changes.touched.is_empty() {
+            let listener = tracks.lock().builder_commit_listener();
+            if let Some(listener) = listener {
+                // A callback of the database, on the builder's own thread: a close it asks for is refused as one
+                // asked for by a watch's listener is, whichever builder is the database's by then. It is let go of
+                // inside the callback too, as a watch's listener is: what it holds may be the last of the database,
+                // whose close would wait for this thread
+                let (sequence, touched) = (changes.sequence, changes.touched);
+                let heard = watch::as_callback(&tracks, move || {
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener(sequence, touched)))
+                });
+                // One that panics is heard no more, as a watch whose listener panics is ended: the builder goes on,
+                // where the panic would have ended its thread with builds left that nothing waits out
+                if heard.is_err() {
+                    tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+                }
+            }
+        }
         Ok(done)
     })
 }
@@ -174,12 +196,19 @@ pub(crate) fn drop_index_data(
             continue;
         }
         if let ["types", entity_type, "indexes", index] = parts.as_slice() {
-            let (low, high) = crate::format::key::prefix_range(&keys::index_range(entity_type, index, &[]));
-            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
-            let doomed: Vec<Vec<u8>> =
-                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
-            for key in doomed {
-                db.delete(txn, &key)?;
+            // Each range of a value index's keys, the blocks of their places, and the key that is a range's own first:
+            // an index on one field keeps the entities without a value under it
+            for own in keys::value_index_ranges(entity_type, index) {
+                for under in [own.clone(), keys::index_blocks(&own)] {
+                    let (low, high) = crate::format::key::prefix_range(&under);
+                    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+                    let doomed: Vec<Vec<u8>> =
+                        db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+                    for key in doomed {
+                        db.delete(txn, &key)?;
+                    }
+                }
+                db.delete(txn, &own)?;
             }
             for range in keys::text_index_ranges(entity_type, index) {
                 let (low, high) = crate::format::key::prefix_range(&range);
@@ -325,6 +354,7 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
 
 /// Marks empty types' indexes built inside the mutation that changes their contents or declaration.
 pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
+    changed::settle(t.txn, t.db, t.schema)?;
     let (empty, unbuilt) = unbuilt_indexes(t)?;
     for work in empty {
         match work {
@@ -353,7 +383,8 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
         schema.validate(txn, db)?;
         unbuilt_indexes(&unit::Snapshot { txn, db, schema })
     })?;
-    if !empty.is_empty() && !store.is_read_only() {
+    let order_settled = !store.read(|txn, db| changed::needs_settling(txn, db, schema))?;
+    if (!empty.is_empty() || !order_settled) && !store.is_read_only() {
         return store
             .write_committed(
                 |txn, db| {
@@ -372,6 +403,12 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
 
 pub(crate) use builder::{Builder, Work};
 
+/// A position as the binding hands it, msgpack of `changed::Position`
+fn position(bytes: &[u8]) -> Result<changed::Position> {
+    rmp_serde::from_slice(bytes)
+        .map_err(|error| Error::new(ErrorCode::BatchInvalid, format!("A position to read what changed from: {error}")))
+}
+
 /// What a write's caller gets back across the binding: each operation's answer, and the commit's change set
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -380,6 +417,22 @@ pub struct Written<'a> {
     pub changes: &'a ChangeSet,
     /// The commit's sequence, as its change set says
     pub sequence: u64,
+}
+
+/// A write that has committed and is owed a sync. Dropped without a wait, nothing says whether it became durable
+pub struct Unsynced {
+    sequence: u64,
+    store: Arc<Store>,
+}
+
+impl Unsynced {
+    /// Asks for a sync and waits for it, answering as a durable write does: `NOT_DURABLE` when it failed. The sync is
+    /// asked for here and not as the write commits, and covers every commit made before this call: of several writes
+    /// waited for after the last of them, the first wait's sync is the others' too
+    pub fn wait(self) -> Result<()> {
+        let synced = self.store.durable().map_or(Ok(()), crate::store::sync::Durable::wait);
+        Commit { sequence: self.sequence, synced }.finish()
+    }
 }
 
 impl Database {
@@ -393,6 +446,20 @@ impl Database {
             sequence: changes.sequence,
         })
         .expect("an answer serializes"))
+    }
+
+    /// `write_bytes`, answered once the commit has landed and before its sync, with the sync to wait for
+    /// (`Unsynced::wait`): a caller with several writes in hand makes them all and waits once, where each made
+    /// durable would wait for a sync of its own. Its watches and tracked reads are told as the commit lands, before
+    /// the sync, where a durable write tells them after it
+    pub fn write_bytes_unsynced(&self, batch: &[u8]) -> Result<(Vec<u8>, Unsynced)> {
+        let batch = decode_batch(batch)?;
+        // The store the write goes to, held until its sync is waited for: a close waits for it, as for a durable write
+        let store = self.store()?;
+        let (results, changes) = self.write(&batch, false)?;
+        let answer = Written { results: &results.results, changes: &changes, sequence: changes.sequence };
+        let answer = rmp_serde::to_vec_named(&answer).expect("an answer serializes");
+        Ok((answer, Unsynced { sequence: changes.sequence, store }))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
@@ -422,7 +489,12 @@ impl Database {
     /// durable unit
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
         let op = Op::rebuild(index);
-        let result = op.in_scope(|| self.admin_unit(|t| derive::rebuild(t, index)));
+        let result = op.in_scope(|| {
+            if index.is_none() {
+                self.store()?.make_room(REBUILD_ROOM)?;
+            }
+            self.admin_unit(|t| derive::rebuild(t, index))
+        });
         op.ended(result, "durable")
     }
 
@@ -444,7 +516,8 @@ impl Database {
     /// Renames a type, rewriting its entities' ids, the relations and declared `ref` fields naming them, and its
     /// sequences
     pub fn rename_type(&self, from: &str, to: &str) -> Result<()> {
-        self.admin_unit(|t| admin::rename_type(t, from, to))
+        let store = self.store()?;
+        self.admin_unit(|t| admin::rename_type(t, from, to, store.next_sequence(t.txn)?))
     }
 
     pub(crate) fn admin_load(&self, loads: &[maintenance::Load]) -> Result<()> {
@@ -465,6 +538,7 @@ impl Database {
     ) -> Result<()> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = now_ms();
         let (waiting, mut commit) = store.write_committed(
             |txn, db| {
@@ -473,7 +547,9 @@ impl Database {
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
                 vector::flush(&mut t)?;
-                ranks::push_at_commit(&mut t)
+                let waiting = ranks::push_at_commit(&mut t)?;
+                store.deposit_touched(changed::Touched::of(&state.events, &schema));
+                Ok(waiting)
             },
             !recycle,
         )?;
@@ -484,22 +560,63 @@ impl Database {
             commit.synced = store.committed(true);
         }
         drop(schema);
-        self.finish_admin_commit(&store, commit)?;
-        if let Some(builders) = self.builders()? {
+        // As in `write`: queued before a failed sync is reported, the commit having landed
+        let landed = self.finish_admin_commit(&store, commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(())
+        landed
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
         finish_commit(&self.tracks, store, &self.observing_schema(), ChangeSet::default(), None, commit).map(|_| ())
     }
 
+    /// The checkpoint named `name`, as the latest commit left it (`Unit::set_checkpoint`)
+    pub fn checkpoint(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        checkpoint_name(name)?;
+        self.store()?.read(|txn, db| Ok(db.get(txn, &keys::checkpoint(name))?.map(<[u8]>::to_vec)))
+    }
+
+    /// Whether another handle has committed since this one last asked, or since it opened: like SQLite's `data_version`,
+    /// it moves for another's commits and never for this handle's own, its index builder's included
+    pub fn committed_elsewhere(&self) -> Result<bool> {
+        self.store()?.committed_elsewhere()
+    }
+
+    /// The entities of `types` that changed after `from`, in the order of the commits that changed them, at most
+    /// `limit`, with the ones destroyed since, from one snapshot (`docs/architecture/engine.md`, Changed since)
+    pub fn changed_since(&self, types: &[String], from: &changed::Position, limit: usize) -> Result<changed::Changed> {
+        let schema = self.schema_guard();
+        self.store()?.read(|txn, db| changed::since(txn, db, &schema, types, from, limit))
+    }
+
+    /// `changed_since` with its position and answer as msgpack bytes, as the binding takes them
+    pub fn changed_since_bytes(&self, types: &[String], from: &[u8], limit: usize) -> Result<Vec<u8>> {
+        let from = position(from)?;
+        Ok(rmp_serde::to_vec_named(&self.changed_since(types, &from, limit)?).expect("an answer serializes"))
+    }
+
     /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
-    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would
+    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would. Refused
+    /// on the thread of the builder it would wait for (`CALLBACK_ACTIVE`), by a listener one of its commits
+    /// delivered to: those builds go on once the listener returns. A listener that changed the schema waits for
+    /// the builder started for it, which is another thread's
     pub fn wait_for_index_builds(&self) -> Result<()> {
         // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
-        let Some(waiter) = self.builder().as_ref().map(Builder::waiter) else { return Ok(()) };
+        let Some((waiter, here)) = self.builder().as_ref().map(|builder| (builder.waiter(), builder.on_its_thread()))
+        else {
+            return Ok(());
+        };
+        // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
+        // listener to return: the wait would be for itself
+        if here {
+            return Err(Error::new(
+                ErrorCode::CallbackActive,
+                "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
+                 after it has",
+            ));
+        }
         if self.store()?.unit_is_open() {
             return Err(Error::new(
                 ErrorCode::UnitOpen,
@@ -611,6 +728,7 @@ impl Database {
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
         let ((results, changes, written, waiting), commit) = store.write_committed(
@@ -623,16 +741,19 @@ impl Database {
                 vector::flush(&mut t)?;
                 let waiting = ranks::push_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
-                Ok((results, ChangeSet::of(&state.events), state.written.take(), waiting))
+                let changes = ChangeSet::of(&state.events);
+                store.deposit_touched(changed::Touched::of(&state.events, &schema));
+                Ok((results, changes, state.written.take(), waiting))
             },
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
-        if let Some(builders) = self.builders()? {
+        // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
+        let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok((results, changes))
+        Ok((results, landed?))
     }
 
     /// Runs `f` on a read snapshot of the last commit
@@ -652,31 +773,67 @@ impl Database {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
         let held = self.schema_guard();
         let store = self.store()?;
-        let (txn, gate) = store.begin()?;
+        // The unit's place is let go if no unit comes of it, refused or panicking, once the transaction and its
+        // holds, declared after it, have gone
+        let mut place = Place { store: &store, taken: false };
+        let (txn, gate, writer) = store.begin()?;
+        // Declared so that an unwind drops the transaction first, then the gate, as the unit's own end does
+        let (writer, gate, txn) = (writer, gate, txn);
+        place.taken = true;
+        run_point!(UNIT_HELD);
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
-            store.end_unit();
+            writer.release();
             return Err(error);
         }
         let schema = Arc::clone(&held);
         drop(held);
+        let builders = match self.builders() {
+            Ok(builders) => builders,
+            Err(error) => {
+                drop(txn);
+                drop(gate);
+                writer.release();
+                return Err(error);
+            }
+        };
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
         let logging = !self.tracks.lock().is_empty();
+        let (tracks, schemas) = (Arc::clone(&self.tracks), self.observing_schema());
+        // From here the unit holds the place, and ends it
+        place.taken = false;
+        drop(place);
         Ok(Unit {
             txn: Some(txn),
             state: UnitState::new(logging),
-            tracks: Arc::clone(&self.tracks),
-            schemas: self.observing_schema(),
+            tracks,
+            schemas,
             poisoned: None,
             gate: Some(gate),
+            writer: Some(writer),
             schema,
             store,
-            builders: self.builders()?,
+            builders,
+            ended: false,
             _thread: PhantomData,
         })
+    }
+}
+
+/// A unit's place in the store while the unit is being made: ended when dropped while taken
+struct Place<'a> {
+    store: &'a Store,
+    taken: bool,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        if self.taken {
+            self.store.end_unit();
+        }
     }
 }
 
@@ -690,16 +847,83 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
+    /// The writer's hold on the write transaction, let go once the transaction has ended and the store has accounted
+    /// for its commit (`store/writers.rs`)
+    writer: Option<crate::store::WriterLock>,
     schema: Arc<EngineSchema>,
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
     /// The builder the rank indexes' pushes its commit leaves go to
     builders: Option<crate::database::Builders>,
+    /// Whether the store has been told the unit ended: once, however it ends
+    ended: bool,
     _thread: PhantomData<*const ()>,
 }
 
+/// A checkpoint is named by its reader, and every reader needs a name
+fn checkpoint_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(Error::new(ErrorCode::BatchInvalid, "A checkpoint has a name"));
+    }
+    Ok(())
+}
+
 impl Unit {
+    /// Records `value` as the checkpoint `name`, in this unit, so it commits with the work it records or not at all: a
+    /// reader's place in what it has read (CouchDB's local documents, Kafka's committed offsets). A checkpoint is no
+    /// entity and changes no change order. A backup keeps it with the rows it describes; a dump leaves it out, and
+    /// `reset` and `replace_with` drop it with them, so a reader starts again from nothing
+    pub fn set_checkpoint(&mut self, name: &str, value: &[u8]) -> Result<()> {
+        checkpoint_name(name)?;
+        self.view(0.0)?.put(&keys::checkpoint(name), value)
+    }
+
+    /// The checkpoint named `name`, as this unit sees it
+    pub fn checkpoint(&mut self, name: &str) -> Result<Option<Vec<u8>>> {
+        checkpoint_name(name)?;
+        let view = self.view(0.0)?;
+        unit::Read::get(&view, &keys::checkpoint(name))
+    }
+
+    /// What this unit has changed so far, which something running inside it may need to act on before it commits
+    pub fn pending_changes(&mut self) -> Result<ChangeSet> {
+        let view = self.view(0.0)?;
+        Ok(ChangeSet::of(&view.state.events))
+    }
+
+    /// `pending_changes` as msgpack bytes, as the binding takes it
+    pub fn pending_changes_bytes(&mut self) -> Result<Vec<u8>> {
+        Ok(rmp_serde::to_vec_named(&self.pending_changes()?).expect("a change set serializes"))
+    }
+
+    /// `Database::changed_since` read in this unit, before its own writes are stamped: what it has written so far is in
+    /// `pending_changes`, and takes `next_sequence` as it commits
+    pub fn changed_since(
+        &mut self,
+        types: &[String],
+        from: &changed::Position,
+        limit: usize,
+    ) -> Result<changed::Changed> {
+        let view = self.view(0.0)?;
+        changed::since(view.txn, view.db, view.schema, types, from, limit)
+    }
+
+    /// `changed_since` with its position and answer as msgpack bytes, as the binding takes them
+    pub fn changed_since_bytes(&mut self, types: &[String], from: &[u8], limit: usize) -> Result<Vec<u8>> {
+        let from = position(from)?;
+        Ok(rmp_serde::to_vec_named(&self.changed_since(types, &from, limit)?).expect("an answer serializes"))
+    }
+
+    /// The sequence this unit commits as: what it writes is stamped with it. The unit holds the write transaction, so
+    /// no other commit can take it first
+    pub fn next_sequence(&mut self) -> Result<u64> {
+        // What a poisoned or ended unit refuses, as its other calls do
+        self.view(0.0)?;
+        let txn = self.txn.as_ref().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
+        self.store.next_sequence(txn)
+    }
+
     fn view(&mut self, now: f64) -> Result<Txn<'_, 'static>> {
         if let Some(error) = &self.poisoned {
             return Err(Error::new(
@@ -796,30 +1020,40 @@ impl Unit {
         };
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
+        run_point!(UNIT_COMMITTING);
         self.store.deposit(std::mem::take(&mut self.state.edges));
+        self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
+        self.writer = None;
+        self.ended = true;
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        let changes = finish_commit(
+        // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
+        let landed = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },
-        )?;
+        );
         if let Some(builders) = &self.builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(changes)
+        landed
     }
 
     /// Ends the unit, keeping nothing of it
     pub fn abort(&mut self) {
-        if self.txn.take().is_some() {
+        // The transaction first, and then its holds. A commit that panicked once it had taken the transaction has
+        // not told the store, which is told here as the unit is dropped
+        self.txn = None;
+        if !self.ended {
             self.gate = None;
+            self.writer = None;
+            self.ended = true;
             self.store.end_unit();
         }
     }
@@ -839,6 +1073,10 @@ impl Drop for Unit {
         self.abort();
     }
 }
+
+/// How many times what the database holds a full rebuild asks the map to be before it begins: it deletes every
+/// derived key and writes each again in one unit, where a page freed is no room until the unit commits
+const REBUILD_ROOM: usize = 3;
 
 #[cfg(test)]
 mod tests;

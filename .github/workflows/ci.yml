@@ -1,16 +1,20 @@
 name: CI
 
-# Every push to main runs the Linux checks (`checks`, `heap`, `repo`). A draft pull request runs the fast tier: those, and the binding's suites on
-# Apple silicon and Windows. A pull request ready for review, and a dispatch, run the full tier: every target the binding
-# ships for (design.md, Packages), each building the binding and running every suite on it, and the instruction counts.
+# Every push to main runs the Linux checks (`checks`, `heap`, `repo`) and the concurrency models. A pull request, draft
+# or ready for review, and a dispatch run the fast tier: those, and the binding's suites on Apple silicon and Windows
+# (platforms.yml). The rest of what a pull request ready for review must pass, the full tier, is full.yml's: marking a
+# pull request ready starts that workflow and not this one, whose run of the same commit goes on, or stands.
 # A change to documentation alone runs nothing past `changes`, and a newer push to the same pull request or branch
-# cancels the run before it. `ci-pass` is the one check a merge waits on. Mutants of a pull request's change run beside
-# this, advisory, in mutants.yml.
+# cancels the run before it. `ci-pass` is the check a merge waits on, beside full.yml's `full-pass` and mutants.yml's
+# `mutants-pass`, for the mutants of a pull request's change.
+#
+# Every job has a time limit, so one that hangs ends there and not at GitHub's six hours: about twice the job's slowest
+# successful run among the 400 workflow runs of 2026-11-03 to 2026-11-11, rounded up to five minutes. A
+# platform carries its own among its target's fields, which platforms.yml reads.
 on:
   push:
     branches: [main]
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 
 concurrency:
@@ -21,13 +25,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the change holds anything but documentation, which no check reads, and which tier it runs
+  # Whether the change holds anything but documentation, which no check reads
   changes:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
-      full: ${{ steps.tier.outputs.full }}
-      platforms: ${{ steps.tier.outputs.platforms }}
     steps:
       # A pull request's merge commit and its first parent, the base it merges into
       - uses: actions/checkout@v4
@@ -47,20 +50,6 @@ jobs:
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
-      # A draft pull request's platforms are the fast tier's; everything else that runs platforms runs all of them
-      - id: tier
-        env:
-          DRAFT: ${{ github.event.pull_request.draft }}
-        run: |
-          fast='{"runner":"macos-15","target":"aarch64-apple-darwin"},{"runner":"windows-latest","target":"x86_64-pc-windows-msvc"}'
-          rest='{"runner":"macos-15-intel","target":"x86_64-apple-darwin"},{"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu"},{"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu"}'
-          if [ "$DRAFT" = true ]; then
-            echo "full=false" >> "$GITHUB_OUTPUT"
-            echo "platforms=[$fast]" >> "$GITHUB_OUTPUT"
-          else
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            echo "platforms=[$fast,$rest]" >> "$GITHUB_OUTPUT"
-          fi
 
   # The Linux checks, split three ways so they run beside each other: lint and the suites; the heap test and the
   # benchmarks' smoke run; the repository's own checks and the binding
@@ -69,6 +58,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -93,6 +83,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain
@@ -110,6 +101,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -144,6 +136,7 @@ jobs:
           node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
           python3 -B scripts/test-read-profile.py
           python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
+          node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 > "$RUNNER_TEMP/against-sqlite.json"
       - name: preserve read measurement reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -152,6 +145,7 @@ jobs:
           path: |
             ${{ runner.temp }}/read-allocations.json
             ${{ runner.temp }}/read-codecs.json
+            ${{ runner.temp }}/against-sqlite.json
           if-no-files-found: error
       - name: process claim without an account, home directory or proc mount
         run: python3 scripts/check-process-claim-linux.py
@@ -166,6 +160,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg loom
       LOOM_MAX_PREEMPTIONS: 3
@@ -182,6 +177,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     env:
       RUSTFLAGS: --cfg shuttle
       CARGO_TARGET_DIR: target/shuttle
@@ -191,188 +187,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model engine::builder::model
 
-  # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
-  # the runner's load, so the step summary shows what the change costs. Reported, never a failure
-  instructions:
-    name: instruction counts (Linux)
-    needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    steps:
-      # The merge commit and its first parent, the base it merges into
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 2
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: gungraun-runner@0.20.0
-      - run: python3 scripts/instruction-counts.py HEAD^1
-        env:
-          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
-      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: instruction-counts-gungraun
-          path: ${{ runner.temp }}/gungraun
-          if-no-files-found: ignore
-          # Read soon after the failure it explains, so not kept the repository's 90 days
-          retention-days: 7
-
-  # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
-  # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
-  diagnostics:
-    name: diagnostics overhead (Linux)
-    needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: gungraun-runner@0.20.0
-      - run: python3 scripts/diagnostics-overhead.py
-        env:
-          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
-      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: diagnostics-overhead-gungraun
-          path: ${{ runner.temp }}/gungraun
-          if-no-files-found: ignore
-          # Read soon after the failure it explains, so not kept the repository's 90 days
-          retention-days: 7
-
   platforms:
-    name: ${{ matrix.target }} on Node 22.17.0
     needs: changes
     if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(needs.changes.outputs.platforms) }}
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22.17.0
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.148
-      - run: cargo nextest run --workspace --profile ci
-      # On Windows, @napi-rs/cli 3.10.9's build times out on its own filesystem-reconciliation lock, so the binding
-      # is built by cargo and named as napi's loader expects; everywhere else napi builds it
-      - name: binding
-        shell: bash
-        run: |
-          npm ci
-          if [ "$RUNNER_OS" = Windows ]; then
-            cargo build -p elmdb-node --release
-            cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
-          else
-            npm run build
-          fi
-          npm test
-      # Reuse the exact same .node file: an ABI-stable binding must load without recompiling for another runtime.
-      - name: record the built binding identity
-        shell: bash
-        run: |
-          node scripts/runtime-binding.cjs record node-floor
-          node scripts/check-runtime-binding.cjs
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - name: Node 24 loads the existing binding and runs the binding suite
-        shell: bash
-        run: |
-          node scripts/runtime-binding.cjs verify node24
-          npm test
-      # The app currently pins Electron 37.2.4. This runs Node's test runner inside that Electron executable,
-      # not Electron's npm launcher under the setup-node runtime. No app windows or developer profiles are used.
-      - name: Electron 37.2.4 loads the existing binding and runs the binding suite
-        shell: bash
-        env:
-          ELECTRON_RUN_AS_NODE: '1'
-        run: |
-          npm exec --yes --package=electron@37.2.4 -- electron scripts/runtime-binding.cjs verify electron
-          npm exec --yes --package=electron@37.2.4 -- electron --test "crates/elmdb-node/test/**/*.test.mjs"
+    uses: ./.github/workflows/platforms.yml
+    with:
+      targets: >-
+        [{"runner":"macos-15","target":"aarch64-apple-darwin","timeout":30},
+        {"runner":"windows-latest","target":"x86_64-pc-windows-msvc","timeout":30}]
 
-  # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
-  # and run every suite in a node:23-alpine container of the runner's own architecture. The toolchain, the registry and
-  # the build are cached on the runner and mounted in, and nextest is its released musl binary, checked against the
-  # release's own checksum
-  musl:
-    name: ${{ matrix.target }}
-    needs: changes
-    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.full == 'true' && github.event_name != 'push'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            nextest-sha256: bf92cb81450872d960ffa13857a83084d557ec0cdc141663d263bb23ef756f97
-          - runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-            nextest-sha256: 94676506ceaed01746d78cfe9ed124ee841b2932fd18d9d10f438a347bd9ba5e
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ${{ runner.temp }}/musl-cache
-            target
-          key: musl-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
-          restore-keys: musl-${{ matrix.target }}-
-      - name: every suite, in Alpine
-        env:
-          TARGET: ${{ matrix.target }}
-          NEXTEST_SHA256: ${{ matrix.nextest-sha256 }}
-        run: |
-          cache=$RUNNER_TEMP/musl-cache
-          mkdir -p "$cache/rustup" "$cache/registry" "$cache/git"
-          docker run --rm -v "$PWD:/w" -w /w \
-            -v "$cache/rustup:/root/.rustup" \
-            -v "$cache/registry:/root/.cargo/registry" \
-            -v "$cache/git:/root/.cargo/git" \
-            -e TARGET -e NEXTEST_SHA256 -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR \
-            node:23-alpine sh -euc '
-            apk add --no-cache bash curl git build-base
-            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
-            export PATH="$HOME/.cargo/bin:$PATH"
-            # The runner builds for its own architecture, where the native gcc links musl binaries
-            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
-            git config --global --add safe.directory /w
-            rustup show active-toolchain
-            archive=cargo-nextest-0.9.148-$TARGET.tar.gz
-            curl --proto "=https" --tlsv1.2 -sSfLO "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/$archive"
-            echo "$NEXTEST_SHA256  $archive" | sha256sum -c -
-            tar -xzf "$archive" -C "$HOME/.cargo/bin" && rm "$archive"
-            cargo nextest run --workspace --profile ci
-            npm ci
-            npm run build
-            npm test
-          '
-          # The container writes as root; the cache is saved by the runner's user
-          sudo chown -R "$(id -u):$(id -g)" "$cache" target
-
-  # The one check a merge waits on: every job above passed or was skipped (a documentation-only change, or the full
-  # tier's jobs on a draft)
+  # The check a merge waits on: every job above passed or was skipped (a documentation-only change, or the platforms on
+  # a push to main). A dispatch reports under another name: it runs the branch's tip and not the merge, on the commit
+  # the pull request's run reports on, where its pass would otherwise replace that run's failure
   ci-pass:
+    name: ${{ github.event_name != 'workflow_dispatch' && 'ci-pass' || 'CI (dispatched, not a merge gate)' }}
     if: always()
-    needs: [changes, checks, heap, repo, loom, shuttle, instructions, diagnostics, platforms, musl]
+    needs: [changes, checks, heap, repo, loom, shuttle, platforms]
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
       - env:
           RESULTS: ${{ join(needs.*.result, ' ') }}

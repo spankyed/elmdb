@@ -97,3 +97,541 @@ fn the_sequence_follows_what_the_database_holds() {
     let (_, changes) = db.write(&batch(vec![]), false).unwrap();
     assert_eq!(changes.sequence, 42);
 }
+
+/// What another process leaves: one commit, naming a task, and it has gone
+#[test]
+#[ignore = "run by commit_elsewhere, as a process of its own"]
+fn child_commits_a_task() {
+    let Ok(path) = std::env::var("ELMDB_ELSEWHERE_DB") else { return };
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    write(&db, vec![large_task("Task-elsewhere")]).unwrap();
+    db.close().unwrap();
+}
+
+/// Runs `child_commits_a_task` against the database in `dir`, and waits for it to end
+fn commit_elsewhere(dir: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_commits_a_task",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_ELSEWHERE_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the other process failed");
+}
+
+#[test]
+fn a_handle_learns_that_another_process_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![large_task("Task-mine")]).unwrap();
+    assert!(!db.committed_elsewhere().unwrap(), "nothing yet");
+    commit_elsewhere(&dir);
+
+    assert!(db.committed_elsewhere().unwrap(), "another process committed");
+    assert!(!db.committed_elsewhere().unwrap(), "and nothing since this asked");
+    write(&db, vec![large_task("Task-after")]).unwrap();
+    assert!(!db.committed_elsewhere().unwrap(), "a commit here is never another's");
+}
+
+#[test]
+fn a_handles_own_commits_of_every_kind_are_never_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![large_task("Task-1"), large_task("Task-2")]).unwrap();
+    write(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" })]).unwrap();
+    let unit = db.begin().unwrap();
+    unit.commit(false).unwrap();
+    db.store().unwrap().write(|_, _| Ok(()), false).unwrap();
+    assert!(!db.committed_elsewhere().unwrap());
+}
+
+/// A commit here that finds another's commit before it, whose wake this handle never heard, tells its listener
+#[test]
+fn a_commit_here_after_an_unheard_one_elsewhere_wakes_this_handles_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    commit_elsewhere(&dir);
+    // Listening only now: the other process's wake went to nobody
+    let (told, heard) = std::sync::mpsc::channel();
+    db.hear_commits_elsewhere(std::sync::Arc::new(move || told.send(()).unwrap())).unwrap();
+    write(&db, vec![large_task("Task-here")]).unwrap();
+    heard.recv_timeout(Duration::from_secs(10)).expect("woken by its own commit");
+    assert!(db.committed_elsewhere().unwrap());
+}
+
+#[test]
+fn a_unit_sees_its_own_changes_before_it_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![large_task("Task-pending")])).unwrap();
+    assert!(unit.pending_changes().unwrap().entities.contains_key("Task-pending"));
+    let decoded: crate::ChangeSet = rmp_serde::from_slice(&unit.pending_changes_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, unit.pending_changes().unwrap(), "what the binding reads, in msgpack");
+    unit.commit(false).unwrap();
+}
+
+/// Replaces every row of the database `ELMDB_RESET_DB` names, from a process of its own
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_resets_the_database() {
+    let Ok(path) = std::env::var("ELMDB_RESET_DB") else { return };
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    db.reset().unwrap();
+    db.close().unwrap();
+}
+
+fn reset_elsewhere(dir: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_resets_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_RESET_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the resetting process failed");
+}
+
+/// Replaces every row of the database in `dir` with the one in `source`, from a process of its own
+fn replace_elsewhere(dir: &tempfile::TempDir, source: &tempfile::TempDir) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_replaces_the_database",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_REPLACE_DB", dir.path())
+        .env("ELMDB_REPLACE_FROM", source.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the replacing process failed");
+}
+
+const A_TASK: fn(&str) -> serde_json::Value =
+    |id| json!({ "op": "create", "type": "Task", "id": id, "fields": { "title": "t" } });
+
+/// Replaces every row of the database `ELMDB_REPLACE_DB` names with the database `ELMDB_REPLACE_FROM` names
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_replaces_the_database() {
+    let Ok(path) = std::env::var("ELMDB_REPLACE_DB") else { return };
+    let from = std::env::var("ELMDB_REPLACE_FROM").unwrap();
+    let db = Database::open(std::path::Path::new(&path), OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    db.replace_with(from).unwrap();
+    db.close().unwrap();
+}
+
+#[test]
+fn a_replace_with_in_another_process_refuses_commits_here_as_a_reset_does() {
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-copied")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    replace_elsewhere(&dir, &source);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    assert!(db.adopt_replacement(epoch).unwrap());
+    write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn a_unit_stamps_only_what_it_wrote_after_a_write_refused_for_a_replacement() {
+    use crate::engine::changed::Position;
+    // Tasks keep a change order, so a commit stamps the Tasks its write touched
+    let open = |dir: &tempfile::TempDir| {
+        let mut json = super::schema_json();
+        json["types"]["Task"]["changeOrder"] = json!(true);
+        let schema = crate::schema::Schema::from_json(&json).unwrap();
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
+    };
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-1")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    replace_elsewhere(&dir, &source);
+    // A write of Task-1 is refused as it commits, having told the store what it touched
+    let retitled = json!({ "op": "set", "id": "Task-1", "fields": { "title": "refused" } });
+    assert_eq!(db.write(&batch(vec![retitled]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert!(db.adopt_replacement(epoch).unwrap());
+    let before = db.sequence().unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-2")])).unwrap();
+    unit.commit(false).unwrap();
+    let changed = db.changed_since(&["Task".to_owned()], &Position { sequence: before, after: None }, 10).unwrap();
+    assert_eq!(
+        changed.ids,
+        ["Task-2"],
+        "the unit's commit moved what the unit wrote, and not what the refused write did"
+    );
+    assert_eq!(super::row(&db, "Task-1").unwrap()["title"], "t");
+}
+
+#[test]
+fn adopting_a_replacement_another_has_followed_adopts_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    reset_elsewhere(&dir);
+    let first = db.replaced_elsewhere().unwrap().expect("replaced");
+    reset_elsewhere(&dir);
+    assert!(!db.adopt_replacement(first).unwrap(), "the second reset is news the caller hasn't acted on");
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-1")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let second = db.replaced_elsewhere().unwrap().expect("still replaced");
+    assert!(second > first);
+    assert!(db.adopt_replacement(second).unwrap());
+    write(&db, vec![A_TASK("Task-2")]).unwrap();
+}
+
+#[test]
+fn a_reset_here_that_failed_vouches_for_no_reset_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
+    assert!(db.reset().is_err(), "the commit failed as a full disk would");
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    reset_elsewhere(&dir);
+    assert_eq!(
+        db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err().code,
+        ErrorCode::DataReplaced,
+        "the failed reset's epoch is the one the other process stored"
+    );
+}
+
+#[test]
+fn a_write_refused_for_a_replacement_leaves_nothing_for_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    reset_elsewhere(&dir);
+    assert_eq!(db.write(&batch(vec![A_TASK("Task-refused")]), false).unwrap_err().code, ErrorCode::DataReplaced);
+    let epoch = db.replaced_elsewhere().unwrap().unwrap();
+    assert!(db.adopt_replacement(epoch).unwrap());
+    write(&db, vec![A_TASK("Task-next")]).unwrap();
+    assert!(super::row(&db, "Task-refused").is_none());
+    assert!(super::row(&db, "Task-next").is_some());
+}
+
+#[test]
+fn a_reset_in_another_process_refuses_commits_here_until_it_is_adopted() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+
+    reset_elsewhere(&dir);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    let refused = db.write(&batch(vec![A_TASK("Task-2")]), false).unwrap_err();
+    assert_eq!(refused.code, ErrorCode::DataReplaced);
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-3")])).unwrap();
+    assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::DataReplaced, "a unit opened after it too");
+    assert!(
+        db.read(&serde_json::from_value(json!({"reads":[{"read":"query","plan":{"start":{"from":"types","types":["Task"]},"terminal":{"answer":"ids"}}}]})).unwrap()).is_ok(),
+        "reads carry on, over what's there now"
+    );
+
+    assert!(db.adopt_replacement(epoch).unwrap());
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-4")]).unwrap();
+}
+
+#[test]
+fn a_reset_here_goes_on_taking_commits_and_says_nothing_of_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    db.reset().unwrap();
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-2")]).unwrap();
+    db.reset().unwrap();
+    write(&db, vec![A_TASK("Task-3")]).unwrap();
+}
+
+#[test]
+fn a_replacement_counts_for_a_process_that_opened_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        db.reset().unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    assert_eq!(db.replaced_elsewhere().unwrap(), None);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+}
+
+#[test]
+fn a_failed_reset_leaves_the_handle_refusing_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let mut unit = db.begin().unwrap();
+    assert!(db.reset().is_err(), "a unit holds the write transaction");
+    unit.abort();
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+}
+
+/// Holds a unit open on the database `ELMDB_UNIT_DB` names, having written in it, until it is killed; says so by
+/// creating `holding` beside it
+#[test]
+#[ignore = "a helper the tests below run as another process"]
+fn child_holds_a_unit_until_killed() {
+    let Ok(path) = std::env::var("ELMDB_UNIT_DB") else { return };
+    let path = std::path::PathBuf::from(path);
+    let db = Database::open(&path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.write(&batch(vec![A_TASK("Task-held")])).unwrap();
+    std::fs::write(path.join("holding"), b"").unwrap();
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Another process holding a unit open on `dir`, ready once it has written in it
+fn a_writer_holding_a_unit(dir: &tempfile::TempDir) -> std::process::Child {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_holds_a_unit_until_killed",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_UNIT_DB", dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let holding = dir.path().join("holding");
+    let started = std::time::Instant::now();
+    while !holding.exists() {
+        assert!(started.elapsed() < Duration::from_secs(30), "the other process never held its unit");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+}
+
+#[test]
+fn a_writer_killed_inside_a_unit_leaves_the_write_lock_to_the_next_while_another_holds_the_database_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let mut child = a_writer_holding_a_unit(&dir);
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let writing = std::sync::Arc::clone(&db);
+    within_ten_seconds(move || write(&writing, vec![A_TASK("Task-after")]).unwrap());
+    assert!(super::row(&db, "Task-held").is_none(), "the killed unit committed nothing");
+}
+
+#[test]
+fn a_writer_waiting_when_the_holder_is_killed_is_let_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let mut child = a_writer_holding_a_unit(&dir);
+    let (done, finished) = mpsc::channel();
+    let writing = std::sync::Arc::clone(&db);
+    std::thread::spawn(move || {
+        let _ = done.send(write(&writing, vec![A_TASK("Task-waiting")]).map(|_| ()));
+    });
+    assert!(finished.recv_timeout(Duration::from_millis(300)).is_err(), "it waits while the holder is alive");
+    child.kill().unwrap();
+    child.wait().unwrap();
+    finished.recv_timeout(Duration::from_secs(10)).expect("let go once the holder died").unwrap();
+}
+
+/// Asks which process holds the record lock LMDB keeps on the first byte of the lock file `ELMDB_LOCK_FILE` names, by
+/// which an opener knows it isn't the first, printing its process id or 0. Readers' locks, one byte at each reader's
+/// process id, are left out of the question
+#[cfg(unix)]
+#[test]
+#[ignore = "a helper the test below runs as another process"]
+fn child_asks_who_holds_the_lock_file() {
+    let Ok(path) = std::env::var("ELMDB_LOCK_FILE") else { return };
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new().read(true).write(true).open(path).unwrap();
+    // SAFETY: a zeroed `flock` is a valid query for the whole file once its type and whence are set
+    let mut query: libc::flock = unsafe { std::mem::zeroed() };
+    query.l_type = libc::F_WRLCK as libc::c_short;
+    query.l_whence = libc::SEEK_SET as libc::c_short;
+    query.l_start = 0;
+    query.l_len = 1;
+    // SAFETY: the descriptor is open, and F_GETLK writes only into `query`
+    assert_eq!(unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &mut query) }, 0);
+    let unlocked = query.l_type == libc::F_UNLCK as libc::c_short;
+    println!("holder={}", if unlocked { 0 } else { query.l_pid });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_writing_handle_keeps_the_lock_lmdb_holds_on_its_lock_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "engine::tests::lifecycle::child_asks_who_holds_the_lock_file",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("ELMDB_LOCK_FILE", dir.path().join("lock.mdb"))
+        .output()
+        .unwrap();
+    let printed = String::from_utf8_lossy(&output.stdout);
+    // The test harness prints its own words on the same line
+    let holder = printed.split("holder=").nth(1).and_then(|rest| rest.split_whitespace().next()).unwrap_or_else(|| {
+        panic!("the other process didn't answer: {printed} {}", String::from_utf8_lossy(&output.stderr))
+    });
+    assert_eq!(holder, std::process::id().to_string(), "the next opener would otherwise take itself for the first");
+}
+
+#[test]
+fn a_panic_that_unwinds_through_a_write_or_a_unit_leaves_the_database_to_be_written_and_closed() {
+    use crate::failpoints::{self, points};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    let task = |id: &str| vec![json!({ "op": "create", "type": "Task", "id": id })];
+    for point in [points::WRITE_HELD, points::UNIT_RESERVED, points::UNIT_HELD, points::UNIT_COMMITTING] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, task("Task-before")).unwrap();
+        failpoints::run_once_here(point, || panic!("a panic the test raised"));
+        let unwound = catch_unwind(AssertUnwindSafe(|| {
+            if point == points::WRITE_HELD {
+                write(&db, task("Task-lost")).unwrap();
+            } else {
+                let mut unit = db.begin().unwrap();
+                unit.write(&batch(task("Task-lost"))).unwrap();
+                unit.commit(false).unwrap();
+            }
+        }));
+        assert!(unwound.is_err() && !failpoints::is_armed_here(point), "{point}: the panic was raised there");
+        // The write transaction, the unit's place and the gate were let go as the panic unwound: a unit begins, a
+        // write lands, what the panic interrupted is not there, and the database closes and opens again
+        let mut unit = db.begin().unwrap_or_else(|error| panic!("{point}: {error}"));
+        unit.write(&batch(task("Task-unit"))).unwrap();
+        unit.commit(false).unwrap();
+        write(&db, task("Task-after")).unwrap();
+        assert!(super::row(&db, "Task-lost").is_none(), "{point}");
+        assert!(db.check().unwrap().is_clean(), "{point}");
+        db.close().unwrap_or_else(|error| panic!("{point}: {error}"));
+        let again = open(&dir);
+        assert!(super::row(&again, "Task-after").is_some() && super::row(&again, "Task-before").is_some(), "{point}");
+    }
+}
+
+#[test]
+fn a_data_file_cut_short_of_pages_its_trees_reach_is_refused_and_left_as_it_is() {
+    // A power loss can leave the trees' pages unwritten at the end of the file. The open reads the file's trees by seeks
+    // and refuses it, whichever way it is opened, without changing it: nothing is extended and nothing is mapped past its end
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        for n in 0..200 {
+            let task = json!({ "op": "create", "type": "Task", "id": format!("Task-{n}"), "fields": { "c": "x".repeat(2000) } });
+            write(&db, vec![task]).unwrap();
+        }
+        db.close().unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let whole = std::fs::metadata(&data).unwrap().len();
+    // Cut to whole 4 KiB pages: heed refuses a read-only open of a length that is not one on Windows, before the walk runs
+    std::fs::OpenOptions::new().write(true).open(&data).unwrap().set_len(whole / 2 / 4096 * 4096).unwrap();
+    let writable =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() })
+            .err()
+            .expect("a writable open refuses the cut file");
+    assert_eq!(writable.code, ErrorCode::Corrupted, "{writable}");
+    let read_only = Database::open(
+        dir.path(),
+        OpenOptions { schema: Some(schema()), syncs: false, read_only: true, ..Default::default() },
+    )
+    .err()
+    .expect("a read-only open refuses the cut file");
+    assert_eq!(read_only.code, ErrorCode::Corrupted, "{read_only}");
+    assert_eq!(std::fs::metadata(&data).unwrap().len(), whole / 2 / 4096 * 4096, "the file is left as it was");
+}
+
+#[test]
+fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for() {
+    use crate::failpoints::{self, points};
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    let task = |id: &str| json!({ "op": "create", "type": "Task", "id": id });
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+    // The mirror holds the store's edges as of now, the lists of the two entities the writes link from among them, so
+    // each commit after is applied to it
+    let mirror = db.store().unwrap().mirror();
+    let at = db.sequence().unwrap();
+    mirror.lock().at(at);
+    for id in ["Task-1", "Task-2"] {
+        db.snapshot(|s| mirror.lock().visit_far_ends(s, at, id, true, "refs", |_, _| {})).unwrap();
+    }
+    assert_eq!(mirror.lock().held(), 2);
+    let link = |source: &str, target: &str| json!({ "op": "link", "source": source, "kind": "refs", "target": target });
+    // The first writer's commit lands, which lets LMDB's write lock go, and it stops there, before the store has
+    // handed its edges to the mirror
+    let (landed, has_landed) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let first = {
+        let (db, edge) = (std::sync::Arc::clone(&db), link("Task-1", "Task-2"));
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::COMMIT_LANDED, move || {
+                landed.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            write(&db, vec![edge]).unwrap();
+        })
+    };
+    has_landed.recv_timeout(Duration::from_secs(10)).expect("the first write's commit landed");
+    // A second writer, on another thread, reaches the store and waits its turn, though LMDB's lock is free by now
+    let (at_the_store, is_at_the_store) = mpsc::channel();
+    let (done, is_done) = mpsc::channel();
+    let second = {
+        let (db, edge) = (std::sync::Arc::clone(&db), link("Task-2", "Task-3"));
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::WRITE_RESERVATION, move || at_the_store.send(()).unwrap());
+            write(&db, vec![edge]).unwrap();
+            done.send(()).unwrap();
+        })
+    };
+    is_at_the_store.recv_timeout(Duration::from_secs(10)).expect("the second write reached the store");
+    assert!(
+        is_done.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the second write committed while the first had yet to account for its own"
+    );
+    go_on.send(()).unwrap();
+    is_done.recv_timeout(Duration::from_secs(10)).expect("the second write goes on once the first is done");
+    first.join().unwrap();
+    second.join().unwrap();
+    // Each commit reached the mirror in its order, with its own edges: the mirror is at the last, and the lists it
+    // held are the store's, which `check()` compares
+    assert_eq!(mirror.lock().sequence(), Some(db.sequence().unwrap()));
+    assert_eq!(mirror.lock().held(), 2, "no commit emptied it");
+    assert_eq!(super::edges(&db), ["Task-1|refs|Task-2", "Task-2|refs|Task-3"]);
+    let report = db.check().unwrap();
+    assert!(report.is_clean(), "{report:?}");
+}

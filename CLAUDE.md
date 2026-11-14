@@ -15,7 +15,16 @@ read `docs/architecture/design.md` before changing anything, and the document th
 
 ## Checks
 
-Run what your change touches, and all of them before a commit that lands an engine change:
+Before a push, run every check CI fails a change on that this machine can run, in one command that stops at the first
+failure. It checks what is committed, and refuses a tree with uncommitted changes:
+
+```bash
+cargo xtask pre-push              # cheapest first; --base REF when the branch merges into another than origin/main
+```
+
+What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings.
+
+While working, run what your change touches:
 
 ```bash
 cargo fmt --all --check
@@ -25,19 +34,33 @@ cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
-cargo xtask check-mutant-exclusions  # every exclude_re in .cargo/mutants.toml still names a mutant (needs cargo-mutants)
+cargo xtask check-mutant-exclusions  # every `// mutant-skip:` and exclude_re still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
+cargo xtask check-diagnostics-off && cargo xtask check-leiden-serial  # what the dependency tree may hold
+python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BASE what it merges into; fails on a survivor
 ```
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
-- **Moved a line a `// mutant-skip:` excuses?** `cargo xtask mutant-exclusions`, and commit `.cargo/mutants.toml`.
+- **Moved a line a `// mutant-skip:` excuses?** Keep its comment directly above it, and that is all: the comment is the
+  exclusion, read from the source at each run, and no list of them is committed. A `cargo mutants` run by hand reads
+  them with `--config "$(cargo xtask mutant-exclusions)"`; `.cargo/mutants.toml` holds only exclusions naming no line.
+- **A mutant survived?** Kill it with a test that fails on it, or, when no input tells it from the code, name it in a
+  `// mutant-skip:` with why. A mutant in code this machine doesn't compile survives whatever the tests: macOS-only code
+  is read on a Mac, Linux-only and Windows-only code by CI, which mutates only what each runner compiles. Breaking a line
+  by hand checks the cases you thought of; the script checks the ones you didn't, so `pre-push` runs it before the push,
+  not after. Code no Rust test can ever reach, such as the binding's exports that only JavaScript calls, is excluded
+  once in `.cargo/mutants.toml` rather than skipped mutant by mutant.
+- **Stacking a pull request on another?** Run `cargo xtask pre-push` and clear the branch's survivors before branching
+  the next from it. A fix made under a stack is merged up through every branch above it, and each push there reruns
+  their CI: survivors cleared where the code was written cost minutes, cleared at the end of a stack, hours.
 - **Changed the binding's exports?** `npm run build` regenerates `index.js` and `index.d.ts`;
   commit them. CI fails when they differ from a fresh build.
-- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`. A draft pull request runs the fast
-  tier, adding Apple silicon and Windows; a pull request ready for review runs every target the binding ships for.
-  Open a pull request as a draft while iterating, mark it ready (`gh pr ready`) for the full tier, and merge when
-  `ci-pass`, the one required check, is green. Mutants of the change (`mutants (advisory)`) are read in their
-  summary, not waited on.
+- CI (`.github/workflows/ci.yml`) runs these on Linux for every push to `main`, and for every pull request with the
+  fast tier's platforms, Apple silicon and Windows. The full tier (`full.yml`), every other target the binding ships
+  for and the Valgrind readings, runs once a pull request is ready for review: marking it ready starts the full tier
+  and leaves the fast tier's run alone. Open a pull request as a draft while iterating, mark it ready (`gh pr ready`)
+  for the full tier, and merge when the three required checks are green: `ci-pass`, `full-pass`, and `mutants-pass`,
+  which a surviving mutant fails.
 
 The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supported Rust version.
 

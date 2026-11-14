@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import { Packr } from 'msgpackr';
 
 const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
@@ -94,9 +95,9 @@ test('durable() resolves once what was committed is on disk', async (t) => {
 test('rebuild() takes a type and an index, or neither', (t) => {
   const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
   for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
-    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
+    assert.throws(() => db.rebuildSync(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
   }
-  db.rebuild();
+  db.rebuildSync();
   db.close();
 });
 
@@ -132,4 +133,31 @@ test('an open refuses a sync or map option that is not a whole number in range, 
     assert.throws(() => Database.open(dir, { syncs: false, ...options }), { code: 'VALUE_INVALID' }, JSON.stringify(options));
   }
   Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
+});
+
+test("committedElsewhere is never a handle's own commit, a unit reads its pending changes, and a checkpoint commits with its unit", () => {
+  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
+  try {
+    const db = Database.open(join(dir, 'db'), { schema: {
+      $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
+    } });
+    db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
+    assert.equal(db.committedElsewhere(), false);
+
+    const unit = db.begin();
+    unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
+    assert.deepEqual(Object.keys(packr.unpack(unit.pendingChanges()).entities), ['Task-2']);
+    unit.abort();
+
+    const reading = db.begin();
+    reading.setCheckpoint('reader', Buffer.from('there'));
+    assert.equal(reading.checkpoint('reader').toString(), 'there');
+    assert.equal(db.checkpoint('reader'), null, 'not until it commits');
+    reading.commit();
+    assert.equal(db.checkpoint('reader').toString(), 'there');
+    db.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

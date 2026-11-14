@@ -19,15 +19,19 @@ static COLLECTOR: OnceLock<Arc<Collector>> = OnceLock::new();
 /// Starts keeping elmdb's spans for `takeDiagnostics`, for the rest of the process. Refused when the process already
 /// has a collector of another kind
 #[napi(js_name = "collectDiagnostics")]
-pub fn collect_diagnostics() -> napi::Result<()> {
-    if COLLECTOR.get().is_some() {
-        return Ok(());
-    }
-    let collector = Arc::new(Collector::new(KEPT));
-    tracing::subscriber::set_global_default(Arc::clone(&collector))
-        .map_err(|e| napi::Error::from_reason(format!("This process already collects diagnostics: {e}")))?;
-    let _ = COLLECTOR.set(collector);
-    Ok(())
+pub fn collect_diagnostics() -> napi::Result<(), crate::Code> {
+    crate::panics::guarded("collectDiagnostics", || {
+        if COLLECTOR.get().is_some() {
+            return Ok(());
+        }
+        let collector = Arc::new(Collector::new(KEPT));
+        tracing::subscriber::set_global_default(Arc::clone(&collector)).map_err(|e| {
+            let reason = format!("This process already collects diagnostics: {e}");
+            napi::Error::new(crate::Code("GenericFailure"), reason)
+        })?;
+        let _ = COLLECTOR.set(collector);
+        Ok(())
+    })
 }
 
 #[napi(object)]
@@ -41,7 +45,9 @@ pub struct Diagnostics {
 
 /// What `collectDiagnostics` kept since the last take
 #[napi(js_name = "takeDiagnostics")]
-pub fn take_diagnostics() -> Diagnostics {
-    let taken = COLLECTOR.get().map(|collector| collector.take()).unwrap_or_default();
-    Diagnostics { spans: taken.spans, dropped: taken.dropped as f64 }
+pub fn take_diagnostics() -> napi::Result<Diagnostics, crate::Code> {
+    crate::panics::guarded("takeDiagnostics", || {
+        let taken = COLLECTOR.get().map(|collector| collector.take()).unwrap_or_default();
+        Ok(Diagnostics { spans: taken.spans, dropped: taken.dropped as f64 })
+    })
 }

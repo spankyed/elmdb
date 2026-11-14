@@ -14,6 +14,13 @@ exclude_globs = [
     "crates/elmdb/src/sync/shuttle_primitives.rs",
     "crates/elmdb/src/engine/watch/model.rs",
     "crates/elmdb/src/engine/builder/model.rs",
+    # The binding's exports and the conversions they make for JavaScript: only JavaScript reaches them, its suite
+    # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
+    # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants
+    "crates/elmdb-node/src/lib.rs",
+    # The pool's jobs and the database's queue of writes: each runs when a promise is made by JavaScript, which only
+    # the binding's suite calls (`test/offthread.test.mjs`)
+    "crates/elmdb-node/src/jobs.rs",
 ]
 # A mutant of the engine is tested by the engine's suite, which the binding's and the CLI's add nothing to
 test_package = ["elmdb"]
@@ -26,7 +33,10 @@ output = "target"
 # Without debug info (`Cargo.toml`, profile.mutants): each job's copy is a fraction of a debug build's
 profile = "mutants"
 
-# Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`)
+# Mutants that answer exactly what the code answers, each with why (`docs/evidence/verification-tooling.md`). These
+# name no line. A mutant excused on its line is named by a `// mutant-skip:` comment above that line and nowhere here,
+# so a run reads `--config "$(cargo xtask mutant-exclusions)"`: this file with a pattern for each of those comments,
+# written to target/ and never committed (`docs/architecture/testing.md`, Mutation testing)
 exclude_re = [
     # The block a trigram's place is filed under is layout: the writes, the builds and check() all ask block_of, so any
     # function of the place answers the same, and only the file's size and a write's cost tell them apart
@@ -36,8 +46,8 @@ exclude_re = [
     "entities.rs:.*delete match arm \\[Some\\(v\\)\\] in unique_keys",
     # within's guard: the DFA is built for the distance within asks, and reports Exact only up to its own maximum
     "search.rs:.*replace match guard d <= distance with true in within",
-    # walk_type merges the trash into the live range by place, and no two entities share a place
-    "reads.rs:.*replace < with <= in Query<'_, R>::walk_type",
+    # walk_places merges the trash into the live range by place, and no two entities share a place
+    "reads.rs:.*replace < with <= in Query<'_, R>::walk_places",
     # The value spec refuses every extension but the timestamp, and every number that isn't finite, so no stored value
     # reaches these guards' other side
     "reads.rs:.*replace match guard \\*t == TIMESTAMP_EXTENSION with true in sort_key",
@@ -48,9 +58,10 @@ exclude_re = [
     "derive.rs:.*replace match guard matches!\\(e.code, ErrorCode::Unique \\| ErrorCode::ValueInvalid\\) with true in rebuild",
     # buildable_entry's own-entry skip: index_parts files each of an entity's values once, so an entity never meets its
     # own entry under one key
-    "derive.rs:.*replace match guard \\*other != id with true in buildable_entry",
-    # begin's growth when more than half the map is used: at exactly half, growing or not is a page's difference
-    "store/mod.rs:.*replace > with >= in Store::begin",
+    "derive.rs:.*replace match guard other != id with true in buildable_entry",
+    # A growth when the map is short of so many times what is in use: at exactly as many, growing or not is a
+    # page's difference
+    "store/mod.rs:.*replace > with >= in Store::map_short_of",
     # Disjoint flag bits, which | and ^ join alike: MoveFileExW's replace and write-through, GetModuleHandleExW's
     # from-address and pin
     "backup.rs:.*replace \\| with \\^ in move_file",
@@ -63,6 +74,16 @@ exclude_re = [
     # The binding's diagnostics experiment: installing elmdb's collector for the process and taking from it, each a call
     # of elmdb's tested Collector that needs Node, which `examples/diagnostics.mjs` runs and cargo-mutants doesn't
     "elmdb-node/src/diagnostics.rs:.*replace (collect_diagnostics|take_diagnostics) -> ",
+    # The panic a test asks an export for, by a variable of the process read once: `test/panics.test.mjs` starts a
+    # process for each export to hold it, and no test of this process can ask twice
+    "elmdb-node/src/panics.rs:.* in asked_for",
+    "elmdb-node/src/panics.rs:.*replace asked_for with ",
+    # The closes made as an environment or the process ends, which only a Node process that ends reaches:
+    # `test/exit.test.mjs` holds them, by the semaphores a database left open would leave
+    "elmdb-node/src/exit.rs:.*replace (close_at_process_exit|close_at_exit|opened) ",
+    # An export's answer made of a caught panic: a napi error, which a test binary can't link the dropping of
+    # without Node (`napi_delete_reference`). `test/panics.test.mjs` holds each through every export
+    "elmdb-node/src/panics.rs:.*replace (guarded|Health::guarded|Health::unrefused) -> ",
     # A stored value streamed, which every one is with the guard false or the one-call size made 0: the stream
     # decompresses the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
     "values.rs:.*replace match guard size <= ONE_CALL_UP_TO with false in decompress",
@@ -86,68 +107,4 @@ exclude_re = [
     # Abandoning the builder as the process exits: without it `Drop` stops the thread and joins it, which matters only
     # where a join at exit could hang, and no test here runs a process to its exit
     "builder.rs:.*replace Builder::abandon with \\(\\)",
-    # BEGIN generated by `cargo xtask mutant-exclusions` from each `// mutant-skip:` comment, which holds its reason
-    "crates/elmdb/src/engine/builder.rs:400:.*delete match arm Some\\(super::ranks::Applied::Written\\{waiting\\}\\) in build_rank",
-    "crates/elmdb/src/engine/derive/sorted.rs:15:.*replace \\* with",
-    "crates/elmdb/src/engine/derive.rs:615:.*replace == with != in build_chunk",
-    "crates/elmdb/src/engine/entities.rs:365:.*replace == with != in check_unique",
-    "crates/elmdb/src/engine/mirror.rs:59:.*delete -",
-    "crates/elmdb/src/engine/mirror.rs:166:.*replace > with >= in EdgeMirror::commit",
-    "crates/elmdb/src/engine/mod.rs:80:.*delete ! in drain_commits",
-    "crates/elmdb/src/engine/ranks.rs:367:.*in Change<'i, 'a>::get",
-    "crates/elmdb/src/engine/ranks.rs:384:.*replace > with >= in Change<'i, 'a>::set",
-    "crates/elmdb/src/engine/ranks.rs:489:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
-    "crates/elmdb/src/engine/ranks.rs:494:.*replace \\* with (\\+|/) in Change<'i, 'a>::reweigh_arc",
-    "crates/elmdb/src/engine/ranks.rs:498:.*replace > with >= in Change<'i, 'a>::reweigh_arc",
-    "crates/elmdb/src/engine/ranks.rs:607:.*replace == with != in Change<'i, 'a>::finish",
-    "crates/elmdb/src/engine/ranks.rs:627:.*replace > with >= in Change<'i, 'a>::finish",
-    "crates/elmdb/src/engine/ranks.rs:638:.*replace > with >= in Change<'i, 'a>::finish",
-    "crates/elmdb/src/engine/ranks.rs:728:.*replace match guard after.is_some\\(\\) with (true|false) in push",
-    "crates/elmdb/src/engine/ranks.rs:737:.*replace > with >= in push",
-    "crates/elmdb/src/engine/ranks.rs:788:.*replace Drained::is_stale -> Result<bool> with Ok\\(false\\)",
-    "crates/elmdb/src/engine/ranks.rs:815:.*replace > with >= in Drained::write",
-    "crates/elmdb/src/engine/ranks.rs:852:.*in plan",
-    "crates/elmdb/src/engine/ranks.rs:856:.*in plan",
-    "crates/elmdb/src/engine/ranks.rs:858:.*in plan",
-    "crates/elmdb/src/engine/ranks.rs:861:.*in plan",
-    "crates/elmdb/src/engine/ranks.rs:885:.*replace > with >= in plan",
-    "crates/elmdb/src/engine/ranks.rs:885:.*replace < with <= in plan",
-    "crates/elmdb/src/engine/ranks.rs:887:.*in plan",
-    "crates/elmdb/src/engine/ranks.rs:924:.*replace > with >= in plan",
-    "crates/elmdb/src/engine/ranks.rs:926:.*replace > with >= in plan",
-    "crates/elmdb/src/engine/ranks.rs:980:.*replace > with >= in Sweep::push",
-    "crates/elmdb/src/engine/ranks.rs:982:.*replace > with >= in Sweep::push",
-    "crates/elmdb/src/engine/ranks.rs:1033:.*replace > with >= in Reached::add",
-    "crates/elmdb/src/engine/ranks.rs:1134:.*replace > with >= in Reached::sweep_all",
-    "crates/elmdb/src/engine/ranks.rs:1134:.*replace < with <= in Reached::sweep_all",
-    "crates/elmdb/src/engine/ranks.rs:1154:.*replace \\+= with \\*= in Reached::sweep_all",
-    "crates/elmdb/src/engine/ranks.rs:1202:.*replace Reached::arcs -> Result<Option<Vec<\\(usize, f64\\)>>> with Ok\\(None\\)",
-    "crates/elmdb/src/engine/ranks.rs:1231:.*in Reached::arcs",
-    "crates/elmdb/src/engine/ranks.rs:1280:.*replace > with >= in owes_work",
-    "crates/elmdb/src/engine/ranks.rs:1410:.*replace > with >= in unfinished",
-    "crates/elmdb/src/engine/ranks.rs:1410:.*replace && with \\|\\| in unfinished",
-    "crates/elmdb/src/engine/ranks.rs:1487:.*in violations",
-    "crates/elmdb/src/engine/ranks.rs:1500:.*in violations",
-    "crates/elmdb/src/engine/ranks.rs:1539:.*in violations",
-    "crates/elmdb/src/engine/ranks.rs:1541:.*in violations",
-    "crates/elmdb/src/engine/ranks.rs:1556:.*in violations",
-    "crates/elmdb/src/engine/ranks.rs:1568:.*in violations",
-    "crates/elmdb/src/engine/reads.rs:944:.*replace > with < in Query<'_, R>::stage",
-    "crates/elmdb/src/engine/reads.rs:946:.*replace - with / in Query<'_, R>::stage",
-    "crates/elmdb/src/engine/reads.rs:970:.*delete ! in Query<'_, R>::stage",
-    "crates/elmdb/src/engine/reads.rs:1244:.*replace \\+ with \\* in Query<'_, R>::nearest",
-    "crates/elmdb/src/engine/reads.rs:1447:.*replace >= with < in Query<'_, R>::first_ordered",
-    "crates/elmdb/src/engine/reads.rs:1450:.*replace == with != in Query<'_, R>::first_ordered",
-    "crates/elmdb/src/engine/text/search.rs:68:.*replace > with >= in parse",
-    "crates/elmdb/src/engine/text/search.rs:314:.*replace > with >= in expand",
-    "crates/elmdb/src/engine/text/search.rs:319:.*replace > with >= in expand",
-    "crates/elmdb/src/engine/text/search.rs:432:.*replace &= with \\|= in search",
-    "crates/elmdb/src/engine/text/search.rs:438:.*replace > with >= in search",
-    "crates/elmdb/src/engine/text/search.rs:604:.*replace > with >= in suggest",
-    "crates/elmdb/src/engine/values.rs:47:.*replace (< with <=|\\+ with -|\\+ with \\*) in stored",
-    "crates/elmdb/src/engine/values.rs:77:.*replace << with >>",
-    "crates/elmdb/src/store/backup.rs:103:.*replace & with \\| in move_file",
-    "crates/elmdb/src/store/sync.rs:333:.*replace > with >= in run",
-    "crates/elmdb/src/store/sync.rs:349:.*replace match guard !shared.clock.is_manual\\(\\) with true in run",
-    # END generated
 ]

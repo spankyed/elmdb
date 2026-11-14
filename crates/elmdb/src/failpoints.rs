@@ -62,8 +62,29 @@ pub(crate) mod points {
     pub const STAMP: &str = "store::stamp";
     /// Writing the reset checkpoint fails
     pub const RESET_CHECKPOINT: &str = "store::reset_checkpoint";
+    /// Runs in a reset's checkpoint, once it has its turn to write and before it takes the write transaction
+    pub const RESET_CLAIMING: &str = "store::reset_claiming";
+    /// Runs in an open once it holds the snapshot the data file's trees are read at, before it reads that commit's
+    /// meta page from the file
+    pub const OPEN_SNAPSHOT: &str = "store::open_snapshot";
+    /// Runs in an open once the data file's trees have been read, before a file found short is extended
+    pub const OPEN_WALKED: &str = "store::open_walked";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
+    /// Runs once a commit has landed and LMDB's write lock has gone with it, before the store hands the commit's
+    /// edges to the mirror
+    pub const COMMIT_LANDED: &str = "store::commit_landed";
+    /// Runs in a write, once it holds the write transaction and before its work
+    pub const WRITE_HELD: &str = "store::write_held";
+    /// Runs as a unit is begun, once its place is reserved and its map has room, before it takes the write transaction
+    pub const UNIT_RESERVED: &str = "store::unit_reserved";
+    /// Runs as a unit is begun, once it has found the map grown by another process and let its holds go, before it
+    /// adopts the size
+    pub const UNIT_MAP_GROWN: &str = "store::unit_map_grown";
+    /// Runs as a unit is begun, once it holds the write transaction and before the unit is made
+    pub const UNIT_HELD: &str = "engine::unit_held";
+    /// Runs in a unit's commit, once the commit has taken the unit's transaction
+    pub const UNIT_COMMITTING: &str = "engine::unit_committing";
     /// Runs once a backup's compacted copy is complete, before it is published
     pub const BACKUP_READY: &str = "backup::ready";
     /// A backup fails at publication, its copy complete and not yet visible
@@ -74,6 +95,10 @@ pub(crate) mod points {
     pub const SCHEMA_RECOVERY: &str = "database::before_schema_recovery";
     /// Runs before a schema is written
     pub const SCHEMA_WRITE: &str = "database::before_schema_write";
+    /// Runs once a schema change has waited for a builder to end, before it takes the schema's lock again
+    pub const SCHEMA_BUILDER_STOPPED: &str = "database::schema_builder_stopped";
+    /// Runs once a close has stopped the builder and taken the store, before it waits for the store's other holders
+    pub const CLOSE_TAKEN: &str = "database::close_taken";
     /// Runs before a load publishes its staged database
     pub const LOAD_PUBLISH: &str = "dump::before_load_publish";
     /// A load's sync fails after its database is published
@@ -82,6 +107,8 @@ pub(crate) mod points {
     pub const READ_SNAPSHOT: &str = "engine::before_read_snapshot";
     /// Reading the indexes still to build fails
     pub const INDEX_REFRESH: &str = "engine::index_refresh";
+    /// The builder's work on a rank index fails before it starts, leaving it owed
+    pub const BUILD_RANK: &str = "builder::build_rank";
     /// A watch's read panics
     pub const WATCH_READ: &str = "watch::read";
     /// Creating a derivation's scratch directory fails

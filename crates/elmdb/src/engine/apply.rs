@@ -22,9 +22,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         Op::Set { id, fields, touch } => {
             existing(t, id)?;
             let checked = check_fields(t, id, fields, "set")?;
-            for (name, value) in &checked {
-                entities::put_field(t, id, name, value)?;
-            }
+            entities::put_fields(t, id, &checked)?;
             if *touch && !checked.is_empty() {
                 stamp(t, id)?;
             }
@@ -108,6 +106,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             declared_role(t, role)?;
             for other in among.iter().filter(|o| *o != id) {
                 if entities::record(t, other)?.is_some() {
+                    declared_type(t, other)?;
                     revoke(t, other, role)?;
                 }
             }
@@ -116,25 +115,46 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         }
         Op::Link { source, kind, target, info, weight } => {
             existing(t, source)?;
+            declared_end(t, target)?;
             let (id, linked) = relations::link(t, source, kind, target, info.clone(), *weight)?;
             Ok(OpResult::Relation { id, linked })
         }
         Op::Unlink { source, kind, target } => {
             existing(t, source)?;
+            match target {
+                Some(target) => declared_end(t, target)?,
+                // With no target named, every edge of the kind goes, or of every kind: each one's far end is
+                // written as a named one is
+                None => {
+                    for (_, far) in relations::edges(t, source, true, kind.as_deref())? {
+                        declared_end(t, &far)?;
+                    }
+                }
+            }
             relations::unlink(t, source, kind.as_deref(), target.as_deref())?;
             Ok(OpResult::Done)
         }
         Op::UpdateRelation { relation, source, target, info, weight } => {
+            for end in [source, target].into_iter().flatten() {
+                declared_end(t, end)?;
+            }
+            // The ends it has are written too: each is stamped, and loses the edge when it moves
+            if let Some(stored) = relations::get(t, relation)? {
+                declared_end(t, &stored.source)?;
+                declared_end(t, &stored.target)?;
+            }
             relations::update(t, relation, source.as_deref(), target.as_deref(), info.clone(), *weight)?;
             Ok(OpResult::Done)
         }
         Op::RemoveRelation { relation } => {
-            if relations::get(t, relation)?.is_none() {
+            let Some(stored) = relations::get(t, relation)? else {
                 return Err(Error::new(
                     ErrorCode::NoSuchRelation,
                     format!("removeRelation(\"{relation}\"): no relation has this id"),
                 ));
-            }
+            };
+            declared_end(t, &stored.source)?;
+            declared_end(t, &stored.target)?;
             relations::remove(t, relation)?;
             Ok(OpResult::Done)
         }
@@ -195,10 +215,32 @@ fn declared_role(t: &Txn<'_, '_>, role: &str) -> Result<()> {
     }
 }
 
-/// Refuses an id no entity has, naming where a relation's id goes
+/// Refuses an entity of a type the schema doesn't declare (`UNKNOWN_TYPE`): one a removed declaration left, whose data
+/// stays as it is until the type is declared again or purged (`docs/architecture/schema.md`, Changing a schema)
+fn declared_type(t: &Txn<'_, '_>, id: &str) -> Result<()> {
+    let entity_type = ids::type_of(id);
+    if t.schema.types.contains_key(entity_type) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::UnknownType,
+        format!(
+            "write(\"{id}\"): {entity_type} isn't a type the schema declares, so its entities are kept and not written. \
+             Declare it again to write them, or purge it to delete them"
+        ),
+    ))
+}
+
+/// `declared_type` of an end a relation is given, when an entity has that id: a link may name one its unit makes
+/// later, which a check as it commits holds to existing
+fn declared_end(t: &Txn<'_, '_>, id: &str) -> Result<()> {
+    if entities::record(t, id)?.is_some() { declared_type(t, id) } else { Ok(()) }
+}
+
+/// Refuses an id no entity has, naming where a relation's id goes, and an entity of a type the schema doesn't declare
 fn existing(t: &Txn<'_, '_>, id: &str) -> Result<()> {
     if entities::record(t, id)?.is_some() {
-        return Ok(());
+        return declared_type(t, id);
     }
     let message = if relations::get(t, id)?.is_some() {
         format!(
@@ -354,6 +396,17 @@ fn create(
     }
     let id = match given {
         Some(given) => {
+            if given.len() > ids::MAX_ID_BYTES {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!(
+                        "create({quoted}): the id given is {} bytes, and an id is at most {}, so that its entity's keys \
+                         and its edges' fit the store's",
+                        given.len(),
+                        ids::MAX_ID_BYTES
+                    ),
+                ));
+            }
             if ids::type_of(given) != entity_type {
                 return Err(Error::new(
                     ErrorCode::TypeMismatch,
@@ -372,7 +425,7 @@ fn create(
         }
         None => ids::new_entity_id(entity_type, t.now),
     };
-    entities::insert(t, &id)?;
+    let made = entities::insert(t, &id)?;
     let short_code = match (brought, &prefix) {
         (Some(code), _) => Some(code.to_owned()),
         (None, Some(prefix)) => Some(numbering::next_short_code(t, entity_type, prefix)?),
@@ -388,6 +441,10 @@ fn create(
     for (name, value) in fields {
         entities::put_field(t, &id, name, value)?;
     }
+    // The times are written above for every entity, and the rest are the fields given
+    entities::file_without(t, &id, made.seq, |name| {
+        name == field::CREATED_AT || name == field::UPDATED_AT || fields.get(name).is_some_and(|value| !value.is_nil())
+    })?;
     Ok(OpResult::Entity { id, short_code, created: true })
 }
 
@@ -421,9 +478,7 @@ fn upsert(
         ));
     }
     let checked = check_fields(t, id, fields, "upsert")?;
-    for (name, value) in &checked {
-        entities::put_field(t, id, name, value)?;
-    }
+    entities::put_fields(t, id, &checked)?;
     if !checked.is_empty() {
         stamp(t, id)?;
     }

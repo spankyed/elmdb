@@ -102,18 +102,8 @@ pub fn field_names(entity_type: &str) -> Vec<u8> {
     })
 }
 
-/// An index entry: the type, the index, the key's parts, and the entity's place
-pub fn index_entry(entity_type: &str, index: &str, parts: &[crate::format::key::Part], seq: u64) -> Vec<u8> {
-    with(Prefix::Index, |w| {
-        w.string(entity_type).string(index);
-        for p in parts {
-            w.part(p);
-        }
-        w.number(seq as f64);
-    })
-}
-
-/// Every entry of an index under these leading parts
+/// The key a value index files entities under for these parts, which every key of it under them as leading parts
+/// starts with
 pub fn index_range(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
     with(Prefix::Index, |w| {
         w.string(entity_type).string(index);
@@ -121,6 +111,66 @@ pub fn index_range(entity_type: &str, index: &str, parts: &[crate::format::key::
             w.part(p);
         }
     })
+}
+
+/// The least key above every entry of an index under these leading parts
+pub fn index_past(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
+    let mut key = index_range(entity_type, index, parts);
+    key.push(crate::format::key::TAG_HIGH);
+    key
+}
+
+/// The least key an entry of an index for a string can have under these leading parts, which is above every entry
+/// under them for null, a boolean or a number
+pub fn index_strings(entity_type: &str, index: &str, parts: &[crate::format::key::Part]) -> Vec<u8> {
+    with(Prefix::Index, |w| {
+        w.string(entity_type).string(index);
+        for part in parts {
+            w.part(part);
+        }
+        w.string_prefix("");
+    })
+}
+
+/// The key a value index files entities under besides its entries: those without a value in its last field
+/// (`Prefix::IndexWithout`), or those it doesn't order (`Prefix::IndexUnordered`), each under the parts its fields
+/// before the last hold. The key holds their places, as a value's does (`engine/places.rs`)
+pub fn index_others(prefix: Prefix, entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Vec<u8> {
+    with(prefix, |w| {
+        w.string(entity_type).string(index);
+        for part in leading {
+            w.part(part);
+        }
+    })
+}
+
+/// The ranges a value index's keys are in: its entries, the entities without a value and those whose value it doesn't
+/// order; that it is built is the one key `index_built` builds
+pub fn value_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 3] {
+    [
+        index_range(entity_type, index, &[]),
+        index_others(Prefix::IndexWithout, entity_type, index, &[]),
+        index_others(Prefix::IndexUnordered, entity_type, index, &[]),
+    ]
+}
+
+/// The key the blocks of a value's places are under, for a value whose own key is `own`: the same parts under the
+/// tag for the blocks of its kind, `d/x`'s, `d/xw`'s or `d/xu`'s. A block's key is this and where it starts
+/// (`place_under`)
+pub fn index_blocks(own: &[u8]) -> Vec<u8> {
+    let kinds = [
+        (Prefix::Index, Prefix::IndexPlaces),
+        (Prefix::IndexWithout, Prefix::IndexWithoutPlaces),
+        (Prefix::IndexUnordered, Prefix::IndexUnorderedPlaces),
+    ];
+    for (of, blocks) in kinds {
+        if let Some(parts) = own.strip_prefix(of.key().to_vec().as_slice()) {
+            let mut key = blocks.key().to_vec();
+            key.extend_from_slice(parts);
+            return key;
+        }
+    }
+    unreachable!("a value index's key")
 }
 
 /// That an index of a type is built
@@ -159,7 +209,7 @@ pub fn between_range(source: &str, kind: &str, target: &str) -> Vec<u8> {
     })
 }
 
-/// A text index's posting list for a term
+/// A text index's term: the places of the entities holding it, or that they are in blocks
 pub fn text_term(entity_type: &str, index: &str, term: &str) -> Vec<u8> {
     with(Prefix::TextTerm, |w| {
         w.string(entity_type).string(index).string(term);
@@ -180,10 +230,28 @@ pub fn text_terms_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<
     })
 }
 
-/// Where a term is in one entity's fields
-pub fn text_positions(entity_type: &str, index: &str, term: &str, seq: u64) -> Vec<u8> {
-    with(Prefix::TextPositions, |w| {
-        w.string(entity_type).string(index).string(term).number(seq as f64);
+/// Every block of the places of the entities holding a term of a text index, in place order: a block's key is this
+/// and the place it starts at (`place_under`)
+pub fn text_blocks(entity_type: &str, index: &str, term: &str) -> Vec<u8> {
+    with(Prefix::TextBlock, |w| {
+        w.string(entity_type).string(index).string(term);
+    })
+}
+
+/// The key of what is kept under `key` at a place: `key` with the place as its next part
+pub fn place_under(key: &[u8], place: u64) -> Vec<u8> {
+    crate::format::key::with_number(key, place as f64)
+}
+
+/// The place a key built by `place_under` ends with
+pub fn place_of(key: &[u8]) -> Option<u64> {
+    crate::format::key::last_number(key).map(|place| place as u64)
+}
+
+/// Each field's length in the entities of a text index in one block of places
+pub fn text_lengths(entity_type: &str, index: &str, block: u64) -> Vec<u8> {
+    with(Prefix::TextLengths, |w| {
+        w.string(entity_type).string(index).number(block as f64);
     })
 }
 
@@ -222,7 +290,7 @@ pub fn text_stats(entity_type: &str, index: &str) -> Vec<u8> {
     })
 }
 
-/// A stemming text index's posting list for a word as written
+/// How many entities of a stemming text index hold a word as written
 pub fn text_word(entity_type: &str, index: &str, word: &str) -> Vec<u8> {
     with(Prefix::TextWord, |w| {
         w.string(entity_type).string(index).string(word);
@@ -243,15 +311,21 @@ pub fn text_words_starting(entity_type: &str, index: &str, prefix: &str) -> Vec<
     })
 }
 
-/// The ranges of a text index's terms, positions, documents and words; its statistics are the one key `text_stats`
-/// builds
-pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 4] {
+/// The ranges of a text index's terms, their blocks, its documents, their lengths and its words; its statistics are
+/// the one key `text_stats` builds
+pub fn text_index_ranges(entity_type: &str, index: &str) -> [Vec<u8>; 5] {
     let range = |prefix: Prefix| {
         with(prefix, |w| {
             w.string(entity_type).string(index);
         })
     };
-    [range(Prefix::TextTerm), range(Prefix::TextPositions), range(Prefix::TextDocument), range(Prefix::TextWord)]
+    [
+        range(Prefix::TextTerm),
+        range(Prefix::TextBlock),
+        range(Prefix::TextDocument),
+        range(Prefix::TextLengths),
+        range(Prefix::TextWord),
+    ]
 }
 
 /// A chunk's stored embedding, the vectors of an entity's chunks, and of an index
@@ -339,6 +413,46 @@ pub fn rank_orders(index: &str) -> Vec<u8> {
 pub fn rank_queued(index: &str, type_at: u32, seq: u64) -> Vec<u8> {
     with(Prefix::RankQueue, |w| {
         w.string(index).number(f64::from(type_at)).number(seq as f64);
+    })
+}
+
+/// An entity's place in its type's change order
+pub fn changed(entity_type: &str, changed: u64, place: u64) -> Vec<u8> {
+    with(Prefix::Changed, |w| {
+        w.string(entity_type).number(changed as f64).number(place as f64);
+    })
+}
+
+/// A type's change order
+pub fn changed_of_type(entity_type: &str) -> Vec<u8> {
+    with(Prefix::Changed, |w| {
+        w.string(entity_type);
+    })
+}
+
+/// A tombstone of an entity a commit destroyed
+pub fn destroyed(sequence: u64, entity_type: &str, id: &str) -> Vec<u8> {
+    with(Prefix::Destroyed, |w| {
+        w.number(sequence as f64).string(entity_type).string(id);
+    })
+}
+
+/// The first tombstone at or after `sequence`
+pub fn destroyed_through(sequence: u64) -> Vec<u8> {
+    with(Prefix::Destroyed, |w| {
+        w.number(sequence as f64);
+    })
+}
+
+/// Every tombstone
+pub fn destroyed_prefix() -> Vec<u8> {
+    with(Prefix::Destroyed, |_| {})
+}
+
+/// The checkpoint named `name`
+pub fn checkpoint(name: &str) -> Vec<u8> {
+    with(Prefix::Checkpoint, |w| {
+        w.string(name);
     })
 }
 

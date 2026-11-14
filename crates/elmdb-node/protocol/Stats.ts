@@ -16,4 +16,10 @@ relations: { [key in string]: number },
 /**
  * Per type and index, its entries
  */
-indexes: { [key in string]: number }, entries: number, fileBytes: number, mapBytes: number, };
+indexes: { [key in string]: number }, 
+/**
+ * Per type and value index, the bytes of its keys and their values, in every key family it is filed in: its
+ * values' places, those of the entities without a value and of those it doesn't order, and the blocks of each.
+ * The engine's own indexes of a type, of short codes and roles, are among them
+ */
+indexBytes: { [key in string]: number }, entries: number, fileBytes: number, mapBytes: number, };

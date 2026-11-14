@@ -66,6 +66,10 @@ pub struct Stats {
     pub relations: BTreeMap<String, u64>,
     /// Per type and index, its entries
     pub indexes: BTreeMap<String, u64>,
+    /// Per type and value index, the bytes of its keys and their values, in every key family it is filed in: its
+    /// values' places, those of the entities without a value and of those it doesn't order, and the blocks of each.
+    /// The engine's own indexes of a type, of short codes and roles, are among them
+    pub index_bytes: BTreeMap<String, u64>,
     pub entries: u64,
     pub file_bytes: u64,
     pub map_bytes: u64,
@@ -89,23 +93,51 @@ pub struct FieldStats {
     pub bytes: u64,
 }
 
+/// Refuses a loaded value outside the value spec (`VALUE_INVALID`), saying what holds it
+fn in_spec(value: &Value, holder: impl FnOnce() -> String) -> Result<()> {
+    values::check_spec(value).map_err(|e| Error::new(e.code, format!("A load of {}: {}", holder(), e.message)))
+}
+
+/// Refuses a loaded number that isn't finite (`VALUE_INVALID`), saying what holds it: the value spec holds none
+fn finite(is: bool, holder: impl FnOnce() -> String) -> Result<()> {
+    if is {
+        return Ok(());
+    }
+    Err(Error::new(ErrorCode::ValueInvalid, format!("A load of {}: it holds a number that isn't finite", holder())))
+}
+
 /// Applies loads in one unit without a write's checks: no schema, no refusals, the ids and fields as given. The derived
-/// keys an entity's and a relation's writes keep are kept
+/// keys an entity's and a relation's writes keep are kept. The value spec is no such check: every reader of the store,
+/// its keys and its indexes included, takes a stored value to be inside it, so a load that isn't is refused
+/// (`VALUE_INVALID`) and its unit keeps nothing
 pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
     for item in loads {
         match item {
             Load::Entity { id, fields, trashed } => {
-                if entities::record(t, id)?.is_none() {
-                    entities::insert(t, id)?;
+                for (name, value) in fields {
+                    in_spec(value, || format!("{id}'s {name}"))?;
                 }
+                let made = match entities::record(t, id)? {
+                    Some(_) => None,
+                    None => Some(entities::insert(t, id)?),
+                };
                 for (name, value) in fields {
                     entities::put_field(t, id, name, value)?;
+                }
+                if let Some(made) = made {
+                    entities::file_without(t, id, made.seq, |name| {
+                        fields.get(name).is_some_and(|value| !value.is_nil())
+                    })?;
                 }
                 if *trashed && entities::get(t, id, entities::field::TRASHED_AT)?.is_none() {
                     entities::put_field(t, id, entities::field::TRASHED_AT, &Value::from(0))?;
                 }
             }
             Load::Relation { id, kind, source, target, info, weight } => {
+                if let Some(info) = info {
+                    in_spec(info, || format!("{id}'s info"))?;
+                }
+                finite(weight.is_none_or(f64::is_finite), || format!("{id}'s weight"))?;
                 if relations::get(t, id)?.is_some() {
                     relations::remove(t, id)?;
                 }
@@ -127,6 +159,7 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                 t.put(&keys::sequence(name), &values::encode(&next.into()))?;
             }
             Load::Embedding { id, index, chunk, model, hash, vector } => {
+                finite(vector.iter().all(|f| f.is_finite()), || format!("{id}'s embedding in {index}"))?;
                 if entities::record(t, id)?.is_some() {
                     super::vector::restore(t, id, index, *chunk, model, hash, vector)?;
                 }
@@ -246,11 +279,31 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
             .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A relation's row doesn't read: {e}")))?;
         *stats.relations.entry(stored.kind).or_default() += 1;
     }
-    for (key, _) in r.scan(&Prefix::Index.key().to_vec())? {
+    // An index's entries: the places filed under each of its keys
+    for (key, stored) in r.scan(&Prefix::Index.key().to_vec())? {
         let parts = decode_key(&key)?;
         if let (Some(Part::String(t)), Some(Part::String(i))) = (parts.get(1), parts.get(2)) {
-            *stats.indexes.entry(format!("{t}.{i}")).or_default() += 1;
+            *stats.indexes.entry(format!("{t}.{i}")).or_default() += super::places::count(r, &key, &stored)?;
         }
+    }
+    // A value index's keys: its values' places, the places of the entities without a value and of those it doesn't
+    // order, and the blocks of each
+    let filed = [
+        Prefix::Index,
+        Prefix::IndexPlaces,
+        Prefix::IndexWithout,
+        Prefix::IndexWithoutPlaces,
+        Prefix::IndexUnordered,
+        Prefix::IndexUnorderedPlaces,
+    ];
+    for prefix in filed {
+        r.try_visit(&prefix.key().to_vec(), |key, stored| {
+            let parts = decode_key(key)?;
+            if let (Some(Part::String(t)), Some(Part::String(i))) = (parts.get(1), parts.get(2)) {
+                *stats.index_bytes.entry(format!("{t}.{i}")).or_default() += (key.len() + stored.len()) as u64;
+            }
+            Ok(())
+        })?;
     }
     for prefix in Prefix::ALL {
         let mut n = 0;
@@ -272,6 +325,7 @@ impl Database {
     /// Atomically removes every entry but the database's own (its format and schema), with durable completion,
     /// the database staying open
     pub fn reset(&self) -> Result<()> {
+        let store = self.store()?;
         self.admin_unit_with_checkpoint(
             |t| {
                 let kept = t.scan(&Prefix::Meta.key().to_vec())?;
@@ -285,11 +339,37 @@ impl Database {
                 for (key, value) in kept {
                     t.put(&key, &value)?;
                 }
+                store.replacing_every_row(t.txn, t.db)?;
                 super::settle_indexes_in(t)?;
-                Ok(())
+                super::changed::replaced(t.txn, t.db, t.schema, None, store.next_sequence(t.txn)?)
             },
             true,
         )
+    }
+
+    /// The epoch another process's replacement of every row (`reset`, `replace_with`) moved the database to, when this
+    /// handle hasn't adopted it. Until it does, its commits are refused (`DATA_REPLACED`) and its reads read what's there
+    /// now
+    pub fn replaced_elsewhere(&self) -> Result<Option<u64>> {
+        self.store()?.replaced_elsewhere()
+    }
+
+    /// Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again, and queues the
+    /// index work the store says is owed. Answers false, adopting nothing, when another replacement has landed since
+    /// `replaced_elsewhere` named `epoch`: the caller starts over from what is there now
+    pub fn adopt_replacement(&self, epoch: u64) -> Result<bool> {
+        let store = self.store()?;
+        if !store.adopt_replacement(epoch)? {
+            return Ok(false);
+        }
+        // The schema's guard is let go before the builders take their own read of it: a second read on one thread waits
+        // for a writer that is parked, which would be this thread's own wait. A read-only handle has no builders, and
+        // what it would have queued is none of its business
+        if let Some(builders) = self.builders_of(std::sync::Arc::clone(&store))? {
+            let owed = super::remaining_indexes(&store, &self.schema_guard())?;
+            builders.queue(owed);
+        }
+        Ok(true)
     }
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
@@ -327,12 +407,16 @@ impl Database {
         }
         // Retain one immutable source snapshot through retries, copying primary ranges directly into the write.
         // No source values are retained after each put, and derived source rows are never traversed.
+        let store = self.store()?;
         let result = self.admin_unit(|t| {
             let kept = t.scan(&Prefix::Meta.key().to_vec())?;
             t.db.clear(t.txn)?;
             for (key, value) in &kept {
                 t.put(key, value)?;
             }
+            store.replacing_every_row(t.txn, t.db)?;
+            // What it copied carries the other database's sequences, which mean nothing here
+            store.deposit_touched(super::changed::Touched::every(t.schema));
             for prefix in Prefix::ALL.into_iter().filter(|prefix| prefix.kind() == PrefixKind::Primary) {
                 let (low, high) = crate::format::key::prefix_range(&prefix.key().to_vec());
                 let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
@@ -343,14 +427,15 @@ impl Database {
             }
             derive::rebuild(t, None)?;
             super::settle_indexes_in(t)?;
-            Ok(())
+            super::changed::replaced(t.txn, t.db, t.schema, None, store.next_sequence(t.txn)?)
         });
         drop(rtxn);
         env.prepare_for_closing().wait();
         result
     }
 
-    /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes
+    /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+    /// each value index, and its sizes
     pub fn stats(&self) -> Result<Stats> {
         let store = self.store()?;
         let schema = self.schema_guard();
@@ -392,6 +477,17 @@ impl Database {
     pub fn bulk_load(&self, loads: &[Load]) -> Result<()> {
         self.admin_load(loads)
     }
+
+    /// `bulk_load` with the loads as msgpack bytes (`Load[]`), as the binding takes them: the whole buffer checked
+    /// against the value spec first, as a batch's is, so a value outside it is refused as such (`VALUE_INVALID`) and a
+    /// load that isn't one as `BATCH_INVALID`
+    pub fn bulk_load_bytes(&self, loads: &[u8]) -> Result<()> {
+        crate::format::value::validate(loads)
+            .map_err(|e| Error::new(e.code, format!("The loads aren't valid: {}", e.message)))?;
+        let loads: Vec<Load> = rmp_serde::from_slice(loads)
+            .map_err(|e| Error::new(ErrorCode::BatchInvalid, format!("The loads don't decode: {e}")))?;
+        self.bulk_load(&loads)
+    }
 }
 
 #[cfg(test)]
@@ -411,11 +507,11 @@ mod export_tests {
         fn visit_starting(&self, prefix: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
             self.0.visit_starting(prefix, f)
         }
-        fn visit_from(&self, prefix: &[u8], from: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.0.visit_from(prefix, from, f)
+        fn visit_within(&self, from: &[u8], to: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.0.visit_within(from, to, f)
         }
-        fn visit_back(&self, prefix: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.0.visit_back(prefix, f)
+        fn visit_back_within(&self, from: &[u8], to: &[u8], f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.0.visit_back_within(from, to, f)
         }
         fn schema(&self) -> &Schema {
             self.0.schema()

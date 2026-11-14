@@ -36,6 +36,10 @@ struct Level {
 pub struct UnitState {
     /// Whether the unit loads data unchecked (`bulkLoad`, a dump's load): a unique index then takes what it is given
     pub unchecked: bool,
+    /// The unique indexes one write of several of their fields is part way through (`entities::put_fields`): each is
+    /// checked once the last of the fields is written, against the values the write leaves, not at each field against
+    /// values the entity only passes through
+    pub(super) unique_deferred: Vec<String>,
     levels: Vec<Level>,
     pub(super) checks: Vec<Check>,
     pub(super) events: Vec<Event>,
@@ -86,12 +90,24 @@ pub trait Read {
     /// Visits the entries whose key starts with `bytes`, which a key part left open ends (`KeyWriter::string_prefix`),
     /// in key order until `visit` answers false
     fn visit_starting(&self, bytes: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries whose key is `from` or after it and before `to`, in key order until `visit` answers false: a
+    /// walk between two places reads nothing outside them
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    /// Visits the entries whose key is `from` or after it and before `to`, from the last of them, in reverse key
+    /// order, until `visit` answers false
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
     /// Visits the entries under `prefix` whose key is `from` or after it, in key order until `visit` answers false: a
     /// walk that skips what it knows can't match seeks with it, rather than reading every entry
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let (low, high) = prefix_range(prefix);
+        self.visit_within(from.max(&low), &high, visit)
+    }
     /// Visits the entries under `prefix` from the last, in reverse key order, until `visit` answers false: a walk that
     /// wants a range's last entries reads none before them
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()>;
+    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        let (low, high) = prefix_range(prefix);
+        self.visit_back_within(&low, &high, visit)
+    }
     /// Fallible streaming visit: stop at the first consumer error without collecting the range.
     fn try_visit(&self, prefix: &[u8], mut each: impl FnMut(&[u8], &[u8]) -> Result<()>) -> Result<()> {
         let mut result = Ok(());
@@ -100,6 +116,34 @@ pub trait Read {
             result.is_ok()
         })?;
         result
+    }
+
+    /// What `key` holds, read as a probe: a read that decides how a plan is read and never what it answers, so one
+    /// a tracked read makes is not among what its answer depends on (`tracking::Recording`)
+    fn probe(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.get(key)
+    }
+    /// How many entries have a key that is `from` or after it and before `to`, counted no further than `upto`, and
+    /// the key a count of the rest goes on from, past the last one counted: a probe, as `probe` is
+    fn probe_within(&self, from: &[u8], to: &[u8], upto: u64) -> Result<(u64, Vec<u8>)> {
+        let mut counted = 0;
+        let mut next = from.to_vec();
+        self.visit_within(from, to, |key, _| {
+            if counted == upto {
+                return false;
+            }
+            counted += 1;
+            next.clear();
+            next.extend_from_slice(key);
+            next.push(0);
+            true
+        })?;
+        Ok((counted, next))
+    }
+
+    /// `visit_within`, read as a probe: what a count that reads more than keys is made of
+    fn probe_visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        self.visit_within(from, to, visit)
     }
 
     fn schema(&self) -> &Schema;
@@ -141,20 +185,15 @@ fn visit_in(
     Ok(())
 }
 
-/// The entries under `prefix` from `from` on: the later of the two to the prefix's end
-fn visit_from_in(
+/// The entries from `from` up to `to`, in key order
+fn visit_within_in(
     db: Db,
     txn: &heed::RoTxn<'_, heed::WithoutTls>,
-    prefix: &[u8],
     from: &[u8],
+    to: &[u8],
     mut visit: impl FnMut(&[u8], &[u8]) -> bool,
 ) -> Result<()> {
-    let (low, high) = prefix_range(prefix);
-    let start = if from > low.as_slice() { from } else { low.as_slice() };
-    if start >= high.as_slice() {
-        return Ok(());
-    }
-    let range = (std::ops::Bound::Included(start), std::ops::Bound::Excluded(high.as_slice()));
+    let range = (std::ops::Bound::Included(from), std::ops::Bound::Excluded(to));
     for entry in db.range(txn, &range)? {
         let (k, v) = entry?;
         if !visit(k, v) {
@@ -164,15 +203,15 @@ fn visit_from_in(
     Ok(())
 }
 
-/// The entries under `prefix`, from the last
-fn visit_back_in(
+/// The entries from `from` up to `to`, from the last
+fn visit_back_within_in(
     db: Db,
     txn: &heed::RoTxn<'_, heed::WithoutTls>,
-    prefix: &[u8],
+    from: &[u8],
+    to: &[u8],
     mut visit: impl FnMut(&[u8], &[u8]) -> bool,
 ) -> Result<()> {
-    let (low, high) = prefix_range(prefix);
-    let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+    let range = (std::ops::Bound::Included(from), std::ops::Bound::Excluded(to));
     for entry in db.rev_range(txn, &range)? {
         let (k, v) = entry?;
         if !visit(k, v) {
@@ -228,12 +267,12 @@ impl Read for Snapshot<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-        visit_from_in(self.db, self.txn, prefix, from, visit)
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_within_in(self.db, self.txn, from, to, visit)
     }
 
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-        visit_back_in(self.db, self.txn, prefix, visit)
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+        visit_back_within_in(self.db, self.txn, from, to, visit)
     }
 
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
@@ -261,14 +300,14 @@ impl Read for Txn<'_, '_> {
         visit_starting_in(self.db, self.txn, bytes, visit)
     }
 
-    fn visit_from(&self, prefix: &[u8], from: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         self.counted();
-        visit_from_in(self.db, self.txn, prefix, from, visit)
+        visit_within_in(self.db, self.txn, from, to, visit)
     }
 
-    fn visit_back(&self, prefix: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+    fn visit_back_within(&self, from: &[u8], to: &[u8], visit: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
         self.counted();
-        visit_back_in(self.db, self.txn, prefix, visit)
+        visit_back_within_in(self.db, self.txn, from, to, visit)
     }
 
     fn raw(&self) -> (&heed::RoTxn<'_, heed::AnyTls>, Db) {
@@ -278,6 +317,39 @@ impl Read for Txn<'_, '_> {
     fn schema(&self) -> &Schema {
         self.schema
     }
+}
+
+/// Refuses a key longer than LMDB stores (`VALUE_INVALID`), naming what it is made of: the ids and names in a key are
+/// the caller's, and LMDB's own refusal of one (`MDB_BAD_VALSIZE`) says neither which key nor why
+fn key_fits(key: &[u8]) -> Result<()> {
+    use crate::engine::values::MAX_KEY_BYTES;
+    use crate::format::key::Part;
+    if key.len() <= MAX_KEY_BYTES {
+        return Ok(());
+    }
+    // Each part as it reads, a long one cut short: enough to tell the id or the name that is too long
+    let part = |part: &Part| match part {
+        Part::String(s) if s.chars().count() > 24 => {
+            format!("{}… ({} bytes)", s.chars().take(24).collect::<String>(), s.len())
+        }
+        Part::String(s) => s.clone(),
+        Part::Number(n) => n.to_string(),
+        Part::Bool(b) => b.to_string(),
+        Part::Null => "null".to_owned(),
+        Part::Bytes(b) => format!("{} bytes", b.len()),
+    };
+    let made_of = match crate::format::key::decode(key) {
+        Ok(parts) => parts.iter().map(part).collect::<Vec<_>>().join(", "),
+        Err(_) => "what doesn't read as a key".to_owned(),
+    };
+    Err(crate::error::Error::new(
+        crate::error::ErrorCode::ValueInvalid,
+        format!(
+            "A key of {} bytes can't be stored, a key being at most {MAX_KEY_BYTES}: it is made of {made_of}. Shorten \
+             the id or the name in it that is long",
+            key.len()
+        ),
+    ))
 }
 
 /// The transaction and the unit's state for the length of one call
@@ -295,6 +367,15 @@ impl Txn<'_, '_> {
     fn counted(&self) {
         #[cfg(test)]
         self.state.reads.set(self.state.reads.get() + 1);
+    }
+
+    /// The last entry under `prefix` whose key is `upto`, a key under `prefix`, or before it: what holds a place among
+    /// entries kept by where each starts
+    pub(crate) fn last_upto(&self, prefix: &[u8], upto: &[u8]) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        self.counted();
+        let (low, _) = prefix_range(prefix);
+        let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Included(upto));
+        Ok(self.db.rev_range(self.txn, &range)?.next().transpose()?.map(|(key, value)| (key.to_vec(), value.to_vec())))
     }
 
     fn record(&mut self, key: &[u8]) -> Result<()> {
@@ -317,6 +398,7 @@ impl Txn<'_, '_> {
     }
 
     pub fn put(&mut self, key: &[u8], value: &[u8]) -> Result<()> {
+        key_fits(key)?;
         self.record(key)?;
         self.log(key);
         self.db.put(self.txn, key, value)?;
@@ -333,6 +415,7 @@ impl Txn<'_, '_> {
 
     /// `put`, given what `key` holds now, as the caller read it in this call
     pub fn put_over(&mut self, key: &[u8], value: &[u8], before: Option<&[u8]>) -> Result<()> {
+        key_fits(key)?;
         self.record_known(key, before);
         self.log(key);
         self.db.put(self.txn, key, value)?;

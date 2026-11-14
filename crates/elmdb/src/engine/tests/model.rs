@@ -13,6 +13,7 @@ use serde_json::{Value as Json, json};
 
 use super::rank_bound::RankIndex;
 use super::{edges as stored_edges, row, schema_json};
+use crate::ChangeSet;
 use crate::engine::unit::Read;
 use crate::engine::{entities, keys, relations, values};
 use crate::format::key::{Part, decode as decode_key};
@@ -150,7 +151,32 @@ enum Step {
     Rebuild {
         index: Option<(&'static str, &'static str)>,
     },
+    /// Every entity, edge and derived row removed; the schema, the meta data and the sequence counter are kept
+    Reset,
+    /// Every edge of one kind moved to another: a commit with no change set, which stamps the ends of each edge it moved
+    RenameRelation {
+        from: &'static str,
+        to: &'static str,
+    },
+    /// A `Task` field's values moved to another: the harness declares `spare` as a second unindexed field of `Task`
+    RenameField {
+        from: &'static str,
+        to: &'static str,
+    },
 }
+
+/// The field renames the workload makes, both ways between `c` and the spare field
+const FIELD_RENAMES: [(&str, &str); 2] = [("c", "spare"), ("spare", "c")];
+
+/// The kinds a relation rename moves between: the workload's two plain kinds and the one it never links
+const RENAMES: [(&str, &str); 6] = [
+    ("refs", "tags"),
+    ("tags", "refs"),
+    ("blocks", "tags"),
+    ("tags", "blocks"),
+    ("refs", "blocks"),
+    ("blocks", "refs"),
+];
 
 fn value() -> impl Strategy<Value = Json> {
     prop_oneof![
@@ -253,12 +279,20 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let aimed = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: true });
         let blind = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: false });
         let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
+        let reset = Just(Step::Reset).boxed();
+        let rename =
+            prop::sample::select(&RENAMES[..]).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
+        let field_rename =
+            prop::sample::select(&FIELD_RENAMES[..]).prop_map(|(from, to)| Step::RenameField { from, to }).boxed();
         prop_oneof![
             7 => aimed(aimed_write(&state.model)),
             1 => blind(write()),
             2 => aimed(aimed_unit(&state.model, true)),
             1 => blind(Just(Step::RefuseNext).boxed()),
             1 => blind(rebuild),
+            1 => blind(reset),
+            1 => blind(rename),
+            1 => blind(field_rename),
             1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
@@ -282,8 +316,12 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
 /// other edge of its pair holds, which the engine refuses and random steps rarely make; blind, since an aimed step must
 /// be one the model takes. Any write when the model holds neither
 fn onto_joined_ends(m: &Model) -> BoxedStrategy<Step> {
-    let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let edges: Vec<(&'static str, &'static str, &'static str)> = m
+        .edges
+        .iter()
+        .filter(|(_, k, _)| KINDS.contains(&k.as_str()))
+        .map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t)))
+        .collect();
     let onto: Vec<_> = edges
         .iter()
         .flat_map(|a| edges.iter().filter(move |b| a.0 == b.0 && a.1 == b.1 && a.2 != b.2).map(move |b| (*a, b.2)))
@@ -324,8 +362,12 @@ fn aimed_write(m: &Model) -> BoxedStrategy<Step> {
     let existing = ids(&|e| e.is_some());
     let missing = ids(&|e| e.is_none());
     let trashed = ids(&|e| e.is_some_and(|e| e.trashed));
-    let edges: Vec<(&'static str, &'static str, &'static str)> =
-        m.edges.iter().map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t))).collect();
+    let edges: Vec<(&'static str, &'static str, &'static str)> = m
+        .edges
+        .iter()
+        .filter(|(_, k, _)| KINDS.contains(&k.as_str()))
+        .map(|(s, k, t)| (named(&IDS, s), named(&KINDS, k), named(&IDS, t)))
+        .collect();
     let keys_where = |keep: &dyn Fn(Option<&Json>) -> bool| -> Vec<(&'static str, &'static str)> {
         existing
             .iter()
@@ -650,7 +692,9 @@ impl Model {
             }
             // What the model holds is primary data, which a rebuild leaves as it is
             Step::Rebuild { .. } => {}
-            Step::RefuseNext => unreachable!("only at the top"),
+            Step::RefuseNext | Step::Reset | Step::RenameRelation { .. } | Step::RenameField { .. } => {
+                unreachable!("only at the top")
+            }
         }
         Ok(())
     }
@@ -671,6 +715,58 @@ impl Model {
     fn step(&mut self, step: &Step) -> Result<(), Refusal> {
         if let Step::RefuseNext = step {
             self.refuse_next = true;
+            return Ok(());
+        }
+        if let Step::RenameField { from, to } = step {
+            // A Task holding both names would have one value replaced: refused before the commit, so an armed refusal stays
+            let clash = self.entities.iter().any(|(id, e)| {
+                crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from) && e.fields.contains_key(*to)
+            });
+            if clash {
+                return Err("a Task holds both names");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.pending.clear();
+            for (id, entity) in self.entities.iter_mut() {
+                if crate::engine::ids::type_of(id) == "Task"
+                    && let Some(value) = entity.fields.remove(*from)
+                {
+                    entity.fields.insert(to.to_string(), value);
+                }
+            }
+            return Ok(());
+        }
+        if let Step::RenameRelation { from, to } = step {
+            // An edge of the new kind joining the ends of a moving edge would be one identity twice: refused, nothing moves.
+            // The engine refuses that before its commit, so an armed refusal stays armed for the next commit
+            let moving: Vec<(String, String, String)> =
+                self.edges.iter().filter(|(_, kind, _)| kind.as_str() == *from).cloned().collect();
+            if moving
+                .iter()
+                .any(|(source, _, target)| self.edges.contains(&(source.clone(), to.to_string(), target.clone())))
+            {
+                return Err("an edge of the new kind joins the ends");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.pending.clear();
+            for (source, kind, target) in moving {
+                self.edges.remove(&(source.clone(), kind, target.clone()));
+                self.edges.insert((source, to.to_string(), target));
+            }
+            return Ok(());
+        }
+        if let Step::Reset = step {
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.entities.clear();
+            self.edges.clear();
+            self.keyed.clear();
+            self.pending.clear();
             return Ok(());
         }
         let saved = self.clone();
@@ -804,6 +900,9 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::Rekey { .. }
         | Step::Unit { .. }
         | Step::RefuseNext
+        | Step::Reset
+        | Step::RenameRelation { .. }
+        | Step::RenameField { .. }
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -825,14 +924,17 @@ fn apply_in(unit: &mut crate::Unit, step: &Step) -> Result<(), crate::Error> {
     }
 }
 
-/// Applies a step at the top
-fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
+/// Runs one step on the engine: the change set of the commit it made, or `None` when it made none
+fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
     match step {
         Step::RefuseNext => {
             crate::failpoints::fail_once_at(crate::failpoints::points::COMMIT, db.path());
-            Ok(())
+            Ok(None)
         }
-        Step::Rebuild { index } => db.rebuild(*index),
+        Step::Rebuild { index } => db.rebuild(*index).map(|()| None),
+        Step::Reset => db.reset().map(|()| None),
+        Step::RenameRelation { from, to } => db.rename_relation(from, to).map(|()| None),
+        Step::RenameField { from, to } => db.rename_field("Task", from, to).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -844,9 +946,9 @@ fn run(db: &Database, step: &Step) -> Result<(), crate::Error> {
                 unit.abort();
                 return Err(crate::Error::new(crate::ErrorCode::Io, "the unit threw"));
             }
-            unit.commit(*durable).map(|_| ())
+            unit.commit(*durable).map(Some)
         }
-        write => db.write(&super::batch(vec![op_of(db, write)]), false).map(|_| ()),
+        write => db.write(&super::batch(vec![op_of(db, write)]), false).map(|(_, changes)| Some(changes)),
     }
 }
 
@@ -893,7 +995,11 @@ fn all_edges(m: &Model) -> Vec<(String, String, String)> {
     edges
 }
 
-/// The ids under a derived key range, in key order
+/// The ids of the entities a value index files under a key
+fn filed(s: &impl Read, entity_type: &str, own: &[u8]) -> Vec<String> {
+    super::filed_under(s, entity_type, own).into_iter().map(|(_, id)| id).collect()
+}
+
 fn ids_under(s: &impl Read, prefix: &[u8]) -> Vec<String> {
     s.scan(prefix).unwrap().into_iter().map(|(_, v)| values::decode(&v).unwrap().as_str().unwrap().to_owned()).collect()
 }
@@ -909,15 +1015,15 @@ fn derived_of(db: &Database) -> BTreeMap<String, Json> {
             for role in ROLES {
                 out.insert(
                     format!("{t} role {role}"),
-                    json!(ids_under(s, &keys::index_range(t, "role", &[Part::from(role)]))),
+                    json!(filed(s, t, &keys::index_range(t, "role", &[Part::from(role)]))),
                 );
             }
         }
         // Task's index on `a`: every entry, as (part, id)
         let mut entries = Vec::new();
-        for (k, v) in s.scan(&keys::index_range("Task", "a", &[])).unwrap() {
+        for (k, id) in super::filed_under(s, "Task", &keys::index_range("Task", "a", &[])) {
             let parts = decode_key(&k).unwrap();
-            entries.push(json!([format!("{:?}", parts[3]), values::decode(&v).unwrap().as_str().unwrap()]));
+            entries.push(json!([format!("{:?}", parts[3]), id]));
         }
         out.insert("Task index a".to_owned(), json!(entries));
         for kind in ALL_KINDS {
@@ -1110,6 +1216,48 @@ fn derived_reads() -> Vec<(String, Json)> {
                 let steps = json!([{ "step": "where", "field": field, "value": probe }, { "step": "limit", "n": 2 }]);
                 out.push((format!("{t} first 2 where {field} {probe}"), ids(start.clone(), steps, "live")));
             }
+            // A range of numbers, with both bounds and with one; and one put in order, its first two
+            let between = json!({ "step": "range", "field": field, "atLeast": 2, "below": 6 });
+            out.push((format!("{t} range {field} 2 6"), ids(start.clone(), json!([between]), "live")));
+            let above = json!({ "step": "range", "field": field, "above": 4 });
+            out.push((format!("{t} range {field} 4 up"), ids(start.clone(), json!([above]), "live")));
+            for descending in [false, true] {
+                let order = json!({ "step": "orderBy", "field": field, "descending": descending });
+                let direction = if descending { "desc" } else { "asc" };
+                let steps = json!([between, order, { "step": "limit", "n": 2 }]);
+                out.push((format!("{t} ranged {field} {direction}"), ids(start.clone(), steps, "live")));
+                // The first two in the field's order of those the other field's value keeps: a task's `a` under
+                // its `b` is read from the index on the two, and the rest are sorted
+                let other = if field == "a" { "b" } else { "a" };
+                let kept = json!({ "step": "where", "field": other, "value": 3 });
+                let steps = json!([kept, order, { "step": "limit", "n": 2 }]);
+                out.push((format!("{t} filtered {field} {direction}"), ids(start.clone(), steps, "live")));
+                // And of those, the ones in the range, whichever of the two is asked first, and a page after each id
+                for (way, steps) in [("after", json!([kept, between])), ("before", json!([between, kept]))] {
+                    out.push((format!("{t} filtered range {field} {way}"), ids(start.clone(), steps, "live")));
+                }
+                for cursor in IDS {
+                    let steps = json!([kept, order, { "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+                    let label = format!("{t} filtered page {field} {direction} {cursor}");
+                    out.push((label, ids(start.clone(), steps, "live")));
+                }
+                // A page of two after each of the type's ids, and after one of the other type's, in the field's order
+                for cursor in IDS {
+                    let steps = json!([order, { "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+                    out.push((format!("{t} page {field} {direction} {cursor}"), ids(start.clone(), steps, "live")));
+                }
+            }
+        }
+        // A page of two after each id in the order the type was created in, and among the holders of a value
+        for cursor in IDS {
+            let steps = json!([{ "step": "after", "id": cursor }, { "step": "limit", "n": 2 }]);
+            out.push((format!("{t} after {cursor}"), ids(start.clone(), steps, "live")));
+            let steps = json!([
+                { "step": "where", "field": "a", "value": 3 },
+                { "step": "after", "id": cursor },
+                { "step": "limit", "n": 2 }
+            ]);
+            out.push((format!("{t} holders after {cursor}"), ids(start.clone(), steps, "live")));
         }
         if t == "Note" {
             for n in 0..GREPS.len() {
@@ -1134,6 +1282,19 @@ fn derived_reads() -> Vec<(String, Json)> {
                 format!("{t} role {role}"),
                 ids(start.clone(), json!([{ "step": "withRole", "role": role }]), "live"),
             ));
+            // A role's holders that hold a value in `a`, or one in a range of it, whichever of the two filters is
+            // asked first: a task has an index for each, and the one holding the fewer entries is read
+            let held = json!({ "step": "withRole", "role": role });
+            let filters = [
+                ("3", json!({ "step": "where", "field": "a", "value": 3 })),
+                ("5", json!({ "step": "where", "field": "a", "value": 5 })),
+                ("range", json!({ "step": "range", "field": "a", "atLeast": 2, "below": 6 })),
+            ];
+            for (asked, filter) in filters {
+                for (way, steps) in [("after", json!([filter, held])), ("before", json!([held, filter]))] {
+                    out.push((format!("{t} paired {way} {role} {asked}"), ids(start.clone(), steps, "live")));
+                }
+            }
         }
     }
     for id in IDS {
@@ -1173,8 +1334,8 @@ fn plans_of(db: &Database) -> BTreeMap<String, Json> {
         .collect()
 }
 
-/// How `orderBy` orders two values: booleans, numbers, strings by the root collation, a list or map by its JSON, then
-/// a missing or null value
+/// How `orderBy` orders two values: booleans, numbers, strings by the root collation and then their bytes, a list or
+/// map by its JSON, then a missing or null value
 fn ordered_as(
     collator: &icu_collator::CollatorBorrowed<'static>,
     a: Option<&Json>,
@@ -1190,10 +1351,24 @@ fn ordered_as(
     class(a).cmp(&class(b)).then_with(|| match (a, b) {
         (Some(Json::Bool(x)), Some(Json::Bool(y))) => x.cmp(y),
         (Some(Json::Number(x)), Some(Json::Number(y))) => x.as_f64().partial_cmp(&y.as_f64()).unwrap(),
-        (Some(Json::String(x)), Some(Json::String(y))) => collator.compare(x, y),
+        (Some(Json::String(x)), Some(Json::String(y))) => collator.compare(x, y).then_with(|| x.cmp(y)),
         (Some(x), Some(y)) if class(a) == 3 => collator.compare(&x.to_string(), &y.to_string()),
         _ => std::cmp::Ordering::Equal,
     })
+}
+
+/// Whether a `range` holds a value: a number `within` it, or a list holding one
+fn in_range(value: Option<&Json>, within: &impl Fn(f64) -> bool) -> bool {
+    match value {
+        Some(Json::Array(items)) => items.iter().filter_map(Json::as_f64).any(within),
+        Some(value) => value.as_f64().is_some_and(within),
+        None => false,
+    }
+}
+
+/// The two ids after `cursor` among `ids`, or none when it isn't one of them
+fn page_after<'a>(ids: impl Iterator<Item = &'a String>, cursor: &str) -> Vec<&'a String> {
+    ids.skip_while(|id| *id != cursor).skip(1).take(2).collect()
 }
 
 /// What the derived reads should answer, from the model
@@ -1282,6 +1457,19 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                         .map(|(id, _)| id)
                         .collect::<Vec<_>>()
                 ),
+                ["paired", _, role, asked] => {
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let kept = |e: &Entity| match asked.parse::<i64>() {
+                        Ok(probe) => holds(e.fields.get("a"), &Json::from(probe)),
+                        Err(_) => in_range(e.fields.get("a"), &within),
+                    };
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && e.roles.iter().any(|r| r == role) && kept(e))
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
                 ["order", field, direction, limit] => {
                     let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();
                     ordered.sort_by(|(_, x), (_, y)| {
@@ -1291,6 +1479,77 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                     let take = limit.parse().unwrap_or(usize::MAX);
                     json!(ordered.into_iter().take(take).map(|(id, _)| id).collect::<Vec<_>>())
                 }
+                ["range", field, low, high] => {
+                    let low: f64 = low.parse().unwrap();
+                    let within = |n: f64| match high.parse::<f64>() {
+                        Ok(high) => low <= n && n < high,
+                        Err(_) => low < n,
+                    };
+                    json!(
+                        of_type()
+                            .filter(|(_, e)| !e.trashed && in_range(e.fields.get(*field), &within))
+                            .map(|(id, _)| id)
+                            .collect::<Vec<_>>()
+                    )
+                }
+                ["ranged", field, direction] => {
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let mut ordered: Vec<(&String, &Entity)> = of_type()
+                        .filter(|(_, e)| !e.trashed && in_range(e.fields.get(*field), &within))
+                        .copied()
+                        .collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(ordered.into_iter().take(2).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["filtered", field, direction] => {
+                    let other = if *field == "a" { "b" } else { "a" };
+                    let mut ordered: Vec<(&String, &Entity)> = of_type()
+                        .filter(|(_, e)| !e.trashed && holds(e.fields.get(other), &json!(3)))
+                        .copied()
+                        .collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(ordered.into_iter().take(2).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["filtered", "range", field, _] => {
+                    let other = if *field == "a" { "b" } else { "a" };
+                    let within = |n: f64| (2.0..6.0).contains(&n);
+                    let kept =
+                        |e: &Entity| holds(e.fields.get(other), &json!(3)) && in_range(e.fields.get(*field), &within);
+                    json!(of_type().filter(|(_, e)| !e.trashed && kept(e)).map(|(id, _)| id).collect::<Vec<_>>())
+                }
+                ["filtered", "page", field, direction, cursor] => {
+                    let other = if *field == "a" { "b" } else { "a" };
+                    let mut ordered: Vec<(&String, &Entity)> = of_type()
+                        .filter(|(_, e)| !e.trashed && holds(e.fields.get(other), &json!(3)))
+                        .copied()
+                        .collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(page_after(ordered.into_iter().map(|(id, _)| id), cursor))
+                }
+                ["page", field, direction, cursor] => {
+                    let mut ordered: Vec<(&String, &Entity)> = of_type().filter(|(_, e)| !e.trashed).copied().collect();
+                    ordered.sort_by(|(_, x), (_, y)| {
+                        let o = ordered_as(&collator, x.fields.get(*field), y.fields.get(*field));
+                        if *direction == "desc" { o.reverse() } else { o }
+                    });
+                    json!(page_after(ordered.into_iter().map(|(id, _)| id), cursor))
+                }
+                ["after", cursor] => {
+                    json!(page_after(of_type().filter(|(_, e)| !e.trashed).map(|(id, _)| *id), cursor))
+                }
+                ["holders", "after", cursor] => json!(page_after(
+                    of_type().filter(|(_, e)| !e.trashed && holds(e.fields.get("a"), &json!(3))).map(|(id, _)| *id),
+                    cursor
+                )),
                 ["first", n, "where", field, probe] => {
                     let probe = Json::from(probe.parse::<i64>().unwrap());
                     json!(
@@ -1328,9 +1587,21 @@ const RANKED: RankIndex<'static> =
 
 const TOLERANCE: f64 = 1e-9;
 
-/// The engine tests' schema with `RANKED` declared
+/// The schema with the spare field a renameField moves values into: unindexed, so the workload's indexes are the same as
+/// before. Every database the model compares declares it, the crash child's included
+fn with_spare(mut schema: Json) -> Json {
+    schema["types"]["Task"]["fields"]["spare"] = json!({ "type": "any", "optional": true });
+    schema
+}
+
+/// The engine tests' schema with `RANKED` declared, the spare field included, opened over a fresh directory
 fn open(dir: &tempfile::TempDir) -> Database {
     let mut schema = schema_json();
+    // Change order is what `changed_since` answers from: each type it is asked of is declared to keep it
+    for entity_type in ["Task", "Note"] {
+        schema["types"][entity_type]["changeOrder"] = json!(true);
+    }
+    schema = with_spare(schema);
     schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
                                               "direction": RANKED.direction, "weights": RANKED.weights,
                                               "tolerance": TOLERANCE } });
@@ -1339,10 +1610,575 @@ fn open(dir: &tempfile::TempDir) -> Database {
 }
 
 /// The engine under the model: the prelude written, each step run and its answer compared, and after each the data, every
-/// derived key and every derived read compared with the model's; after the workload, `check()` finds nothing
+/// derived key, every derived read and the change set the commit made compared with the model's; after the workload,
+/// `check()` finds nothing
 struct Engine {
     db: Database,
     _dir: tempfile::TempDir,
+    /// The model as it was before the step being tracked, which the step's change is the difference from
+    before: Model,
+    since: Since,
+    /// The entities of `Task` and `Note`, which `changed_since` is asked about
+    types: Vec<String>,
+    /// The sequence of the last commit the engine reported
+    sequence: u64,
+    /// Whether a reset has happened, and the position a reader from after it starts at
+    replaced: bool,
+    replaced_at: Option<u64>,
+}
+
+/// What `changed_since` answers from position zero: each entity still there with the sequence of its last change, and
+/// those destroyed and not made again
+#[derive(Default)]
+struct Since {
+    last: BTreeMap<String, u64>,
+    gone: BTreeSet<String>,
+}
+
+/// What a commit did to one entity, as the engine's change set names it: the fields are the ones the commit wrote, the
+/// engine's own left out
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Change {
+    created: bool,
+    destroyed: bool,
+    trashed: bool,
+    restored: bool,
+    /// The roles the entity holds differ: a grant or a revoke, which the engine names as its `role` field
+    roles: bool,
+    fields: BTreeSet<String>,
+    /// Destroyed and made again within the commit: named with only what was done to the one made. Internal to the replay
+    replaced: bool,
+}
+
+/// The model's changes between two of its states, each entity the commit changed, with the fields whose values differ
+fn changes_between(before: &Model, after: &Model) -> BTreeMap<String, Change> {
+    let mut out = BTreeMap::new();
+    let ids: BTreeSet<&String> = before.entities.keys().chain(after.entities.keys()).collect();
+    for id in ids {
+        let change = match (before.entities.get(id), after.entities.get(id)) {
+            (None, Some(a)) => {
+                Change { created: true, fields: a.fields.keys().cloned().collect(), ..Default::default() }
+            }
+            (Some(_), None) => Change { destroyed: true, ..Default::default() },
+            (Some(b), Some(a)) => {
+                let fields = b
+                    .fields
+                    .keys()
+                    .chain(a.fields.keys())
+                    .filter(|k| b.fields.get(*k) != a.fields.get(*k))
+                    .cloned()
+                    .collect();
+                let (mut was, mut now) = (b.roles.clone(), a.roles.clone());
+                was.sort();
+                now.sort();
+                Change {
+                    trashed: !b.trashed && a.trashed,
+                    restored: b.trashed && !a.trashed,
+                    roles: was != now,
+                    fields,
+                    ..Default::default()
+                }
+            }
+            (None, None) => continue,
+        };
+        if change != Change::default() {
+            out.insert(id.clone(), Change { fields: without_engine_fields(change.fields), ..change });
+        }
+    }
+    out
+}
+
+fn without_engine_fields(fields: BTreeSet<String>) -> BTreeSet<String> {
+    fields.into_iter().filter(|f| !ENGINE_FIELDS.contains(&f.as_str())).collect()
+}
+
+/// The changes a commit's change set names, the engine's own fields left out and an entity that changed in no way the
+/// model holds left out
+fn changes_of(changes: &ChangeSet) -> BTreeMap<String, Change> {
+    changes
+        .entities
+        .iter()
+        .map(|(id, e)| {
+            let change = Change {
+                created: e.created,
+                destroyed: e.destroyed,
+                trashed: e.trashed,
+                restored: e.restored,
+                roles: e.fields.iter().any(|f| f == "role"),
+                fields: without_engine_fields(e.fields.iter().cloned().collect()),
+                replaced: false,
+            };
+            (id.clone(), change)
+        })
+        .filter(|(_, change)| *change != Change::default())
+        .collect()
+}
+
+/// What a step that committed made: each entity it changed and the ends of the edges it changed. The step is replayed on the
+/// model one member at a time, so a write a later member reverts is still named, as the engine names it, and a savepoint
+/// the model rolls back makes none; the replay must land on the state the reference holds after the step
+fn effects_of(step: &Step, before: &Model, after: &Model) -> (BTreeMap<String, Change>, BTreeSet<String>) {
+    let mut current = before.clone();
+    let mut changes = BTreeMap::new();
+    let mut ends = BTreeSet::new();
+    effects_in(&mut current, step, &mut changes, &mut ends).expect("a committed step applies");
+    for change in changes.values_mut() {
+        change.replaced = false;
+    }
+    // A write that changes nothing the engine names (an upsert of no fields) leaves no entry
+    changes.retain(|_, change| *change != Change::default());
+    // An entity the commit found and left destroyed is named as destroyed alone, though a unit made it again on the way
+    for (id, change) in changes.iter_mut() {
+        if before.entities.contains_key(id) && change.created && change.destroyed {
+            change.created = false;
+        }
+    }
+    assert!(
+        current.entities == after.entities && current.edges == after.edges && current.keyed == after.keyed,
+        "replaying a committed step lands on the reference's state: {step:?}"
+    );
+    (changes, ends)
+}
+
+/// Applies one step to `current`, adding what it made. A unit's members in turn; a unit inside another is a savepoint, and
+/// one that fails or throws is rolled back with its effects. Err when a leaf step is refused
+fn effects_in(
+    current: &mut Model,
+    step: &Step,
+    changes: &mut BTreeMap<String, Change>,
+    ends: &mut BTreeSet<String>,
+) -> Result<(), Refusal> {
+    match step {
+        Step::Unit { steps, throws, .. } => {
+            let saved = current.clone();
+            let (mut inner_changes, mut inner_ends) = (BTreeMap::new(), BTreeSet::new());
+            let outcome =
+                steps.iter().try_for_each(|member| effects_in(current, member, &mut inner_changes, &mut inner_ends));
+            if outcome.is_err() || *throws {
+                *current = saved;
+                return Ok(());
+            }
+            merge(changes, inner_changes);
+            ends.extend(inner_ends);
+            Ok(())
+        }
+        leaf => {
+            let previous = current.clone();
+            current.apply(leaf)?;
+            merge(changes, changes_between(&previous, current));
+            merge(changes, writes_of(leaf, &previous));
+            ends.extend(touched_ends(&previous, current));
+            ends.extend(written_ends(leaf));
+            Ok(())
+        }
+    }
+}
+
+/// One relation as the engine's change set names it: an edge made, unlinked, rekeyed or moved, by its kind and ends. A relation
+/// the commit made and unlinked again is one entry with both flags, as the engine reports it
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Rel {
+    kind: String,
+    source: String,
+    target: String,
+    linked: bool,
+    unlinked: bool,
+    changed: bool,
+    /// The ends a moved relation had before the commit
+    moved_from: Option<(String, String)>,
+    /// The key of a keyed edge, which tells two of the same ends apart. Internal to the replay: the engine's report has
+    /// no key, so it is cleared before the comparison
+    n: Option<u8>,
+    /// The key a rekey gave the edge, which is what the entry's key becomes. Internal to the replay
+    to_n: Option<u8>,
+}
+
+impl Rel {
+    fn new(kind: &str, source: &str, target: &str) -> Rel {
+        Rel {
+            kind: kind.to_owned(),
+            source: source.to_owned(),
+            target: target.to_owned(),
+            linked: false,
+            unlinked: false,
+            changed: false,
+            moved_from: None,
+            n: None,
+            to_n: None,
+        }
+    }
+}
+
+/// The relations a committed step made, in the order of the engine's report. Replayed as `effects_in` replays the entities
+fn relations_of(step: &Step, before: &Model) -> Vec<Rel> {
+    let mut current = before.clone();
+    let mut rels = Vec::new();
+    rel_effects_in(&mut current, step, &mut rels).expect("a committed step applies");
+    for rel in &mut rels {
+        rel.n = None;
+        rel.to_n = None;
+    }
+    rels.sort();
+    rels
+}
+
+fn rel_effects_in(current: &mut Model, step: &Step, rels: &mut Vec<Rel>) -> Result<(), Refusal> {
+    match step {
+        Step::Unit { steps, throws, .. } => {
+            // A nested unit's events go straight into the commit's list, so each finds the entry it follows by the key the
+            // edge had then; a savepoint that fails or throws is rolled back with its events
+            let saved = current.clone();
+            let saved_rels = rels.clone();
+            let outcome = steps.iter().try_for_each(|member| rel_effects_in(current, member, rels));
+            if outcome.is_err() || *throws {
+                *current = saved;
+                *rels = saved_rels;
+            }
+            Ok(())
+        }
+        leaf => {
+            let previous = current.clone();
+            current.apply(leaf)?;
+            let events = match leaf {
+                Step::MoveRelation { id, kind, target, to } => {
+                    let mut rel = Rel::new(kind, id, to);
+                    rel.changed = true;
+                    // Moved onto the target it has, the relation is changed and has moved from nowhere
+                    rel.moved_from = (to != target).then(|| (id.to_string(), target.to_string()));
+                    vec![rel]
+                }
+                Step::Rekey { id, target, from, to } => {
+                    let mut rel = Rel::new(KEYED, id, target);
+                    rel.changed = true;
+                    rel.n = Some(*from);
+                    rel.to_n = Some(*to);
+                    vec![rel]
+                }
+                _ => edge_diff(&previous, current),
+            };
+            for rel in events {
+                push_rel(rels, rel);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// The links and unlinks between two states: an edge added is a relation made, one removed a relation unlinked
+fn edge_diff(before: &Model, after: &Model) -> Vec<Rel> {
+    let mut out = Vec::new();
+    for (source, kind, target) in after.edges.difference(&before.edges) {
+        let mut rel = Rel::new(kind, source, target);
+        rel.linked = true;
+        out.push(rel);
+    }
+    for (source, kind, target) in before.edges.difference(&after.edges) {
+        let mut rel = Rel::new(kind, source, target);
+        rel.unlinked = true;
+        out.push(rel);
+    }
+    for (source, target, n) in after.keyed.difference(&before.keyed) {
+        let mut rel = Rel::new(KEYED, source, target);
+        rel.linked = true;
+        rel.n = Some(*n);
+        out.push(rel);
+    }
+    for (source, target, n) in before.keyed.difference(&after.keyed) {
+        let mut rel = Rel::new(KEYED, source, target);
+        rel.unlinked = true;
+        rel.n = Some(*n);
+        out.push(rel);
+    }
+    out
+}
+
+/// Records a relation event: an unlink of a relation the commit already has an entry for, linked or rekeyed or moved, is
+/// folded into that entry; anything else is an entry of its own
+fn push_rel(rels: &mut Vec<Rel>, rel: Rel) {
+    // A move is the same relation as the entry holding its pre-move ends, and that entry keeps the ends it began with
+    if let Some((from_source, from_target)) = rel.moved_from.clone()
+        && let Some(open) = rels.iter_mut().find(|r| {
+            !r.unlinked && r.kind == rel.kind && r.source == from_source && r.target == from_target && r.n == rel.n
+        })
+    {
+        open.source = rel.source;
+        open.target = rel.target;
+        open.changed = true;
+        open.moved_from.get_or_insert((from_source, from_target));
+        return;
+    }
+    // A link makes a relation of its own; an unlink or a rekey is the same relation as an entry it follows, for the same ends
+    if !rel.linked
+        && rel.moved_from.is_none()
+        && let Some(open) = rels.iter_mut().find(|r| {
+            !r.unlinked && r.kind == rel.kind && r.source == rel.source && r.target == rel.target && r.n == rel.n
+        })
+    {
+        open.unlinked |= rel.unlinked;
+        open.changed |= rel.changed;
+        if rel.to_n.is_some() {
+            open.n = rel.to_n;
+        }
+        return;
+    }
+    // An entry carries the key its edge has after the commit, so an event later in the commit finds it by that key
+    let mut rel = rel;
+    if let Some(to) = rel.to_n.take() {
+        rel.n = Some(to);
+    }
+    rels.push(rel);
+}
+
+/// The fields and roles a write names, whether or not its value changed: the engine reports each one it wrote. A grant of a
+/// role the entity holds, or a revoke of one it lacks, writes nothing
+fn writes_of(step: &Step, previous: &Model) -> BTreeMap<String, Change> {
+    let field = |id: &str, names: Vec<&str>| {
+        let fields = names.into_iter().map(str::to_owned).collect();
+        [(id.to_owned(), Change { fields, ..Default::default() })].into_iter().collect()
+    };
+    let held = |id: &str, key: &str| previous.entities.get(id).and_then(|e| e.fields.get(key));
+    match step {
+        Step::Set { id, key, .. } | Step::Append { id, key, .. } | Step::Merge { id, key, .. } => field(id, vec![key]),
+        // Removals that take nothing away write nothing: a missing field, or an index past the list's end
+        Step::Delete { id, key } => {
+            if held(id, key).is_some() {
+                field(id, vec![key])
+            } else {
+                BTreeMap::new()
+            }
+        }
+        Step::RemoveAt { id, key, index } => match held(id, key) {
+            Some(Json::Array(items)) if (*index as usize) < items.len() => field(id, vec![key]),
+            _ => BTreeMap::new(),
+        },
+        Step::RemoveValue { id, key, value } => match held(id, key) {
+            Some(Json::Array(items)) if items.contains(value) => field(id, vec![key]),
+            _ => BTreeMap::new(),
+        },
+        Step::Create { id, fields } | Step::Upsert { id, fields } => field(id, fields.keys().copied().collect()),
+        Step::Grant { id, role } | Step::GrantExclusive { id, role } | Step::Revoke { id, role } => {
+            let held = previous.entities.get(*id).is_some_and(|e| e.roles.iter().any(|r| r == role));
+            let writes = if matches!(step, Step::Revoke { .. }) { held } else { !held };
+            if writes {
+                [(id.to_string(), Change { roles: true, ..Default::default() })].into_iter().collect()
+            } else {
+                BTreeMap::new()
+            }
+        }
+        _ => BTreeMap::new(),
+    }
+}
+
+/// The ends a step writes whether or not its edge changes: a rekey stamps both, to its own key or another, and a move
+fn written_ends(step: &Step) -> BTreeSet<String> {
+    match step {
+        Step::Rekey { id, target, .. } => [id.to_string(), target.to_string()].into_iter().collect(),
+        // A move wrote the ends it left and the one it joined, though to the same target it changes nothing
+        Step::MoveRelation { id, target, to, .. } => {
+            [id.to_string(), target.to_string(), to.to_string()].into_iter().collect()
+        }
+        _ => BTreeSet::new(),
+    }
+}
+
+/// Adds the changes of a later step to those of the steps before it. An entity destroyed and made again within the commit is
+/// named as made alone, with only what was done to the one made, as `ChangeSet::entities` documents
+fn merge(into: &mut BTreeMap<String, Change>, from: BTreeMap<String, Change>) {
+    for (id, later) in from {
+        match into.get_mut(&id) {
+            Some(earlier) if later.replaced || (later.created && earlier.destroyed) => {
+                *earlier = Change { replaced: true, ..later };
+            }
+            Some(earlier) => {
+                earlier.created |= later.created;
+                earlier.destroyed |= later.destroyed;
+                earlier.trashed |= later.trashed;
+                earlier.restored |= later.restored;
+                earlier.roles |= later.roles;
+                earlier.fields.extend(later.fields);
+            }
+            None => {
+                into.insert(id, later);
+            }
+        }
+    }
+}
+
+impl Since {
+    fn record(&mut self, sequence: u64, changes: &BTreeMap<String, Change>) {
+        for (id, change) in changes {
+            if change.destroyed {
+                self.last.remove(id);
+                self.gone.insert(id.clone());
+            } else {
+                self.gone.remove(id);
+                self.last.insert(id.clone(), sequence);
+            }
+        }
+    }
+}
+
+/// The entities at either end of an edge a step added, removed or moved, or of a keyed edge whose key changed. A relation
+/// change stamps both its ends in `changed_since`, though the change set names them as changed only in its relations
+fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
+    let mut ends = BTreeSet::new();
+    for (source, _, target) in before.edges.symmetric_difference(&after.edges) {
+        ends.insert(source.clone());
+        ends.insert(target.clone());
+    }
+    for (source, target, _) in before.keyed.symmetric_difference(&after.keyed) {
+        ends.insert(source.clone());
+        ends.insert(target.clone());
+    }
+    ends
+}
+
+/// Records the model's state after a step, comparing the change set the engine made with the change the model's states
+/// name, and what `changed_since` answers from the start with what the changes so far say. `quiet` is the database's
+/// sequence as the step began, with the rank index's builder idle: a rename reports no sequence, and its commit is
+/// the one after that. The database's own sequence by now may be past it, by a commit of the builder's the rename
+/// gave work to
+fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model, quiet: u64) {
+    if let (Step::RenameField { from, .. }, Ok(_)) = (step, got) {
+        // A field rename commits, consuming a sequence even when no entity held the field; it stamps the entities that did
+        let sequence = quiet + 1;
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        let holders: Vec<String> = engine
+            .before
+            .entities
+            .iter()
+            .filter(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in holders {
+            if after.entities.contains_key(&id) {
+                engine.since.gone.remove(&id);
+                engine.since.last.insert(id, sequence);
+            }
+        }
+        if engine.replaced && engine.replaced_at.is_none() {
+            engine.replaced_at = Some(sequence - 1);
+        }
+        engine.before = after;
+        assert_since(engine, step);
+        return;
+    }
+    if let (Step::RenameRelation { from, .. }, Ok(_)) = (step, got) {
+        // A rename commits no change set and reports no sequence: its commit is the one after the database's as the
+        // step began. It stamps the ends of each edge it moved, and the ends are alive
+        let sequence = quiet + 1;
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        let moved: Vec<(String, String)> = engine
+            .before
+            .edges
+            .iter()
+            .filter(|(_, kind, _)| kind.as_str() == *from)
+            .map(|(source, _, target)| (source.clone(), target.clone()))
+            .collect();
+        for id in moved.into_iter().flat_map(|(source, target)| [source, target]) {
+            if after.entities.contains_key(&id) {
+                engine.since.gone.remove(&id);
+                engine.since.last.insert(id, sequence);
+            }
+        }
+        if engine.replaced && engine.replaced_at.is_none() {
+            engine.replaced_at = Some(sequence - 1);
+        }
+        engine.before = after;
+        assert_since(engine, step);
+        return;
+    }
+    if let (Step::Reset, Ok(_)) = (step, got) {
+        // A reset commits no change set, and a reader from before it is told the answer is incomplete: the entities it
+        // removed have no tombstone. The tracking starts again from the database as it is
+        engine.before = after;
+        engine.since = Since::default();
+        engine.replaced = true;
+        engine.replaced_at = None;
+        assert_since(engine, step);
+        return;
+    }
+    match got {
+        Ok(Some(commit)) => {
+            let (changes, ends) = effects_of(step, &engine.before, &after);
+            let mut reported: Vec<Rel> = commit
+                .relations
+                .values()
+                .map(|r| Rel {
+                    kind: r.kind.clone(),
+                    source: r.source.clone(),
+                    target: r.target.clone(),
+                    linked: r.linked,
+                    unlinked: r.unlinked,
+                    changed: r.changed,
+                    moved_from: r.moved_from.as_ref().map(|e| (e.source.clone(), e.target.clone())),
+                    n: None,
+                    to_n: None,
+                })
+                .collect();
+            reported.sort();
+            assert_eq!(reported, relations_of(step, &engine.before), "{step:?}: the relations the commit reported");
+            assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+            engine.sequence = commit.sequence;
+            // A reader from the commit before the first after a reset reads what changed since the reset
+            if engine.replaced && engine.replaced_at.is_none() {
+                engine.replaced_at = Some(commit.sequence - 1);
+            }
+            assert_eq!(changes_of(commit), changes, "{step:?}: the change set the commit reported");
+            engine.since.record(commit.sequence, &changes);
+            // An end the step left destroyed is not stamped: its destruction is the change
+            for id in ends.iter().filter(|id| after.entities.contains_key(*id)) {
+                engine.since.last.insert(id.clone(), commit.sequence);
+            }
+        }
+        _ => {
+            assert!(
+                changes_between(&engine.before, &after).is_empty(),
+                "{step:?}: the model changed where the engine made no commit"
+            );
+            assert!(
+                touched_ends(&engine.before, &after).is_empty(),
+                "{step:?}: the model moved an edge where the engine made no commit"
+            );
+        }
+    }
+    engine.before = after;
+    assert_since(engine, step);
+}
+
+fn assert_since(engine: &Engine, step: &Step) {
+    let from_start = engine
+        .db
+        .changed_since(&engine.types, &crate::engine::changed::Position::default(), 1_000_000)
+        .expect("changed_since answers");
+    if engine.replaced {
+        assert!(!from_start.complete, "{step:?}: a reader from before a reset is told the answer is incomplete");
+    } else {
+        assert_answer(engine, step, &from_start);
+    }
+    if let Some(sequence) = engine.replaced_at {
+        let position = crate::engine::changed::Position { sequence, after: None };
+        let since = engine.db.changed_since(&engine.types, &position, 1_000_000).expect("changed_since answers");
+        assert_answer(engine, step, &since);
+    }
+}
+
+/// What `changed_since` answers, which must be the entities still there with the sequence of their last change, and the
+/// entities destroyed and not made again, and everything
+fn assert_answer(engine: &Engine, step: &Step, got: &crate::engine::changed::Changed) {
+    assert_eq!(got.ids.len(), got.sequences.len(), "each changed entity has the sequence of its last change");
+    let ids: BTreeMap<String, u64> = got.ids.iter().cloned().zip(got.sequences.iter().copied()).collect();
+    assert_eq!(got.ids.len(), ids.len(), "each changed entity is named once");
+    assert_eq!(
+        ids, engine.since.last,
+        "{step:?}: changed since the start, each entity still there and the commit of its last change"
+    );
+    let destroyed: BTreeSet<String> = got.destroyed.iter().cloned().collect();
+    assert_eq!(got.destroyed.len(), destroyed.len(), "each destroyed entity is named once");
+    assert_eq!(destroyed, engine.since.gone, "changed since the start: the entities destroyed and not made again");
+    assert!(got.done && got.complete, "changed since the start answers everything: {got:?}");
 }
 
 struct EngineMachine;
@@ -1354,13 +2190,35 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
     fn init_test(reference: &Reference) -> Engine {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
+        let mut engine = Engine {
+            db,
+            _dir: dir,
+            before: Model::default(),
+            since: Since::default(),
+            types: vec!["Task".to_owned(), "Note".to_owned()],
+            sequence: 0,
+            replaced: false,
+            replaced_at: None,
+        };
         for step in &reference.prelude {
-            run(&db, step).unwrap();
+            // Read beside the builder, which a prelude runs with: no step of one is a rename, whose commit alone is
+            // taken from this
+            assert!(!matches!(step, Step::RenameRelation { .. } | Step::RenameField { .. }), "{step:?} in a prelude");
+            let quiet = engine.db.sequence().expect("the sequence reads");
+            let got = run(&engine.db, step);
+            assert!(got.is_ok(), "the prelude's {step:?}: {got:?}");
+            let mut after = engine.before.clone();
+            after.step(step).expect("the prelude creates each id once");
+            track(&mut engine, step, &got, after, quiet);
         }
-        Engine { db, _dir: dir }
+        engine
     }
 
-    fn apply(engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
+    fn apply(mut engine: Engine, reference: &Reference, transition: Aimed) -> Engine {
+        // Read with the builder idle, so that the step's commit is the next: the builder commits what a step before
+        // gave it to do, and is waited for here whether or not the invariants after that step were
+        engine.db.wait_for_index_builds().expect("the builder's drain ends");
+        let quiet = engine.db.sequence().expect("the sequence reads");
         let got = run(&engine.db, &transition.step);
         assert_eq!(
             got.is_ok(),
@@ -1369,6 +2227,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             transition.step,
             reference.outcome
         );
+        track(&mut engine, &transition.step, &got, reference.model.clone(), quiet);
         engine
     }
 
@@ -1406,6 +2265,314 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
     }
 }
 
+#[test]
+fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destroyed_alone() {
+    // The engine names an entity the commit found and left destroyed as destroyed alone, though the commit made it again
+    // on the way; the model's union of the members' changes must say so too
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Destroy { id: "Task-1" },
+            Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("y"))]) },
+            Step::Destroy { id: "Task-1" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_entity() {
+    // A grant made before the destroy in the commit is the destroyed entity's `role` field, as the engine names it
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![Step::Grant { id: "Task-1", role: "r1" }, Step::Destroy { id: "Task-1" }],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_it() {
+    // The engine names a destroyed-and-made entity with only what was done to the one made: the fields an enclosing unit
+    // wrote before the nested unit's destroy are not among them
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Set { id: "Task-1", key: "c", value: json!("y") },
+            Step::Unit {
+                steps: vec![Step::Destroy { id: "Task-1" }, Step::Upsert { id: "Task-1", fields: BTreeMap::new() }],
+                throws: false,
+                durable: false,
+            },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_rename_is_tracked_at_its_own_commit_though_the_builder_has_committed_since() {
+    // A rename reports no sequence, and gives the rank index's builder work it commits by itself: by the time the
+    // step is tracked the database's sequence may be the builder's, a commit past the one that stamped the ends
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+        Step::Link { id: "Task-2", kind: "refs", target: "Task-3" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    engine.db.wait_for_index_builds().unwrap();
+    let quiet = engine.db.sequence().unwrap();
+    let step = Step::RenameRelation { from: "refs", to: "tags" };
+    let got = run(&engine.db, &step);
+    engine.db.wait_for_index_builds().unwrap();
+    assert_eq!(engine.db.sequence().unwrap(), quiet + 2, "the rename's commit, and the builder's after it");
+    model.step(&step).expect("the model renames");
+    track(&mut engine, &step, &got, model, quiet);
+}
+
+#[test]
+fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move() {
+    // The workload moves a relation onto any entity, the target it has among them: the engine reports the relation
+    // changed and not moved. Alone, and after a link in the same commit, it names no ends it moved from; after a move
+    // in the same commit, the ends that move took it from
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-2", kind: "refs", target: "Task-1" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let onto_its_own = Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-1", to: "Task-1" };
+    let moved_then_onto_its_own = Step::Unit {
+        steps: vec![
+            Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-1", to: "Task-3" },
+            Step::MoveRelation { id: "Task-2", kind: "refs", target: "Task-3", to: "Task-3" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    let linked_then_onto_its_own = Step::Unit {
+        steps: vec![
+            Step::Link { id: "Task-3", kind: "refs", target: "Task-1" },
+            Step::MoveRelation { id: "Task-3", kind: "refs", target: "Task-1", to: "Task-1" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    for step in [onto_its_own, moved_then_onto_its_own, linked_then_onto_its_own] {
+        reference.outcome = model.step(&step);
+        assert_eq!(reference.outcome, Ok(()), "{step:?}");
+        reference.model = model.clone();
+        engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+            engine,
+            &reference,
+            Aimed { step, aimed: true },
+        );
+    }
+}
+
+#[test]
+fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_first_ends() {
+    // The engine names a relation moved twice in one commit once, changed, at its last ends and with the ends it began with
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-4", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::MoveRelation { id: "Task-1", kind: "refs", target: "Task-2", to: "Task-3" },
+            Step::MoveRelation { id: "Task-1", kind: "refs", target: "Task-3", to: "Task-4" },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refused_by_both() {
+    // Renaming refs to tags, where tags already joins the same two entities, would leave two edges with one identity: the
+    // engine refuses it, and the model must refuse it the same way, moving nothing
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "tags", target: "Task-2" },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::RenameRelation { from: "refs", to: "tags" };
+    reference.outcome = model.step(&step);
+    assert!(reference.outcome.is_err(), "the model refuses the rename");
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_the_engine_does() {
+    // The engine refuses a rename onto an edge of the new kind before its commit, so the refusal armed for the next commit
+    // stays armed: the create after the failed rename is the one refused, by both
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::Link { id: "Task-1", kind: "tags", target: "Task-2" },
+        Step::Link { id: "Task-1", kind: "refs", target: "Task-2" },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let steps = [
+        Step::RefuseNext,
+        Step::RenameRelation { from: "refs", to: "tags" },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!("y"))]) },
+    ];
+    for step in steps {
+        reference.outcome = model.step(&step);
+        reference.model = model.clone();
+        engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+            engine,
+            &reference,
+            Aimed { step, aimed: false },
+        );
+    }
+    assert!(reference.outcome.is_err(), "the create after the failed rename is refused, as the armed refusal says");
+}
+
+#[test]
+fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
+    // A Task holding both c and spare would have one value replaced: the engine refuses the rename and the model must too,
+    // moving nothing
+    let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("c", json!(1)), ("spare", json!(2))]) }];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates the id once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::RenameField { from: "c", to: "spare" };
+    reference.outcome = model.step(&step);
+    assert!(reference.outcome.is_err(), "the model refuses the rename");
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
+#[test]
+fn a_rekey_in_a_nested_unit_is_the_same_relation_as_an_earlier_rekey_of_it_in_the_commit() {
+    // An outer unit rekeys an edge to the key it has, and a nested unit rekeys it again: one relation, one entry
+    let prelude = vec![
+        Step::Create { id: "Note-1", fields: BTreeMap::from([("a", json!("t"))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!("x"))]) },
+        Step::LinkKeyed { id: "Note-1", target: "Task-2", n: 0 },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude builds the state");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    let step = Step::Unit {
+        steps: vec![
+            Step::Rekey { id: "Note-1", target: "Task-2", from: 0, to: 0 },
+            Step::Unit {
+                steps: vec![Step::Rekey { id: "Note-1", target: "Task-2", from: 0, to: 1 }],
+                throws: false,
+                durable: false,
+            },
+        ],
+        throws: false,
+        durable: false,
+    };
+    reference.outcome = model.step(&step);
+    reference.model = model;
+    let _ = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+        engine,
+        &reference,
+        Aimed { step, aimed: true },
+    );
+}
+
 proptest_state_machine::prop_state_machine! {
     #![proptest_config(ProptestConfig { cases: 96, failure_persistence: None, ..ProptestConfig::default() })]
 
@@ -1414,7 +2581,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 24] = [
+const STEP_KINDS: [&str; 27] = [
     "Create",
     "Set",
     "Append",
@@ -1439,6 +2606,9 @@ const STEP_KINDS: [&str; 24] = [
     "Unit",
     "RefuseNext",
     "Rebuild",
+    "Reset",
+    "RenameRelation",
+    "RenameField",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -1467,6 +2637,9 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Unit { .. } => "Unit",
         Step::RefuseNext => "RefuseNext",
         Step::Rebuild { .. } => "Rebuild",
+        Step::Reset => "Reset",
+        Step::RenameRelation { .. } => "RenameRelation",
+        Step::RenameField { .. } => "RenameField",
     }
 }
 
@@ -1564,9 +2737,16 @@ mod crash {
     fn child_runs_a_seeded_workload_acknowledging_each_step() {
         let (Ok(path), Ok(seed)) = (std::env::var("ELMDB_CRASH_DB"), std::env::var("ELMDB_CRASH_SEED")) else { return };
         // Syncs on, as the app runs: a commit survives the process's death before any sync
-        let db =
-            Database::open(&path, crate::OpenOptions { schema: Some(super::super::schema()), ..Default::default() })
-                .unwrap();
+        let db = Database::open(
+            &path,
+            crate::OpenOptions {
+                schema: Some(
+                    crate::schema::Schema::from_json(&super::with_spare(super::super::schema_json())).unwrap(),
+                ),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut out = std::io::stdout().lock();
         for (i, step) in seeded(seed.parse().unwrap()).iter().enumerate() {
             let _ = run(&db, step);

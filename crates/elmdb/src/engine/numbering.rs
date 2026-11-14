@@ -49,12 +49,7 @@ fn write_sequence(t: &mut Txn<'_, '_>, name: &str, next: u64) -> Result<()> {
 
 /// Whether an entity of the type holds this short code, read from the short code's index
 fn code_taken(t: &impl Read, entity_type: &str, code: &str) -> Result<bool> {
-    let mut taken = false;
-    t.visit(&keys::index_range(entity_type, SHORT_CODE_INDEX, &[Part::String(code.to_owned())]), |_, _| {
-        taken = true;
-        false
-    })?;
-    Ok(taken)
+    t.contains(&keys::index_range(entity_type, SHORT_CODE_INDEX, &[Part::String(code.to_owned())]))
 }
 
 /// The next short code of the type: `<prefix>-<n>`

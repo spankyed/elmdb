@@ -90,12 +90,12 @@ with tempfile.TemporaryDirectory(prefix="elmdb-verification-mutant-") as directo
     if args.only in (None, "text"):
         p = copy / "crates/elmdb/src/engine/text/mod.rs"
         good = p.read_text()
-        needle = "        while let Some((key, _)) = sorted.next()? {"
+        needle = "        while let Some((order, value)) = sorted.next()? {"
         assert good.count(needle) == 1
         p.write_text(good.replace(needle, """        let mut collected = Vec::new();
         while let Some(row) = sorted.next()? { collected.push(row); }
         let mut sorted = collected.into_iter();
-        while let Some((key, _)) = sorted.next() {"""))
+        while let Some((order, value)) = sorted.next() {"""))
         run("text", heap, True)
         p.write_text(good)
     if args.only in (None, "timing"):

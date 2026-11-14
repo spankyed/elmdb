@@ -1,0 +1,183 @@
+# One plan algebra
+
+Status: built, 2026-11-11: elmdb #107, #108 and #110. Designed 2026-10-28, when the
+planner's three fixes and EXPLAIN were built (goal-elmdb-next's Phase 4, `../../evidence/next-phase-4.md`) and the
+rest waited for a plan over large sets (`../../evidence/next-phase-10.md`, Plan algebra). How it reads now is in
+`../../architecture/engine.md`, Reads: plans. Where the build differs from the design below:
+
+- **No count is kept.** The first phase's `d/xn`, a count for each value, is not built: the filters' lists are read
+  as the places they hold in common, one walked and sought in the others, which is bounded by the shortest
+  whichever is written first and counts nothing to choose.
+- **Blocks of places, not bitmaps.** A value's places are in its own key while 256 or fewer and in blocks of no
+  more than that past it, each as its distance from the one before, the text index's layout: a roaring bitmap
+  saved under a megabyte of a million entities' indexes (Where it stands, below).
+- **Lists, not a bitmap a step.** A plan's steps still pull ids. The filters a type start begins with are read as
+  lists of places; a `lacks` of a field with an index reads the list of the entities the index files without a
+  value; and a search after filters every one of which a list reads runs within the places they keep, a set made
+  without reading an entity. `has`, `unlinkedTo` and a walk are not sets, and a filter after any other step
+  filters what reaches it.
+- **What EXPLAIN says.** A stage's input and output were its `visited` and `kept` already. A stage that reads
+  lists adds the `places` they were handed and `set: "and"` when it read several in common, and a search the
+  places `within` which it ran. There is no `or` or `minus`.
+
+## Where it stands
+
+A plan is a start, steps and a terminal, run by pulling ids through closures (`../../architecture/engine.md`, Reads). Since
+Phase 4, a type start's first indexed `where` or `withRole` among its leading filters drives, the filters before it are
+checked per match, an index lookup visits its matches in place order and stops at a `limit`, `orderBy` with `limit`
+holds only the first `limit`, and EXPLAIN answers each stage's index, visits, kept ids and time. A search, a vector
+query and a trigram search each answer a set the steps after them filter.
+
+Since the road to 1.0's fifth change (`../../roadmap.md`), an `orderBy` of one type reads a value index on the field in
+order, a `range` of numbers reads the entries between its bounds, and an `after` has the stage before it seek to its
+cursor: each index on one field accounts for every entity of its type, so an order read from it leaves none out
+(`../../architecture/engine.md`, Reads: plans). A search has the stage's part in a page too: before an `after` it hands
+on the matches ranked past the cursor, and a `limit`, `first` or `exists` asks it for no more than the answer takes.
+
+An order or a range under equalities is read from an index on the equalities' fields and then its own, and with no
+such index an `orderBy` before a `limit` walks its order and tests the filters while that costs less than sorting
+what they keep, which it learns by counting the entries the filters would read as it goes.
+
+Since then a type start's leading filters are read as the places their indexes hold in common, each index's
+entries for a value a list in place order: one list is walked and its places sought in the others, so what is read
+is bounded by the shortest whichever filter is written first, and nothing is counted to choose among them
+(`../../architecture/engine.md`, Reads: plans). That answers what the first phase below was for without its `d/xn` key.
+
+The reading of The measurements below, taken again as a disposable program through `Database::read_bytes`: 100,000
+tasks, `status` `open` for every second, `prio` `high` for every fifth, so every tenth holds both, each field in an
+index of its own; a release build on an Apple M1 Pro, 2026-11-11, medians of seven. `session/filter-access` at
+`d814908`, at a load of 7, counts each index no further than 1,024 entries, which both hold more than, and so reads
+the first written. `session/leapfrog-filters` at `e304d23`, at a load of 6 to 14, reads the places both hold.
+
+| The read | One index read | The places in common |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 61.8 ms | 18.3 ms |
+| `where(prio).where(status)`, every id | 26.3 ms | 18.0 ms |
+| `where(status).where(prio)`, the first | 60.3 µs | 8.2 µs |
+| `where(status)`, the first | 5.1 µs | 5.1 µs |
+| `where(prio)`, every id | 14.3 ms | 14.3 ms |
+
+In this data the order written no longer matters, and a first over two filters costs 1.6 times a first over one,
+where counting the two indexes cost twelve times. Every id of the two together still costs more than every id of
+the smaller alone, a place sought in the other list for each of its twenty thousand: that is what the lists as
+bitmaps are for. No row here reads a range, the trash, three lists or lists whose places come in runs.
+
+Since then a value index holds a value's places together, in its own key while they are 256 or fewer and in blocks
+of no more than that past it, where it held a key for each entity (`../../architecture/format.md`, `d/x`): the second
+phase below, with a block of places as their distances one from the next, the text index's layout, in place of a
+roaring bitmap. A list is asked a place at a time and a key is read only for a place the one last read doesn't
+answer for, so places close together cost one key between them, and a place carries no id: the entity at a place the
+lists share is read from its type's rows.
+
+What chose the layout, a disposable program on LMDB through `heed` with no engine: 1,000,000 entities filed in place
+order in units of 5,000, not synced, 16 KB pages; the pages in use once loaded, and one entity more filed in a commit
+of its own, the median of 300. An Apple M1 Pro, 2026-11-11, at a load of 15 to 37.
+
+| The index | A key an entity | Blocks of distances | Blocks, a bitmap where smaller |
+|---|---:|---:|---:|
+| A status of two values | 93.7 MB, 11 µs | 1.3 MB, 7 µs | 0.5 MB, 7 µs |
+| An owner of 1,000 values | 113.3 MB, 15 µs | 3.9 MB, 15 µs | 3.9 MB, 12 µs |
+| A number every entity holds its own | 67.5 MB, 19 µs | 67.5 MB, 19 µs | 67.5 MB, 21 µs |
+| All three | 296.2 MB, 37 µs | 73.3 MB, 41 µs | 72.2 MB, 36 µs |
+
+A bitmap saves under a megabyte of a million entities' indexes, so the blocks hold distances alone. A value every
+entity holds its own costs what it did: a key for each.
+
+The reading above taken again with the places in blocks, the same program and machine, 2026-11-11, at a load of 7:
+`main` at `d5e8e08` and `session/value-blocks`, one run after the other.
+
+| The read | A key an entity | Places in blocks |
+|---|---:|---:|
+| `where(status).where(prio)`, every id | 19.3 ms | 7.0 ms |
+| `where(prio).where(status)`, every id | 18.8 ms | 6.8 ms |
+| `where(status).where(prio)`, the first | 8.1 µs | 11.6 µs |
+| `where(status)`, every id | 35.1 ms | 28.0 ms |
+| `where(status)`, the first | 4.9 µs | 7.2 µs |
+| `where(prio)`, every id | 13.8 ms | 11.5 ms |
+| `where(status).where(owner)`, an owner of 100 none of them open | 0.064 ms | 0.184 ms |
+
+Every id of the two together costs less than every id of the smaller alone did, a place sought being found in the
+block already held. A first costs two keys more than it did, the value's own and the entity's row. The last row is
+what the blocks cost: a hundred places a thousand apart are each sought in a block of their own, which is read and
+its 256 places decoded for the one, 1.8 µs where a key sought was 0.6.
+
+Since then a `lacks` of a field with an index reads the list the index keeps of the entities without a value, and
+a search after filters their indexes read runs within the places those filters keep.
+
+## The measurements
+
+- **apack's value indexes are small.** G8's data under apack's schema holds 13 value indexes with about 850 entries in
+  all, the largest `Thread.shortCode` (343); a message is found through its thread's `contains` edges, not an index.
+  No apack plan intersects two large sets.
+- **Where bitmaps would pay**, measured over 100,000 tasks with two value-indexed fields (`status` half `open`, `prio` a
+  fifth `high`, 10,000 both; release build, 2026-10-28, a load of 11): `where(status).where(prio)` as the planner reads
+  it today takes 58.7 ms, the 50,000-entry index driving and `prio` read per match; with the two filters swapped,
+  26.2 ms; the `prio` lookup alone 12.9 ms. The same answer from two roaring bitmaps (16 KB each) decoded and
+  intersected takes 5 µs, and turning its 10,000 places into ids 4.4 ms.
+- **The store's layout**, measured by Phase 9 on the trigram index: one key per value and entity tripled G8's file
+  where a bitmap per value and block of 2^16 places added an eighth (`../../evidence/next-phase-9.md`). A value index
+  stored per entry pays the same per-key cost.
+- **Ranking**: a common word searched exactly over 50,000 messages takes 21 ms (apack's text bench, Phase 9's G4), every
+  holder scored; block-max scores are the answer when that is too slow (`../../roadmap/text-index-at-scale.md`).
+
+So the first gain at scale is the order of the filters, which needs only each index's size; bitmaps are the second, and
+both are worth building only when a plan over large sets is measured slow.
+
+## The design
+
+### 1. Cardinality, and the smaller filter first
+
+Each value index keeps, per value, how many entities hold it: `d/xn type index value → count`, kept by the writes that
+add and remove its entries, derived by `check()` and `rebuild()`. Among a type start's leading indexed filters the one
+with the fewest entities drives; the others are checked per match. EXPLAIN names the chosen index and each candidate's
+count.
+
+### 2. Value indexes as bitmaps
+
+A value index stores, per value and block of places, a roaring bitmap: `d/x type index value block → bitmap`, the
+trigram index's layout (`d/g`), the block 2^16 places. A unique index's value holds one place; its check reads one key.
+The ordered range reads (`orderBy` from an index, a range `where`) walk values in order and, within a value, places in
+order, which a bitmap's iteration gives. Keys of values over 256 bytes, which today aren't indexed, stay unindexed.
+
+### 3. Sets as the algebra
+
+A step yields a set of places with its type — a bitmap per type — and the plan's filters become operations on sets:
+an index lookup a bitmap, two filters an AND, `withRole` a bitmap of the role index, a negation (`lacks`, `unlinkedTo`)
+a difference from the type's places, a walk the far ends' places, a search a set with scores, a trigram search its
+candidates checked. Order, `limit` and `after` stay the last stage over a set already narrowed, by a heap for `orderBy`
+with `limit`. A filter before a search becomes the `within` bitmap the search runs inside, which `search` already takes
+(`text::search::search`'s `within`).
+
+A caller's function `where` can't cross; it splits the plan where it stands, as today: the plan before it runs as sets,
+its ids go to the function, the plan after it starts from what the function kept.
+
+### API
+
+No new step. The plan's steps keep their meaning, and their answers stay in the order they answer today: a type
+start's in place order, a set's in the order it came. EXPLAIN adds each stage's input and output cardinality and, for a
+set operation, its kind (`and`, `or`, `minus`).
+
+## Risks
+
+- **A bitmap's rewrite on every write that adds a common value**, which the block bounds: Phase 9 measured a created
+  message's trigram filing at 0.3 ms, rewriting a block's bitmap per trigram; a value index rewrites one bitmap per
+  indexed field, not hundreds.
+- **Order.** A bitmap is in place order; an answer in another order (an `orderBy` without `limit`) still sorts.
+- **Places across types**: one bitmap per type keeps a mixed set's type with each place, at the cost of a per-type loop.
+- **Equivalence.** Every reordering must answer what the plain reading answers; the model harness's plans and the
+  plans spec are the proof, extended with two-filter cases.
+
+## Phases
+
+1. **Cardinality and the smaller filter first.** Done when: `d/xn` is kept by every write and covered by `check()` and
+   `rebuild()` (the model harness's derived reads include it); the plans spec shows `where(a).where(b)` visiting the
+   smaller index's matches whichever order they're written in, its answer equal to the plain reading's; EXPLAIN shows
+   the counts; the 100,000-task reading above is taken again and is within 10% of its smaller-first figure either way.
+2. **Value indexes as bitmaps.** Built as blocks of places, above. Triggered by a plan over value indexes measured slow in apack, or an index whose
+   entries are a measurable share of the file. Done when: the layout is format 1 edited in place (G3 of goal-elmdb-next,
+   while it holds); a lookup, a range, a unique check and `orderBy` from an index answer what they answer today
+   (model harness, plans spec); G8's file size and apack's bench are recorded before and after.
+3. **Sets as the algebra.** Triggered by phase 2 and a plan of two or more large filters measured slow. Done when: two
+   indexed filters intersect as bitmaps (the reading above within 2× of its 4.4 ms bitmap figure), a filter before a
+   search is its `within`, a function `where` splits the plan as today, and every plan spec and the model harness pass
+   unchanged.

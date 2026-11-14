@@ -34,9 +34,14 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
+   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
+   * the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
+   * order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
+   * is refused while a unit is open
    */
-  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  write(batch: Buffer, durable?: boolean | undefined | null): Promise<Buffer>
+  /** `write` on this thread, held until the batch is applied */
+  writeSync(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
    * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
    * answer per read
@@ -46,6 +51,24 @@ export declare class Database {
   read(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
+  /**
+   * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
+   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
+   * a second being refused, which keeps no process alive, and closing the database drops it
+   */
+  hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
+  /**
+   * Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
+   * second being refused. It keeps no process alive, and closing the database drops it
+   */
+  hearCommitsElsewhere(listener: () => void): void
+  /** The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it */
+  replacedElsewhere(): number | null
+  /**
+   * Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting
+   * nothing, when another has landed since
+   */
+  adoptReplacement(epoch: number): boolean
   /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
   trackStats(): { owners: number; keys: number; ranges: number }
   /**
@@ -58,12 +81,28 @@ export declare class Database {
    * (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
-  /** Compares derived data with primary data and every row with the schema's rules */
-  check(): CheckReport
-  /** Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's */
-  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
+  /** Compares derived data with primary data and every row with the schema's rules, on a thread of the pool */
+  check(): Promise<CheckReport>
+  /** `check` on this thread */
+  checkSync(): CheckReport
+  /**
+   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
+   * thread of the pool and in its turn among the writes asked for, as a write is
+   */
+  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
+  /** `rebuild` on this thread */
+  rebuildSync(entityType?: string | undefined | null, index?: string | undefined | null): void
   /** Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
+  /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
+  committedElsewhere(): boolean
+  /** The checkpoint named `name`, as the latest commit left it */
+  checkpoint(name: string): Buffer | null
+  /**
+   * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
+   * its `Changed`
+   */
+  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /** Blocks until every index waiting to be built is built or has failed */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
@@ -71,15 +110,26 @@ export declare class Database {
   renameType(from: string, to: string): void
   renameField(entityType: string, from: string, to: string): void
   renameRelation(from: string, to: string): void
-  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
-  backup(target: string): void
+  /**
+   * A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
+   * the pool
+   */
+  backup(target: string): Promise<void>
+  /** `backup` on this thread */
+  backupSync(target: string): void
   /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
   replaceWith(source: string): void
   /** Every entry removed but the database's format and schema */
   reset(): void
-  /** What the database holds: entities per type and field, relations per kind, entries per index, its sizes */
+  /**
+   * What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+   * each value index, its sizes
+   */
   stats(): Stats
-  /** Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does */
+  /**
+   * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
+   * value outside the value spec is refused all the same
+   */
   bulkLoad(loads: Buffer): void
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
@@ -97,6 +147,16 @@ export declare class Unit {
    * bytes of `{ results: OpResult[] }`
    */
   write(batch: Buffer): Buffer
+  /** Records `value` as the checkpoint `name`, committing with this unit or not at all */
+  setCheckpoint(name: string, value: Buffer): void
+  /** The checkpoint named `name`, as this unit sees it */
+  checkpoint(name: string): Buffer | null
+  /** What the unit has changed so far: msgpack bytes of its `ChangeSet` */
+  pendingChanges(): Buffer
+  /** `Database.changedSince` read in the unit, before its own writes are stamped */
+  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
+  /** The sequence this unit commits as, which what it writes is stamped with */
+  nextSequence(): number
   /** Answers reads from the unit's transaction, which sees the unit's own writes */
   read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */
@@ -112,6 +172,12 @@ export declare class Unit {
   get isOpen(): boolean
 }
 
+/** A commit the index builder made */
+export interface BuilderCommit {
+  sequence: number
+  touched: Array<number>
+}
+
 export interface OpenOptions {
   /** Open existing files without writing: every write is refused, and the stored schema is used */
   readOnly?: boolean
@@ -122,6 +188,12 @@ export interface OpenOptions {
   schema?: Schema
   /** Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory */
   syncs?: boolean
+  /**
+   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
+   * sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
+   * commits are synced in groups, a moment after they return
+   */
+  syncEachCommit?: boolean
   syncIdleMs?: number
   syncIntervalMs?: number
   mapSizeBytes?: number

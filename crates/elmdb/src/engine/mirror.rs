@@ -4,7 +4,8 @@
 //! A drain reads the edges of its index's kinds of every node its pushes reach, which over a graph whose links are spread
 //! is nearly every node (`docs/evidence/rank-index.md`), though a commit between two drains moves a few. The mirror holds an entity's entries once a drain has read them, and
 //! every commit made through the engine hands the store the entries it filed and unfiled (`EdgeDelta`), which the store
-//! applies under its write lock as it commits, so a list the mirror holds is the store's at the mirror's sequence:
+//! applies as it commits, before this process's next writer begins (`store/writers.rs`), so a list the mirror holds is
+//! the store's at the mirror's sequence:
 //!
 //! - **A list held is complete**: read whole from the store at the mirror's sequence, and changed since only by the
 //!   entries each commit filed or unfiled. An entity the mirror holds no list for is read from the store, as before.
@@ -45,18 +46,17 @@ pub enum EdgeDelta {
 }
 
 /// One entry of a list: its place, its far end's name and its weight, `NO_WEIGHT` when it holds none
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 struct Entry {
     seq: u64,
     far: u32,
     weight: f64,
 }
 
-/// The weight an entry holding none keeps: a weight is from 0 to `relations::MAX_WEIGHT`, so no edge holds this one,
-/// and an entry is 24 bytes where an `Option<f64>` would make it 32
-// mutant-skip: delete -
-// The weight an entry holding none keeps: 1 is no stored weight either, the store holding 1 as none
-const NO_WEIGHT: f64 = -1.0;
+/// The weight an entry holding none keeps: not a number, which no row holds, a link's weight being from 0 to
+/// `relations::MAX_WEIGHT` and a load's any finite number, so an entry is 24 bytes where an `Option<f64>` would make
+/// it 32
+const NO_WEIGHT: f64 = f64::NAN;
 
 impl Entry {
     fn new(seq: u64, far: u32, weight: Option<f64>) -> Self {
@@ -64,7 +64,7 @@ impl Entry {
     }
 
     fn weight(&self) -> Option<f64> {
-        (self.weight != NO_WEIGHT).then_some(self.weight)
+        (!self.weight.is_nan()).then_some(self.weight)
     }
 }
 

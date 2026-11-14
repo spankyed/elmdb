@@ -14,7 +14,7 @@ import sys
 import tempfile
 
 from callgrind import allocator_instructions
-from instruction_gates import GATED, allowed_growth
+from instruction_gates import GATED, allowed_growth, undeclared_or_missing
 
 
 def run(out):
@@ -32,8 +32,9 @@ def run(out):
             "instructions": data["profiles"][0]["data"]["total"]["metrics"]["Ir"]["values"]["new"],
             "allocating": allocator_instructions(summary.parent),
         }
-    cpu = next(line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
-               if line.startswith("model name"))
+    # aarch64 Linux names no model
+    cpu = next((line.split(":", 1)[1].strip() for line in Path("/proc/cpuinfo").read_text().splitlines()
+                if line.startswith("model name")), "unnamed")
     Path(out).write_text(json.dumps({"cpu": cpu, "cases": cases}))
 
 
@@ -45,17 +46,22 @@ def compare(directory):
     print(f"{len(machines)} machines, {len(cpus)} CPU models: {', '.join(cpus)}")
     if len(cpus) < 2:
         print("These machines were all one CPU model, so this run shows nothing about the difference between models")
-    cases = sorted(machines[0]["cases"])
-    if not cases:
-        sys.exit("No cases were counted")
-    failures = []
+    cases = sorted({case for machine in machines for case in machine["cases"]})
+    failures = undeclared_or_missing({each["function"] for machine in machines for each in machine["cases"].values()})
     for case in cases:
-        held = [machine["cases"][case] for machine in machines]
+        held = [machine["cases"][case] for machine in machines if case in machine["cases"]]
+        if len(held) < len(machines):
+            failures.append(f"{case} was counted on {len(held)} of {len(machines)} machines")
+            continue
         counts = [each["instructions"] for each in held]
         spread = max(counts) - min(counts)
         allocating = {each["allocating"] for each in held}
         print(f"{case}: {min(counts):,} to {max(counts):,} (spread {spread:,}), allocating {sorted(allocating)}")
         if held[0]["function"] not in GATED:
+            continue
+        # No operation costs nothing and every gated one allocates, so a 0 is a run that measured nothing
+        if 0 in counts or 0 in allocating:
+            failures.append(f"{case} counted {sorted(set(counts))} instructions, {sorted(allocating)} of them allocating")
             continue
         if spread > allowed_growth(min(counts)):
             failures.append(f"{case} differs by {spread:,} instructions between machines")

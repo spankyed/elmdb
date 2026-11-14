@@ -2,19 +2,28 @@
 //! group commit and map growth (`docs/architecture/engine.md`, Durability; `docs/architecture/format.md`).
 //!
 //! Every transaction holds `gate` for reading, and growing the map holds it for writing, since LMDB grows a map only
-//! while its process has no transaction open. So `read` and `write` never call each other: a write reads through its
+//! while its process has no transaction open. So a read and a write never call each other: a write reads through its
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
+//!
+//! A transaction isn't all that reads through the map. LMDB's meta pages are in it, and a sync, the environment's
+//! sizes and its statistics each read them through a pointer into it, which a growth leaves pointing at nothing between
+//! unmapping the file and mapping it again. Each of those holds the gate for reading too.
 
 mod backup;
 mod idle_reads;
+mod reach;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
 pub mod sync;
 mod unit_slot;
+pub(crate) mod wake;
+mod writers;
+pub(crate) use writers::WriterLock;
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -60,6 +69,9 @@ pub struct StoreOptions {
     pub read_only: bool,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once
     pub syncs: bool,
+    /// Each commit synced by LMDB as it is made, its pages before the meta page that names them: a commit that
+    /// returned is on disk, and no group commit runs
+    pub sync_each_commit: bool,
     pub sync_idle: Duration,
     pub sync_interval: Duration,
     /// The map's size at open; by default `initial_map_size` of the file
@@ -71,11 +83,101 @@ impl Default for StoreOptions {
         Self {
             read_only: false,
             syncs: true,
+            sync_each_commit: false,
             sync_idle: Duration::from_millis(100),
             sync_interval: Duration::from_millis(1000),
             map_size_bytes: None,
         }
     }
+}
+
+// The offset `page_size_of` reads is for a 64-bit host; every target this crate ships for is one.
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
+
+/// The page size LMDB wrote a file with, which it reads from the file and not from the host: a file written on a host with
+/// 4 KiB pages opens with 4 KiB pages on one with 16 KiB. It is `mm_psize`, in the first meta page: the page header (16
+/// bytes), then `mm_magic`, `mm_version`, `mm_address` and `mm_mapsize` (24 bytes on a 64-bit host), then the free tree's
+/// `md_pad`. It is read by seeking, so the file is never mapped to find it
+fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usize> {
+    const AT: u64 = 16 + 24;
+    file.seek(SeekFrom::Start(AT))?;
+    let mut bytes = [0u8; 4];
+    file.read_exact(&mut bytes).map_err(|_| {
+        Error::new(ErrorCode::Corrupted, format!("{} is too short to hold a meta page", path.display()))
+    })?;
+    let page = u32::from_ne_bytes(bytes) as usize;
+    if !page.is_power_of_two() || !(512..=32768).contains(&page) {
+        return Err(Error::new(
+            ErrorCode::Corrupted,
+            format!("{}'s meta page names a page size of {page}, which LMDB does not write", path.display()),
+        ));
+    }
+    Ok(page)
+}
+
+/// Whether the data file is shorter than the pages its last commit names, having read the trees to see that they reach
+/// none of the pages it lacks; a file whose trees do is refused as torn.
+///
+/// The trees are read as one commit left them, which a read transaction holds for the walk: other processes may be
+/// committing, and LMDB gives no page a held snapshot reaches to a later commit. The commit's meta page is read from the
+/// file, where the commit after the next writes over it: when it has gone by the time it is read, two commits landed
+/// since the snapshot was taken, and the walk starts again from a later one
+fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usize, data: &Path) -> Result<bool> {
+    loop {
+        let snapshot = read_txn(env)?;
+        run_point!(OPEN_SNAPSHOT);
+        let Some(meta) = reach::meta(file, page, &snapshot) else {
+            if env.info().last_txn_id > snapshot.id() {
+                continue;
+            }
+            // LMDB took the snapshot from a meta page of this file, and no commit has written over it
+            return Err(reach::refused(
+                data,
+                "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                 than a database handle changed the file as it was opened. Open it again once nothing else writes it",
+            ));
+        };
+        // Read once the snapshot is held: a commit writes its pages before its meta page, and a file only grows under
+        // other processes' commits, so every page this commit wrote to the file is in the length read here
+        let held = file.metadata()?.len();
+        if held >= (meta.last_page + 1) * page as u64 {
+            return Ok(false);
+        }
+        let reached = reach::reach(file, page, held / page as u64, &meta, data)?;
+        if let Some(missing) = reached.missing {
+            return Err(Error::new(
+                ErrorCode::Corrupted,
+                format!(
+                    "{} is {held} bytes, and page {missing} of its trees is past its end: a power loss may have left it \
+                     unwritten. Restore the database from a backup, or from a copy of the file that holds it",
+                    data.display()
+                ),
+            ));
+        }
+        debug_assert!(reached.highest < held / page as u64, "a clean walk reaches only pages in the file");
+        return Ok(true);
+    }
+}
+
+/// Extends the data file with zeros to the pages its last commit names. Under the environment's write lock, which every
+/// commit of every process lands under: the file's length and the last commit's pages are read where neither changes,
+/// so the file is only ever made longer, and never cut where another process has written since it was found short
+fn extend_to_its_pages(
+    env: &Env<WithoutTls>,
+    writers: &writers::Writers,
+    file: &std::fs::File,
+    page: usize,
+) -> Result<()> {
+    let _writer = writers.hold()?;
+    let txn = env.write_txn()?;
+    let needed = (env.info().last_page_number as u64 + 1) * page as u64;
+    // mutant-skip: replace < with <= in extend_to_its_pages
+    // A file of exactly those pages would be set to the length it has
+    if file.metadata()?.len() < needed {
+        file.set_len(needed)?;
+    }
+    txn.abort();
+    Ok(())
 }
 
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
@@ -85,6 +187,15 @@ pub const MAP_STEP: usize = 64 << 20;
 /// fails the test at it, as `MAP_FULL`, rather than filling the disk
 #[cfg(test)]
 const TEST_MAP_LIMIT: usize = 1 << 30;
+
+/// A unit's place, reserved while the unit is begun: let go when dropped, which a unit that began forgets it for
+struct Reserved<'a>(&'a Store);
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        self.0.end_unit();
+    }
+}
 
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
@@ -138,6 +249,8 @@ pub(crate) struct RankPlans {
 pub struct Store {
     path: PathBuf,
     read_only: bool,
+    /// Each commit is synced as it is made, with no group commit (`StoreOptions::sync_each_commit`)
+    sync_each_commit: bool,
     env: Env<WithoutTls>,
     db: Db,
     gate: Arc<RecursiveRwLock<()>>,
@@ -148,6 +261,16 @@ pub struct Store {
     idle: IdleReads,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
+    /// The stored epoch this handle has seen. A commit under any other is refused, since what it read has been replaced
+    epoch: AtomicU64,
+    /// The epoch the transaction about to commit moves to, when it replaces every row: taken by that commit, whatever
+    /// comes of it, so a replacement that failed can't vouch for a later one
+    replacing: AtomicU64,
+    /// Tells other processes of commits here, and this one of theirs
+    pub(crate) wake: wake::Wake,
+    /// What a writer takes before LMDB's write lock: its turn among this process's writers, kept until its commit is
+    /// accounted for, and on macOS a file lock, so a write lock a dead writer left held is let go
+    writers: writers::Writers,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
     /// Run once on the builder's thread between computing a drain and writing it, for a test's commit there
@@ -162,6 +285,19 @@ pub struct Store {
     /// The edge entries the write being committed filed and unfiled, handed by the engine before it commits; none from a
     /// write outside the engine's units, whose commit then empties the mirror
     deposited: PlainMutex<Option<Vec<EdgeDelta>>>,
+    /// The entities the write about to commit wrote, which its commit stamps with its sequence
+    touched: PlainMutex<Option<crate::engine::changed::Touched>>,
+    /// How far this handle has accounted for every commit, and whether one since it last answered was another's
+    accounted: PlainMutex<Accounted>,
+}
+
+/// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
+/// `committed_elsewhere` last answered. Every commit raises the sequence by one and every commit here passes through
+/// `commit_txn`, so a sequence between `through` and the next commit here is another handle's
+#[derive(Default)]
+struct Accounted {
+    through: u64,
+    elsewhere: bool,
 }
 
 /// The most idle read transactions kept: one for each thread that reads at once, the caller's and the read pool's
@@ -255,8 +391,10 @@ impl Store {
             let map_size =
                 if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
             builder.max_dbs(8).map_size(map_size);
-            // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
-            // flushed by group commit's syncs, and a read-only environment is never written
+            // SAFETY: the flags say when LMDB syncs, and nothing else about its files: with NO_SYNC and NO_META_SYNC off,
+            // LMDB syncs a commit's pages before writing the meta page that names them, which is what the sync-each-commit
+            // mode relies on, and with NO_SYNC on, group commit's syncs are what flush a commit (`committed`). A read-only
+            // environment is never written, so its flags are none of these
             unsafe {
                 builder.flags(flags);
             }
@@ -265,7 +403,13 @@ impl Store {
             unsafe { builder.open(&canonical) }
         };
         let env =
-            open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }).map_err(|e| match e {
+            open(match (options.read_only, options.sync_each_commit) {
+                (true, _) => EnvFlags::READ_ONLY,
+                // LMDB's own order: a commit's pages, a sync, then the meta page that names them, synced as written
+                (false, true) => EnvFlags::empty(),
+                (false, false) => EnvFlags::NO_SYNC,
+            })
+            .map_err(|e| match e {
                 heed::Error::Io(ref io) if options.read_only && io.kind() == std::io::ErrorKind::PermissionDenied => {
                     Error::new(
                         ErrorCode::Io,
@@ -286,14 +430,29 @@ impl Store {
                 e => e.into(),
             })?;
 
+        // A read of a page past the end of the file is a SIGBUS (on Windows, an access violation) that ends the process, so
+        // a file shorter than its meta page's pages is read first, by seeks, to see whether the trees reach any of them. LMDB
+        // may leave its last free pages out of the file, and then the file is healthy: a writable open extends it with zeros,
+        // as LMDB's write map would, and a read-only open goes on, since it touches no page the trees don't reach. A page the
+        // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
+        let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
+        let page = page_size_of(&mut file, &data)?;
         if options.read_only {
+            // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
             require_registered_reader(&env, &canonical)?;
         }
-        let db = Self::open_db(&env, &canonical, options.read_only)?;
-        let commit = (!options.read_only && options.syncs).then(|| {
+        let short = short_of_its_pages(&env, &mut file, page, &data)?;
+        run_point!(OPEN_WALKED);
+        let writers = writers::Writers::open(&canonical, options.read_only)?;
+        if short && !options.read_only {
+            extend_to_its_pages(&env, &writers, &file, page)?;
+        }
+        let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
+        let gate = Arc::new(RecursiveRwLock::new(()));
+        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer { env: env.clone(), path: canonical.clone() }),
+                Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
                 Box::new(SystemClock),
             )
         });
@@ -302,18 +461,31 @@ impl Store {
             let held = db.get(&txn, &meta_key(meta::SEQUENCE))?;
             held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes)
         };
+        let epoch = {
+            let txn = read_txn(&env)?;
+            stored_epoch(&txn, db)?
+        };
         let idle = IdleReads::new()?;
         registration.0 = None;
+        let wake = wake::Wake::new(&canonical);
+        let accounted = PlainMutex::<Accounted>::default();
+        accounted.lock().through = sequence;
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
+            // A read-only store makes no commit, so the mode is none of its concern
+            sync_each_commit: options.sync_each_commit,
             env,
             db,
-            gate: Arc::new(RecursiveRwLock::new(())),
+            gate,
             commit,
             unit: UnitSlot::new(),
             idle,
             sequence: AtomicU64::new(sequence),
+            epoch: AtomicU64::new(epoch),
+            replacing: AtomicU64::new(0),
+            wake,
+            writers,
             mirror: Arc::default(),
             #[cfg(test)]
             rank_planned: PlainMutex::default(),
@@ -322,12 +494,14 @@ impl Store {
             #[cfg(test)]
             rank_plans: PlainMutex::default(),
             deposited: PlainMutex::default(),
+            touched: PlainMutex::default(),
+            accounted,
         })
     }
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
-    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool) -> Result<Db> {
+    fn open_db(env: &Env<WithoutTls>, path: &Path, read_only: bool, writers: &writers::Writers) -> Result<Db> {
         let rtxn = read_txn(env)?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -352,7 +526,7 @@ impl Store {
         };
         if let Some(db) = db {
             check_stamp(env, db, path)?;
-            return Self::with_graphs(env, db, read_only);
+            return Self::with_graphs(env, db, read_only, writers);
         }
         if read_only || foreign {
             return Err(Error::new(
@@ -365,6 +539,7 @@ impl Store {
             ));
         }
         // A new environment: its database and stamp in one unit, synced, before anything else is written
+        let writer = writers.hold()?;
         let wtxn = env.write_txn()?;
         let db = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> Result<_> {
@@ -379,13 +554,20 @@ impl Store {
                 Error::new(e.code, format!("Couldn't record the storage format of {}: {}", path.display(), e.message))
             })?
             .unwrap_commit();
+        // Let go before the graphs' transaction, which takes it again
+        writer.release();
         env.force_sync()?;
-        Self::with_graphs(env, db, read_only)
+        Self::with_graphs(env, db, read_only, writers)
     }
 
     /// The databases around `main`: hannoy's graph databases, created in a writable environment that lacks them, and
     /// opened, when there, in a read-only one
-    fn with_graphs(env: &Env<WithoutTls>, main: heed::Database<'static, Bytes, Bytes>, read_only: bool) -> Result<Db> {
+    fn with_graphs(
+        env: &Env<WithoutTls>,
+        main: heed::Database<'static, Bytes, Bytes>,
+        read_only: bool,
+        writers: &writers::Writers,
+    ) -> Result<Db> {
         let rtxn = read_txn(env)?;
         let (cosine, euclidean) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -397,6 +579,7 @@ impl Store {
         if read_only || (cosine.is_some() && euclidean.is_some()) {
             return Ok(Db { main, cosine, euclidean });
         }
+        let _writer = writers.hold()?;
         let wtxn = env.write_txn()?;
         let (cosine, euclidean) = env
             .create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
@@ -450,29 +633,21 @@ impl Store {
 
     /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized
     /// or the environment closed, which no open transaction may outlast
-    fn drop_idle(&self) {
+    pub(crate) fn drop_idle(&self) {
         self.idle.clear();
     }
 
-    /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails. A write that fills the map is
-    /// aborted, the map grown and `f` run again, so `f` must do nothing but write through its transaction
+    /// `write_committed` with its commit finished, for a test that writes to the store under the engine
+    #[cfg(test)]
     pub fn write<T>(&self, f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>, durable: bool) -> Result<T> {
-        self.write_sequenced(f, durable).map(|(t, _)| t)
-    }
-
-    /// `write`, answering also the sequence of the commit it made
-    pub fn write_sequenced<T>(
-        &self,
-        f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
-        durable: bool,
-    ) -> Result<(T, u64)> {
         let (t, commit) = self.write_committed(f, durable)?;
-        let sequence = commit.sequence;
         commit.finish()?;
-        Ok((t, sequence))
+        Ok(t)
     }
 
-    /// `write_sequenced`, answering a durable write's failed sync apart from the commit, which happened
+    /// Runs `f` in a write transaction and commits it, or aborts it when `f` fails, answering the commit it made, a
+    /// durable write's failed sync apart from the commit, which happened. A write that fills the map is aborted, the
+    /// map grown and `f` run again, so `f` must do nothing but write through its transaction
     pub(crate) fn write_committed<T>(
         &self,
         f: impl FnMut(&mut RwTxn<'_>, Db) -> Result<T>,
@@ -512,8 +687,9 @@ impl Store {
             // this caller waiting on the unit's writer while it holds a schema guard
             let claimed = self.unit.claim_writer(|| {
                 let guard = self.gate();
+                let writer = self.writers.hold()?;
                 match self.env.write_txn() {
-                    Ok(txn) => Ok(Some((txn, guard))),
+                    Ok(txn) => Ok(Some((txn, (guard, writer)))),
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => Ok(None),
                     Err(e) => Err(Error::from(e)),
                 }
@@ -523,8 +699,12 @@ impl Store {
                 continue;
             };
             op.record_elapsed(names::WAITED_US);
-            // Only what this write hands over reaches its commit, not what an aborted one left
+            // Only what this write hands over reaches its commit, not what an aborted one left: a replacement that failed
+            // before committing can't vouch for this write
             *self.deposited.lock() = None;
+            *self.touched.lock() = None;
+            self.replacing.store(0, Ordering::Release);
+            run_point!(WRITE_HELD);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -556,20 +736,122 @@ impl Store {
     /// (the `COMMIT` failpoint). The sequence is read in the transaction, which holds the environment's one write lock, so
     /// it is the last any process committed
     pub fn commit_txn(&self, mut txn: RwTxn<'_>) -> Result<u64> {
-        let stored = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
-        let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
-        let next = last.max(self.sequence.load(Ordering::Acquire)) + 1;
+        let replacing = self.replacing.swap(0, Ordering::AcqRel);
+        let epoch = stored_epoch(&txn, self.db)?;
+        // mutant-skip: replace \|\| with && in Store::commit_txn
+        // A replacement's transaction stores the epoch it moves to, and a write's start clears one a failed replacement
+        // left: a replacing commit reads back its own epoch, so the second clause adds nothing a test can tell apart
+        if epoch != self.epoch.load(Ordering::Acquire) && (replacing == 0 || epoch != replacing) {
+            return Err(Error::new(
+                ErrorCode::DataReplaced,
+                "Another process replaced every row in this database since this handle read it: what it read has gone. \
+                 Open the database again, or adopt the replacement, before writing",
+            ));
+        }
+        let next = self.next_sequence(&txn)?;
+        let last = next - 1;
         self.db.put(&mut txn, &meta_key(meta::SEQUENCE), &next.to_be_bytes())?;
+        if let Some(touched) = self.touched.lock().take() {
+            crate::engine::changed::stamp(&mut txn, self.db, &touched, next)?;
+        }
+        crate::engine::changed::trim_tombstones(&mut txn, self.db, next)?;
         // A test's stand-in for a full disk, armed on its thread or for this environment's path; the transaction
         // aborts as it drops
         failure_point!(COMMIT, Error::new(ErrorCode::Io, "No space left on device"));
         failure_point!(COMMIT at &self.path, Error::new(ErrorCode::Io, "No space left on device"));
+        // Held from before the commit is visible until it is accounted for, so an answer never sees it half done
+        let mut accounted = self.accounted.lock();
+        let skipped = last > accounted.through;
         txn.commit()?;
+        accounted.elsewhere |= skipped;
+        accounted.through = next;
+        drop(accounted);
+        self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
-        // Still this process's one writer, so commits reach the mirror in their order
+        run_point!(COMMIT_LANDED);
+        // LMDB's lock went with the commit, and the writer's hold is kept until this returns (`writers.rs`): still
+        // this process's one writer, so commits reach the mirror in their order, each with the edges it deposited
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
+        // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died
+        // first: this handle hears it now as if it had arrived
+        if skipped {
+            self.wake.wake_self();
+        }
+        self.wake.notify();
         Ok(next)
+    }
+
+    /// Whether another handle has committed since this one last asked, or since it opened. A replacement of every row
+    /// that took the sequence back counts as one
+    pub(crate) fn committed_elsewhere(&self) -> Result<bool> {
+        loop {
+            // The gate before the count of what is accounted for, the order a commit takes them in
+            let gate = self.gate();
+            let mut accounted = self.accounted.lock();
+            // A transaction of its own rather than an idle read kept for a burst, which may be from before the latest
+            // commit. A handle that asks before it reads may hear here first that another process grew the file past
+            // its map, which it adopts as a read does
+            let txn = match read_txn(&self.env) {
+                Ok(txn) => txn,
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    drop(accounted);
+                    drop(gate);
+                    self.adopt_map_size()?;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let held = self.db.get(&txn, &meta_key(meta::SEQUENCE))?;
+            let now = held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+            if now != accounted.through {
+                accounted.elsewhere = true;
+                accounted.through = now;
+            }
+            return Ok(std::mem::take(&mut accounted.elsewhere));
+        }
+    }
+
+    /// The sequence the write transaction `txn` commits as. It holds the environment's one write lock, so the stored
+    /// sequence it reads is the last any process committed
+    pub(crate) fn next_sequence(&self, txn: &heed::RoTxn<'_, heed::AnyTls>) -> Result<u64> {
+        let stored = self.db.get(txn, &meta_key(meta::SEQUENCE))?;
+        let last = stored.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+        Ok(last.max(self.sequence.load(Ordering::Acquire)) + 1)
+    }
+
+    /// Moves the stored epoch on, in the transaction replacing every row, which this handle's commit may then finish
+    pub(crate) fn replacing_every_row(&self, txn: &mut RwTxn<'_>, db: Db) -> Result<()> {
+        let next = stored_epoch(txn, db)? + 1;
+        put_meta(txn, db.main, meta::EPOCH, &next.to_be_bytes())?;
+        self.replacing.store(next, Ordering::Release);
+        Ok(())
+    }
+
+    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
+    pub(crate) fn replaced_elsewhere(&self) -> Result<Option<u64>> {
+        let stored = self.read(|txn, db| stored_epoch(txn, db))?;
+        Ok((stored != self.epoch.load(Ordering::Acquire)).then_some(stored))
+    }
+
+    /// Takes `epoch` as seen, so commits here are taken again, if it is still the stored one: a replacement since is news
+    /// the caller hasn't acted on, so it answers false and adopts nothing
+    pub(crate) fn adopt_replacement(&self, epoch: u64) -> Result<bool> {
+        if self.read(|txn, db| stored_epoch(txn, db))? != epoch {
+            return Ok(false);
+        }
+        self.epoch.store(epoch, Ordering::Release);
+        Ok(true)
+    }
+
+    /// Entities the write about to commit wrote, which its commit stamps; what is deposited before it is kept too, as a
+    /// replacement deposits every entity before its unit deposits what it wrote
+    pub(crate) fn deposit_touched(&self, touched: crate::engine::changed::Touched) {
+        let mut slot = self.touched.lock();
+        match slot.as_mut() {
+            Some(held) => held.merge(touched),
+            None => *slot = Some(touched),
+        }
     }
 
     /// The edge entries the write about to commit filed and unfiled, for the edge mirror
@@ -630,6 +912,14 @@ impl Store {
                 commit.durable().wait()?;
             }
         }
+        // LMDB's meta page, the commit's point, is written with O_DSYNC, which on Apple doesn't flush the drive's cache: a
+        // full sync (F_FULLFSYNC, which LMDB's own sync makes of its data file on Apple) does, and a commit that returned
+        // is then on disk. Elsewhere LMDB's sync of the meta page is the flush
+        // mutant-skip: replace && with || in Store::committed
+        // Off Apple the extra sync adds a flush and changes no answer, and no test observes a flush's count
+        if self.sync_each_commit && cfg!(target_os = "macos") {
+            self.env.force_sync()?;
+        }
         Ok(())
     }
 
@@ -639,12 +929,21 @@ impl Store {
     /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
     pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
         self.check_writable()?;
-        if self.unit_is_open() {
-            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
-        }
-        let _guard = self.gate();
-        self.drop_idle();
-        let mut txn = self.env.write_txn()?;
+        // Claimed under the unit's lock, as a write claims its own: a unit that began between a check and the claim
+        // would keep the writer's turn for as long as it is open, and this would wait for it with the gate held
+        let (txn, held) = self
+            .unit
+            .claim_writer(|| {
+                let guard = self.gate();
+                let writer = self.writers.hold()?;
+                run_point!(RESET_CLAIMING);
+                self.drop_idle();
+                Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
+            })
+            .map_err(|_| Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"))??;
+        // Declared after its holds, so it ends before they are let go
+        let _held = held;
+        let mut txn = txn;
         let key = meta_key(meta::SEQUENCE);
         let value = self
             .db
@@ -659,43 +958,96 @@ impl Store {
 
     /// The environment's write transaction for a unit held open across calls, with the gate held for it. Refuses a
     /// second unit, and grows the map first when it is more than half used, since a unit can't grow it once open
-    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
+    pub fn begin(&self) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         let op = Op::begin();
         let result = self.begin_reported(&op);
         op.ended(result, "begun")
     }
 
     /// `begin`'s work, recording on `op` what it waited for and retried
-    fn begin_reported(&self, op: &Op) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>)> {
+    fn begin_reported(
+        &self,
+        op: &Op,
+    ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
         self.unit.reserve()?;
+        // Let go when the unit doesn't begin, whether it is refused or what begins it panics
+        let reserved = Reserved(self);
         let begun = (|| {
-            let info = self.env.info();
-            let page = self.env.unnamed_database_stat().page_size as usize;
-            if (info.last_page_number + 1) * page * 2 > info.map_size {
+            if self.map_half_used() {
                 self.grow()?;
             }
+            run_point!(UNIT_RESERVED);
             loop {
                 let guard = self.gate.read_arc();
+                let writer = self.writers.hold()?;
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
-                        return Ok((txn, guard));
+                        // A unit's commit adds what it touched to whatever is deposited then, so what a refused or
+                        // failed write left is dropped here, as a write's start drops it; the edges one left are
+                        // replaced by the unit's own at its commit. Nor can a replacement that failed before
+                        // committing vouch for this unit
+                        *self.touched.lock() = None;
+                        self.replacing.store(0, Ordering::Release);
+                        return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first
+                    // transaction's hold on it goes first, and the writer's turn with it: adopting waits for this
+                    // process's reads to end, and on macOS the turn keeps the file lock other processes' writers
+                    // wait for
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        drop(guard);
+                        drop((guard, writer));
+                        run_point!(UNIT_MAP_GROWN);
                         self.adopt_map_size()?;
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
         })();
-        if begun.is_err() {
-            self.end_unit();
+        if begun.is_ok() {
+            std::mem::forget(reserved);
         }
         begun
+    }
+
+    /// Whether more than half the map is used, which a unit about to open grows it for
+    fn map_half_used(&self) -> bool {
+        self.map_short_of(2)
+    }
+
+    /// The flags the environment was opened with, which say when LMDB syncs (`EnvFlags`)
+    #[cfg(test)]
+    pub(crate) fn env_flags(&self) -> u32 {
+        self.env.get_flags().expect("the environment's flags read")
+    }
+
+    /// The size of a page of the data file, which LMDB writes whole
+    #[cfg(test)]
+    pub(crate) fn page_size(&self) -> usize {
+        let _gate = self.gate();
+        self.env.unnamed_database_stat().page_size as usize
+    }
+
+    /// Whether `times` what the map has in use is more than the map
+    fn map_short_of(&self, times: usize) -> bool {
+        let _gate = self.gate();
+        let info = self.env.info();
+        let page = self.env.unnamed_database_stat().page_size as usize;
+        ((info.last_page_number + 1) * page).saturating_mul(times) > info.map_size
+    }
+
+    /// Grows the map until it is `times` what is in use: what a write that makes again most of what the database
+    /// holds asks before it begins. The pages such a write frees are no room for it until it commits, so in a map
+    /// with less it would run until the map is full, and then again in a larger one. Nothing grows while a unit
+    /// is open
+    pub fn make_room(&self, times: usize) -> Result<()> {
+        // A growth waits for an open unit to end, which one of this thread's never would: the write this is for
+        // is refused while one is open
+        while !self.unit_is_open() && self.map_short_of(times) {
+            self.grow()?;
+        }
+        Ok(())
     }
 
     /// The open unit ended, committed or not: whoever waits for the write transaction hears of it
@@ -736,7 +1088,8 @@ impl Store {
             return Err(Error::new(ErrorCode::MapFull, format!("A test's database grew past {TEST_MAP_LIMIT} bytes")));
         }
         // SAFETY: the gate held for writing means no read or write runs in this process, and the idle read
-        // transactions are dropped: no transaction is open, which LMDB requires
+        // transactions are dropped: no transaction is open, which LMDB requires. Nor does anything else read through
+        // the map it unmaps: a sync and each read of the environment's sizes hold the gate for reading
         unsafe { self.env.resize(grown) }?;
         Ok(())
     }
@@ -761,6 +1114,7 @@ impl Store {
 
     /// The map's size now
     pub fn map_size(&self) -> usize {
+        let _gate = self.gate();
         self.env.info().map_size
     }
 
@@ -789,11 +1143,19 @@ impl Store {
         synced
     }
 
-    /// Syncs on the calling thread what group commit owes, without its worker
+    /// Syncs on the calling thread what group commit owes, without its worker, as a process that is exiting does. The
+    /// gate is tried and not waited for: a thread that held it for a growth may be gone with it, and a map being grown
+    /// isn't one to read through
     pub fn sync_owed(&self) -> Result<()> {
         match self.commit {
             Some(_) => {
                 failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
+                let Some(_gate) = self.gate.try_read() else {
+                    return Err(Error::new(
+                        ErrorCode::Io,
+                        "The map was being grown as the process exited, so what was owed wasn't synced",
+                    ));
+                };
                 self.env.force_sync().map_err(Into::into)
             }
             None => Ok(()),
@@ -838,6 +1200,7 @@ impl Store {
 impl Drop for Store {
     fn drop(&mut self) {
         // `close` takes these first; a store dropped unclosed releases them here
+        self.wake.stop();
         if let Some(mut commit) = self.commit.take() {
             let _ = commit.close();
         }
@@ -848,6 +1211,9 @@ impl Drop for Store {
 
 struct EnvSyncer {
     env: Env<WithoutTls>,
+    /// The store's gate: a sync reads the map's meta pages to know how much to flush, on the worker's thread, so it
+    /// keeps a growth out as a transaction does
+    gate: Arc<RecursiveRwLock<()>>,
     /// What a test arms the `SYNC` failpoint for
     #[cfg_attr(not(test), allow(dead_code))]
     path: PathBuf,
@@ -856,6 +1222,7 @@ struct EnvSyncer {
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
         failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
+        let _gate = self.gate.read();
         self.env.force_sync().map_err(Into::into)
     }
 }
@@ -864,6 +1231,11 @@ pub fn meta_key(name: &str) -> Vec<u8> {
     let mut key = Prefix::Meta.key();
     key.string(name);
     key.to_vec()
+}
+
+fn stored_epoch(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db) -> Result<u64> {
+    let held = db.get(txn, &meta_key(meta::EPOCH))?;
+    Ok(held.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes))
 }
 
 pub fn put_meta(txn: &mut RwTxn<'_>, db: heed::Database<'_, Bytes, Bytes>, name: &str, value: &[u8]) -> Result<()> {

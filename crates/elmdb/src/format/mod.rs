@@ -49,25 +49,45 @@ pub enum Prefix {
     RelationCount,
     /// `d/f type field` → that a type's entities have held the field
     FieldName,
-    /// `d/x type index …` → a value index's entries
+    /// `d/x type index values` → the places of the type's entities that a value index files under these values,
+    /// in the layout a text index's term has (`engine/text/postings.rs`): the places themselves, or that they are
+    /// in blocks
     Index,
+    /// `d/xp type index values start` → a block of those places
+    IndexPlaces,
     /// `d/xb type index` → that a value index is built
     IndexBuilt,
+    /// `d/xw type index values` → the places of the type's entities without a value in a value index's last field,
+    /// which is missing or null, under what its fields before that one hold: laid out as `d/x` is
+    IndexWithout,
+    /// `d/xwp type index values start` → a block of those places
+    IndexWithoutPlaces,
+    /// `d/xu type index values` → the places of the type's entities a value index holds no one place for, under
+    /// what its fields before the last hold: its last field holds a list or a value the index can't file, or the
+    /// index is unique and a field before the last holds a list. Laid out as `d/x` is
+    IndexUnordered,
+    /// `d/xup type index values start` → a block of those places
+    IndexUnorderedPlaces,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
     In,
     /// `d/b source kind target seq` → the edges between two entities
     Between,
-    /// `d/ft type index term` → a text index's posting list: the places of the entities holding the term
+    /// `d/ft type index term` → a text index's term: the places of the entities holding it, each with the term's count
+    /// in each of its fields, or that they are too many for one key and are in blocks
     TextTerm,
-    /// `d/fp type index term seq` → where in the entity's fields the term is
-    TextPositions,
-    /// `d/fd type index seq` → what a text index holds of one entity: its id, each field's length and its terms
+    /// `d/fb type index term start` → a block of the places of the entities holding a term held by too many for its own
+    /// key, from `start` on
+    TextBlock,
+    /// `d/fd type index seq` → what a text index holds of one entity: its terms, each with its positions in each field,
+    /// and its words as written
     TextDocument,
+    /// `d/fl type index block` → each field's length in the entities of one block of places
+    TextLengths,
     /// `d/fs type index` → a text index's statistics: its entities and each field's total length
     TextStats,
-    /// `d/fw type index word` → a stemming text index's words as written: the places of the entities holding the word
+    /// `d/fw type index word` → a stemming text index's word as written: how many entities hold it
     TextWord,
     /// `d/g type index trigram block` → the places of the entities holding the trigram, case folded, in one block of places
     Trigram,
@@ -93,10 +113,16 @@ pub enum Prefix {
     RankQueue,
     /// `d/rs index` → a rank index's totals: its nodes, their estimates and residuals summed, and how far it is built
     RankTotals,
+    /// `d/h type changed place` → id: a type's entities in the order of the commits that last wrote them (`engine::changed`)
+    Changed,
+    /// `l/d sequence type id`: an entity a commit destroyed, kept for the last `TOMBSTONE_COMMITS` commits (`engine::changed`)
+    Destroyed,
+    /// `l/k name` → a reader's checkpoint, written in the unit whose work it records (`Unit::set_checkpoint`)
+    Checkpoint,
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 32] = [
+    pub const ALL: [Prefix; 41] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -108,13 +134,19 @@ impl Prefix {
         Prefix::RelationCount,
         Prefix::FieldName,
         Prefix::Index,
+        Prefix::IndexPlaces,
         Prefix::IndexBuilt,
+        Prefix::IndexWithout,
+        Prefix::IndexWithoutPlaces,
+        Prefix::IndexUnordered,
+        Prefix::IndexUnorderedPlaces,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
         Prefix::TextTerm,
-        Prefix::TextPositions,
+        Prefix::TextBlock,
         Prefix::TextDocument,
+        Prefix::TextLengths,
         Prefix::TextStats,
         Prefix::TextWord,
         Prefix::Trigram,
@@ -129,6 +161,9 @@ impl Prefix {
         Prefix::RankOrder,
         Prefix::RankQueue,
         Prefix::RankTotals,
+        Prefix::Changed,
+        Prefix::Destroyed,
+        Prefix::Checkpoint,
     ];
 
     /// The string the key's first part holds
@@ -145,13 +180,19 @@ impl Prefix {
             Prefix::RelationCount => "d/rc",
             Prefix::FieldName => "d/f",
             Prefix::Index => "d/x",
+            Prefix::IndexPlaces => "d/xp",
             Prefix::IndexBuilt => "d/xb",
+            Prefix::IndexWithout => "d/xw",
+            Prefix::IndexWithoutPlaces => "d/xwp",
+            Prefix::IndexUnordered => "d/xu",
+            Prefix::IndexUnorderedPlaces => "d/xup",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",
             Prefix::TextTerm => "d/ft",
-            Prefix::TextPositions => "d/fp",
+            Prefix::TextBlock => "d/fb",
             Prefix::TextDocument => "d/fd",
+            Prefix::TextLengths => "d/fl",
             Prefix::TextStats => "d/fs",
             Prefix::TextWord => "d/fw",
             Prefix::Trigram => "d/g",
@@ -166,6 +207,9 @@ impl Prefix {
             Prefix::RankOrder => "d/rk",
             Prefix::RankQueue => "d/rq",
             Prefix::RankTotals => "d/rs",
+            Prefix::Changed => "d/h",
+            Prefix::Destroyed => "l/d",
+            Prefix::Checkpoint => "l/k",
         }
     }
 
@@ -174,9 +218,22 @@ impl Prefix {
             Prefix::Value | Prefix::Entity | Prefix::Relation | Prefix::Sequence | Prefix::Vector => {
                 PrefixKind::Primary
             }
-            Prefix::Meta => PrefixKind::Meta,
+            Prefix::Meta | Prefix::Destroyed | Prefix::Checkpoint => PrefixKind::Meta,
             _ => PrefixKind::Derived,
         }
+    }
+
+    /// The derived tags an earlier layout wrote under and none writes under now: `d/fp`, a term's positions in an
+    /// entity. No prefix takes one again, and a rebuild of everything clears what a database written then still holds
+    pub const RETIRED: [&'static str; 1] = ["d/fp"];
+
+    /// The start of every key under a retired tag
+    pub fn retired() -> impl Iterator<Item = Vec<u8>> {
+        Self::RETIRED.into_iter().map(|tag| {
+            let mut w = key::KeyWriter::new();
+            w.string(tag);
+            w.to_vec()
+        })
     }
 
     /// The prefix a tag names, if any
@@ -200,6 +257,8 @@ pub mod meta {
     pub const SCHEMA_HASH: &str = "schemaHash";
     /// The last commit's sequence, a big-endian u64: a number that only increases for as long as the database exists
     pub const SEQUENCE: &str = "sequence";
+    /// How many times every row has been replaced at once, a big-endian u64, absent for none
+    pub const EPOCH: &str = "epoch";
 }
 
 #[cfg(test)]
@@ -208,10 +267,16 @@ mod tests {
 
     #[test]
     fn tags_are_distinct_and_name_their_kind() {
-        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).collect();
+        // A retired tag is no prefix's, or what a database kept under it would be read as that prefix's
+        let mut tags: Vec<&str> = Prefix::ALL.iter().map(|p| p.tag()).chain(Prefix::RETIRED).collect();
         tags.sort();
         tags.dedup();
-        assert_eq!(tags.len(), Prefix::ALL.len());
+        assert_eq!(tags.len(), Prefix::ALL.len() + Prefix::RETIRED.len());
+        assert!(Prefix::RETIRED.iter().all(|tag| tag.starts_with("d/")), "only derived data is left to a rebuild");
+        // What a rebuild clears is each retired tag's keys, as a key starts with its tag
+        let mut positions = key::KeyWriter::new();
+        positions.string("d/fp");
+        assert_eq!(Prefix::retired().collect::<Vec<_>>(), [positions.to_vec()]);
         for p in Prefix::ALL {
             assert_eq!(Prefix::from_tag(p.tag()), Some(p));
             let expected = match p.tag().split('/').next() {

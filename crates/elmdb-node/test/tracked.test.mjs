@@ -18,7 +18,7 @@ test('reads tracked under a token cross the binding, and a commit names the toke
     types: { Task: { fields: { title: { type: 'any', optional: true } } }, Note: { fields: {} } },
   } });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  const write = (ops) => packr.unpack(db.write(packr.pack({ ops, now: 1000 })));
+  const write = (ops) => packr.unpack(db.writeSync(packr.pack({ ops, now: 1000 })));
   const tasks = { read: 'query', plan: { start: { from: 'types', types: ['Task'] }, terminal: { answer: 'ids' } } };
 
   db.readSync(packr.pack({ reads: [tasks], track: 4 }));
@@ -56,7 +56,7 @@ test('pooled reads keep query results coherent while an index changes fields', a
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  db.write(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
+  db.writeSync(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
     op: 'create', type: 'Task', id: `Task-${i}`,
     fields: { a: i === 0 ? 'match' : 'other', b: i === 1 ? 'match' : 'other' },
   })) }));
@@ -85,7 +85,7 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  db.write(packr.pack({ ops: [
+  db.writeSync(packr.pack({ ops: [
     { op: 'create', type: 'Task', id: 'Task-0', fields: { a: 'match', b: 'other' } },
     { op: 'create', type: 'Task', id: 'Task-1', fields: { a: 'other', b: 'match' } },
   ] }));
@@ -103,7 +103,7 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   await assert.rejects(db.read(packr.pack(reads)), { code: 'SCHEMA_CHANGED' });
   await assert.rejects(db.read(packr.pack({ ...reads, track: 1 })), { code: 'SCHEMA_CHANGED' });
   db.untrack(1);
-  assert.throws(() => db.write(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
+  assert.throws(() => db.writeSync(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
   assert.throws(() => db.begin(), { code: 'SCHEMA_CHANGED' });
   for (const field of ['a', 'b']) {
     assert.throws(() => db.setSchema(schema(field)), { code: 'SCHEMA_CHANGED' });
@@ -113,3 +113,32 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   try { assert.deepEqual(packr.unpack(reopened.readSync(packr.pack(reads)))[0].ids, ['Task-0']); }
   finally { reopened.close(); }
 });
+
+test('the index builder\'s commits reach a listener with the tokens they wrote into', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  const db = Database.open(dir, { syncs: false, schema: {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Doc: { fields: {} } },
+    relations: { refs: { cardinality: 'many-to-many' } },
+    ranks: { docRank: { types: ['Doc'], relations: ['refs'] } },
+  } });
+  t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  const write = (ops) => db.writeSync(packr.pack({ ops, now: 1000 }));
+  const ids = Array.from({ length: 500 }, (_, at) => `Doc-${at}`);
+  write(ids.map((id) => ({ op: 'create', type: 'Doc', id })));
+  db.waitForIndexBuilds();
+  const top = { read: 'query', plan: { start: { from: 'types', types: ['Doc'] },
+    steps: [{ step: 'ranked', index: 'docRank' }, { step: 'limit', n: 5 }], terminal: { answer: 'ids' } } };
+  db.readSync(packr.pack({ reads: [top], track: 9 }));
+
+  // The listener keeps no process alive, so this test holds its own wait open
+  const alive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(alive));
+  const heard = new Promise((resolve) => db.hearBuilderCommits(resolve));
+  assert.throws(() => db.hearBuilderCommits(() => {}), { code: 'ALREADY_LISTENING' });
+  write(ids.slice(1).map((id) => ({ op: 'link', source: id, kind: 'refs', target: 'Doc-0' })));
+  const commit = await heard;
+  assert.deepEqual(commit.touched, [9]);
+  assert.ok(commit.sequence > 0 && commit.sequence <= db.sequence);
+});
+

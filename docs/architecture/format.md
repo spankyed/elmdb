@@ -11,24 +11,31 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | Prefix | Holds | Kind |
 |---|---|---|
 | `p/v` id field | an attribute's value | primary |
-| `p/i` id | that the entity exists: its sequence and whether it is trashed (its type is in its id) | primary |
+| `p/i` id | that the entity exists: its place, whether it is trashed, and the sequence of the commit that last wrote it (its type is in its id) | primary |
 | `p/r` relation | a relation's row: its kind, ends, info, sequence, and its weight when it isn't 1 | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
-| `m/` | the format, the kind, the schema and its hash, the last commit's sequence | meta |
+| `m/` | the format, the kind, the schema and its hash, the last commit's sequence, how many times every row has been replaced, whether the change order is built, and how far tombstones are trimmed and each type's newest destroy | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
+| `d/h` type changed place | a type's entities in the order of the commits that last wrote them, for a type whose schema sets `changeOrder` | derived |
 | `d/rc` kind | a relation kind's count | derived |
 | `d/f` type field | that a type's entities have held the field: put by its first write, kept when its last value goes, pruned only by a rebuild | derived |
 | `d/xb` type index | that a type's index (value, text, trigram or vector) is built; a plan reads only a built one | derived |
-| `d/x` type index values seq | a value index | derived |
+| `d/x` type index values | a value index: the places of the entities holding the values, each as its distance from the one before, when they are no more than 256; that they are in blocks, when more. A place is an entity's through `d/e` or `d/t` | derived |
+| `d/xp` type index values start | a block of the places of the entities holding values more than 256 hold: those of a range of places that starts at `start`, the largest range of a power of two places starting at a multiple of its size that holds no more than 256, as a text index's `d/fb` has them, with no counts | derived |
+| `d/xw` type index values | the places, held as `d/x` holds them, of the entities of the type without a value in a value index's last field, which is missing or null, under what its fields before that one hold: none for an index on one field, and for one on several each a value an equality can ask for, once for each tuple of them when lists are among them | derived |
+| `d/xwp` type index values start | a block of those places, as `d/xp` is of a value's | derived |
+| `d/xu` type index values | the places, held as `d/x` holds them, of the entities of the type the index doesn't order, under what its fields before the last hold as `d/xw` has them: its last field holds a list or a value the index can't file, or the index is unique and a field before the last holds a list | derived |
+| `d/xup` type index values start | a block of those places, as `d/xp` is of a value's | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
-| `d/ft` type index term | a text index's posting list: the places of the entities holding the term | derived |
-| `d/fp` type index term seq | where the entity holds the term: each field's positions | derived |
-| `d/fd` type index seq | the entity's document: its id, each field's length, its terms, its words as written | derived |
+| `d/ft` type index term | a text index's term: the places of the entities holding it, each with the term's count in each field, when they are no more than 256; that they are in blocks, when more | derived |
+| `d/fb` type index term start | a block of the places of the entities holding a term more than 256 hold, each with the term's count in each field: those of a range of places that starts at `start`, the largest range of a power of two places starting at a multiple of its size that holds no more than 256 | derived |
+| `d/fd` type index seq | the entity's document: its terms, each with its positions in each field, and its words as written | derived |
+| `d/fl` type index block | each field's length in the entities of one block of 512 places: every place's, or those of the places a bit each names | derived |
 | `d/fs` type index | a text index's statistics: its documents, each field's total length | derived |
-| `d/fw` type index word | a stemming text index's word as written: the places of the entities holding it | derived |
+| `d/fw` type index word | a stemming text index's word as written: how many entities hold it | derived |
 | `d/g` type index trigram block | a trigram index: the places of the entities holding the three characters, case folded, in one block of 2^16 places, as a roaring bitmap | derived |
 | `d/qc`, `d/qp` type index id chunk | a vector index's chunk: its hash and text; and that it waits for an embedding | derived |
 | `d/qi` type index item, `d/qm` type index id chunk | a chunk's item in the index's hannoy graph, both ways | derived |
@@ -38,6 +45,12 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to as many significant bits as a cell of 256 times the tolerance takes, 4 to 52 | derived |
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
+| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the last 4096 commits (`TOMBSTONE_COMMITS`) | log |
+| `l/k` name | a reader's checkpoint, the bytes it gave, written in the unit whose work it records (`Unit::set_checkpoint`) | log |
+
+A tombstone or a checkpoint is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and
+`check()` doesn't read it. A backup keeps it with the rows it describes, and `reset` and `replace_with` drop it with
+them.
 
 `rebuild()` deletes everything under `d/` and builds it from `p/`, the hannoy graphs (LMDB databases
 `elmdb.graphs.cosine` and `elmdb.graphs.euclidean`) with it. `check()` derives the same from a read snapshot into scratch files and
@@ -74,7 +87,9 @@ one says to update elmdb, an older one that it is from before the format was fix
 
 **The format is 1 until a release has users** (apack's `docs/archive/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
-needs nothing, `rebuild()` building it from primary data. The databases that exist are their developers', reset or
+needs nothing, `rebuild()` building it from primary data. A derived tag a layout stops writing under is retired
+(`Prefix::RETIRED`, `d/fp` so far): no prefix takes it again, and a `rebuild()` of everything clears what a database
+still holds under it. The databases that exist are their developers', reset or
 converted once on a copy (Dumps, below). The accepted cost is that a build may misread a database from before an
 in-place change rather than refuse it; the answer is the same reset, or a dump made before the change.
 
@@ -108,7 +123,8 @@ and a load by the build after it. That is how our databases are converted once, 
   failure removes only private staging files, leaving unrelated destination files intact and permitting retry.
   A publication-sync error reports that the complete database is visible; never delete or overwrite it blindly.
   Unix syncs affected directories; Windows requests write-through publication. A dump that fails removes its file.
-  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load.
+  The data's violations of schema rules remain `check()`'s to report, as after any unchecked load; a value outside the
+  value spec is no such violation, and refuses the load (`VALUE_INVALID`).
   An abruptly killed process can leave an unpublished `.elmdb-load-*` directory. A retry starts new private staging
   and never adopts the partial database. Remove abandoned staging only after confirming its owner has stopped and
   coordinating exclusive destination ownership; preserve unrelated files.

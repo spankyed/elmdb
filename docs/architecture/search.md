@@ -41,8 +41,8 @@ Text and vector indexes are named indexes on a type, beside its value indexes (`
 
 | Method | How |
 |---|---|
-| Ranked full text | BM25 over postings (roaring bitmaps of entities per term, positions beside them), per-field weights, AND, OR, NOT, a field named in the query (`sender:`) |
-| Phrases | positions |
+| Ranked full text | BM25 over each term's places (the entities holding it, each with its count in each field) and each entity's lengths, per-field weights, AND, OR, NOT, a field named in the query (`sender:`) |
+| Phrases | each entity's positions, in its document |
 | Prefix | a range over the sorted term dictionary, for search as you type |
 | Fuzzy terms | a Levenshtein automaton intersected with the term dictionary |
 | Substring and regex | a trigram index narrowing candidates, then a check of each, for error text, ids and code in messages |
@@ -76,28 +76,59 @@ snapshot as a search when it needs to say that search is incomplete.
 
 ## Text search as built
 
-- **Keys** (`format.md`, Keys): per type and index, a term's posting list (`d/ft`, a roaring bitmap of the
-  entities' places), its positions in each entity (`d/fp`), each entity's document — id, each field's length, its
-  terms and words as written — (`d/fd`), the index's statistics (`d/fs`: documents, each field's total length), and,
-  in a stemming index, each word as written and the entities holding it (`d/fw`). Every write that changes an indexed
-  field refiles the entity from its stored document, in the same unit; an index declared over existing data is built
-  in the background as a value index is, and `check()` and `rebuild()` cover it.
+- **Keys** (`format.md`, Keys): per type and index, a term's places (`d/ft`: the entities holding it, each with the
+  term's count in each field), each entity's document — its terms, each with its positions in each field, and its
+  words as written — (`d/fd`), each field's length in every entity, by place (`d/fl`, a block of 512 places a key: every
+  place's lengths, or a bit a place and the lengths of those holding any, whichever is fewer bytes, since a type's
+  entities may be few of the store's places), the
+  index's statistics (`d/fs`: documents, each field's total length), and, in a stemming index, each word as written
+  and how many entities hold it (`d/fw`). Every write that changes an indexed field refiles the entity from its stored
+  document, in the same unit: a term the entity holds as often in each field as it did is left as filed. An index
+  declared over existing data is built in the background as a value index is, a read of it refused until it is
+  (`INDEX_BUILDING`), and `check()` and `rebuild()` cover it.
+- **A term's places** are in its own key while no more than 256 entities hold it. Past that they are in blocks
+  (`d/fb term start`), and the term's key says only so. A block covers a range of places whose size is a power of two
+  and whose start is a multiple of its size: the largest such range that holds no more than 256 of the term's
+  entities, where the range twice its size holds more. A term's keys therefore follow from the entities holding it
+  and from nothing else, in whatever order they were filed, so `check()` derives the bytes the writes left; and a
+  write that files or unfiles an entity rewrites one block, at times splitting one or joining two, however many
+  entities hold the term (`docs/evidence/million-notes.md`).
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
-- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`; `field:word`;
-  `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
+- **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves
+  out what holds the word as typed and nothing it only starts or is an edit from; `field:word`; `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
   written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
-  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; the word itself
-  outranks both. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
+  five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; one longer than the
+  longest term by more than two is within two edits of none, and takes none. The word itself outranks both: each of a
+  word's matches is scored as a holder of the word, as rare as the entities holding it in any of the forms it matched,
+  the word as typed at the whole of that, a term it starts at 0.8, one edit away at 0.6 and two at 0.4. A fuzzy word's automaton walks the sorted dictionary a byte at a time, and where no term starting
   with the bytes read can match it seeks past them all, so a dictionary of names sharing their first letters (ids,
   paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
   when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
-  order.
-- **As a plan step**: `search` after a type start reads the posting lists; after other steps it searches among the
-  entities they reached, in which a type with no text index holds no match. `hits` answers each entity's score,
+  order. A match's frequencies are read from its terms' places and its lengths from the lengths by place, so scoring
+  it reads no key of its own; a phrase's candidates read their documents for positions, and a recency decay reads
+  its field of every match.
+- **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
+  other steps it searches among the entities they reached, in which a type with no text index holds no match;
+  after a type start's filters that their indexes read, within the places those keep, with no entity read to say
+  which (`engine.md`, Reads: plans). Every
+  match is scored, and an entity is read only as the step hands it on, best first: a `limit` straight after the step
+  keeps its best matches as they are scored and reads that many entities, as `first` and `firstRow` keep and read
+  the one. A `count` straight after it counts the matches as the index holds them, scoring and reading none, and an
+  `exists` asks the indexes for one match, scoring none and reading that one. `hits` answers each entity's score,
   matched terms and highlights (`[element, start, end]` in UTF-16 units) with the fields asked for; `groupBy` with
-  `counts` is a facet; `after` pages by the last id of the page before.
+  `counts` is a facet. A hit is of an entity the search handed on:
+  a match a `limit` left out, reached again by a step after it, is answered with no score and no terms, as an entity
+  the search never matched is.
+- **A page**: `after` straight after the step pages by the last id of the page before. The search scores that
+  entity first, as the match it is, and hands on the matches ranked past it: those of a lower score, and those of
+  the same score later in the order ties keep. A `limit` after the `after` keeps the best that many of them, so a
+  page reads its own entities and holds no more matches than it answers, wherever its cursor is; scoring every
+  match is what it still costs. The ranking is the index's as the read finds it, not as the page before found it: a
+  cursor that has stopped matching, or has left the plan's scope, has no page after it, and a write between two
+  pages can move a match across their boundary. So can the clock, for a `recency` option given no `now`: each page
+  is ranked by its own read's time, and a caller paging such a search gives every page the first one's `now`.
 - **Reads**: `suggest` completes a word from the dictionary, most held first, and corrects it, nearest first; a
   stemming index answers from its words as written, so a suggestion is a word (`database`) and never a stem
   (`databas`).
@@ -133,9 +164,14 @@ snapshot as a search when it needs to say that search is incomplete.
   chunk both ways (`d/qi`, `d/qm`), a unit's graph changes (`d/qj`) and each index's graph number (`d/qn`). The graphs
   are hannoy's, in LMDB databases of their own (`elmdb.graphs.cosine`, `elmdb.graphs.euclidean`).
 - **Writes** refile a changed entity's chunks in the same unit: a chunk whose text changed loses its embedding and its
-  graph item and is pending. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
+  graph item and is pending. A chunk whose text only moved among its entity's chunks, as every one after an
+  inserted or a removed paragraph does, takes its embedding to its new place: an embedding is of a text wherever the
+  text lies, and making one again is the caller's cost. `embed` stores a vector only for the chunk's current hash, and answers `stale` otherwise.
 - **Graphs** change once per unit, as the outermost unit commits, from the journal a savepoint rolls back with
-  everything else; `check()` and `rebuild()` treat them as derived from the stored embeddings.
+  everything else; each build is seeded by the changes it makes, so one history builds one graph and builds that
+  change other items draw their levels otherwise (seeded alike, a graph grown an embedding a commit holds every item
+  on one level, each an entry point every insert and search measures against);
+  `check()` and `rebuild()` treat them as derived from the stored embeddings.
   Reads within a unit omit journaled items from the committed graph results and merge the current primary
   embeddings for those items, using the graph's distance metric. New embeddings are visible even before the
   first graph is built. Savepoint rollback restores this read view with the journal and primary data; a read

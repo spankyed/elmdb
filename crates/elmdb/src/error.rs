@@ -32,6 +32,8 @@ pub enum ErrorCode {
     SchemaChangeRefused,
     /// Another process changed the stored schema; close and reopen the handle before reading or writing
     SchemaChanged,
+    /// Another process replaced every row; a commit is refused until this handle adopts that (`adopt_replacement`)
+    DataReplaced,
     /// The files hold something other than an elmdb database
     NotADatabase,
     /// The database is in a format this version doesn't read
@@ -87,9 +89,12 @@ pub enum ErrorCode {
     /// A search naming an index its type doesn't have, or none on a type with no text index or with several; a
     /// `ranked` step naming no rank index
     UnknownIndex,
-    /// A `ranked` read asked to be refused while its index builds
+    /// A second listener for a database's builder commits
+    AlreadyListening,
+    /// A read of an index still being built that nothing answers in its place: a text index's `search`, `hybrid` or
+    /// `suggest`, whose terms and statistics are the answer, and a `ranked` read that asked to be refused rather than
+    /// computed
     IndexBuilding,
-    /// A read of an index still being built, which has nothing to answer from in its place: a rank index
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
@@ -106,8 +111,12 @@ pub enum ErrorCode {
     CallbackPanicked,
     /// The initial watch read panicked; its registration was removed
     WatchPanicked,
-    /// Closing a database from its own watch callback would wait on the callback's operation
+    /// A call that waits for what a listener of the database is called from was made by that listener: a close,
+    /// or on the index builder's thread a wait for its builds
     CallbackActive,
+    /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call may not
+    /// have finished, and the database handle refuses calls with this code until it is closed and opened again
+    Panicked,
 }
 
 impl ErrorCode {
@@ -126,6 +135,7 @@ impl ErrorCode {
             Self::SchemaInvalid => "SCHEMA_INVALID",
             Self::SchemaChangeRefused => "SCHEMA_CHANGE_REFUSED",
             Self::SchemaChanged => "SCHEMA_CHANGED",
+            Self::DataReplaced => "DATA_REPLACED",
             Self::NotADatabase => "NOT_A_DATABASE",
             Self::WrongFormat => "WRONG_FORMAT",
             Self::ValueInvalid => "VALUE_INVALID",
@@ -153,6 +163,7 @@ impl ErrorCode {
             Self::Unique => "UNIQUE",
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
+            Self::AlreadyListening => "ALREADY_LISTENING",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::NotDurable => "NOT_DURABLE",
@@ -162,6 +173,7 @@ impl ErrorCode {
             Self::CallbackPanicked => "CALLBACK_PANICKED",
             Self::WatchPanicked => "WATCH_PANICKED",
             Self::CallbackActive => "CALLBACK_ACTIVE",
+            Self::Panicked => "PANICKED",
         }
     }
 }
@@ -248,11 +260,13 @@ mod tests {
             ErrorCode::Unique,
             ErrorCode::UnitOpen,
             ErrorCode::UnknownIndex,
+            ErrorCode::AlreadyListening,
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
+            ErrorCode::Panicked,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }

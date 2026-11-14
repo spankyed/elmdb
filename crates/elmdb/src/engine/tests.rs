@@ -1,16 +1,23 @@
 //! The write protocol's rules, case by case: ported from apack's `tests/engine/{writes,relations,transact}.spec.ts`,
 //! each translated to batches. What reads answer (queries, walks) is Phase 5's; these read the store back directly.
 
+mod aggregates;
 mod catalog;
+mod changed;
+mod checkpoints;
 mod commits;
+mod compound;
 mod compression;
 mod derived;
 mod field_writes;
+mod filters;
 mod graph;
 mod lifecycle;
 mod maintenance;
 mod model;
+mod ordered;
 mod plans;
+mod power_loss;
 mod rank_bound;
 mod rank_index;
 mod ranks;
@@ -64,6 +71,7 @@ pub(super) fn schema_json() -> Json {
                 },
                 "indexes": {
                     "a": { "kind": "value", "fields": ["a"] },
+                    "ba": { "kind": "value", "fields": ["b", "a"] },
                     "slug": { "kind": "value", "fields": ["slug"], "unique": true }
                 }
             },
@@ -94,7 +102,24 @@ pub(super) fn op(json: Json) -> Op {
     serde_json::from_value(json).unwrap()
 }
 
-/// The batch of these ops, at a fixed time
+/// What a value index files under `under` and under every key that starts with it: each key with the id of each
+/// entity filed there, the keys in order and a key's entities by place
+pub(super) fn filed_under(
+    s: &impl crate::engine::unit::Read,
+    entity_type: &str,
+    under: &[u8],
+) -> Vec<(Vec<u8>, String)> {
+    let (_, to) = crate::format::key::prefix_range(under);
+    let mut out = Vec::new();
+    super::places::visit(s, under, &to, false, &mut |own, place| {
+        let (id, _) = super::entities::at_place(s, entity_type, place)?.expect("an entity at a place an index files");
+        out.push((own.to_vec(), id));
+        Ok(true)
+    })
+    .unwrap();
+    out
+}
+
 pub(super) fn batch(ops: Vec<Json>) -> Batch {
     Batch { ops: ops.into_iter().map(op).collect(), now: Some(1000.0) }
 }
@@ -615,6 +640,48 @@ fn refuses_a_self_link_an_unknown_kind_a_pair_its_endpoints_dont_allow_and_a_lin
 }
 
 #[test]
+fn an_id_is_held_to_a_length_its_keys_fit_and_a_key_past_the_stores_limit_is_refused_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let id = |tag: char, bytes: usize| format!("Task-{}", tag.to_string().repeat(bytes - "Task-".len()));
+    let create = |id: &str| json!({ "op": "create", "type": "Task", "id": id });
+
+    // An id is at most 128 bytes, brought by a create or by an upsert that makes one
+    let over = refused(&db, vec![create(&id('a', 129))]);
+    assert_eq!(over.code, ErrorCode::ValueInvalid, "{over}");
+    assert!(over.message.contains("129") && over.message.contains("128"), "{over}");
+    let upserted = refused(&db, vec![json!({ "op": "upsert", "type": "Task", "id": id('a', 129) })]);
+    assert_eq!(upserted.code, ErrorCode::ValueInvalid, "{upserted}");
+    // Two at the limit are joined by an edge, whose keys hold both
+    write(&db, vec![create(&id('a', 128)), create(&id('b', 128))]).unwrap();
+    write(&db, vec![json!({ "op": "link", "source": id('a', 128), "kind": "refs", "target": id('b', 128) })]).unwrap();
+
+    // What a load brings is held to no such length, and a key made of it that the store can't hold is refused as the
+    // value it is, naming what it was made of, where LMDB's own refusal names nothing
+    let brought =
+        |id: String| crate::engine::maintenance::Load::Entity { id, fields: Default::default(), trashed: false };
+    db.bulk_load(&[brought(id('c', 300)), brought(id('d', 300))]).unwrap();
+    let link = json!({ "op": "link", "source": id('c', 300), "kind": "refs", "target": id('d', 300) });
+    let unkeyed = refused(&db, vec![link]);
+    assert_eq!(unkeyed.code, ErrorCode::ValueInvalid, "{unkeyed}");
+    assert!(unkeyed.message.contains("511") && unkeyed.message.contains("refs"), "{unkeyed}");
+    // What the key is made of reads as it is through 24 characters, and past them cut to its first 24 with its length:
+    // an id of 24 beside one of 470, which only the key holding both is too long for
+    let (short, long) = (id('e', 24), id('g', 470));
+    write(&db, vec![create(&short)]).unwrap();
+    db.bulk_load(&[brought(long.clone())]).unwrap();
+    let cut = refused(&db, vec![json!({ "op": "link", "source": short, "kind": "refs", "target": long })]);
+    assert!(cut.message.contains(&format!("{short}, refs, {}… (470 bytes)", &long[..24])), "{cut}");
+    // A field of any name, on a type that takes any, is such a key too
+    write(&db, vec![json!({ "op": "create", "type": "Bag", "id": "Bag-1" })]).unwrap();
+    let named = refused(&db, vec![json!({ "op": "set", "id": "Bag-1", "fields": { "f".repeat(600): 1 } })]);
+    assert_eq!(named.code, ErrorCode::ValueInvalid, "{named}");
+    assert!(named.message.contains(&format!("Bag, {}… (600 bytes)", "f".repeat(24))), "{named}");
+    assert_eq!(edges(&db).len(), 1, "nothing of the refusals was written");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn an_acyclic_kind_refuses_a_link_closing_a_cycle() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
@@ -631,6 +698,33 @@ fn an_acyclic_kind_refuses_a_link_closing_a_cycle() {
     let e = refused(&db, vec![json!({ "op": "link", "source": "Task-3", "kind": "parent_of", "target": "Task-1" })]);
     assert_eq!(e.code, ErrorCode::Cycle);
     assert!(e.message.contains("would form a cycle"), "{}", e.message);
+}
+
+#[test]
+fn an_acyclic_kinds_edge_moves_wherever_the_edges_beside_it_close_no_cycle() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, (1..=4).map(|n| json!({ "op": "create", "type": "Task", "id": format!("Task-{n}") })).collect())
+        .unwrap();
+    let link = |source: &str, target: &str| {
+        let op = json!({ "op": "link", "source": source, "kind": "parent_of", "target": target });
+        match &write(&db, vec![op]).unwrap()[0] {
+            OpResult::Relation { id, .. } => id.clone(),
+            other => panic!("not a relation: {other:?}"),
+        }
+    };
+    // Turned round: the edge as it was is no path from its new target back to its new source
+    let first = link("Task-1", "Task-2");
+    write(&db, vec![json!({ "op": "updateRelation", "relation": first, "source": "Task-2", "target": "Task-1" })])
+        .unwrap();
+    assert_eq!(edges(&db), ["Task-2|parent_of|Task-1"]);
+    // Through the edges beside it there is one: 2 to 1 and 1 to 3 leave an edge moved to 3 to 2 closing the round
+    link("Task-1", "Task-3");
+    let third = link("Task-3", "Task-4");
+    let e = refused(&db, vec![json!({ "op": "updateRelation", "relation": third, "target": "Task-2" })]);
+    assert_eq!(e.code, ErrorCode::Cycle);
+    assert_eq!(edges(&db), ["Task-1|parent_of|Task-3", "Task-2|parent_of|Task-1", "Task-3|parent_of|Task-4"]);
+    assert!(db.check().unwrap().is_clean());
 }
 
 #[test]

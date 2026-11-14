@@ -25,6 +25,25 @@ unit, a savepoint and a refused commit roll back with it. A workload also rebuil
 show that code wrong. Ranking is checked separately, against fixed corpora (`engine/text/tests.rs`,
 `engine/vector/tests.rs`).
 
+Each commit's change set is checked too: the entities it made, destroyed, trashed or restored, the fields and roles it
+wrote (whether or not the value changed), and its relations: each link, unlink, rekey and move, by kind and ends, with a
+relation unlinked after the commit made it or rekeyed it one entry, as the engine reports it. A unit's members are
+replayed one at a time, so a write a later member reverts is still named, as the engine names it. After every step,
+`changedSince` from the start must name each entity still there with the sequence of its last change, the ends of a
+changed edge included, and the entities destroyed and not made again; a commit's sequence must increase.
+
+The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
+set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
+from the commit before the first after it reads what changed since, checked against the model. The boundary itself, the
+reader one sequence below the reset, is checked by a deterministic test. It renames a relation kind to another now and
+then: its edges move, each end stamped with the rename's sequence. A rename onto an edge of the new kind with the same
+ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
+it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
+and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
+held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
+`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
+relation kinds and roles have none.
+
 It runs in two places:
 
 - in Rust, against the engine directly;
@@ -69,6 +88,34 @@ the parent's cleanup removes it. The
 failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock
 advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
 waited on failed.
+
+## Power loss
+
+`engine/tests/power_loss.rs` replays what a power loss can leave on the data file, without a disk: after each commit of a
+workload the file is copied, the pages that differ from one copy to the next are what that commit wrote, and the files a
+loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
+meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
+before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
+pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
+only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
+that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
+itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
+such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
+they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
+LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. Other
+processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
+that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
+landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
+only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
+torn file that is refused counts as a file that didn't survive.
+
+A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
+2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
+such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
+reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
+to half its pages shows it stopping, and on a child that says nothing and ended any other way.
 
 ## Failpoints
 
@@ -123,24 +170,32 @@ cases: `../evidence/diagnostics.md`.
 ## Mutation testing
 
 cargo-mutants (`.cargo/mutants.toml`) mutates the engine's source — operators, conditions, a function's body — and runs
-the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate:
+the engine's suite against each mutant; one the suite passes is a test missing. A run is scoped, never the whole crate,
+and reads the configuration `cargo xtask mutant-exclusions` writes and prints the path of, which holds the exclusions
+the source's `// mutant-skip:` comments make (below); without it a run reports each of those mutants as missed. Each
+command derives it again, since it holds the lines the comments are above as it is written: one kept from before an
+edit would excuse whatever the edit moved onto those lines, and report the mutants it moved off them.
 
 ```sh
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
-cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
-cargo mutants -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
 python3 scripts/mutants-in-diff.py main
-# One of four shares of them, or only the changed files with Windows-only code (what CI's runners split)
+# One of four shares of them, or only the change's Windows-only code (what CI's runners split)
 python3 scripts/mutants-in-diff.py main 3 --shard 1/4
 python3 scripts/mutants-in-diff.py main 3 --windows-only
+# The same again after a run that was stopped: only the mutants no run of this change has caught yet
+python3 scripts/mutants-in-diff.py main 3 --resume
+# One of CI's four shares alone, on a branch, while the others run or after its runner was lost
+gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
-diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --file F)
+diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --config "$(cargo xtask mutant-exclusions)" --file F)
 # The binding's process claim, against elmdb-node's suite rather than the engine's
-cargo mutants -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
 # Some mutants of a file again, after the specs that should kill them: a regex over their names
-cargo mutants -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
 ```
 
 Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one
@@ -152,13 +207,22 @@ the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c
 cargo-mutants && cargo mutants …'`), and the Windows ones on a Windows machine, with cargo-mutants and the toolchain installed there
 (`docs/evidence/mutation-baseline.md`, The Windows reading).
 
-CI's `mutants (advisory)` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull
-request, against the base it merges into, beside the checks rather than in them: each missed mutant is annotated on its
-line and listed in its job's summary, and a job fails only when cargo-mutants does, so a survivor is read, not waited
-on. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). Windows
-mutates only the changed files holding code that compiles on Windows alone (`--windows-only`: `cfg(windows)` or
-`target_os = "windows"`), which Linux compiles to nothing and shows as missed; a change with none installs nothing
-there. A change to documentation alone mutates nothing.
+CI's `mutants` workflow (`.github/workflows/mutants.yml`) runs `scripts/mutants-in-diff.py` on every pull request,
+against the base it merges into: each missed mutant is annotated on its line and listed in its job's summary, and fails
+the job. A survivor is a test missing, or an equivalent mutant, which a `// mutant-skip:` comment names with why it is
+one; a timeout is listed and doesn't fail it, since load alone can cause one. A mutant that failed to build for want
+of a file, and not for what it changed, fails the run as untested: cargo-mutants lists it as unviable beside those whose
+replacement doesn't compile, and it means the copy of the tree it was built in was damaged, as a temporary directory
+cleaned under a long run leaves it. `cargo xtask pre-push` runs it with the
+other checks before a push, so the job finds nothing. Linux splits the change's mutants over four runners (`--shard K/4`, each timing its own baseline). A mutant of code a
+runner doesn't compile builds unchanged and passes every test, so it would show as missed whatever the tests: the script
+reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
+Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing
+there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing.
+`mutants-pass`, the workflow's last job, passes when every job before it did, at once for a change with nothing to
+mutate, and is the check a merge waits on. A dispatched share reports under another name: it runs on the pull
+request's own commit, where one share passing would otherwise stand for all of them until the pull request's run
+reported.
 `--in-diff` alone would test a binding's or the CLI's mutants against the engine's suite, which `test_package` names, so
 the script runs each crate's files against that crate's suite.
 
@@ -170,12 +234,20 @@ the same directory.
 A survivor is killed by a new test, recorded as a finding, or excluded in the configuration with the reason it answers
 exactly what the code does; no assertion is loosened for either. An exclusion names its mutants, not their line's: where
 an operator repeats on a line, or a mutant beside it is caught, the pattern carries the line and the mutation. One that names
-a line lives in the source: a `// mutant-skip: PATTERN` comment directly above the line it excuses, followed by its reason, or
-` (as above)` where the comment before it gave that. `cargo xtask mutant-exclusions` writes those into a generated part of
-`.cargo/mutants.toml`, each with the line of the next code, so an edit above one moves nothing by hand. It can hide a mutant of
-the same kind that moves onto that line; the `--list --no-config` diff above shows what each exclusion hides. `cargo xtask
-check-mutant-exclusions`, a CI step, fails when that part isn't what the comments generate, and when an exclusion, or one line
-of a pattern naming several, matches no mutant cargo-mutants lists. A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
+a line lives in the source and nowhere else: a `// mutant-skip: PATTERN` comment directly above the line it excuses,
+followed by its reason, or ` (as above)` where the comment before it gave that. It excuses the mutants matching PATTERN
+on the first line of code under it, so it moves with its line through any edit above and through a merge, and two
+branches that each add, move or remove one, or shift the lines above one, have no list of line numbers to reconcile:
+`.cargo/mutants.toml` holds only the exclusions that name no line. `cargo xtask mutant-exclusions` writes the
+configuration a run reads, `target/mutants.toml`, which is that file with a pattern for each comment, carrying the
+line the comment is above when it is written; `scripts/mutants-in-diff.py` asks it for one at every run that has
+something to mutate, and nothing it writes is committed. A comment can hide a mutant of the same kind that moves onto its line; the `--list --no-config`
+diff above shows what each exclusion hides. `cargo xtask check-mutant-exclusions`, a CI step, fails when a comment's
+pattern matches no mutant cargo-mutants lists on the line under it, as after code went in between the two or the
+mutant's name changed; when an exclusion in `.cargo/mutants.toml` matches none; and when one there names a line, which
+every edit above that line would have to rewrite. `cargo xtask mutant-exclusions` writes no configuration from a file
+that holds one either, so a mutation run stops at it as the check does.
+A pattern carries the mutation where it can, not `.*`. The hand-made mutation scripts that remain
 (`scripts/check-process-publication-mutations.py`, `check-maintenance-verification.py`, `check-idle-reader-mutation.py`,
 `check-reader-recovery.py`) make changes cargo-mutants doesn't: one expression swapped for another, and heap, timing and
 cleanup regressions.
@@ -185,7 +257,10 @@ cleanup regressions.
 `check()` runs after every model-harness case, so an index that drifts from its primary data fails the case that
 caused it. `engine/tests/derived.rs` corrupts derived keys directly and checks that `check()` reports them and
 `rebuild()` repairs them; text and vector indexes are checked and rebuilt in their own specs (`engine/text/tests.rs`,
-`engine/vector/tests.rs`). A rank index has its own specs (`engine/tests/rank_index.rs`): random histories of links,
+`engine/vector/tests.rs`). A text index's terms hold their places in blocks only past 256 entities, more than the
+harness writes, so the blocks have a spec of their own (`engine/text/postings/tests.rs`): with one to four entities a
+key, random filings and unfilings of places near and far, each followed by the term's keys held to what filing its
+entities in place order emits, which is what a rebuild does; and the blocks that lays out held to their definition. A rank index has its own specs (`engine/tests/rank_index.rs`): random histories of links,
 unlinks, weights, creates, trashes, restores and destroys, each followed by `check()` and the index held within its
 bound of `rank`; damage `check()` reports; a savepoint rolled back; a drain killed part way through, in a child process,
 resumed on open; and an exact-bits golden of a scripted history, which the CI matrix holds. The model harness declares
@@ -265,15 +340,64 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
+A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
+factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
+without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
+a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
+panic was raised in the unit or in the database; and the
+database opened again holds what was committed before and none of what the unit or the call wrote, takes a write,
+and passes `check()`. The variable is read once, as the addon first runs an export; a value naming no export asks
+for nothing; and nothing but that test sets it. That panic is raised at the export's door. One raised inside the
+engine, with the write transaction held, a unit's place reserved, a unit half begun, or a unit's commit under
+way, is the engine's
+own test (`engine/tests/lifecycle.rs`): after each the database takes a unit and a write, and closes.
+
+An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
+over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
+the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on
+Windows, whose libuv checks, aborts there (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`).
+`answers.test.mjs` holds each export the generated declarations say answers bytes to it, by the mark Node puts on an
+external buffer's memory so that it is never transferred to another thread. `exit.test.mjs` ends twenty processes while
+V8 is still freeing answers they dropped, which only Windows can fail: with external buffers 24 of 200 such processes
+and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
+`windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
+
+`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
+promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
+refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
+after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
+threads, random bytes asked of the pool are answered before the rebuild ends. Forty durable writes asked for behind a
+rebuild are answered by one sync, ten awaited in turn by one each, and one with a rebuild behind it before the
+rebuild. Writes asked for in the turn a database is closed reject as closed, the ones behind none that landed.
+`exit.test.mjs` asks a rebuild and forty writes behind it of a child process that then calls `process.exit()`: all
+forty are there and the rebuild ran to its end; and of a child that drops its handle with a rebuild and a durable
+write in flight, that the write is answered after the handle is collected, the child saying it was. Each
+`…Sync` form is the blocking one the rest of the suite calls.
+
 ## Platforms
 
-CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux. A draft pull request runs the fast
-tier, those and macOS arm64 and Windows x64; a pull request ready for review, and a dispatch, run the full matrix —
+CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
+Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
+pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
-every suite, the model and crash harnesses included, on it; a pull request ready for review also runs the instruction
-counts and the diagnostics overhead.
-`ci-pass` passes when every job passed or was skipped, and is the check `main`'s branch protection requires; a change
-to documentation alone skips everything else.
+every suite, the model and crash harnesses included, on it, and adds the instruction counts and the diagnostics
+overhead. A dispatch of either workflow runs its platforms on a branch, and reports none of the checks a merge waits
+on.
+
+A merge waits on three checks, the ones `main`'s branch protection requires: `ci-pass`, the full tier's `full-pass`
+and the mutation workflow's `mutants-pass` ([Mutation testing](#mutation-testing)). Each is its workflow's last job:
+it passes when every job before it passed or was skipped, and fails when one failed or was cancelled, so a run a newer
+push replaced never stands for the one that replaced it. A change to documentation alone passes all three with nothing
+run: `ci.yml` and `full.yml` skip their jobs, and the mutation jobs find nothing to mutate. The full tier is a
+workflow of its own so that marking a pull request ready starts its jobs and leaves the fast tier's run of the same
+commit alone, neither cancelled nor repeated. Only a pull request ready for review reports `full-pass`. A draft's
+push reports the full tier's last job under another name, because a check on a draft's head still stands when the
+pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
+that is ready therefore merges only after the full tier passed on its head.
+
+Changing a pull request's base starts no workflow. Its checks stay the ones its head earned against the old base, the
+mutants of the old diff among them, so after a base change a push comes before the merge.
 
 Each glibc Linux, macOS and Windows platform job builds once on the supported Node floor, 22.17.0,
 then runs the binding suite on that runtime, Node 24 and Electron 37.2.4 (apack's pinned runtime).
@@ -343,9 +467,11 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 10k messages. A count doesn't move with the machine's load, so one run before a change and one after compare, and it
 doesn't move with the machine either: the benchmark allocates through a counter that only moves forward, since glibc's
 `malloc` costs what the heap's shape makes it and that follows the CPU. So a count here leaves out what an allocator
-costs, and an allocation shows at its fixed 15 instructions; real memory and time are the heap tests' and Criterion's.
-The `instruction determinism` workflow, dispatched after a change of that allocator, the toolchain, Valgrind or the
-runner image, runs the benchmark on eight runners and fails when they disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
+costs, and an allocation shows at its few fixed instructions; real memory and time are the heap tests' and Criterion's.
+Each setup also lets go of the read it leaves cached, whose 100 ms would otherwise make a count follow how long the setup
+took. The `instruction determinism` workflow (`gh workflow run instruction-determinism.yml`), dispatched after a change of
+that allocator, the toolchain, Valgrind or the runner image, runs the benchmark on eight runners and fails when they
+disagree. Text work is the exception: the tokenizer, charabia, looks words up in a hash map seeded randomly per process, so
 `text_rebuild` moves by a small fraction of a percent between runs of one commit
 (`../evidence/instruction-counts.md`). `rank_drain` is entered at `build_rank`, on the index's thread, since the benchmark's
 own thread does none of a drain's work, so it holds the drains' commits and not the benchmark's. The fixture's build runs there too
@@ -401,6 +527,9 @@ drained on the database's own thread (`elmdb-index` in a sample), which is where
 the graph, pushing and writing back. `profile-reads` repeats one of the read benchmark's reads (`field`, `page`, `page_projected`, `all_rows`) after its
 fixture is built; `--unstable-presymbolicate` writes the symbols beside the profile, so it can be read without the
 binary. `read-allocations` counts each read's allocations with dhat. Readings: `docs/evidence/read-allocation-codec.md`.
+`search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
+holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
+and prints nothing, for a sampler.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
@@ -414,6 +543,7 @@ evidence is [measurement tooling evidence](../evidence/maintenance-verification-
 ```sh
 cargo xtask compare main --runs 2 -- cargo bench -p elmdb --bench maintenance -- 'graph/rankIndexChange/1e-6'
 cargo xtask compare main -- cargo run --release -p elmdb --example rank-write-stall -- --edges
+cargo xtask compare main -- cargo run --release -p elmdb --example search-cost
 ```
 
 One command on two revisions, in turn and each run in the other order, each in a worktree under `target/compare/` that stays
@@ -424,6 +554,47 @@ the second is usually the one to read. Alternating is what keeps a spike or a dr
 `CARGO_TARGET_DIR` and `RUSTUP_TOOLCHAIN` for the command, which other variables such as `ELMDB_BENCH_ROWS` pass through. It
 reports and decides nothing: it fails when the command does, after printing what it read, or when a side prints no reading. A
 count that doesn't move with the load is `benches/instructions.rs`'s.
+
+## Against SQLite
+
+```sh
+npm run build
+node crates/elmdb-node/bench/against-sqlite.mjs --json > report.json   # a million notes; --notes N for fewer
+```
+
+One workload on elmdb, through the binding, and on SQLite, through Node's built-in `node:sqlite` with FTS5 and WAL:
+notes of a title, a name, a number and a status, the title in a text index and the other three in value indexes, the
+name a string no other note holds and the status one of two, loaded in units of 5,000 with neither engine syncing. It
+reads what the road to 1.0 tracks per release (`../roadmap.md`): bytes per note as loaded and compacted; a create's
+commit at a twentieth of the notes and at all of them, for a note of three terms and a message of thirty, as a median
+of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
+twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
+misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
+status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
+end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
+count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
+to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
+SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
+entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the
+bytes of each value index in every key family it is filed in (`stats()`).
+
+Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
+best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking
+orders alike, as is a page of them past the third; the other searches' matches tie, and are compared as counts. A
+page of a search is elmdb's `after`. SQLite's is read two ways, FTS5 having no key to seek a rank by: past an
+`OFFSET`, the common idiom, and past the rank and rowid of the cursor, which a caller keeps from the page before and
+which, as elmdb's does, scores every match and keeps ten; the second is held to the first's answers. Those ten notes'
+numbers are past every other note's, so they are the ten highest, and the last 500 are counted below them. A Node
+whose SQLite is built without FTS5 (23.11 is) leaves SQLite's searches out and says so in `host.sqliteText`;
+`--require-text` fails the run there instead. The databases are made under `--dir`, the system's temporary directory
+unless given, and removed; a million notes need about 4 GB there.
+
+Without `--json` it prints a reading a line as `name=value`, which `cargo xtask compare` reads. The times are readings
+of one machine under its load, which the report records before and after: compare two reports from one host, and take
+a reading for a release on a quiet one. CI and `cargo xtask pre-push` run it at 2,000 notes, which shows that it runs
+and that the engines agree, and is no reading; CI's Node 24 job runs it with `--require-text`, since its Node 23
+job compares no search. The readings: `../evidence/million-notes.md`.
 
 ## Read allocation and codec reports
 

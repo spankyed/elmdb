@@ -355,6 +355,7 @@ impl Reader {
             &[("refuse", AdditionalFields::Refuse), ("allow", AdditionalFields::Allow)],
         );
         let indexes = self.named(&mut object, "indexes", |r, _, v, path| r.index(v, path));
+        let change_order = self.bool_or(&mut object, "changeOrder", false);
         self.finish(object);
         Some(TypeDef {
             declared_by: declared_by?,
@@ -362,6 +363,7 @@ impl Reader {
             fields: fields?,
             additional_fields: additional_fields?,
             indexes: indexes?,
+            change_order: change_order?,
         })
     }
 

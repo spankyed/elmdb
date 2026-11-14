@@ -140,8 +140,8 @@ is one small type the store calls instead of a lock and a condition variable
 
 Status: built, 2026-10-30. `tracing` spans on a rebuild (the recovery operation), the writer's acquisition and a
 unit's begin and wait (the transaction-wait paths) and the sorter, behind elmdb's `diagnostics` feature, off by
-default. Nothing collecting, they cost at most 0.02% of any benchmarked operation's instructions, a gate holds them to
-0.05%, and a Node program collects them through the binding's experimental `collectDiagnostics()`
+default. Nothing collecting, they cost an operation a couple of hundred instructions, a gate holds them to 0.05% or 300
+instructions, whichever is more, and to no added allocation, and a Node program collects them through the binding's experimental `collectDiagnostics()`
 ([the record](../evidence/diagnostics.md)). Public configuration through the binding, and apack's use of it, are not
 decided; they are proposed apart when a stall needs them.
 

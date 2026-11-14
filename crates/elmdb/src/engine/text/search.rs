@@ -1,13 +1,14 @@
 //! Searching a text index (`docs/architecture/search.md`, Methods): a query's clauses, each clause's words expanded to the index's
 //! terms — the word itself, the terms it starts for search as you type (in a stemming index, the stems of the words as
 //! written it starts), and those an edit or two away — matched
-//! through the posting lists, checked against positions where a phrase or a field asks it, and ranked by BM25F, each
-//! field's term frequency and length counted at its weight.
+//! through the terms' places, checked against positions where a phrase asks it, and ranked by BM25F, each field's
+//! term frequency and length counted at its weight: the frequencies read from the terms' places and the lengths from
+//! the index's lengths by place, so scoring a match reads no key of its own.
 //!
 //! The query: words, all of which match (or any, with `any`); `"a phrase"`, its words adjacent in one field;
 //! `-word` or `-"a phrase"`, which no match holds; `field:word`, held in that field of the index; and `a OR b`, either.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use levenshtein_automata::{DFA, Distance, LevenshteinAutomatonBuilder, SINK_STATE};
@@ -18,7 +19,9 @@ use crate::format::key::{Part, decode as decode_key};
 
 use super::super::keys;
 use super::super::unit::Read;
-use super::{TextIndex, decode_places, decode_postings, document, stats, texts_at};
+use super::lengths::{self, Lengths};
+use super::postings::{self, Postings, Term};
+use super::{StoredDocument, TextIndex, document, stats, texts_at, word_held};
 use crate::engine::plan::SearchOptions;
 
 /// BM25's saturation of term frequency, and its normalization by length
@@ -170,13 +173,26 @@ fn automaton(distance: u8) -> &'static LevenshteinAutomatonBuilder {
     }
 }
 
-/// The edits a word of this length may be away from a term and still match it
-fn edits_for(word: &str) -> u8 {
-    match word.chars().count() {
-        0..=4 => 0,
-        5..=8 => 1,
-        _ => 2,
+/// The most edits a word may be away from an entry of a dictionary and still match it
+const MAX_EDITS: usize = 2;
+
+/// The edits a word of `length` characters may be away from an entry and still match it: none through `none`
+/// characters, one through `one`, and two past that. None again for a word longer than the longest entry an index
+/// holds by more than the most edits: it is further than that from every entry, and its automaton, whose size grows
+/// with the word, would be built to find nothing
+pub(super) fn edits(length: usize, none: usize, one: usize) -> u8 {
+    if length <= none || length > super::MAX_TERM_BYTES + MAX_EDITS {
+        0
+    } else if length <= one {
+        1
+    } else {
+        2
     }
+}
+
+/// The edits a searched word may be away from a term and still match it
+fn edits_for(word: &str) -> u8 {
+    edits(word.chars().count(), 4, 8)
 }
 
 /// The term a key of a text index's dictionary holds
@@ -188,11 +204,17 @@ fn term_of(key: &[u8]) -> Result<String> {
 }
 
 /// Every entry of a dictionary of the index (its terms, or its words as written) within `distance` edits of `word`,
-/// with its distance and its posting list. The automaton reads each entry a byte at a time, and where no entry starting
-/// with the bytes read so far can match, the walk seeks past all of them: a dictionary is read where it can match, not
-/// whole. An entry's key is the dictionary's prefix, a string's tag and the entry's bytes, ended by a zero; an entry
-/// holding a zero, which an analyzer never makes, is read whole
-fn within(r: &impl Read, dictionary: &[u8], dfa: &DFA, distance: u8) -> Result<Vec<(String, u8, RoaringTreemap)>> {
+/// with its distance and what `read` makes of what its key holds. The automaton reads each entry a byte at a time, and
+/// where no entry starting with the bytes read so far can match, the walk seeks past all of them: a dictionary is read
+/// where it can match, not whole. An entry's key is the dictionary's prefix, a string's tag and the entry's bytes, ended
+/// by a zero; an entry holding a zero, which an analyzer never makes, is read whole
+fn within<T>(
+    r: &impl Read,
+    dictionary: &[u8],
+    dfa: &DFA,
+    distance: u8,
+    read: impl Fn(&str, &[u8]) -> Result<T>,
+) -> Result<Vec<(String, u8, T)>> {
     // The entry's bytes start after the dictionary's prefix and the string's tag
     let head = dictionary.len() + 1;
     let mut out = Vec::new();
@@ -225,7 +247,10 @@ fn within(r: &impl Read, dictionary: &[u8], dfa: &DFA, distance: u8) -> Result<V
                     None => dfa.eval(&entry),
                 };
                 match distance_of {
-                    Distance::Exact(d) if d <= distance => Ok(Some((entry, d, decode_postings(value)?))),
+                    Distance::Exact(d) if d <= distance => {
+                        let held = read(&entry, value)?;
+                        Ok(Some((entry, d, held)))
+                    }
                     _ => Ok(None),
                 }
             });
@@ -249,36 +274,36 @@ fn within(r: &impl Read, dictionary: &[u8], dfa: &DFA, distance: u8) -> Result<V
     }
 }
 
-/// The terms of the index a word matches, each with what a match of it scores beside the word itself and its posting
-/// list
-type Expansions = BTreeMap<String, (f64, RoaringTreemap)>;
+/// The terms of the index a word matches, each with what a match of it scores beside the word itself and the entities
+/// holding it
+type Expansions = BTreeMap<String, (f64, Postings)>;
 
 /// Adds a term to a word's expansions at a weight, keeping the higher where it is there already
 fn merge(
     out: &mut Expansions,
-    term: String,
+    term: &str,
     weight: f64,
-    postings: impl FnOnce() -> Result<Option<RoaringTreemap>>,
+    postings: impl FnOnce() -> Result<Option<Postings>>,
 ) -> Result<()> {
-    if let Some((held, _)) = out.get_mut(&term) {
+    if let Some((held, _)) = out.get_mut(term) {
         *held = held.max(weight);
         return Ok(());
     }
     if let Some(p) = postings()? {
-        out.insert(term, (weight, p));
+        out.insert(term.to_owned(), (weight, p));
     }
     Ok(())
 }
 
-/// The entries of a dictionary of the index starting with the bytes `starting`, each with its posting list, most held
-/// first
-fn started(r: &impl Read, starting: &[u8]) -> Result<Vec<(String, RoaringTreemap)>> {
-    let mut out: Vec<(String, RoaringTreemap)> = Vec::new();
+/// The entries of a dictionary of the index starting with the bytes `starting`, each with how many entities hold it,
+/// which `held` reads from what its key holds, most held first
+fn started(r: &impl Read, starting: &[u8], held: impl Fn(&str, &[u8]) -> Result<u64>) -> Result<Vec<(String, u64)>> {
+    let mut out: Vec<(String, u64)> = Vec::new();
     let mut failed = None;
     r.visit_starting(starting, |key, value| {
-        match (term_of(key), decode_postings(value)) {
-            (Ok(entry), Ok(p)) => out.push((entry, p)),
-            (Err(e), _) | (_, Err(e)) => {
+        match term_of(key).and_then(|entry| Ok((held(&entry, value)?, entry))) {
+            Ok((entities, entry)) => out.push((entry, entities)),
+            Err(e) => {
                 failed = Some(e);
                 return false;
             }
@@ -288,24 +313,21 @@ fn started(r: &impl Read, starting: &[u8]) -> Result<Vec<(String, RoaringTreemap
     if let Some(e) = failed {
         return Err(e);
     }
-    out.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     Ok(out)
 }
 
 fn expand(r: &impl Read, entity_type: &str, index: &TextIndex, word: &Word, fuzzy: bool) -> Result<Expansions> {
     let name = index.name.as_str();
+    let term = |term: &str| Term::new(entity_type, name, index.fields.len(), term);
     let mut out = Expansions::new();
-    let postings = |term: &str| -> Result<Option<RoaringTreemap>> {
-        r.get(&keys::text_term(entity_type, name, term))?.map(|b| decode_postings(&b)).transpose()
-    };
     for alternative in &word.alternatives {
-        merge(&mut out, alternative.clone(), 1.0, || postings(alternative))?;
+        merge(&mut out, alternative, 1.0, || postings::read(r, &term(alternative)))?;
         if word.prefix {
-            for (term, p) in started(r, &keys::text_terms_starting(entity_type, name, alternative))?
-                .into_iter()
-                .take(MAX_PREFIX_TERMS)
-            {
-                merge(&mut out, term, PREFIX_WEIGHT, || Ok(Some(p)))?;
+            let starting = keys::text_terms_starting(entity_type, name, alternative);
+            let found = started(r, &starting, |entry, stored| postings::held(r, &term(entry), stored))?;
+            for (entry, _) in found.into_iter().take(MAX_PREFIX_TERMS) {
+                merge(&mut out, &entry, PREFIX_WEIGHT, || postings::read(r, &term(&entry)))?;
             }
         }
         let edits = if fuzzy { edits_for(alternative) } else { 0 };
@@ -313,12 +335,15 @@ fn expand(r: &impl Read, entity_type: &str, index: &TextIndex, word: &Word, fuzz
         // A word given no edits walks an exact DFA, whose only match, at distance 0, the loop skips
         if edits > 0 {
             let dfa = automaton(edits).build_dfa(alternative);
-            for (term, d, p) in within(r, &keys::text_terms(entity_type, name), &dfa, edits)? {
+            let near = within(r, &keys::text_terms(entity_type, name), &dfa, edits, |entry, stored| {
+                postings::read_stored(r, &term(entry), stored)
+            })?;
+            for (entry, d, p) in near {
                 // mutant-skip: replace > with >= in expand
                 // The exact term was merged at weight 1 first, and merge keeps a term's highest weight
                 if d > 0 {
                     let weight = if d == 1 { ONE_EDIT_WEIGHT } else { TWO_EDITS_WEIGHT };
-                    merge(&mut out, term, weight, || Ok(Some(p)))?;
+                    merge(&mut out, &entry, weight, || Ok(Some(p)))?;
                 }
             }
         }
@@ -327,10 +352,11 @@ fn expand(r: &impl Read, entity_type: &str, index: &TextIndex, word: &Word, fuzz
     // is matched against the words as written, each standing for the term it is held as
     if word.prefix && index.analyzer.stems() {
         for written in &word.written {
-            let found = started(r, &keys::text_words_starting(entity_type, name, written))?;
+            let starting = keys::text_words_starting(entity_type, name, written);
+            let found = started(r, &starting, |_, stored| word_held(stored))?;
             for (held, _) in found.into_iter().take(MAX_PREFIX_TERMS) {
-                let term = index.analyzer.stem(&held);
-                merge(&mut out, term.clone(), PREFIX_WEIGHT, || postings(&term))?;
+                let stem = index.analyzer.stem(&held);
+                merge(&mut out, &stem, PREFIX_WEIGHT, || postings::read(r, &term(&stem)))?;
             }
         }
     }
@@ -349,48 +375,57 @@ pub struct Hit {
     pub fields: Vec<u32>,
 }
 
-/// A clause's words expanded, and the entities holding every word
+/// A clause's words expanded, how many entities hold each word in any of its expansions, and the entities holding
+/// every word where the clause asks: in its fields, and for a phrase at consecutive places
 struct Matched {
     words: Vec<Expansions>,
+    held: Vec<f64>,
     candidates: RoaringTreemap,
 }
 
 fn union(postings: &Expansions) -> RoaringTreemap {
-    postings.values().fold(RoaringTreemap::new(), |acc, (_, p)| acc | p)
+    postings.values().fold(RoaringTreemap::new(), |acc, (_, p)| acc | &p.places)
 }
 
-/// Each place of the entity's fields a word's terms are at, by field: `field → positions`
-fn places_of(
-    r: &impl Read,
-    entity_type: &str,
-    index: &str,
-    word: &Expansions,
-    seq: u64,
-) -> Result<BTreeMap<u32, HashSet<u32>>> {
-    let mut out: BTreeMap<u32, HashSet<u32>> = BTreeMap::new();
-    for (term, (_, postings)) in word {
-        if !postings.contains(seq) {
-            continue;
-        }
-        if let Some(stored) = r.get(&keys::text_positions(entity_type, index, term, seq))? {
-            for (field, positions) in decode_places(&stored)? {
-                out.entry(field).or_default().extend(positions);
+/// The entities holding one of a word's terms in one of `fields`
+fn union_in(postings: &Expansions, fields: &[u32], of: usize) -> Result<RoaringTreemap> {
+    let mut out = RoaringTreemap::new();
+    for (_, p) in postings.values() {
+        for entry in p.entries() {
+            let (place, counts) = entry?;
+            let mut held = false;
+            postings::counted(counts, of, |field, _| held |= fields.contains(&field))?;
+            if held {
+                out.insert(place);
             }
         }
     }
     Ok(out)
 }
 
-/// Whether the entity holds the clause: each word in one of its fields, a phrase's words at consecutive places
-fn holds(r: &impl Read, entity_type: &str, index: &str, clause: &Clause, matched: &Matched, seq: u64) -> Result<bool> {
+/// Each place of the entity's fields a word's terms are at, by field: `field → positions`
+fn places_of(document: &StoredDocument, word: &Expansions) -> BTreeMap<u32, HashSet<u32>> {
+    let mut out: BTreeMap<u32, HashSet<u32>> = BTreeMap::new();
+    for term in word.keys() {
+        for (field, positions) in document.places(term).unwrap_or_default() {
+            out.entry(*field).or_default().extend(positions);
+        }
+    }
+    out
+}
+
+/// Whether the entity holds a phrase: its words at consecutive places of one of the clause's fields
+fn holds(
+    r: &impl Read,
+    entity_type: &str,
+    index: &str,
+    clause: &Clause,
+    words: &[Expansions],
+    seq: u64,
+) -> Result<bool> {
+    let Some(document) = document(r, entity_type, index, seq)? else { return Ok(false) };
     let in_field = |f: &u32| clause.fields.as_ref().is_none_or(|fs| fs.contains(f));
-    if matched.words.len() == 1 && clause.fields.is_none() {
-        return Ok(true);
-    }
-    let mut places = Vec::with_capacity(matched.words.len());
-    for word in &matched.words {
-        places.push(places_of(r, entity_type, index, word, seq)?);
-    }
+    let places: Vec<_> = words.iter().map(|word| places_of(&document, word)).collect();
     for (field, first) in places[0].iter().filter(|(f, _)| in_field(f)) {
         let starts = first.iter().filter(|&&p| {
             places
@@ -406,8 +441,319 @@ fn holds(r: &impl Read, entity_type: &str, index: &str, clause: &Clause, matched
     Ok(false)
 }
 
+/// A word of a clause as matches are scored against it: how rare it is, and each of its terms' weight beside the word
+/// itself and the entities holding it, read in place order as the matches are
+struct Scoring<'a> {
+    idf: f64,
+    terms: Vec<(f64, postings::Walk<'a>)>,
+}
+
+/// What a query matches among a type's entities in one of its text indexes
+pub struct Matches<'a> {
+    entity_type: &'a str,
+    index: &'a TextIndex,
+    options: &'a SearchOptions,
+    clauses: Vec<Clause>,
+    matched: Vec<Matched>,
+    /// The index's fields the search reads, which its options may narrow
+    allowed: Vec<u32>,
+    /// The places of the entities it matches
+    pub found: RoaringTreemap,
+}
+
+/// How many places are few enough to ask the trash for one by one, where reading the whole of it costs more
+const PROBED: u64 = 256;
+
+/// `places` of a type, less those in its trash
+pub(crate) fn untrashed(r: &impl Read, entity_type: &str, mut places: RoaringTreemap) -> Result<RoaringTreemap> {
+    // mutant-skip: replace <= with > in untrashed
+    // Either way leaves the places out of the trash: asking for each, or reading the trash, is what it costs
+    if places.len() <= PROBED {
+        let mut trashed = Vec::new();
+        for seq in &places {
+            if r.get(&keys::of_type(true, entity_type, seq))?.is_some() {
+                trashed.push(seq);
+            }
+        }
+        for seq in trashed {
+            places.remove(seq);
+        }
+    } else {
+        r.visit(&keys::type_range(true, entity_type), |key, _| {
+            if let Some(place) = keys::place_of(key) {
+                places.remove(place);
+            }
+            true
+        })?;
+    }
+    Ok(places)
+}
+
+/// What clauses' candidates come to, joined: every group's, or with `any` one group's, and no negated clause's. A
+/// clause not `settled` is a phrase not yet checked, whose candidates are its matches and more: a negated one leaves
+/// nothing out, so the answer holds every match of the search
+fn joined(clauses: &[Clause], candidates: &[RoaringTreemap], settled: &[bool], any: bool) -> RoaringTreemap {
+    let mut groups: BTreeMap<usize, RoaringTreemap> = BTreeMap::new();
+    let mut excluded = RoaringTreemap::new();
+    for (at, clause) in clauses.iter().enumerate() {
+        if !clause.negated {
+            *groups.entry(clause.group).or_default() |= &candidates[at];
+        } else if settled[at] {
+            excluded |= &candidates[at];
+        }
+    }
+    let mut found: Option<RoaringTreemap> = None;
+    for group in groups.into_values() {
+        found = Some(match found {
+            None => group,
+            Some(found) if any => found | group,
+            Some(found) => found & group,
+        });
+    }
+    found.unwrap_or_default() - excluded
+}
+
+/// The entities of a type the query matches in one of its text indexes: within `among` when given, and with `live`
+/// none of the type's trash
+pub fn matches<'a>(
+    r: &impl Read,
+    entity_type: &'a str,
+    index: &'a TextIndex,
+    query: &[RawClause],
+    options: &'a SearchOptions,
+    among: Option<&RoaringTreemap>,
+    live: bool,
+) -> Result<Matches<'a>> {
+    let name = index.name.as_str();
+    let clauses = clauses(index, query, options);
+    let mut words_of = Vec::with_capacity(clauses.len());
+    let mut held_of = Vec::with_capacity(clauses.len());
+    // Each clause's candidates: the entities holding its every word, which are its matches unless it is a phrase
+    let mut candidates = Vec::with_capacity(clauses.len());
+    for clause in &clauses {
+        // A negation leaves out what holds the word as typed: a term an edit away is another word, which the query
+        // didn't name, as a term the word only starts is (`clauses`)
+        let fuzzy = options.fuzzy && !clause.negated;
+        let words: Vec<_> =
+            clause.words.iter().map(|w| expand(r, entity_type, index, w, fuzzy)).collect::<Result<_>>()?;
+        let holders: Vec<RoaringTreemap> = words.iter().map(union).collect();
+        let held: Vec<f64> = holders.iter().map(|h| h.len() as f64).collect();
+        // A clause held to some of the index's fields is matched by the entities holding its words there
+        let holders = match &clause.fields {
+            Some(fields) => {
+                words.iter().map(|word| union_in(word, fields, index.fields.len())).collect::<Result<_>>()?
+            }
+            None => holders,
+        };
+        let mut holders = holders.into_iter();
+        let mut holding = holders.next().unwrap_or_default();
+        for word in holders {
+            // mutant-skip: replace &= with \|= in matches
+            // A clause of several words is a phrase, checked by holds, which needs every word at consecutive places:
+            // the union of the words' places keeps what their intersection keeps
+            holding &= word;
+        }
+        if let Some(among) = among {
+            holding &= among;
+        }
+        words_of.push(words);
+        held_of.push(held);
+        candidates.push(holding);
+    }
+    // mutant-skip: replace > with >= in matches
+    // One word is at consecutive places wherever it is, and candidates are already those holding it in the clause's
+    // fields: holds answers true for each
+    let phrase = |words: &Vec<Expansions>| words.len() > 1;
+    let mut settled: Vec<bool> = words_of.iter().map(|words| !phrase(words)).collect();
+    // A phrase is checked in each candidate's document, so only in those the other clauses leave a match among, the
+    // phrase fewest hold all the words of first: each one checked leaves the next fewer
+    let mut phrases: Vec<usize> = (0..clauses.len()).filter(|at| !settled[*at]).collect();
+    phrases.sort_by_key(|at| candidates[*at].len());
+    for at in phrases {
+        // mutant-skip: replace & with \| in matches
+        // Checked wherever a match may be or beyond, a phrase's matches among the search's are the same: what is
+        // left out is what the check costs
+        let mut possible = joined(&clauses, &candidates, &settled, options.any) & &candidates[at];
+        // The trash is left out before the documents are read, not after
+        if live {
+            possible = untrashed(r, entity_type, possible)?;
+        }
+        let mut kept = RoaringTreemap::new();
+        for seq in &possible {
+            if holds(r, entity_type, name, &clauses[at], &words_of[at], seq)? {
+                kept.insert(seq);
+            }
+        }
+        candidates[at] = kept;
+        settled[at] = true;
+    }
+    let mut found = joined(&clauses, &candidates, &settled, options.any);
+    if live {
+        found = untrashed(r, entity_type, found)?;
+    }
+    let matched = words_of
+        .into_iter()
+        .zip(held_of)
+        .zip(candidates)
+        .map(|((words, held), candidates)| Matched { words, held, candidates })
+        .collect();
+    let allowed: Vec<u32> = match &options.fields {
+        Some(names) => {
+            names.iter().filter_map(|f| index.fields.iter().position(|(n, _)| n == f).map(|i| i as u32)).collect()
+        }
+        None => (0..index.fields.len() as u32).collect(),
+    };
+    Ok(Matches { entity_type, index, options, clauses, matched, allowed, found })
+}
+
+/// The id of the entity of a type at a place, live or trashed
+fn id_at(r: &impl Read, entity_type: &str, seq: u64) -> Result<Option<String>> {
+    for trashed in [false, true] {
+        if let Some(held) = r.get(&keys::of_type(trashed, entity_type, seq))? {
+            return Ok(super::super::values::decode(&held)?.as_str().map(str::to_owned));
+        }
+    }
+    Ok(None)
+}
+
+impl Matches<'_> {
+    fn weight(&self, field: u32) -> f64 {
+        self.index.fields.get(field as usize).map(|(_, w)| *w).unwrap_or(0.0)
+    }
+
+    /// Hands `each` every match's place and score, in place order: BM25F over the fields searched, then the recency
+    /// the options ask for. `now` measures a recency option's ages
+    pub fn scored(&self, r: &impl Read, now: f64, each: impl FnMut(u64, f64)) -> Result<()> {
+        self.scored_at(r, now, &self.found, each)
+    }
+
+    /// The score `scored` hands the match at a place, or none for a place that is no match's. It is read as `scored`
+    /// reads it, so it is that number to the bit: what a page's cursor is ranked by among the matches it is one of
+    pub fn score_of(&self, r: &impl Read, now: f64, seq: u64) -> Result<Option<f64>> {
+        if !self.found.contains(seq) {
+            return Ok(None);
+        }
+        let mut score = None;
+        self.scored_at(r, now, &RoaringTreemap::from_iter([seq]), |_, own| score = Some(own))?;
+        Ok(score)
+    }
+
+    /// Hands `each` the place and score of each of `places`, which are matches', in place order
+    fn scored_at(
+        &self,
+        r: &impl Read,
+        now: f64,
+        places: &RoaringTreemap,
+        mut each: impl FnMut(u64, f64),
+    ) -> Result<()> {
+        if places.is_empty() {
+            return Ok(());
+        }
+        let name = self.index.name.as_str();
+        let fields = self.index.fields.len();
+        let weights: Vec<f64> = (0..fields as u32).map(|field| self.weight(field)).collect();
+        let stats = stats(r, self.entity_type, self.index)?;
+        let n = stats.documents.max(1) as f64;
+        let average: f64 = self
+            .allowed
+            .iter()
+            .map(|&f| weights[f as usize] * stats.lengths[f as usize] as f64 / n)
+            .sum::<f64>()
+            .max(1.0);
+        // Each clause's fields' weights, none for a field it isn't held to, and each of its words: how rare it is, and
+        // its terms read in place order beside the matches. A word is as rare as the entities holding it in any form
+        // it was matched in. Were each form scored by its own rarity, a rare term an edit away would outweigh the word
+        // asked for; scored as the word, the forms differ by their weights alone, the word as typed at the whole of it
+        let mut read: Vec<(Vec<f64>, Vec<Scoring<'_>>)> = Vec::new();
+        for (clause, m) in self.clauses.iter().zip(&self.matched) {
+            let held_to = clause.fields.as_deref().unwrap_or(&self.allowed);
+            let in_clause = (0..fields as u32).map(|f| if held_to.contains(&f) { weights[f as usize] } else { 0.0 });
+            let words = m.words.iter().zip(&m.held).map(|(word, held)| Scoring {
+                idf: (1.0 + (n - held + 0.5) / (held + 0.5)).ln(),
+                terms: word.values().map(|(w, postings)| (*w, postings.walk())).collect(),
+            });
+            read.push((in_clause.collect(), words.collect()));
+        }
+        let mut lengths: Option<(u64, Option<Lengths<Vec<u8>>>)> = None;
+        for seq in places {
+            let block = lengths::block_of(seq);
+            if lengths.as_ref().is_none_or(|(held, _)| *held != block) {
+                let stored = r.get(&keys::text_lengths(self.entity_type, name, block))?;
+                lengths = Some((block, stored.map(|stored| Lengths::read(stored, fields)).transpose()?));
+            }
+            let held = lengths.as_ref().and_then(|(_, held)| held.as_ref());
+            let length: f64 = self
+                .allowed
+                .iter()
+                .map(|&f| weights[f as usize] * f64::from(held.map_or(0, |held| held.at(seq, f as usize))))
+                .sum();
+            let mut score = 0.0;
+            for (((in_clause, words), clause), m) in read.iter_mut().zip(&self.clauses).zip(&self.matched) {
+                // mutant-skip: replace > with >= in Matches<'_>::scored
+                // A match that isn't one of a clause of one word holds none of its terms in the clause's fields, and
+                // adds nothing below: only a phrase's words can be held where the phrase isn't
+                if clause.negated || (m.words.len() > 1 && !m.candidates.contains(seq)) {
+                    continue;
+                }
+                for word in words {
+                    let mut best: f64 = 0.0;
+                    for (w, walk) in &mut word.terms {
+                        let Some(counts) = walk.to(seq)? else { continue };
+                        // Each field's count at its weight, and none for a field the clause isn't held to
+                        let frequency = postings::weighted(counts, in_clause)?;
+                        if frequency == 0.0 {
+                            continue;
+                        }
+                        let tf = frequency * (K1 + 1.0) / (frequency + K1 * (1.0 - B + B * length / average));
+                        best = best.max(*w * word.idf * tf);
+                    }
+                    score += best;
+                }
+            }
+            if let Some(recency) = &self.options.recency
+                && recency.half_life > 0.0
+                && let Some(id) = id_at(r, self.entity_type, seq)?
+                && let Some(at) = super::super::entities::get(r, &id, &recency.field)?
+                    .as_ref()
+                    .and_then(super::super::values::as_time)
+            {
+                score *= 0.5f64.powf(((now - at).max(0.0)) / recency.half_life);
+            }
+            each(seq, score);
+        }
+        Ok(())
+    }
+
+    /// The index's terms a match holds, in term order, and the fields it holds them in: what its hit names, and its
+    /// highlights are of
+    pub fn held_by(&self, seq: u64) -> Result<(Vec<String>, Vec<u32>)> {
+        let mut terms: BTreeSet<&str> = BTreeSet::new();
+        let mut fields: BTreeSet<u32> = BTreeSet::new();
+        for (clause, m) in self.clauses.iter().zip(&self.matched) {
+            if clause.negated || !m.candidates.contains(seq) {
+                continue;
+            }
+            let in_clause = clause.fields.as_deref().unwrap_or(&self.allowed);
+            for (term, (_, postings)) in m.words.iter().flatten() {
+                // Of a word's many forms a match holds one or two: the set says which without reading a run
+                if !postings.places.contains(seq) {
+                    continue;
+                }
+                let Some(counts) = postings.at(seq)? else { continue };
+                postings::counted(counts, self.index.fields.len(), |field, _| {
+                    if in_clause.contains(&field) {
+                        terms.insert(term);
+                        fields.insert(field);
+                    }
+                })?;
+            }
+        }
+        Ok((terms.into_iter().map(str::to_owned).collect(), fields.into_iter().collect()))
+    }
+}
+
 /// The entities of a type the query matches in one of its text indexes, within `among` when given, each with its
-/// score and the terms it matched. `now` measures a recency option's ages
+/// score and the terms it matched, in place order. `now` measures a recency option's ages
 pub fn search(
     r: &impl Read,
     entity_type: &str,
@@ -417,121 +763,14 @@ pub fn search(
     among: Option<&RoaringTreemap>,
     now: f64,
 ) -> Result<Vec<Hit>> {
-    let name = index.name.as_str();
-    let clauses = clauses(index, query, options);
-    let mut matched = Vec::with_capacity(clauses.len());
-    for clause in &clauses {
-        let words: Vec<_> =
-            clause.words.iter().map(|w| expand(r, entity_type, index, w, options.fuzzy)).collect::<Result<_>>()?;
-        let mut candidates = words.first().map(union).unwrap_or_default();
-        for word in words.iter().skip(1) {
-            // mutant-skip: replace &= with \|= in search
-            // A clause of several words is checked by holds, which needs every word at consecutive places, so the union
-            // of the words' postings keeps what their intersection keeps; and holds answers true for one word in any
-            // field
-            candidates &= union(word);
-        }
-        if let Some(among) = among {
-            candidates &= among;
-        }
-        // mutant-skip: replace > with >= in search (as above)
-        let needs_places = words.len() > 1 || clause.fields.is_some();
-        if needs_places {
-            let mut kept = RoaringTreemap::new();
-            let probe = Matched { words, candidates: RoaringTreemap::new() };
-            for seq in &candidates {
-                if holds(r, entity_type, name, clause, &probe, seq)? {
-                    kept.insert(seq);
-                }
-            }
-            matched.push(Matched { words: probe.words, candidates: kept });
-        } else {
-            matched.push(Matched { words, candidates });
-        }
-    }
-    // The groups' matches, joined: every group, or with `any` one of them, and no negated clause
-    let mut groups: BTreeMap<usize, RoaringTreemap> = BTreeMap::new();
-    let mut excluded = RoaringTreemap::new();
-    for (clause, m) in clauses.iter().zip(&matched) {
-        if clause.negated {
-            excluded |= &m.candidates;
-        } else {
-            *groups.entry(clause.group).or_default() |= &m.candidates;
-        }
-    }
-    let mut found: Option<RoaringTreemap> = None;
-    for g in groups.into_values() {
-        found = Some(match found {
-            None => g,
-            Some(f) if options.any => f | g,
-            Some(f) => f & g,
-        });
-    }
-    let found = found.unwrap_or_default() - excluded;
-    if found.is_empty() {
-        return Ok(Vec::new());
-    }
-    let stats = stats(r, entity_type, index)?;
-    let n = stats.documents.max(1) as f64;
-    let allowed: Vec<u32> = match &options.fields {
-        Some(names) => {
-            names.iter().filter_map(|f| index.fields.iter().position(|(n, _)| n == f).map(|i| i as u32)).collect()
-        }
-        None => (0..index.fields.len() as u32).collect(),
-    };
-    let weight = |f: u32| index.fields.get(f as usize).map(|(_, w)| *w).unwrap_or(0.0);
-    let average: f64 = allowed.iter().map(|&f| weight(f) * stats.lengths[f as usize] as f64 / n).sum::<f64>().max(1.0);
-    let mut hits = Vec::with_capacity(found.len() as usize);
-    for seq in &found {
-        let Some(doc) = document(r, entity_type, name, seq)? else { continue };
-        let length: f64 = allowed.iter().map(|&f| weight(f) * f64::from(doc.lengths[f as usize])).sum();
-        let mut score = 0.0;
-        let mut terms: HashSet<String> = HashSet::new();
-        let mut fields: HashSet<u32> = HashSet::new();
-        for (clause, m) in clauses.iter().zip(&matched) {
-            if clause.negated || !m.candidates.contains(seq) {
-                continue;
-            }
-            let in_clause: Vec<u32> = clause.fields.clone().unwrap_or_else(|| allowed.clone());
-            for word in &m.words {
-                let mut best: f64 = 0.0;
-                for (term, (w, postings)) in word {
-                    if !postings.contains(seq) {
-                        continue;
-                    }
-                    let Some(stored) = r.get(&keys::text_positions(entity_type, name, term, seq))? else { continue };
-                    let mut frequency = 0.0;
-                    for (field, positions) in decode_places(&stored)? {
-                        if in_clause.contains(&field) {
-                            frequency += weight(field) * positions.len() as f64;
-                            fields.insert(field);
-                        }
-                    }
-                    if frequency == 0.0 {
-                        continue;
-                    }
-                    terms.insert(term.clone());
-                    let df = postings.len() as f64;
-                    let idf = (1.0 + (n - df + 0.5) / (df + 0.5)).ln();
-                    let tf = frequency * (K1 + 1.0) / (frequency + K1 * (1.0 - B + B * length / average));
-                    best = best.max(w * idf * tf);
-                }
-                score += best;
-            }
-        }
-        if let Some(recency) = &options.recency
-            && recency.half_life > 0.0
-            && let Some(at) = super::super::entities::get(r, &doc.id, &recency.field)?
-                .as_ref()
-                .and_then(super::super::values::as_time)
-        {
-            score *= 0.5f64.powf(((now - at).max(0.0)) / recency.half_life);
-        }
-        let mut terms: Vec<String> = terms.into_iter().collect();
-        terms.sort();
-        let mut fields: Vec<u32> = fields.into_iter().collect();
-        fields.sort();
-        hits.push(Hit { id: doc.id, seq, score, terms, fields });
+    let matches = matches(r, entity_type, index, query, options, among, false)?;
+    let mut scored = Vec::new();
+    matches.scored(r, now, |seq, score| scored.push((seq, score)))?;
+    let mut hits = Vec::with_capacity(scored.len());
+    for (seq, score) in scored {
+        let Some(id) = id_at(r, entity_type, seq)? else { continue };
+        let (terms, fields) = matches.held_by(seq)?;
+        hits.push(Hit { id, seq, score, terms, fields });
     }
     Ok(hits)
 }
@@ -593,19 +832,21 @@ pub fn suggest(
         let starting = keys::text_terms_starting(entity_type, name, &first.text);
         (first.text, keys::text_terms(entity_type, name), starting)
     };
-    let completions = started(r, &starting)?.into_iter().take(limit).map(|(t, _)| t).collect();
-    let edits = match term.chars().count() {
-        0..=2 => 0,
-        3..=6 => 1,
-        _ => 2,
+    // How many entities hold an entry of that dictionary
+    let held = |entry: &str, stored: &[u8]| match index.analyzer.stems() {
+        true => word_held(stored),
+        false => postings::held(r, &Term::new(entity_type, name, index.fields.len(), entry), stored),
     };
+    let completions = started(r, &starting, held)?.into_iter().take(limit).map(|(t, _)| t).collect();
+    // A word being typed is corrected sooner than a searched one is matched loosely
+    let edits = edits(term.chars().count(), 2, 6);
     let mut near: Vec<(u8, u64, String)> = Vec::new();
     // mutant-skip: replace > with >= in suggest (as above)
     if edits > 0 {
         let dfa = automaton(edits).build_dfa(&term);
-        for (t, d, p) in within(r, &dictionary, &dfa, edits)? {
+        for (t, d, entities) in within(r, &dictionary, &dfa, edits, held)? {
             if d > 0 {
-                near.push((d, p.len(), t));
+                near.push((d, entities, t));
             }
         }
     }
@@ -627,7 +868,8 @@ pub fn places(r: &impl Read, ids: &[String]) -> Result<HashMap<u64, String>> {
 
 #[cfg(test)]
 mod seeking {
-    //! The fuzzy walk against the dictionary read whole: what it finds, and how little of it it reads
+    //! What a search reads to find what it finds: the fuzzy walk against the dictionary read whole, and a phrase's
+    //! check against every document holding its words
 
     use super::*;
     use crate::schema::Schema;
@@ -636,13 +878,18 @@ mod seeking {
     use serde_json::json;
     use std::cell::Cell;
 
-    /// A read that counts the entries it hands over
+    /// A read that counts the entries it hands over, and the keys under `under` it is asked for
     struct Counting<'a, R> {
         inner: &'a R,
         entries: Cell<usize>,
+        under: Vec<u8>,
+        gets: Cell<usize>,
     }
     impl<R: Read> Read for Counting<'_, R> {
         fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+            if key.starts_with(&self.under) {
+                self.gets.set(self.gets.get() + 1);
+            }
             self.inner.get(key)
         }
         fn visit(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
@@ -657,14 +904,14 @@ mod seeking {
                 f(k, v)
             })
         }
-        fn visit_from(&self, prefix: &[u8], from: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_from(prefix, from, |k, v| {
+        fn visit_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
         }
-        fn visit_back(&self, prefix: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
-            self.inner.visit_back(prefix, |k, v| {
+        fn visit_back_within(&self, from: &[u8], to: &[u8], mut f: impl FnMut(&[u8], &[u8]) -> bool) -> Result<()> {
+            self.inner.visit_back_within(from, to, |k, v| {
                 self.entries.set(self.entries.get() + 1);
                 f(k, v)
             })
@@ -741,14 +988,73 @@ mod seeking {
                         _ => None,
                     })
                     .collect();
-                let counting = Counting { inner: r, entries: Cell::new(0) };
-                let found: Vec<(String, u8)> =
-                    within(&counting, &dictionary, &dfa, edits)?.into_iter().map(|(term, d, _)| (term, d)).collect();
+                let counting =
+                    Counting { inner: r, entries: Cell::new(0), under: dictionary.clone(), gets: Cell::new(0) };
+                let found: Vec<(String, u8)> = within(&counting, &dictionary, &dfa, edits, |_, _| Ok(()))?
+                    .into_iter()
+                    .map(|(term, d, ())| (term, d))
+                    .collect();
                 assert_eq!(found, expected, "{query} within {edits}");
                 read += counting.entries.get();
             }
             // The walk reads an entry where a match could start: a small part of every query reading the whole dictionary
             assert!(read * 10 < whole.len() * 200, "read {read} entries for 200 walks of {}", whole.len());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn a_phrase_is_checked_in_the_documents_the_other_clauses_leave_a_match_among() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Message": {
+                "fields": { "text": { "type": "string", "optional": true } },
+                "indexes": { "text": { "kind": "text", "fields": { "text": {} } } }
+            } }
+        }))
+        .unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+            .unwrap();
+        // 300 hold the phrase, three of them beside a zebra; ten hold its words the other way round, and a zebra; four
+        // hold it after a zebra crossing
+        let text = |i: usize| match i {
+            0..3 => "a note number here zebra",
+            3..300 => "a note number here",
+            300..310 => "zebra number note",
+            _ => "zebra crossing note number",
+        };
+        let ops: Vec<_> = (0..314)
+            .map(|i| json!({ "op": "create", "type": "Message", "id": format!("Message-{i}"), "fields": { "text": text(i) } }))
+            .collect();
+        crate::engine::tests::write(&db, ops).unwrap();
+        let index = &super::super::text_indexes(&db.schema().unwrap(), "Message")[0];
+        let options: SearchOptions = serde_json::from_value(json!({ "fuzzy": false })).unwrap();
+        let ids = |range: std::ops::Range<usize>| range.map(|i| format!("Message-{i}")).collect::<BTreeSet<_>>();
+        db.snapshot(|r| {
+            // The ids a query finds, and how many documents it read to check its phrases
+            let search = |query: &str| -> Result<(BTreeSet<String>, usize)> {
+                let documents = keys::text_index_ranges("Message", "text")[2].clone();
+                let counting = Counting { inner: r, entries: Cell::new(0), under: documents, gets: Cell::new(0) };
+                let matches = matches(&counting, "Message", index, &parse(query), &options, None, false)?;
+                let found = matches.found.iter().map(|seq| id_at(r, "Message", seq).map(Option::unwrap));
+                Ok((found.collect::<Result<_>>()?, counting.gets.get()))
+            };
+            // Seventeen hold a zebra and the phrase's words: theirs are the documents read, not the 314 holding the
+            // words, whether the phrase is asked for or left out
+            let both: BTreeSet<String> = ids(0..3).into_iter().chain(ids(310..314)).collect();
+            assert_eq!(search("zebra \"note number\"")?, (both, 17));
+            assert_eq!(search("zebra -\"note number\"")?, (ids(300..310), 17));
+            // Of two phrases the one fewer hold the words of is checked first, and the other in what it leaves
+            assert_eq!(search("\"note number\" \"zebra crossing\"")?, (ids(310..314), 8));
+            assert_eq!(search("\"zebra crossing\" \"note number\"")?, (ids(310..314), 8));
+            // A phrase alone, or beside a word either of which is enough, is checked wherever its words are
+            let phrase: BTreeSet<String> = ids(0..300).into_iter().chain(ids(310..314)).collect();
+            assert_eq!(search("\"note number\"")?, (phrase, 314));
+            assert_eq!(search("zebra OR \"note number\"")?, (ids(0..314), 314));
+            // A phrase left out of nothing is checked nowhere
+            assert_eq!(search("-\"note number\"")?, (BTreeSet::new(), 0));
             Ok(())
         })
         .unwrap();

@@ -1,7 +1,7 @@
 //! Relations in the store's keys (`docs/architecture/format.md`, Keys):
 //!
 //! - `p/r relation` → `{ kind, source, target, info, weight, seq }`: the relation's row and its place, `weight` held
-//!   only when it isn't 1 (a kind declared `weighted`)
+//!   only when it isn't 1 (given to an edge of a kind declared `weighted`, and kept by the edge from then on)
 //! - `d/o source kind seq` → `[relation, target]` and `d/n target kind seq` → `[relation, source]`: each entity's edges
 //!   out and in, by kind, in the order linked, so a walk reads a far end without the row; a third element, the weight,
 //!   when the row holds one, so a weighted graph reads it there too
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::{Cardinality, RelationDef};
 
-use super::changes::Event;
+use super::changes::{Ends, Event};
 use super::entities;
 use super::keys;
 use super::mirror::EdgeDelta;
@@ -29,7 +29,7 @@ pub struct Stored {
     pub target: String,
     #[serde(default)]
     pub info: Option<Value>,
-    /// The edge's weight when it isn't 1, which only a kind declared `weighted` holds
+    /// The edge's weight when it isn't 1: given to it in a kind declared `weighted`, read only while its kind is one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub weight: Option<f64>,
     pub seq: u64,
@@ -227,8 +227,9 @@ pub fn definition<'s>(t: &'s impl Read, kind: &str) -> Result<&'s RelationDef> {
 
 /// Whether linking `source` to `target` would close a cycle through `kinds`: `target` already reaches `source` over
 /// edges of any of them. Every edge counts, a trashed entity's included, since restoring it would otherwise close the
-/// cycle. A link checks its own kind; the `wouldCreateCycle` read asks the same of the kinds it names
-pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String]) -> Result<bool> {
+/// cycle; all but `moving`, the relation being moved to these ends, whose edge as it is goes with the move. A link
+/// checks its own kind; the `wouldCreateCycle` read asks the same of the kinds it names
+pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String], moving: Option<&str>) -> Result<bool> {
     let mut seen = std::collections::HashSet::new();
     let mut stack = vec![target.to_owned()];
     while let Some(node) = stack.pop() {
@@ -236,8 +237,8 @@ pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String]) 
             return Ok(true);
         }
         for kind in kinds {
-            for (_, far) in edges(t, &node, true, Some(kind))? {
-                if seen.insert(far.clone()) {
+            for (relation, far) in edges(t, &node, true, Some(kind))? {
+                if moving != Some(relation.as_str()) && seen.insert(far.clone()) {
                     stack.push(far);
                 }
             }
@@ -248,7 +249,7 @@ pub fn would_cycle(t: &impl Read, source: &str, target: &str, kinds: &[String]) 
 
 /// Refuses an edge of `def` from `source` to `target` its kind's rules don't allow, an edge `relation` itself (when
 /// it is being moved) aside
-fn check_rules(
+pub(super) fn check_rules(
     t: &impl Read,
     def: &RelationDef,
     kind: &str,
@@ -280,7 +281,7 @@ fn check_rules(
             format!("{source} already has a {kind} target, and a {kind} source has one; unlink it first"),
         ));
     }
-    if def.acyclic && would_cycle(t, source, target, &[kind.to_owned()])? {
+    if def.acyclic && would_cycle(t, source, target, &[kind.to_owned()], relation)? {
         return Err(Error::new(ErrorCode::Cycle, format!("Cannot create a {kind} relation that would form a cycle")));
     }
     Ok(())
@@ -289,7 +290,7 @@ fn check_rules(
 /// A weight given to an edge of `def`, as the row holds it: refused unless the kind is declared weighted and the weight
 /// is a number from 0 to `MAX_WEIGHT`; 1, every edge's weight unless given another, held as none, and -0 held as 0, so
 /// equal weights are the same bytes
-fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
+pub(super) fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Option<f64>> {
     let Some(weight) = weight else { return Ok(None) };
     if !def.weighted {
         return Err(Error::new(
@@ -306,7 +307,9 @@ fn weight_of(def: &RelationDef, kind: &str, weight: Option<f64>) -> Result<Optio
     Ok((weight != 1.0).then_some(weight.abs()))
 }
 
-fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
+/// Refuses info an edge of `def` can't hold: what the kind's info spec refuses, and info that is no map where the
+/// kind's key is read from its fields
+pub(super) fn check_info(def: &RelationDef, kind: &str, info: Option<&Value>) -> Result<()> {
     match info {
         // A key is read from the info's fields, so info that is no map would hold a null key whatever it was
         Some(info) if !def.key.is_empty() && !matches!(info, Value::Map(_)) => Err(Error::new(
@@ -332,13 +335,13 @@ pub fn key_values(def: &RelationDef, info: Option<&Value>) -> Vec<Value> {
         .collect()
 }
 
-fn same_key(a: &[Value], b: &[Value]) -> bool {
+pub(super) fn same_key(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
 }
 
 /// The edge of `kind` from `source` to `target` holding `key` other than `except`: the one a link to that identity
 /// updates, and the one a move onto it would duplicate
-fn with_identity(
+pub(super) fn with_identity(
     t: &impl Read,
     def: &RelationDef,
     source: &str,
@@ -402,6 +405,7 @@ pub fn link(
                 kind: kind.to_owned(),
                 source: source.to_owned(),
                 target: target.to_owned(),
+                moved_from: None,
             });
         }
         return Ok((relation, false));
@@ -445,6 +449,14 @@ pub fn restore(t: &mut Txn<'_, '_>, relation: &str, stored: &Stored) -> Result<(
         target: stored.target.clone(),
     });
     Ok(())
+}
+
+/// Moves a relation to another kind, keeping its id, its ends, its info, its weight and its place: an admin
+/// rename's move, of an edge the caller has held to the kind's rules (`check_info`, `weight_of`, `check_rules`). A
+/// weight goes with its edge to a kind that reads none, as one stays in a row whose kind stops being weighted
+pub fn rekind(t: &mut Txn<'_, '_>, relation: &str, stored: Stored, kind: &str) -> Result<()> {
+    remove(t, relation)?;
+    restore(t, relation, &Stored { kind: kind.to_owned(), ..stored })
 }
 
 /// Removes the relation; an id no relation has is ignored
@@ -546,11 +558,13 @@ pub fn update(
         super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
     }
     put(t, relation, &next)?;
+    let moved_from = moved.then_some(Ends { source: before.source, target: before.target });
     t.event(Event::RelationChanged {
         relation: relation.to_owned(),
         kind: next.kind,
         source: next.source,
         target: next.target,
+        moved_from,
     });
     Ok(())
 }

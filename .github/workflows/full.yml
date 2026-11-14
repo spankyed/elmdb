@@ -1,0 +1,196 @@
+name: full tier
+
+# What a pull request ready for review must pass beyond ci.yml's fast tier: the binding's suites on every other target
+# it ships for (design.md, Packages), glibc and musl, the instruction counts and the diagnostics overhead. It runs for
+# a pull request that is ready: when it is opened or reopened ready, when a draft is marked ready, and on every push
+# to it from then on. Its concurrency group is its own, so marking ready starts these jobs and neither cancels nor
+# repeats ci.yml's run of the same commit. A draft's push starts a run that skips them all. A dispatch runs the
+# targets on a branch, and neither Valgrind reading. `full-pass` is the check a merge waits on.
+#
+# Every job has a time limit, as ci.yml's do and by the same rule; the Intel Mac's suites take over twice the other
+# targets', and its limit is as much longer.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+concurrency:
+  group: full-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Skipped for a draft, and every job below with it. Otherwise, whether the change holds anything but documentation,
+  # which no check reads
+  scope:
+    name: full tier's scope
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      # A pull request's merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: diff
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && ! git diff --name-only HEAD^1 HEAD | grep -qvE '^docs/|\.md$'; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
+  # the runner's load, so the step summary shows what the change costs. Reported, never a failure
+  instructions:
+    name: instruction counts (Linux)
+    needs: scope
+    if: needs.scope.outputs.code == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      # The merge commit and its first parent, the base it merges into
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@0.20.0
+      - run: python3 scripts/instruction-counts.py HEAD^1
+        env:
+          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
+      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: instruction-counts-gungraun
+          path: ${{ runner.temp }}/gungraun
+          if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
+
+  # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
+  # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
+  diagnostics:
+    name: diagnostics overhead (Linux)
+    needs: scope
+    if: needs.scope.outputs.code == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: gungraun-runner@0.20.0
+      - run: python3 -B scripts/test-callgrind.py
+      - run: python3 scripts/diagnostics-overhead.py
+        env:
+          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
+      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: diagnostics-overhead-gungraun
+          path: ${{ runner.temp }}/gungraun
+          if-no-files-found: ignore
+          # Read soon after the failure it explains, so not kept the repository's 90 days
+          retention-days: 7
+
+  platforms:
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    uses: ./.github/workflows/platforms.yml
+    with:
+      targets: >-
+        [{"runner":"macos-15-intel","target":"x86_64-apple-darwin","timeout":60},
+        {"runner":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","timeout":20},
+        {"runner":"ubuntu-24.04-arm","target":"aarch64-unknown-linux-gnu","timeout":20}]
+
+  # GitHub runs no JavaScript action inside an Alpine container on arm64, so the musl jobs check out on the runner
+  # and run every suite in a node:23-alpine container of the runner's own architecture. The toolchain, the registry and
+  # the build are cached on the runner and mounted in, and nextest is its released musl binary, checked against the
+  # release's own checksum
+  musl:
+    name: ${{ matrix.target }}
+    needs: scope
+    if: needs.scope.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            nextest-sha256: bf92cb81450872d960ffa13857a83084d557ec0cdc141663d263bb23ef756f97
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            nextest-sha256: 94676506ceaed01746d78cfe9ed124ee841b2932fd18d9d10f438a347bd9ba5e
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/musl-cache
+            target
+          key: musl-${{ matrix.target }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: musl-${{ matrix.target }}-
+      - name: every suite, in Alpine
+        env:
+          TARGET: ${{ matrix.target }}
+          NEXTEST_SHA256: ${{ matrix.nextest-sha256 }}
+        run: |
+          cache=$RUNNER_TEMP/musl-cache
+          mkdir -p "$cache/rustup" "$cache/registry" "$cache/git"
+          docker run --rm -v "$PWD:/w" -w /w \
+            -v "$cache/rustup:/root/.rustup" \
+            -v "$cache/registry:/root/.cargo/registry" \
+            -v "$cache/git:/root/.cargo/git" \
+            -e TARGET -e NEXTEST_SHA256 -e CARGO_INCREMENTAL=0 -e CARGO_TERM_COLOR \
+            node:23-alpine sh -euc '
+            apk add --no-cache bash curl git build-base
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            # The runner builds for its own architecture, where the native gcc links musl binaries
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
+            git config --global --add safe.directory /w
+            rustup show active-toolchain
+            archive=cargo-nextest-0.9.148-$TARGET.tar.gz
+            curl --proto "=https" --tlsv1.2 -sSfLO "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/$archive"
+            echo "$NEXTEST_SHA256  $archive" | sha256sum -c -
+            tar -xzf "$archive" -C "$HOME/.cargo/bin" && rm "$archive"
+            cargo nextest run --workspace --profile ci
+            npm ci
+            npm run build
+            npm test
+          '
+          # The container writes as root; the cache is saved by the runner's user
+          sudo chown -R "$(id -u):$(id -g)" "$cache" target
+
+  # The check a merge waits on: every job above passed or was skipped (a documentation-only change). Only a run for a
+  # pull request ready for review reports under that name. A draft's run, where every job above is skipped, would
+  # otherwise leave a passing `full-pass` on the head, and that one would stand from the moment the pull request is
+  # marked ready until the run that click starts reports its own, which is after its last job; a dispatch runs no
+  # Valgrind reading
+  full-pass:
+    name: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'full-pass' || 'full tier (not a merge gate)' }}
+    if: always()
+    needs: [scope, instructions, diagnostics, platforms, musl]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          case " $RESULTS " in *" failure "*|*" cancelled "*) exit 1 ;; esac

@@ -92,17 +92,52 @@ fn stats_count_entities_fields_relations_and_index_entries() {
         vec![
             json!({ "op": "create", "type": "Task", "id": "Task-1", "fields": { "a": 1 } }),
             json!({ "op": "create", "type": "Task", "id": "Task-2", "fields": { "a": 2 } }),
+            json!({ "op": "create", "type": "Task", "id": "Task-3", "fields": { "a": 1 } }),
             json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
             json!({ "op": "trash", "id": "Task-2" }),
         ],
     )
     .unwrap();
     let stats = db.stats().unwrap();
-    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 1));
-    assert_eq!(stats.types["Task"].fields["a"].entities, 2);
+    assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (2, 1));
+    assert_eq!(stats.types["Task"].fields["a"].entities, 3);
     assert_eq!(stats.relations["refs"], 1);
-    assert_eq!(stats.indexes["Task.a"], 2);
+    // An index's entries are its entities under each value: two under one, and the one in the trash
+    assert_eq!(stats.indexes["Task.a"], 3);
     assert!(stats.file_bytes > 0 && stats.map_bytes >= stats.file_bytes);
+}
+
+#[test]
+fn stats_sum_a_value_index_s_bytes_in_every_family_it_is_filed_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let bytes = |db: &Database| db.stats().unwrap().index_bytes.get("Task.a").copied().unwrap_or(0);
+    let mut made = 0;
+    // A unit of `count` tasks holding `a`, and how many bytes the index grew by
+    let mut grown_by = |a: serde_json::Value, count: usize| {
+        let before = bytes(&db);
+        let ops = (0..count)
+            .map(|_| {
+                made += 1;
+                json!({ "op": "create", "type": "Task", "id": format!("Task-{made}"), "fields": { "a": a } })
+            })
+            .collect();
+        write(&db, ops).unwrap();
+        bytes(&db) - before
+    };
+    // A value's own key, with the type's and the index's names in it
+    assert!(grown_by(json!("a value"), 1) > "Task".len() as u64 + "a value".len() as u64);
+    // An entity the index doesn't order: a key of that kind. And one without a value, which is filed twice, among
+    // the values, where an equality for null finds it, and among the entities without one
+    let unordered = grown_by(json!({ "k": 1 }), 1);
+    assert!(unordered > "Task".len() as u64);
+    assert!(grown_by(serde_json::Value::Null, 1) >= 2 * unordered - 2);
+    // Past 256 places a key's places are in blocks, a byte a place at the least, in a family of their own for each
+    // kind: one for a value's and one for the unordered, and both a value's and the family of those without one for
+    // a null
+    assert!(grown_by(json!("another"), 600) >= 600);
+    assert!(grown_by(json!({ "k": 1 }), 600) >= 600);
+    assert!(grown_by(serde_json::Value::Null, 600) >= 1200);
 }
 
 #[test]
@@ -116,6 +151,7 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
         Load::Entity { id: "Ghost-1".into(), fields: fields(&[("anything", 1.into())]), trashed: false },
         Load::Entity { id: "Task-1".into(), fields: fields(&[("shortCode", "TSK-1".into())]), trashed: false },
         Load::Entity { id: "Task-2".into(), fields: fields(&[("shortCode", "TSK-1".into())]), trashed: true },
+        Load::Entity { id: "Task-3".into(), fields: fields(&[("shortCode", "TSK-10".into())]), trashed: false },
         Load::Relation {
             id: "Relation-x".into(),
             kind: "gone".into(),
@@ -128,8 +164,9 @@ fn a_bulk_load_takes_rows_the_checks_would_refuse() {
     ])
     .unwrap();
     assert_eq!(row(&db, "Ghost-1").unwrap()["anything"], 1);
+    // The sequence's next code is one a task holds already, which the code after it is taken in place of
     let next = write(&db, vec![json!({ "op": "create", "type": "Task" })]).unwrap();
-    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-10"), "{next:?}");
+    assert!(matches!(&next[0], crate::OpResult::Entity { short_code: Some(c), .. } if c == "TSK-11"), "{next:?}");
     let report = db.check().unwrap();
     assert!(report.differences.is_empty(), "{report:?}");
     let said: Vec<&str> = report.violations.iter().map(|v| v.message.as_str()).collect();
@@ -165,6 +202,89 @@ fn an_unset_load_removes_any_field_and_keeps_derived_data_with_it() {
     assert_eq!((stats.types["Task"].live, stats.types["Task"].trashed), (1, 0), "out of the trash");
     assert!(row(&db, "Task-none").is_none(), "an unset makes no entity");
     assert!(db.check().unwrap().differences.is_empty());
+}
+
+#[test]
+fn a_load_holding_what_the_value_spec_doesnt_is_refused_and_none_of_it_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let entity = |value: rmpv::Value| Load::Entity {
+        id: "Task-bad".into(),
+        fields: BTreeMap::from([("a".to_owned(), value)]),
+        trashed: false,
+    };
+    let relation = |info: Option<rmpv::Value>, weight: Option<f64>| Load::Relation {
+        id: "Relation-bad".into(),
+        kind: "weighs".into(),
+        source: "Task-1".into(),
+        target: "Task-kept".into(),
+        info,
+        weight,
+    };
+    let embedding = |vector: Vec<f32>| Load::Embedding {
+        id: "Task-1".into(),
+        index: "none".into(),
+        chunk: 0,
+        model: "m".into(),
+        hash: "h".into(),
+        vector,
+    };
+    let nested = (0..300).fold(rmpv::Value::Nil, |inner, _| rmpv::Value::Array(vec![inner]));
+    let outside = vec![
+        ("a number that isn't finite", entity(rmpv::Value::F64(f64::NAN))),
+        ("an infinite number in a list", entity(rmpv::Value::Array(vec![rmpv::Value::F32(f32::INFINITY)]))),
+        ("an extension other than the timestamp", entity(rmpv::Value::Ext(5, vec![0]))),
+        ("a map key that is no string", entity(rmpv::Value::Map(vec![(1.into(), 1.into())]))),
+        ("a value nested past the limit", entity(nested)),
+        ("info holding a number that isn't finite", relation(Some(rmpv::Value::F64(f64::NAN)), None)),
+        ("a weight that is no number", relation(None, Some(f64::NAN))),
+        ("an infinite weight", relation(None, Some(f64::INFINITY))),
+        ("an infinite weight below zero", relation(None, Some(f64::NEG_INFINITY))),
+        ("a vector holding a number that isn't finite", embedding(vec![0.5, f32::NAN])),
+    ];
+    for (what, load) in outside {
+        // One unit: the load before the refused one goes with it
+        let kept = Load::Entity {
+            id: "Task-kept".into(),
+            fields: BTreeMap::from([("a".to_owned(), 1.into())]),
+            trashed: false,
+        };
+        let error = db.bulk_load(&[kept, load]).expect_err(what);
+        assert_eq!(error.code, crate::ErrorCode::ValueInvalid, "{what}: {error}");
+        assert!(row(&db, "Task-kept").is_none(), "{what}: the load before it was kept");
+    }
+    assert!(edges(&db).is_empty());
+    assert!(db.check().unwrap().is_clean());
+
+    // What the checks would refuse and the spec holds is loaded still: a weight below zero, which `check()` reports
+    db.bulk_load(&[relation(None, Some(-1.0))]).unwrap();
+    assert_eq!(edges(&db), ["Task-1|weighs|Task-kept"]);
+}
+
+#[test]
+fn loads_as_bytes_are_held_to_the_value_spec_before_they_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let bytes = |loads: serde_json::Value| rmp_serde::to_vec_named(&loads).unwrap();
+    db.bulk_load_bytes(&bytes(json!([{ "load": "entity", "id": "Task-1", "fields": { "a": 1 } }]))).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap()["a"], 1);
+
+    // A relation whose weight is NaN, as msgpack writes one: the float64 marker and a NaN's bits
+    let mut nan = rmp_serde::to_vec_named(&json!([{
+        "load": "relation", "id": "Relation-x", "kind": "weighs", "source": "Task-1", "target": "Task-1", "weight": 1.5
+    }]))
+    .unwrap();
+    let at = nan.windows(9).position(|w| w[0] == 0xcb && w[1..] == 1.5f64.to_be_bytes()).expect("the weight's bytes");
+    nan[at + 1..at + 9].copy_from_slice(&f64::NAN.to_be_bytes());
+    let error = db.bulk_load_bytes(&nan).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::ValueInvalid, "{error}");
+    assert!(error.message.starts_with("The loads aren't valid"), "{error}");
+
+    let error = db.bulk_load_bytes(&bytes(json!([{ "load": "no such load" }]))).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::BatchInvalid, "{error}");
+    assert!(error.message.starts_with("The loads don't decode"), "{error}");
+    assert!(edges(&db).is_empty());
 }
 
 /// The live entities of `types`, in the order they were made

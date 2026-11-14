@@ -178,8 +178,9 @@ violations identify the element path. Strings inside `object` and `any` remain o
   Moving an edge, or changing its key, onto an identity another edge holds is refused (`DUPLICATE_EDGE`).
 - `weighted: true`: each edge of this kind has a weight, a number from 0 to 2^960 (so no sum of weights reaches
   infinity), 1 when a link gives none. A weight that isn't one, or a weight on a kind not declared weighted, is refused
-  (`VALUE_INVALID`). Linking a pair again with another weight replaces the edge's; a keyed kind's edges of one pair
-  add their weights in a rank. `rank` and `communities` read it (`engine.md`, Reads: plans).
+  (`VALUE_INVALID`); a weight an edge holds already stays with it when `renameRelation` moves it to a kind not
+  declared weighted, where nothing reads it. Linking a pair again with another weight replaces the edge's; a keyed
+  kind's edges of one pair add their weights in a rank. `rank` and `communities` read it (`engine.md`, Reads: plans).
 - `endpoints`: the type pairs an edge may join. Absent, any.
 - `info`: the field type of the edge's info. Absent, `any`.
 
@@ -188,23 +189,45 @@ An entity's edges keep the order they were linked in.
 ## Indexes
 
 Indexes are declared on the type, named, and separate from the fields, since one index can cover several fields and one
-field several indexes. A plan never names a value index: the engine reads a built one for a `where` or `withRole` it can. A
-search step names its text, trigram or vector index only when the type has more than one.
+field several indexes. A plan never names a value index: the engine reads a built one for a `where`, a `withRole`, a
+`range` or an `orderBy` it can (`engine.md`, Reads: plans). A search step names its text, trigram or vector index only
+when the type has more than one.
 
-**Value**: equality lookups, and what `unique` enforces.
+**Value**: equality lookups, ranges and order, and what `unique` enforces.
 
 ```json
 "senderByTime": { "kind": "value", "fields": ["sender", "timestamp"], "unique": false }
 ```
 
-- `fields`: one, or several for a compound index, which enforces `unique` over the fields together; a plan's lookups
-  read single-field indexes only (`engine.md`, Reads: plans). A field of any type but `bytes`, `object` or a list of those or of lists: of
-  an `any` field the index holds the scalar values, and a lookup for another walks the type's rows.
+- `fields`: one, or several for a compound index, which enforces `unique` over the fields together. The order of
+  several is what a plan reads: equalities on every field but the last, then the last field's order or a range of
+  it, so `["status", "n"]` reads the open tasks in `n`'s order and `["n", "status"]` does not (`engine.md`, Reads:
+  plans). An equality alone reads an index on its one field. A field of any type but `bytes`, `object` or a list of
+  those or of lists: of an `any` field the index holds the scalar values, and a lookup for another walks the type's
+  rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`), from the moment it is
   declared: a value the index can't hold (below), or one of rows its build hasn't reached yet, is found by walking the
   type's rows.
 - A `list` field is indexed per element. A string longer than 256 bytes (UTF-8) isn't indexed: the type's rows are walked
   for it instead.
+- In an index on several fields that isn't `unique`, a list in a field before the last is filed per element too: the
+  entity has an entry under each element, and with lists in two of those fields under each pair, so `["tags", "updatedAt"]` reads
+  the entities tagged `x` in `updatedAt`'s order. An entity is refiled under each of those when its last field
+  changes, so one holding a hundred tags costs a hundred entries each time its `updatedAt` moves, and lists in two
+  fields their product. What no equality the index answers can ask for names nothing: a missing value, a null, an
+  empty list, and a value the index can't hold, in itself or in a list. A list in the last field has no place in
+  its order, and a list in a `unique` index is no one tuple of values to hold an entity to: the index doesn't order
+  the entity under the tuples it would be read under (below), and orders every other as before.
+- A `unique` index on several fields holds an entity to its tuple of values once each field has one, a null among
+  them: two entities with the same values and a null in the same field are refused as any two are.
+- An index on one field accounts for every entity of its type: besides its entries, it holds which entities are without
+  a value (the field missing or null) and which hold a value it doesn't order (a list, a map, bytes, a timestamp, a
+  string past 256 bytes). That is what lets a plan read the type in the field's order, or a range of it, from the
+  index alone and leave no entity out. Numbers and booleans are read in order; strings are held, and sorted by the
+  schema's collation when a plan orders by them. A number field that every entity holds costs nothing more for it; an
+  optional one costs a key for each entity without it. An index on several fields accounts the same way for the
+  entities an equality on each field but the last can name: those whose fields before the last each hold a value,
+  filed without a value under what those fields hold when the last is missing or null.
 - Every type has a unique value index on `shortCode` and one on `role`, without declaring them.
 
 **Text**: ranked full-text search (`search.md`).
@@ -278,14 +301,14 @@ stored one.
 
 | Change | What happens |
 |---|---|
-| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built |
+| A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built, and a text index, which has no rows to walk in its place, refuses its reads until then (`INDEX_BUILDING`) |
 | A required field added to a type with rows, or a type or relation kind declared again over the data its removal kept | enforced, as a tightened rule is: `check()` reports the rows that break it |
-| An index's definition changed | rebuilt in the background under its name |
+| An index's definition changed | rebuilt in the background under its name; a text index is searched again once it is built, and refused (`INDEX_BUILDING`) until then |
 | The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
 | An index removed | dropped |
 | A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
-| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, `stats()` counts it, and `purge` deletes it |
+| A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, every write to an entity of a removed type among them (`UNKNOWN_TYPE`), a trash, a destroy and a link at either end included, but for one: a `destroy` of a declared entity removes its edges, one from a removed type's entity among them, since an edge can't outlast an end and refusing would leave the declared entity undeletable until the type is declared again or purged. An `unlink`, whose ends both stay, is refused. `stats()` counts the data that stays, and `purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
 | A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic` added, a field dropped from a relation's `key`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
 | A short code prefix changed or removed, a type declared again with another prefix than its stored codes hold or with none, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
