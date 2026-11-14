@@ -325,16 +325,15 @@ impl ValueIndex {
     ///
     /// An index on one field has an entry for the field's value, or for each distinct element of its list; an
     /// index that accounts for its entities also files the entity among those without a value when the field is
-    /// missing or null, among those holding a long string when it holds one (`values::long`), with or without an
-    /// entry, and among those it doesn't order when it holds a list or any other value no index holds.
+    /// missing or null, among those holding a long string when it holds one (`values::long`), and among those it
+    /// doesn't order when it holds a list or any other value no index holds.
     ///
     /// An index on several fields files the entity under each tuple its fields before the last name
     /// (`leading_of`), which is each tuple of values that equalities on those fields can ask for: an entry there
     /// when the last field holds a boolean, a number or a string the index holds; among those without a value
     /// when the last is missing or null; among those holding a long string when it is one; among those it doesn't
-    /// order when the last holds anything else. Under a tuple it files the entity in one of those places, and a long
-    /// string that has an entry in both of its two, so what one entity holds decides only how its own tuples are
-    /// read.
+    /// order when the last holds anything else. Under a tuple it files the entity in one of those places, so what
+    /// one entity holds decides only how its own tuples are read.
     ///
     /// A unique index on several fields holds an entity to one tuple of values (`unique_keys`), and that tuple is
     /// its one entry, a null among its parts: so a list before the last, which is no one tuple, leaves the entity
@@ -351,7 +350,7 @@ impl ValueIndex {
             filed.entries = values::index_parts(last.as_ref()).into_iter().map(|part| vec![part]).collect();
             match place(last) {
                 Place::Without => filed.others.push(Other::Without(Vec::new())),
-                _ if long => filed.others.push(Other::Long(Vec::new())),
+                Place::Unordered if long => filed.others.push(Other::Long(Vec::new())),
                 Place::Unordered => filed.others.push(Other::Unordered(Vec::new())),
                 Place::Entry(_) => {}
             }
@@ -369,9 +368,6 @@ impl ValueIndex {
                     Place::Unordered => filed.others.push(Other::Unordered(tuple)),
                     // A unique index's one entry is its tuple, filed above
                     Place::Entry(part) => {
-                        if long {
-                            filed.others.push(Other::Long(tuple.clone()));
-                        }
                         if !self.unique {
                             tuple.push(part);
                             filed.entries.push(tuple);
@@ -427,8 +423,9 @@ pub enum Other {
     /// a list or a value no index holds but a long string, or it is a unique index and a field before the last
     /// holds a list
     Unordered(Vec<Part>),
-    /// Among those whose last field holds a long string (`values::long`), under the parts its fields before the
-    /// last hold: a string is ordered among strings, so an order of the field's numbers reads past it
+    /// Among those whose last field holds a long string (`values::long`), which the index has no entry for, under
+    /// the parts its fields before the last hold: a string is ordered among strings, so an order of the field's
+    /// numbers reads past it
     Long(Vec<Part>),
 }
 

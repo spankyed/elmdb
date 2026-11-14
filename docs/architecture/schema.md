@@ -221,8 +221,8 @@ when the type has more than one.
 - A `unique` index on several fields holds an entity to its tuple of values once each field has one, a null among
   them: two entities with the same values and a null in the same field are refused as any two are.
 - An index on one field accounts for every entity of its type: besides its entries, it holds which entities are without
-  a value (the field missing or null), which hold a long string (one past 256 bytes, or one its zero bytes make as
-  long in a key) and which hold a value it doesn't order (a list, a map, bytes, a timestamp). That is what lets a
+  a value (the field missing or null), which hold a long string (one past 256 bytes) and which hold a value it
+  doesn't order (a list, a map, bytes, a timestamp). That is what lets a
   plan read the type in the field's order, or a range of it, from the index alone and leave no entity out. A long
   string is a string: it leaves a range and an order of the field's numbers to the index. Numbers and booleans are read in order; strings are held, and sorted by the
   schema's collation when a plan orders by them. A number field that every entity holds costs nothing more for it; an

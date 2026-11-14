@@ -69,16 +69,16 @@ pub enum Prefix {
     /// `d/xup type index values start` → a block of those places
     IndexUnorderedPlaces,
     /// `d/xl type index values` → the places of the type's entities whose last field in a value index is a string
-    /// longer than the index files strings by (`engine::values::long`), under what its fields before the last
-    /// hold: a string, as the index's entries for strings are, and none it has an entry of that length for. Laid
-    /// out as `d/x` is
+    /// longer than the index has an entry for (`engine::values::long`), under what its fields before the last hold.
+    /// Laid out as `d/x` is
     IndexLong,
     /// `d/xlp type index values start` → a block of those places
     IndexLongPlaces,
     /// `d/xo type index build values sortkey cut string` → nothing: that a value index has an entry for the string
     /// under these values, filed where the schema's collation orders it, by its sort key as far as the key has room
     /// for it and whether that is all of it (`engine/order.rs`). `d/xo type index build values sortkey cut place`
-    /// → nothing: that the entity at the place holds a long string there, which has no key of the first kind
+    /// → nothing: that the entity at the place holds a string there that has no key of the first kind. What is
+    /// filed under a build is its stamp's to lay out
     IndexOrder,
     /// `d/xob type index` → the stamp of the collator an index's `d/xo` keys were made by, the build they are
     /// under, and whether that build is whole

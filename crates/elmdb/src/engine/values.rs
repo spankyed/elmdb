@@ -173,12 +173,10 @@ pub fn holds(stored: &Value, probe: &Value) -> bool {
     strict_equal(stored, probe) || matches!(stored, Value::Array(items) if items.iter().any(|v| strict_equal(v, probe)))
 }
 
-/// Whether a string is longer than a value index files strings by: its part of a key is more than a string of
-/// `MAX_INDEXED_STRING` bytes with no zero byte takes, a zero byte taking two (`format::key`). A string of more
-/// bytes has no entry, and one of fewer that its zero bytes make long has one. An index says which entities hold
-/// either (`entities::Other::Long`)
+/// Whether a string is longer than a value index has an entry for: more than `MAX_INDEXED_STRING` bytes. An index
+/// says which entities hold one (`entities::Other::Long`)
 pub fn long(string: &str) -> bool {
-    string.len() + string.bytes().filter(|byte| *byte == 0).count() > MAX_INDEXED_STRING
+    string.len() > MAX_INDEXED_STRING
 }
 
 /// The key part an index files a scalar under, or `None` for a value no index holds (a map, a list, bytes, a

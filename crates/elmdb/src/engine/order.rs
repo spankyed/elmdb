@@ -64,8 +64,21 @@ pub fn sort_key(collator: &CollatorBorrowed<'static>, string: &str, room: usize)
 /// be patched under its version, the keys the running collator gives some strings
 pub type Stamp = [u8; 32];
 
-/// How a sort key is made: the collator's options and the sink that cuts it. Raised with any change to either
-const MAKING: u32 = 1;
+/// The layout of an order's keys and how a sort key is made: the collator's options and the sink that cuts it,
+/// which strings have a key of their own (`placed`), the room a sort key has (`keys::order_room`) and what a key
+/// holds. Raised with any change to one of them: keys of another layout are then another stamp's, and built again
+const LAYOUT: u32 = 1;
+
+/// The most bytes a string takes in a key that holds it after its sort key: its tag, as many bytes as the longest
+/// string a value index has an entry for, and its end
+pub const PLACED_PART: usize = crate::engine::values::MAX_INDEXED_STRING + 2;
+
+/// Whether a string has a key of its own in an order, holding it: one whose part of a key is no more than
+/// `PLACED_PART`, a zero byte taking two (`format::key`). Any other is filed by its entity's place: a string a value
+/// index has no entry for (`values::long`), and one of fewer bytes that its zero bytes make as long
+pub fn placed(string: &str) -> bool {
+    string.len() + string.bytes().filter(|byte| *byte == 0).count() + 2 <= PLACED_PART
+}
 
 /// The crates a collator's code and data are, each at the version this elmdb is built with: every ICU crate the
 /// lockfile holds, which a test holds this list to
@@ -101,7 +114,7 @@ pub fn stamp(collation: &str) -> crate::error::Result<Stamp> {
         hash.update(bytes);
     };
     part(collation.as_bytes());
-    part(&MAKING.to_be_bytes());
+    part(&LAYOUT.to_be_bytes());
     for (name, version) in CRATES {
         part(name.as_bytes());
         part(version.as_bytes());
@@ -222,12 +235,12 @@ mod tests {
             let sort_key = SortKey { bytes: vec![0x2b; filled.min(room)], cut };
             let of_place = keys::order_place(&entity_type, &index, build, &leading, &sort_key, place);
             prop_assert!(of_place.len() <= most);
-            if !crate::engine::values::long(&string) {
+            if placed(&string) {
                 let of_string = keys::order_string(&entity_type, &index, build, &leading, &sort_key, &string);
                 prop_assert!(of_string.len() <= most, "{} bytes", of_string.len());
             }
-            // The longest string that isn't long, after a sort key that fills its room, is a key of exactly the
-            // most bytes: the room is all there is, and no more
+            // The longest string with a key of its own, after a sort key that fills its room, is a key of exactly
+            // the most bytes: the room is all there is, and no more
             let full = SortKey { bytes: vec![0x2b; room], cut };
             let longest = keys::order_string(&entity_type, &index, build, &leading, &full, &"a".repeat(256));
             prop_assert_eq!(longest.len(), most);
@@ -296,7 +309,7 @@ mod tests {
     #[test]
     fn a_sort_key_s_bytes_are_those_the_stamp_was_made_for() {
         // The root collation's keys for a few strings, as this stamp's collator makes them. A change here is a
-        // change to what is stored under the stamp: `MAKING` or `CRATES` moves with it, or the stored keys are stale
+        // change to what is stored under the stamp: `LAYOUT` or `CRATES` moves with it, or the stored keys are stale
         let root = collator("root").unwrap();
         let key = |string: &str| sort_key(&root, string, usize::MAX).bytes;
         assert_eq!(key("a"), [0x2b, 0x01, 0x05, 0x01, 0x05]);

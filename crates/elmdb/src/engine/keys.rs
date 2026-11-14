@@ -198,12 +198,11 @@ pub fn order_of(entity_type: &str, index: &str) -> Vec<u8> {
 
 /// How many bytes of a sort key a key of an index's order holds under these leading parts: what a key's length
 /// leaves after what the key begins with, the sort key's tag and its end, the part saying whether it was cut, and
-/// the longest string that isn't long (`values::long`) after them. It is one room for every string under the
+/// the longest string that has a key of this kind after them (`order::placed`). It is one room for every string under the
 /// parts, since keys cut at different lengths can't be ordered by their bytes. None when it is under
 /// `LEAST_ORDER_ROOM`: long names or long leading values, under which no order is kept
 pub fn order_room(entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Option<usize> {
-    let string = super::values::MAX_INDEXED_STRING + 2;
-    let taken = order_range(entity_type, index, 0, leading).len() + 2 + 1 + string;
+    let taken = order_range(entity_type, index, 0, leading).len() + 2 + 1 + super::order::PLACED_PART;
     super::values::MAX_KEY_BYTES.checked_sub(taken).filter(|room| *room >= LEAST_ORDER_ROOM)
 }
 
@@ -223,7 +222,8 @@ pub fn order_string(
     key
 }
 
-/// The key that says the entity at `place` holds a long string under these leading parts, where `sort_key` orders it
+/// The key that says the entity at `place` holds a string with no key of its own under these leading parts, where
+/// `sort_key` orders it
 pub fn order_place(
     entity_type: &str,
     index: &str,
