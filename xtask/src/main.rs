@@ -3,6 +3,8 @@
 //! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`.
 //! - `check-generated`: fails when what `generate` would write differs from what is committed.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
+//! - `check-icu-exact`: fails unless every ICU crate the lockfile holds is a dependency of `elmdb` required at exactly
+//!   the locked version, so whoever builds elmdb builds the collator its stored sort keys are stamped with.
 //! - `check-diagnostics-off`: fails when a default build of the workspace has `elmdb` depend on `tracing` itself,
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
@@ -39,6 +41,7 @@ fn main() -> ExitCode {
         Some("compare") => compare::compare(&workspace_root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         Some("check-generated") => check_generated(),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
+        Some("check-icu-exact") => check_icu_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => sweep(&workspace_root()),
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
                 &[
                     ("generated protocol", &check_generated),
                     ("one LMDB", &|| check_one_lmdb(&root)),
+                    ("exact ICU crates", &|| check_icu_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("crate::sync", &|| check_sync(&root)),
@@ -61,7 +65,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
                 .to_owned(),
         ),
     };
@@ -443,6 +447,40 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
             "The dependency tree holds {} LMDB -sys crates, and a binary may link only one LMDB:\n  {}",
             found.len(),
             found.join("\n  ")
+        )),
+    }
+}
+
+/// Every ICU crate the lockfile holds, required by the workspace at exactly its locked version and named among
+/// `elmdb`'s dependencies. A sort key is the collator's output: one stored under the stamp of these versions
+/// (`engine/order.rs`) is read as this collator's, so a build that resolved another version of any of them would read
+/// stale keys with no error. Required exactly, a consumer of the crate resolves these or fails to resolve
+fn check_icu_exact(root: &Path) -> Result<(), String> {
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"));
+    let (lock, workspace, elmdb) = (read("Cargo.lock")?, read("Cargo.toml")?, read("crates/elmdb/Cargo.toml")?);
+    let mut problems = Vec::new();
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        let Some(name) = line.strip_prefix("name = \"").and_then(|rest| rest.strip_suffix('"')) else { continue };
+        if !name.starts_with("icu_") {
+            continue;
+        }
+        let version = lines.next().and_then(|line| line.strip_prefix("version = \"")).unwrap_or_default();
+        let version = version.trim_end_matches('"');
+        let required = workspace.lines().find(|line| line.starts_with(&format!("{name} = ")));
+        if !required.is_some_and(|line| line.contains(&format!("\"={version}\""))) {
+            problems.push(format!("Cargo.toml doesn't require {name} at exactly {version}"));
+        }
+        if !elmdb.lines().any(|line| line.trim() == format!("{name}.workspace = true")) {
+            problems.push(format!("crates/elmdb/Cargo.toml doesn't depend on {name}"));
+        }
+    }
+    match problems.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "An ICU crate the collator is built from isn't required exactly, so a build may resolve another and \
+             read stored sort keys as its own:\n  {}",
+            problems.join("\n  ")
         )),
     }
 }
