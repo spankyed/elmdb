@@ -144,22 +144,42 @@ test('a process that exits with writes asked for and not yet answered ends with 
 test('a durable write of a handle nothing else holds is answered once the handle has been collected', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Note: { fields: {} } } };
-  const batch = new Packr({ useRecords: false, mapsAsObjects: true })
-    .pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-1' }], now: 1000 }).toString('base64');
+  const schema = {
+    $schema: 'https://elmdb.dev/schema/1.json',
+    types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
+  };
   // The write holds the last hold on the database once the handle is collected, and its store until its sync has
-  // been waited for: letting the database go first would close it, and wait for the store the write still held
+  // been waited for: letting the database go first would close it, and wait for the store the write still held.
+  // A rebuild of 20,000 notes runs ahead of the write, so the handle is collected before the write's turn comes: the
+  // child says `collected` only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or
+  // `kept` where this run showed nothing. The handle was collected 6 to 7 ms in and the rebuild ended 245 to 274 ms
+  // in, over three runs (Apple M1 Pro, 2026-11-13, the binding built in release)
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
+    `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
+    'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
+    "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
     `let db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)} });`,
-    'db.rebuild();',
-    `const written = db.write(Buffer.from(${JSON.stringify(batch)}, 'base64'), true);`,
+    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    'let collected = false;',
+    'let rebuilt = false;',
+    'const registry = new FinalizationRegistry(() => { collected = true; });',
+    'registry.register(db, 0);',
+    'db.rebuild().then(() => { rebuilt = true; });',
+    "const written = db.write(batch(['Note-late']), true);",
     'db = undefined;',
-    'global.gc();',
-    "written.then(() => process.stdout.write('answered'));",
+    'const until = Date.now() + 20000;',
+    // Two more turns once the registry has been told, for the binding's own finalizer, which Node defers as well
+    'let turns = 2;',
+    '(function wait() {',
+    '  global.gc();',
+    '  if (!collected || turns-- > 0) return Date.now() < until ? setImmediate(wait) : process.stdout.write("kept");',
+    '  process.stdout.write(rebuilt ? "late" : "collected");',
+    "  written.then(() => process.stdout.write('answered'));",
+    '})();',
   ].join('\n');
-  const said = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 30_000 });
-  assert.equal(said, 'answered');
+  const said = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(said, 'collectedanswered');
 });
 
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {

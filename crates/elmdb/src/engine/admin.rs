@@ -272,7 +272,11 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 /// fields that named it, and the type's sequences. A string field holding an id that isn't a declared `ref` isn't
 /// rewritten. Derived data is rebuilt from what this leaves. `sequence` is the commit's: a reader of what changed in
 /// either type from before it is told to start again, the ids it read having gone and the ones in their place carrying
-/// the stamps those had
+/// the stamps those had. A relation's info declared a `ref` is rewritten as a field is. Refused, with nothing moved,
+/// when `check()` would report of what the rename leaves a rule it didn't report before: an entity the new type's
+/// fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the
+/// new type, a `ref` that doesn't name it or that names a moved entity where it is declared for neither type, and a
+/// rule a load left broken that names a moved entity
 pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
@@ -286,6 +290,26 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         return Ok(());
     }
     let renamed = |id: &str| moved.iter().find(|(old, _)| old == id).map(|(_, new)| new.clone());
+    // The rules rows break as the rename finds them, which it leaves to `check()`
+    let broken_before: std::collections::HashSet<(String, String)> =
+        derive::rule_violations(t)?.into_iter().map(|violation| (violation.subject, violation.message)).collect();
+    // Whether a value type is a `ref` that may name an entity of the type, or a list of them, however deep
+    fn refers(v: &ValueType, from: &str, to: &str) -> bool {
+        match v {
+            ValueType::Ref { to: targets } => targets.iter().any(|x| x == to || x == from),
+            ValueType::List { of } => refers(of, from, to),
+            _ => false,
+        }
+    }
+    let refers = |v: &ValueType| refers(v, from, to);
+    // A `ref`'s value, or a list's, with each id of the type as the rename leaves it
+    fn rewritten(value: &Value, renamed: &dyn Fn(&str) -> Option<String>) -> Value {
+        match value {
+            Value::Array(items) => Value::Array(items.iter().map(|item| rewritten(item, renamed)).collect()),
+            v => v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone()),
+        }
+    }
+    let rewritten = |value: &Value| rewritten(value, &renamed);
     for (old, new) in &moved {
         if entities::record(t, new)?.is_some() {
             return Err(Error::new(ErrorCode::IdInUse, format!("renameType: {new} exists already")));
@@ -313,10 +337,15 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
     for (id, stored) in all_relations(t)? {
         let source = renamed(&stored.source);
         let target = renamed(&stored.target);
-        if source.is_some() || target.is_some() {
+        // Its info, where the kind declares it a `ref` that may name an entity of the type
+        let declared = t.schema.relations.get(&stored.kind).is_some_and(|def| refers(&def.info.value));
+        let info =
+            stored.info.as_ref().filter(|_| declared).map(rewritten).filter(|next| Some(next) != stored.info.as_ref());
+        if source.is_some() || target.is_some() || info.is_some() {
             let next = relations::Stored {
                 source: source.unwrap_or(stored.source.clone()),
                 target: target.unwrap_or(stored.target.clone()),
+                info: info.or(stored.info.clone()),
                 ..stored
             };
             let bytes = rmp_serde::to_vec_named(&next).expect("a relation row serializes");
@@ -338,11 +367,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         .types
         .iter()
         .flat_map(|(ty, def)| {
-            def.fields.iter().filter_map(move |(name, f)| {
-                let names = |v: &ValueType| matches!(v, ValueType::Ref { to: targets } if targets.iter().any(|x| x == to || x == from));
-                let holds = names(&f.value) || matches!(&f.value, ValueType::List { of } if names(of));
-                holds.then(|| (ty.clone(), name.clone()))
-            })
+            def.fields.iter().filter(move |(_, f)| refers(&f.value)).map(move |(name, _)| (ty.clone(), name.clone()))
         })
         .collect();
     // The renamed type's own entities are under their new ids now, which the type's listing, derived and rebuilt last,
@@ -355,11 +380,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         }
         for id in ids {
             let Some(value) = entities::get(t, &id, &name)? else { continue };
-            let rewrite = |v: &Value| v.as_str().and_then(renamed).map(Value::from).unwrap_or_else(|| v.clone());
-            let next = match &value {
-                Value::Array(items) => Value::Array(items.iter().map(rewrite).collect()),
-                v => rewrite(v),
-            };
+            let next = rewritten(&value);
             if next != value {
                 t.put(&keys::value(&id, &name), &values::stored(&next))?;
                 // A field of another type's entity, written as any write of it is
@@ -387,6 +408,44 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
                 t.del(&key)?;
             }
         }
+    }
+    // What the rename leaves is held to the schema's rules as `check()` reads them, from primary data, before any
+    // derived data is rebuilt: what it would report now and didn't, in the same words, as the rename began. Only the
+    // rename has written since, so a rule newly broken is its doing; and a rule a load left broken is reported in
+    // other words once an entity it names has another id, so that one is held to as well, the rename having no way
+    // to tell it from its own
+    let broken = derive::rule_violations(t)?
+        .into_iter()
+        .find(|violation| !broken_before.contains(&(violation.subject.clone(), violation.message.clone())));
+    if let Some(violation) = broken {
+        let was = |new: &str| moved.iter().find(|(_, id)| id == new).map(|(old, _)| old.as_str());
+        // An entity moved is named with the id it has, and a relation as one, where `check()` names its row's key
+        let relation = derive::key_text(&keys::relation(""));
+        let subject: Vec<String> = violation
+            .subject
+            .split(", ")
+            .map(|id| match (was(id), id.strip_prefix(&relation)) {
+                (Some(old), _) => format!("{id} (now {old})"),
+                (None, Some(relation)) => format!("the relation {relation}"),
+                (None, None) => id.to_owned(),
+            })
+            .collect();
+        // A write changes a row while its type is declared, and a load whatever its type
+        let by_load = match t.schema.types.contains_key(from) {
+            true => "",
+            false => ", a row of type {from} by a bulkLoad of it under its id, the schema not declaring the type",
+        }
+        .replace("{from}", from);
+        return Err(Error::new(
+            ErrorCode::SchemaChangeRefused,
+            format!(
+                "renameType({from:?} to {to:?}): renamed, {} {}, which the schema refuses, and nothing was moved. \
+                 Change what is named so that the rule holds{by_load}, or change the declaration the rule is of, then \
+                 rename again",
+                subject.join(", "),
+                violation.message
+            ),
+        ));
     }
     super::changed::replaced(t.txn, t.db, t.schema, Some(&[from, to]), sequence)?;
     derive::rebuild(t, None)

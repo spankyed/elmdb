@@ -406,11 +406,13 @@ its turn among them, and a write that comes to its turn while a unit is open is 
 write among them is applied with no sync of its own and answered once a sync has covered it: the job goes on to the
 durable writes straight behind it and asks for a sync when the next is no durable write, or none is, or 64 are owed
 one, so a run of them waits for one sync between them, and none waits for a rebuild behind it. Its watches are told
-as it commits, before that sync. Forty asked for in one turn took 1 sync and 9.9 ms in the binding's test, where as jobs of their
-own they took 19 to 21 syncs and 91 to 118 ms over five rounds (Apple M1 Pro, 2026-11-13, load 7.5 to 10, the binding
-built in release). A job that catches up with the asking syncs more than once; `offthread.test.mjs` holds it to four. A database's
-check and backup read, and each is a job of the pool of its own; every `…Sync` form runs on the calling thread. A
-process that exits by `process.exit()` runs the pool to its end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that
+as it commits, before that sync. A job that catches up with the asking syncs more than once; `offthread.test.mjs`
+asks for forty behind a rebuild, where all of them wait when the job comes to the first, and holds them to one sync.
+Ten awaited in turn took 10 syncs and 42 to 47 ms over three runs of that test, which prints both counts (Apple M1
+Pro, 2026-11-13, the binding built in release). A database's check and backup read, and each is a job of the pool of
+its own; every `…Sync` form runs on the calling thread. A process that exits by `process.exit()` runs the pool to its
+end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a
+handle that
 has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
 promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it,
 so the event loop is held by a close made during one. An operation still queued when the close takes the database
@@ -633,7 +635,7 @@ unit is open.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
-- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves.
+- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` rewrites the ids its entities are named by in relations' ends, in `ref` fields and in a relation's info declared a `ref`. It is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when `check()` would report of what it leaves a rule it didn't report before: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` that doesn't name it, or that names a moved entity where it is declared for neither type. A rule a load left broken is left to `check()` when it names no moved entity; one that does is reported in other words after the rename, and is held to as the rename's own.
   `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
   (`FIELD_TYPE`, `REQUIRED_FIELD`), no entity joined to itself (`SELF_LINK`), the types it joins (`ENDPOINT`), how
   many far ends an end may have (`CARDINALITY`) and, in a kind declared acyclic, no cycle (`CYCLE`), each against
