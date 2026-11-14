@@ -2653,6 +2653,7 @@ impl<R: Read> Query<'_, R> {
         name: &str,
     ) -> Result<Option<Ordered<'q>>> {
         let Some((index, leading)) = self.order_index(entity_type, equals, name)? else { return Ok(None) };
+        let mut order = None;
         let (from, to) = match &limits {
             Some(limits) => limits.keys(entity_type, &index, &leading),
             None => {
@@ -2662,15 +2663,23 @@ impl<R: Read> Query<'_, R> {
                     held = true;
                     false
                 })?;
+                // An index that holds a string under these values is read where its order is: one this elmdb
+                // filed and holds whole, under values that leave its keys room. One that holds none reads no
+                // marker, an order of numbers being no collator's
                 if held || self.r.contains(&keys::index_others(Prefix::IndexLong, entity_type, &index, &leading))? {
-                    return Ok(None);
+                    let room = keys::order_room(entity_type, &index, &leading);
+                    match super::order::readable(self.r, entity_type, &index)?.filter(|_| room.is_some()) {
+                        Some(build) => order = Some(build),
+                        None => return Ok(None),
+                    }
                 }
                 let mut least = leading.clone();
                 least.push(Part::Bool(false));
                 (keys::index_range(entity_type, &index, &least), strings)
             }
         };
-        Ok(Some(Ordered { entity_type, index, leading, from, to, without: limits.is_none() }))
+        let (without, name) = (limits.is_none(), name.to_owned());
+        Ok(Some(Ordered { entity_type, index, leading, from, to, without, strings: order, name }))
     }
 
     /// Where an ordered read begins for a page after `cursor`, the order being of the set the first `under` steps
@@ -2685,6 +2694,12 @@ impl<R: Read> Query<'_, R> {
             return Ok(None);
         }
         let value = get_value(self.r, cursor, name)?.filter(|value| !value.is_nil());
+        // A string of any length is in the strings' order, one the index has no entry for too
+        if let Some(Value::String(string)) = &value
+            && let Some(string) = string.as_str()
+        {
+            return Ok(Some(Begin::PastString(string.to_owned(), seq)));
+        }
         Ok(Some(match value.as_ref().and_then(values::index_part) {
             Some(part) => {
                 let mut parts = ordered.leading.clone();
@@ -2707,6 +2722,11 @@ impl<R: Read> Query<'_, R> {
         if !descending {
             let from = match begin {
                 Begin::PastWithout(place) => return self.without_value(ordered, Some(place), each),
+                Begin::PastString(string, place) => {
+                    // The rest of the strings, then the entities without a value
+                    let on = self.strings(ordered, false, Some((&string, place)), each)?;
+                    return Ok(on && self.without_value(ordered, None, each)?);
+                }
                 Begin::PastEntry(own, place) => {
                     // The rest of the cursor's value, then the values above it
                     if !self.places_after(&own, Some(place), each)? {
@@ -2719,26 +2739,183 @@ impl<R: Read> Query<'_, R> {
             if !super::places::visit(self.r, &from, &ordered.to, false, &mut |_, place| each(place))? {
                 return Ok(false);
             }
+            // A string is after every boolean and number
+            if !self.strings(ordered, false, None, each)? {
+                return Ok(false);
+            }
             return self.without_value(ordered, None, each);
         }
-        let before = if let Begin::PastEntry(own, place) = begin {
-            // The rest of the cursor's value, then the values below it
-            if !self.places_after(&own, Some(place), each)? {
-                return Ok(false);
+        let before = match begin {
+            Begin::PastEntry(own, place) => {
+                // The rest of the cursor's value, then the values below it
+                if !self.places_after(&own, Some(place), each)? {
+                    return Ok(false);
+                }
+                own
             }
-            own
-        } else {
-            let after = match begin {
-                Begin::PastWithout(place) => Some(place),
-                _ => None,
-            };
-            if !self.without_value(ordered, after, each)? {
-                return Ok(false);
+            Begin::PastString(string, place) => {
+                // The rest of the strings from the greatest, then the numbers and the booleans
+                if !self.strings(ordered, true, Some((&string, place)), each)? {
+                    return Ok(false);
+                }
+                ordered.to.clone()
             }
-            ordered.to.clone()
+            begin => {
+                let after = match begin {
+                    Begin::PastWithout(place) => Some(place),
+                    _ => None,
+                };
+                if !self.without_value(ordered, after, each)? || !self.strings(ordered, true, None, each)? {
+                    return Ok(false);
+                }
+                ordered.to.clone()
+            }
         };
         // By value from the greatest, and one value's in place order, as an order that keeps ties has them
         super::places::visit(self.r, &ordered.from, &before, true, &mut |_, place| each(place))
+    }
+
+    /// The entities holding a string under an ordered read's leading values, in the strings' order, from the
+    /// index's order of them (`order.rs`): all of them, or those past the entity at a place among those holding a
+    /// string, a page's cursor. False when `each` stopped the walk.
+    ///
+    /// The order's keys are walked, forwards or from the last, and each run of them, the keys of one sort key and
+    /// one cut, is handed on as it ends (`run`). A page begins at its cursor's run, sought by the cursor's string
+    fn strings(
+        &self,
+        ordered: &Ordered<'_>,
+        descending: bool,
+        after: Option<(&str, u64)>,
+        each: &mut Entry<'_>,
+    ) -> Result<bool> {
+        let Some(build) = ordered.strings else { return Ok(true) };
+        let running = super::order::running(&self.r.schema().collation)?;
+        let under = keys::order_range(ordered.entity_type, &ordered.index, build, &ordered.leading);
+        let (mut from, mut to) = prefix_range(&under);
+        if let Some((string, _)) = after {
+            // The room is there: an order is read only under values that leave its keys one
+            let room = keys::order_room(ordered.entity_type, &ordered.index, &ordered.leading).unwrap_or_default();
+            let sort_key = super::order::sort_key(&running.collator, string, room);
+            let mut run = crate::format::key::KeyWriter::new();
+            run.bytes(&sort_key.bytes).bool(sort_key.cut);
+            let (first, past) = prefix_range(&[under.as_slice(), &run.to_vec()].concat());
+            if descending { to = past } else { from = first }
+        }
+        // The run being read: the bytes its keys share after what every key of the order begins with, whether its
+        // sort key was cut, and what its keys hold
+        let mut run: Option<(Vec<u8>, bool)> = None;
+        let mut held: Vec<(Option<String>, u64)> = Vec::new();
+        let (mut cursor, mut on, mut failed) = (after, true, None);
+        let mut step = |key: &[u8]| -> Result<bool> {
+            let rest = &key[under.len()..];
+            let mut parts = decode_key(rest)?.into_iter();
+            let (Some(Part::Bytes(sort_key)), Some(Part::Bool(cut)), Some(last)) =
+                (parts.next(), parts.next(), parts.next())
+            else {
+                return Err(Error::new(ErrorCode::Corrupted, "A key of an index's order doesn't read"));
+            };
+            if run.as_ref().is_none_or(|(of, was_cut)| *of != sort_key || *was_cut != cut) {
+                if run.is_some() && !self.run(ordered, &running, &mut held, descending, cursor.take(), each)? {
+                    return Ok(false);
+                }
+                run = Some((sort_key, cut));
+            }
+            held.push(match last {
+                Part::String(string) => (Some(string), 0),
+                Part::Number(place) => (None, place as u64),
+                _ => {
+                    return Err(Error::new(ErrorCode::Corrupted, "A key of an index's order holds no string or place"));
+                }
+            });
+            Ok(true)
+        };
+        let mut visit = |key: &[u8], _: &[u8]| match step(key) {
+            Ok(more) => {
+                on = more;
+                more
+            }
+            Err(error) => {
+                failed = Some(error);
+                false
+            }
+        };
+        if descending {
+            self.r.visit_back_within(&from, &to, &mut visit)?;
+        } else {
+            self.r.visit_within(&from, &to, &mut visit)?;
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        // The last run, which no key after it ended
+        Ok(on && (run.is_none() || self.run(ordered, &running, &mut held, descending, cursor.take(), each)?))
+    }
+
+    /// Hands on the entities of one run of an order's keys, emptying `held`: each key's string, or the place of
+    /// the entity holding a string that has no key of its own. False when `each` stopped the walk.
+    ///
+    /// The keys of a run are in the order of their bytes, which is the strings' order only for a whole sort key
+    /// whose keys each hold a string: the strings are then equal to the collator, and ordered by their bytes. Any
+    /// other run is ordered here before any of it is handed on, by the collator and then the bytes: a cut sort key
+    /// says nothing past the cut, and a key holding a place is before every key holding a string whatever the
+    /// strings. A string's entities are those of its entry, in place order; an entity filed by its place has its
+    /// string read from its row. With `after`, a page's cursor, what is at or before it in the order is left out
+    fn run(
+        &self,
+        ordered: &Ordered<'_>,
+        running: &super::order::Running,
+        held: &mut Vec<(Option<String>, u64)>,
+        descending: bool,
+        after: Option<(&str, u64)>,
+        each: &mut Entry<'_>,
+    ) -> Result<bool> {
+        let towards = |order: Ordering| if descending { order.reverse() } else { order };
+        let compare =
+            |a: &str, b: &str| towards(running.collator.compare(a, b).then_with(|| a.as_bytes().cmp(b.as_bytes())));
+        // Each with its string and, for an entity filed by its place, the place
+        let mut run: Vec<(String, Option<u64>)> = Vec::with_capacity(held.len());
+        let walked = held.iter().all(|(string, _)| string.is_some());
+        for (string, place) in held.drain(..) {
+            match string {
+                Some(string) => run.push((string, None)),
+                None => {
+                    let Some((id, _)) = entities::at_place(self.r, ordered.entity_type, place)? else { continue };
+                    if let Some(Value::String(string)) = get_value(self.r, &id, &ordered.name)?
+                        && let Some(string) = string.as_str()
+                    {
+                        run.push((string.to_owned(), Some(place)));
+                    }
+                }
+            }
+        }
+        // Keys that each hold a string under one whole sort key came in their order already, and one key is its own
+        if !walked || run.len() > 1 {
+            run.sort_by(|(a, at), (b, other)| compare(a, b).then_with(|| at.cmp(other)));
+        }
+        for (string, place) in run {
+            // Where a page's cursor is: before it nothing is handed on, and of its own string what is past its place
+            let past = match after {
+                None => None,
+                Some((cursor, at)) => match compare(&string, cursor) {
+                    Ordering::Less => continue,
+                    Ordering::Equal => Some(at),
+                    Ordering::Greater => None,
+                },
+            };
+            let more = match place {
+                Some(place) if past.is_some_and(|at| place <= at) => true,
+                Some(place) => each(place)?,
+                None => {
+                    let mut parts = ordered.leading.clone();
+                    parts.push(Part::String(string));
+                    self.places_after(&keys::index_range(ordered.entity_type, &ordered.index, &parts), past, each)?
+                }
+            };
+            if !more {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// The entity an ordered read's index files first among those holding a value, or (`greatest`) the first in place
@@ -2749,13 +2926,20 @@ impl<R: Read> Query<'_, R> {
         if let Some(stages) = self.stages {
             stages.reads_index(&ordered.index);
         }
-        let mut found = None;
-        // By value from the least or from the greatest, and one value's entities in place order either way
-        super::places::visit(self.r, &ordered.from, &ordered.to, greatest, &mut |_, place| {
+        // By value from the least or from the greatest, and one value's entities in place order either way: the
+        // booleans and the numbers, and the strings after them. A walk that `take` stopped found the entity
+        let found = RefCell::new(None);
+        let mut take = |place: u64| -> Result<bool> {
             self.count_visit();
-            found = self.at_place(ordered.entity_type, place)?;
-            Ok(found.is_none())
-        })?;
+            *found.borrow_mut() = self.at_place(ordered.entity_type, place)?;
+            Ok(found.borrow().is_none())
+        };
+        let on = !greatest || self.strings(ordered, true, None, &mut take)?;
+        let on = on && super::places::visit(self.r, &ordered.from, &ordered.to, greatest, &mut |_, place| take(place))?;
+        if on && !greatest {
+            self.strings(ordered, false, None, &mut take)?;
+        }
+        let found = found.into_inner();
         if let (Some(stages), Some(_)) = (self.stages, &found) {
             stages.kept(stage);
         }
@@ -4045,6 +4229,8 @@ enum Begin {
     First,
     /// Past the place among those filed under the key
     PastEntry(Vec<u8>, u64),
+    /// Past the entity at the place among those holding the string, in the strings' order
+    PastString(String, u64),
     PastWithout(u64),
 }
 
@@ -4085,6 +4271,11 @@ struct Ordered<'q> {
     to: Vec<u8>,
     /// Whether the entities without a value are in the set, which they aren't after a `range`
     without: bool,
+    /// The build the index's order of its strings is read under (`order.rs`), when the entities read hold any:
+    /// none for an index that holds no string under the leading parts, and after a `range` of numbers
+    strings: Option<u64>,
+    /// The field the order is of, the index's last
+    name: String,
 }
 
 /// A lower and an upper bound, each with whether a value equal to it is within; none is no bound on that side

@@ -209,9 +209,6 @@ fn an_order_is_read_from_the_index_as_the_sort_has_it() {
 fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
     let ext = Value::Ext(-1, 1_700_000_000u32.to_be_bytes().to_vec());
     let unordered: Vec<(&str, Value)> = vec![
-        ("a string", "pear".into()),
-        ("a string past what an index holds", "p".repeat(300).into()),
-        ("a string of zero bytes", "\0".repeat(200).into()),
         ("a list", Value::Array(vec![1.into()])),
         ("an empty list", Value::Array(vec![])),
         ("a map", Value::Map(vec![("k".into(), 1.into())])),
@@ -235,6 +232,38 @@ fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
         let (first, visits) = same(&db, "live", |field| json!([order(field, true), limit(3)]));
         assert_eq!(visits, 3, "{what}: gone, the index orders every value");
         assert_eq!(first, of(&all, &[2, 3, 11]), "{what}");
+        clean(&db);
+    }
+}
+
+#[test]
+fn a_string_is_read_where_the_index_s_order_has_it_after_every_number() {
+    // One the index has an entry for, one past what it holds an entry for, and one whose zero bytes leave it no key
+    // of its own in the order: each is read from the order, in as many entries as the page takes
+    let strings: Vec<(&str, Value)> = vec![
+        ("a string", "pear".into()),
+        ("a string past what an index holds", "p".repeat(300).into()),
+        ("a string of zero bytes", "\0".repeat(200).into()),
+    ];
+    for (what, value) in strings {
+        let (_dir, db) = open();
+        let all = load(&db, "Item", &mixed());
+        write(&db, vec![create("Item", "Item-odd", Some(value.clone()), &[])]);
+        db.wait_for_index_builds().unwrap();
+        for descending in [false, true] {
+            let (_, visits) = same(&db, "live", |field| json!([order(field, descending), limit(3)]));
+            assert_eq!(visits, 3, "{what}: three entries are read for the first three");
+            let (every, _) = same(&db, "live", |field| json!([order(field, descending)]));
+            assert_eq!(every.len(), all.len() + 1, "{what}");
+            // And a page goes on from it, and from the entity before it
+            for cursor in ["Item-odd", every[every.iter().position(|id| id == "Item-odd").unwrap() - 1].as_str()] {
+                same(
+                    &db,
+                    "live",
+                    |field| json!([order(field, descending), { "step": "after", "id": cursor }, limit(2)]),
+                );
+            }
+        }
         clean(&db);
     }
 }
