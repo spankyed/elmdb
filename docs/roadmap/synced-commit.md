@@ -169,9 +169,9 @@ the file, and writes the record again as of this boot, `kept`, with the notice: 
 makes it again from the same record. LMDB then opens at the record's commit.
 
 **A sync that fails** writes the record `failed`. From then the process refuses every commit, as it refuses every
-wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does the
-same, as does one whose sync before a write fails: only a restore writes over it. If the record can't be written either, the database goes on as it does today,
-which the error says.
+wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does the same,
+as does one whose sync before a write fails: only a restore writes over it. If the record can't be written either,
+the database goes on as it does today, which the error says.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.
