@@ -337,6 +337,20 @@ fn stale_exclusions(committed: &[String], skips: &[Skip], mutants: &[&str]) -> R
         }
     }
     for skip in skips {
+        // A comment excuses mutants of the line under it. One whose pattern matches a mutant of any other line
+        // holds an operator where it meant a character, a `|` above all, which with nothing on one side of it
+        // matches every mutant there is: no mutant is then tested, and nothing fails
+        let own = skip.pattern.splitn(3, ':').take(2).collect::<Vec<_>>().join(":") + ":";
+        let pattern = regex::Regex::new(&skip.pattern).map_err(|e| format!("exclusion {:?}: {e}", skip.pattern))?;
+        if let Some(other) = mutants.iter().find(|mutant| pattern.is_match(mutant) && !mutant.starts_with(&own)) {
+            stale.push(format!(
+                "{}:{}: this `// mutant-skip:` excuses {:?}, which matches a mutant of another line, {other:?}: a \
+                 character of the mutant's name that is an operator in a pattern, such as `|`, `(` or `+`, takes a \
+                 backslash before it",
+                skip.path, skip.line, skip.pattern
+            ));
+            continue;
+        }
         if matches_none(&skip.pattern)? {
             stale.push(format!(
                 "{}:{}: this `// mutant-skip:` excuses {:?}, which matches none of the {} mutants listed: the line \
@@ -680,6 +694,14 @@ fn a() {
             assert!(named.len() == 1 && named[0].contains("names a line"), "{named:?}");
         }
         assert!(stale_exclusions(&["(".to_owned()], &[], &mutants).is_err());
+        // A comment whose mutant's name holds `||` unescaped is a pattern with nothing on one side of a `|`, which
+        // matches every mutant: refused for the mutants of other lines it excuses, and taken once it is escaped
+        let ors =
+            ["crates/x/src/a.rs:6:10: replace && with || in a", "crates/x/src/b.rs:3:5: replace b -> bool with true"];
+        let all = stale_exclusions(&[], &[skip(5, "crates/x/src/a.rs:6:.*replace && with || in a")], &ors).unwrap();
+        assert!(all.len() == 1 && all[0].contains("another line"), "{all:?}");
+        let one = stale_exclusions(&[], &[skip(5, "crates/x/src/a.rs:6:.*replace && with \\|\\| in a")], &ors);
+        assert_eq!(one.unwrap(), [""; 0]);
     }
 
     #[test]
