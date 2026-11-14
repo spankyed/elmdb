@@ -5,6 +5,7 @@
 use serde_json::{Value as Json, json};
 
 use crate::engine::order::{self, Marker, Step};
+use crate::engine::plan::{ReadOp, Reads};
 use crate::engine::unit::{Read, Txn, UnitState};
 use crate::engine::{entities, keys};
 use crate::format::Prefix;
@@ -491,4 +492,117 @@ fn a_build_goes_on_with_one_it_finds_unfinished_beside_the_writes_that_keep_it()
     assert!(whole.whole && whole.build == begun.build);
     assert_eq!(strings(&db, "byTag").len(), 41);
     clean(&db);
+}
+
+/// The ids a plan of Items answers after these steps, and the entities it visited
+fn read(db: &Database, steps: Json, track: Option<u32>) -> (Vec<String>, u64) {
+    let plan =
+        json!({ "start": { "from": "types", "types": ["Item"] }, "steps": steps, "terminal": { "answer": "ids" } });
+    let op = serde_json::from_value::<ReadOp>(json!({ "read": "query", "visits": true, "plan": plan })).unwrap();
+    let bytes = db.read(&Reads { reads: vec![op], track }).unwrap();
+    let answers = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    let ids = answers[0]["answer"]["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned());
+    (ids.collect(), answers[0]["visited"].as_u64().unwrap())
+}
+
+fn by_tag(take: usize) -> Json {
+    json!([{ "step": "orderBy", "field": "tag" }, { "step": "limit", "n": take }])
+}
+
+fn ids(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| format!("Item-{name}")).collect()
+}
+
+#[test]
+fn an_order_is_read_from_keys_this_elmdb_filed_whole_and_from_the_rows_under_any_other_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_at(&dir, schema_json());
+    db.wait_for_index_builds().unwrap();
+    // Swedish puts `å` after `z`, where the root collation has it beside `a`
+    write(
+        &db,
+        vec![item("z", json!({ "tag": "z" })), item("ao", json!({ "tag": "å" })), item("a", json!({ "tag": "a" }))],
+    )
+    .unwrap();
+    assert_eq!(read(&db, by_tag(2), None), (ids(&["a", "ao"]), 2));
+    let root = stored(&db, "byTag").0.unwrap();
+    // The collation changed: the keys are the root's, under the root's stamp, and no read of this schema's trusts
+    // them. Until the builder has filed them again the rows are read, in the new collation's order
+    let mut swedish = schema_json();
+    swedish["collation"] = json!("sv");
+    let changes = db.set_schema(Schema::from_json(&swedish).unwrap()).unwrap();
+    assert!(changes.iter().any(|change| change.path == "collation" && change.effect == crate::schema::Effect::Builds));
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(read(&db, by_tag(2), None), (ids(&["a", "z"]), 2));
+    let built = stored(&db, "byTag").0.unwrap();
+    assert!(built.whole && built.stamp != root.stamp && built.build > root.build);
+    clean(&db);
+    // The root's keys under a marker forged to this stamp are read, and give the root's order: what the stamp is for
+    let forged = |keys_of: &str, stamp_of: &str| {
+        let mut filed = schema_json();
+        filed["collation"] = json!(keys_of);
+        let filed = Schema::from_json(&filed).unwrap();
+        let stamp = order::stamp(stamp_of).unwrap();
+        db.store()
+            .unwrap()
+            .write(
+                |txn, store| {
+                    let mut state = UnitState::new(false);
+                    let mut t = Txn { txn, db: store, state: &mut state, schema: &filed, now: 0.0 };
+                    order::clear(&mut t, "Item", "byTag")?;
+                    let (step, _) = order::build_unit(&mut t, "Item", "byTag", Step::Begin, true, 1000)?;
+                    assert_eq!(step, Step::Done);
+                    let marker = order::marker(&t, "Item", "byTag")?.expect("built");
+                    t.put(&keys::order_marker("Item", "byTag"), &Marker { stamp, ..marker }.encode())
+                },
+                false,
+            )
+            .unwrap();
+    };
+    forged("root", "sv");
+    assert_eq!(read(&db, by_tag(2), None), (ids(&["a", "ao"]), 2), "the root's order, read as if it were this one's");
+    // Under their true stamp they are no read's: every entity's row is read, and the order is right
+    forged("root", "root");
+    assert_eq!(read(&db, by_tag(2), None), (ids(&["a", "z"]), 3));
+    // A database opened to read only reads what is there, and never builds
+    drop(db);
+    let schema = Schema::from_json(&swedish).unwrap();
+    let options = OpenOptions { schema: Some(schema), syncs: false, read_only: true, ..Default::default() };
+    let reader = Database::open(dir.path(), options).unwrap();
+    assert_eq!(read(&reader, by_tag(2), None), (ids(&["a", "z"]), 3));
+    // An order of numbers is no collator's: its index is read whatever the marker of the strings' order beside it
+    assert_eq!(read(&reader, json!([{ "step": "orderBy", "field": "n" }, { "step": "limit", "n": 1 }]), None).1, 1);
+    drop(reader);
+    // And one opened to write builds it, and then reads it
+    let db = open_at(&dir, swedish);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(read(&db, by_tag(2), None), (ids(&["a", "z"]), 2));
+    clean(&db);
+}
+
+#[test]
+fn a_read_of_an_order_is_one_a_commit_writes_into_where_it_changes_what_the_read_read() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(
+        &db,
+        vec![item("b", json!({ "tag": "b" })), item("c", json!({ "tag": "c" })), item("d", json!({ "tag": "d" }))],
+    )
+    .unwrap();
+    let touched = |ops: Vec<Json>| db.write(&super::batch(ops), false).unwrap().1.touched;
+    let track = || assert_eq!(read(&db, by_tag(2), Some(1)), (ids(&["b", "c"]), 2));
+    track();
+    // A string past what the read went as far as is nothing it read
+    assert!(touched(vec![item("z", json!({ "tag": "z" }))]).is_empty());
+    // One before the first it read is, and so is another entity taking a string it read
+    assert_eq!(touched(vec![item("a", json!({ "tag": "a" }))]), [1]);
+    db.untrack(1);
+    assert_eq!(read(&db, by_tag(2), Some(1)), (ids(&["a", "b"]), 2));
+    assert_eq!(touched(vec![item("b2", json!({ "tag": "b" }))]), [1]);
+    // And so is another elmdb's write that ends the build the read was of, whatever string it files
+    db.untrack(1);
+    assert_eq!(read(&db, by_tag(2), Some(1)), (ids(&["a", "b"]), 2));
+    order::forge(1);
+    assert_eq!(touched(vec![item("y", json!({ "tag": "y" }))]), [1]);
+    order::forge(0);
 }
