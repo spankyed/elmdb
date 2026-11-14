@@ -295,6 +295,11 @@ xtask's `UNMODELLED` with the reason (a lock no model provides, state no model c
 and fails on a listed file that no longer does. So new shared state is modelable by default, and the list says what
 isn't modelled yet: a model of one is how its file leaves the list.
 
+**Every write transaction is committed in one module.** `cargo xtask check-commits` fails when engine code outside
+`store/commits.rs` commits one: a unit's, a new environment's first, the vector graphs' databases' and the
+checkpoint's after a reset all pass through it. What must hold of every commit is then held in one place
+(`../roadmap/synced-commit.md`), and a commit can't be added that the place never hears of.
+
 `store/unit_slot.rs`'s model is whether a unit holds the environment's one write transaction. It holds that a
 plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
 waiter returns when the unit ends or once woken after its stop is set. LMDB's writer lock is a Loom mutex in the model:

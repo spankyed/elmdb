@@ -1397,6 +1397,28 @@ fn drained(dir: &tempfile::TempDir) -> std::path::PathBuf {
     data
 }
 
+/// Counts on this thread each time an open syncs a commit of its own, from now on
+fn count_open_syncs(count: std::rc::Rc<std::cell::Cell<u32>>) {
+    crate::failpoints::run_once_here(crate::failpoints::points::OPEN_SYNCED, move || {
+        count.set(count.get() + 1);
+        count_open_syncs(std::rc::Rc::clone(&count));
+    });
+}
+
+#[test]
+fn an_open_syncs_each_commit_it_makes_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let synced = std::rc::Rc::new(std::cell::Cell::new(0));
+    count_open_syncs(std::rc::Rc::clone(&synced));
+    // A new environment's stamp, then the graphs' databases: two commits of the open's own, which group commit never
+    // hears of, each synced before the open goes on. So a database made and closed has no commit left unsynced
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    assert_eq!(synced.get(), 2);
+    // Opened again the environment has both: the open commits nothing, and syncs nothing
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    assert_eq!(synced.get(), 2);
+}
+
 #[test]
 fn a_short_file_whose_tail_the_trees_do_not_reach_opens_and_a_writable_open_extends_it() {
     // Emptied, the trees reach far fewer pages than the file holds, and LMDB leaves the free tail out of the file. Such a

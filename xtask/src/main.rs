@@ -10,6 +10,8 @@
 //! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
 //!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
 //!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
+//! - `check-commits`: fails when engine code outside `src/store/commits.rs` commits a write transaction, so every
+//!   commit passes the one module that holds what must be true of each.
 //! - `mutant-exclusions`: writes `target/mutants.toml`, the configuration a mutation run reads with `--config`, and
 //!   prints its path: `.cargo/mutants.toml` with an `exclude_re` for each `// mutant-skip:` comment in the source, which
 //!   sits above the line it excuses and holds the reason. Nothing it writes is committed, so the comment is the one
@@ -43,6 +45,7 @@ fn main() -> ExitCode {
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => sweep(&workspace_root()),
         Some("check-sync") => check_sync(&workspace_root()),
+        Some("check-commits") => check_commits(&workspace_root()),
         Some("mutant-exclusions") => mutant_exclusions(&workspace_root()),
         Some("check-mutant-exclusions") => check_mutant_exclusions(&workspace_root()),
         Some("pre-push") => {
@@ -56,12 +59,13 @@ fn main() -> ExitCode {
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("crate::sync", &|| check_sync(&root)),
+                    ("one place commits", &|| check_commits(&root)),
                     ("mutant exclusions", &|| check_mutant_exclusions(&root)),
                 ],
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
                 .to_owned(),
         ),
     };
@@ -396,6 +400,59 @@ fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>,
     Ok(found)
 }
 
+/// The engine's one module that commits a write transaction, relative to its source
+const COMMITS: &str = "store/commits.rs";
+
+/// Fails on engine code outside `COMMITS` that commits a write transaction, naming each line: a commit made
+/// elsewhere is one the store's rule for every commit never sees
+fn check_commits(root: &Path) -> Result<(), String> {
+    let found = commits_outside(&root.join("crates/elmdb/src"))?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "these commit a write transaction outside crates/elmdb/src/{COMMITS}: {found:?}; commit through that \
+         module's functions, which are where every commit is held to the store's rule"
+    ))
+}
+
+/// The lines of the engine's source, tests aside, that commit a write transaction outside `COMMITS`, as
+/// `file:line`
+fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    let mut pending = vec![source.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let relative = path.strip_prefix(source).expect("under source").to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                if !relative.ends_with("tests") {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !relative.ends_with(".rs") || relative.ends_with("tests.rs") || relative == COMMITS {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            for (at, line) in text.lines().enumerate() {
+                if commits_a_write(line) {
+                    found.push(format!("{relative}:{}", at + 1));
+                }
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Whether a line of code commits a write transaction: heed's own commit of one, which takes no argument where
+/// the engine's commits of a unit do, or its making of databases, which commits the transaction it is given
+fn commits_a_write(line: &str) -> bool {
+    let code = line.trim_start();
+    !code.starts_with("//") && (code.contains(".commit()") || code.contains("create_databases_and_commit("))
+}
+
 /// Whether a line of code reaches a lock, a condition variable or a thread-local other than `crate::sync`'s
 fn locks_outside_sync(line: &str) -> bool {
     let code = line.trim_start();
@@ -652,6 +709,27 @@ fn a() {
         let found: Vec<String> = unmodelled_files(src).unwrap().into_iter().collect();
         assert_eq!(found, ["engine/local.rs", "engine/locked.rs", "engine/parked.rs"]);
         assert!(!locks_outside_sync("    // parking_lot::Mutex"));
+    }
+
+    #[test]
+    fn a_commit_outside_the_one_module_is_found_and_one_in_it_or_in_a_test_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("crates/elmdb/src");
+        std::fs::create_dir_all(src.join("store")).unwrap();
+        std::fs::create_dir_all(src.join("engine/tests")).unwrap();
+        std::fs::write(src.join("store/commits.rs"), "fn commit(txn: RwTxn) { txn.commit() }\n").unwrap();
+        std::fs::write(src.join("store/tests.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
+        std::fs::write(src.join("engine/tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
+        // A unit's commit takes whether it is durable, the mirror's its sequences, and a comment commits nothing
+        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
+        std::fs::write(src.join("engine/unit.rs"), unit).unwrap();
+        assert_eq!(super::check_commits(dir.path()), Ok(()));
+        std::fs::write(src.join("store/mod.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit()?;\n}\n").unwrap();
+        let made = "fn f(env: &Env, wtxn: RwTxn) {\n    env.create_databases_and_commit(wtxn, |_, _| todo!());\n}\n";
+        std::fs::write(src.join("engine/made.rs"), made).unwrap();
+        let refused = super::check_commits(dir.path()).unwrap_err();
+        assert!(refused.contains(r#"["engine/made.rs:2", "store/mod.rs:3"]"#), "{refused}");
+        assert!(refused.contains("crates/elmdb/src/store/commits.rs"), "{refused}");
     }
 
     #[test]
