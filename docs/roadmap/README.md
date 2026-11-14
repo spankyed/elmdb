@@ -18,6 +18,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [The JavaScript boundary](javascript-boundary.md) | Designed: lazy rows that decode a field when read, and optimistic units that can span an `await` |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [A string's order from its index](string-order.md) | Designed, not built: every declared value index keeps a key for each distinct string it holds, under the collation's sort key, so an order, a page and a string range read keys and entries where they read every entity, and a write that repeats a string files nothing more; a marker of the collator's stamp and a build keep a stale sort key from being read |
+| [A power loss that tears no file](synced-commit.md) | Designed, not built: the grouped mode keeps the last synced commit, its pages by a read transaction LMDB gives no writer the pages of and its meta page by a record beside the data, so a database is opened at that commit after a power loss, or a sync that failed, where today its file may be no commit's |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
 ## Development improvements
