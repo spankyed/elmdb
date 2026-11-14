@@ -80,7 +80,10 @@ writes: an index is about half of a change of its field, because the place is ta
 another that no other change of the unit writes; a second filing of a string adds 13.5 to 15.9 µs to its change,
 42 to 48% of the unit, and 3.7 µs to a create; and an index of two values costs its change as much as one of strings
 all different, 19 to 22 µs. Why was not read: by the layout its places are in blocks by place, and each change of a
-unit spread over the type would write a block of its own under each value, which is an inference.
+unit spread over the type would write a block of its own under each value, which is an inference. A third run (load
+23 to 27, the type holding a second enum of two values that two indexes file) read what a second filing of such a
+value costs: 35.3 µs for a change of the enum one index files and 54.9 for the one two file, 19.6 µs and 56% of the
+unit, where a second filing of a string no other entity holds added 13.2 in that run.
 
 ## The design
 
@@ -98,16 +101,17 @@ string some entity holds files no key for the order. The derived families, each 
 | `d/xo` type index build leading… sortkey cut string | nothing. It says the index's `d/x` has an entry for this string under what the index's fields before the last hold |
 | `d/xo` type index build leading… sortkey cut place | nothing. It says the entity at this place holds a string that has no key of the kind above |
 | `d/xob` type index | the order's marker: the stamp it was filed under, its build, and whether the build is whole |
-| `d/xl` type index leading… | the places of the entities whose last field is an unplaced string (below), in blocks past 256 (`d/xlp`): among them the strings past 256 bytes, which `d/x` has no entry for and `d/xu` held until now |
+| `d/xl` type index leading… | the places of the entities whose last field is a string past 256 bytes, in blocks past 256 (`d/xlp`): the strings `d/x` has no entry for, which `d/xu` held until now |
 
 - **A placed string** is one whose part in `d/x`'s key is no longer than a string of 256 bytes with no zero byte
   takes, 258 bytes. Its `d/xo` key holds the string as `d/x`'s key does, and is there exactly while its `d/x` entry
   holds a place: one key for a status a million entities hold, and a key each for a million names.
-- **An unplaced string** is any other the field holds: one past 256 bytes, or one of fewer whose zero bytes, two
-  bytes each in a key, make its part longer. Its entity has a `d/xo` key of its own, the entity's place where the
-  string would be, and is in `d/xl`. So a string of any length is in the order, and what an unplaced string files
-  follows from its entity alone. Its key holds a build and a sort key, so the function that derives an entity's
-  keys hands it on apart from the entries and the rest, which are compared as sets of plain keys.
+- **An unplaced string** is any other the field holds: one past 256 bytes, which is in `d/xl` and has no `d/x`
+  entry, or one of fewer whose zero bytes, two bytes each in a key, make its part longer, which has one. Its entity
+  has a `d/xo` key of its own, the entity's place where the string would be. So a string of any length is in the
+  order, and what an unplaced string files follows from its entity alone. Its key holds a build and a sort key, so
+  the function that derives an entity's keys hands it on apart from the entries and the rest, which are compared
+  as sets of plain keys.
 - **The sort key** is the collator's for the schema's collation at its default strength, a bytes part, made by a
   sink that keeps the bytes the key has room for and stops the collator at the next. The part after it says which:
   `false` for a whole key, `true` for one that was cut.
@@ -122,9 +126,12 @@ string some entity holds files no key for the order. The derived families, each 
   and a read of it reads the rows. A write and a read each work the room out from the names and the leading parts
   they hold, so nothing stored says it, and an order on the field's numbers is read from the index as now. Of an
   index whose names alone leave less, `indexStatus()` says its order isn't kept and that shorter names keep it.
-- **What decides where a string is filed is the format's**: the 258 bytes, the room and the 64. `d/xl` is under no
-  build, and two elmdbs that differed in any of the three would misfile each other's keys, so a change to one is
-  a change to the format (`../architecture/format.md`, Versions) and not to the stamp.
+- **The layout is its stamp's, and only its envelope is the format's.** Which strings have keys of their own, the
+  258 bytes, the room, the 64 and what a key's value holds are all under a build, and the stamp holds a number for
+  them (below): an elmdb that lays an order out another way files under another stamp, and builds its orders again
+  in the background, with no change to the format. What the format holds, and freezes with format 1, is the
+  families' tags, the marker and the rule every write keeps towards it, and `d/xl` as the strings `d/x` has no
+  entry for, which is under no build and follows from the 256 bytes `d/x` already stops at.
 - **A list's strings have keys too.** `d/x` files each element of a list for an equality and the entity in `d/xu`,
   so no read reaches those keys while the list is there. They are filed all the same: the rule is every `d/x` entry
   of a placed string, with no exception to verify.
@@ -137,19 +144,24 @@ string some entity holds files no key for the order. The derived families, each 
 
 **What keeps it.** Under a marker of the running stamp and a tuple with room, the `d/xo` keys holding a string are
 those of `d/x`'s entries of placed strings, each under its sort key, and the keys holding a place are those of the
-entities holding unplaced strings. Nothing but these writes the family:
+entities holding unplaced strings. An index's entries are filed in two functions and its order's keys with them, so
+no caller files one and not the other:
 
 - *The function that files a place under a `d/x` entry and takes one out* (`places::file`, `places::unfile`) is
   told by the list of places whether the entry came to be or went: `postings::put` finding no key of the entry's
   own, `postings::remove` deleting it. A list moved between the entry's own key and its blocks is neither. It puts
   the string's `d/xo` key at the first and deletes it at the second. Text terms, `d/xw` and `d/xu` are lists of
   the same kind and file no order, so it is this function's to do and not the list's.
-- *The function that derives an entity's keys for an index* (`ValueIndex::files`) hands on, with `d/xl`, that the
-  entity holds an unplaced string under a tuple, and a write, the builder, `rebuild()` and `check()` file its key
-  where they build the others, with the type's name, under a tuple with room.
-- *What clears or files `d/x` in bulk* does the same to `d/xo` in the same unit, deriving it from the `d/x` keys it
-  files: `rebuild()` of one index and of all, which `renameType` and a database replaced by another's
-  (`replace_with`) run; a dropped or changed index; `reset()`; and the unit that marks an empty type's index built.
+- *The function every bulk filing of entries goes through* (`places::Sorting::finish`) is handed each place under
+  each entry's key, sorted, and lays out one entry after another. It hands on the order's key with each entry of a
+  placed string. `rebuild()` of one index and of all, which `renameType` and a database replaced by another's
+  (`replace_with`) run, file through it, and `check()` derives what it compares through it, so each has the
+  order's keys from the entries it was given and from nowhere else.
+- *The function that derives an entity's keys for an index* (`ValueIndex::files`) hands on that the entity holds
+  an unplaced string under a tuple, and a write, the builder, `rebuild()` and `check()` file its key where they
+  build the others, with the type's name, under a tuple with room.
+- *What clears an index's `d/x`* clears its `d/xo`, `d/xl` and marker in the same unit: a dropped or changed
+  index, a `rebuild()` and `reset()`.
 
 **What reads it**, where the plan reads a number's entries today (one type, a built index, nothing in `d/xu`, and
 for a compound index equalities on the fields before the last):
@@ -196,43 +208,39 @@ error. The rules, each unit reading the marker in its own transaction and throug
 back restores it:
 
 - *A read* uses `d/xo` under the marker's build only when the marker's stamp is its own and the build is whole.
-- *A write* reads the marker when a placed string gains its first holder or loses its last under a tuple, and
-  whenever an entity holding an unplaced string is filed under a tuple or taken out from under one, or its string
-  changes, whether or not a key of its own stamp would change: two unplaced strings of one cut sort key to this
-  collator may be of two to another, and a change to a field before the last moves the entity's key to another
-  tuple with its string as it was. It files under the marker's build when the marker's stamp is its own, whole or
-  not. Under a marker of another stamp it deletes the marker, once, and files nothing; with no marker it files
-  nothing. So no build is whole that lacks a key, whoever wrote. A write that gives an entity a placed string
-  another holds reads no marker and ends no build: which strings have keys depends on no collator, and the entity
-  is found through the string's `d/x` entry. Nor does a write under a tuple without room, where no stamp files a
-  key.
-- *An index's order begins whole.* The unit that declares an index, whose `d/x` is empty, writes the marker with
-  its stamp, its sequence as the build, and whole: an empty `d/x` has an empty order. What fills `d/x` after it,
-  the value index's builder and the writes beside it, files the order by the functions above, so the two are whole
-  together. *`rebuild()`* files `d/x` and the order whole under a new build, in its unit.
-- *The order's builder* is for an order that isn't this stamp's and whole: one another stamp ended, or one filed
-  before an update of the collator. It goes on with a build of its own stamp that isn't whole, and otherwise begins
-  one: a marker of its stamp, its unit's sequence, not whole. It walks the index's `d/x` keys, not the rows, and
-  the rows of the entities in `d/xl`, in units that go on from the last key done, putting each key that isn't
-  there, beside the writes of its stamp that keep the keys on both sides of where it is. A build it finds
-  unfinished it goes on with from the index's first key, a key already there being read and not written. Each of
-  its units checks that the marker is still its stamp and its build, not whole, and stops if not; the last marks
-  it whole. An order another stamp ended or replaced is tried again after a wait that doubles, so two elmdb
-  versions that hold one database open leave its orders unbuilt, and read from rows, more of the time the longer
-  both stay.
-- *What tells the builder*: an open that can write, for every declared index whose marker is not its own and whole;
-  a unit that deleted a marker or found none where it read for one, once it commits; and, in a process that can
-  write, an ordered read that found the marker not its own and whole, so a process whose writes only repeat
-  strings has its orders built again too.
-- *A dropped index* has its `d/xo`, `d/xl` and marker cleared in the unit that clears its `d/x`.
+- *A write* that files a string under an index, or takes one out, reads the index's marker, once in its unit: a
+  string's entry gaining or losing a place, whatever others it holds, and an entity put among those of `d/xl` or
+  taken from them. Under a marker of its own stamp, whole or not, it files what its layout files under the marker's
+  build, which for this layout is nothing where the string has another holder. Under a marker of another stamp it
+  deletes the marker, once, and files nothing; with no marker it files nothing. So no build is whole that lacks a
+  key, whoever wrote and whatever the other's layout files: a layout that keeps something for each holder is
+  ended by a write of this one that would have filed nothing. The rule is the format's, and the same for every
+  layout there will be.
+- *Only the order's builder and `rebuild()` write a marker.* A unit that declares an index writes none, and what
+  fills its `d/x`, the value index's builder and the writes beside it, finds none and files no order. `rebuild()`
+  files a built index's `d/x` and its order whole under a new build, in its unit, and leaves an index it can't
+  build with neither marker nor key.
+- *The order's builder* builds the order of a built index whose marker isn't this stamp's and whole: one just
+  built, one another stamp ended, one filed before an update of the collator or under another layout. It goes on
+  with a build of its own stamp that isn't whole, and otherwise begins one: a marker of its stamp, its unit's
+  sequence, not whole. It walks the index's `d/x` keys, not the rows, and the rows of the entities holding
+  unplaced strings, in units that go on from the last key done, putting each key that isn't there, beside the
+  writes of its stamp that keep the keys on both sides of where it is. A build it finds unfinished it goes on with
+  from the index's first key, a key already there being read and not written. Each of its units checks that the
+  marker is still its stamp and its build, not whole, and stops if not; the last marks it whole. An order another
+  stamp ended or replaced is tried again after a wait that doubles, so two elmdb versions that hold one database
+  open leave its orders unbuilt, and read from rows, more of the time the longer both stay.
+- *What tells the builder*: an open that can write, for every built index whose marker is not its own and whole;
+  the end of a value index's build; and a unit that deleted a marker or found none, once it commits.
 - *Keys under a build that is not the marker's* are no order's. The builder deletes them in units of their own, each
   reading the marker again; they sort before the marker's build, so finding none is one seek.
 - *The schema's collation* is in the stamp, so a change's effect becomes `Builds` where it is `Applied` today, by the
   same path.
 
-**The stamp** covers what can change a sort key's bytes and nothing else. It is a SHA-256 of: the schema's
-collation; a number for the collator's options and the sink, raised with any change to the function that makes a
-sort key and held by a test of pinned key bytes; and the name and version of every ICU crate in the collator's
+**The stamp** covers what a key under a build follows from. It is a SHA-256 of: the schema's collation; a number
+for the layout and for how a sort key is made (the collator's options, the sink, which strings have keys of their
+own, the room, what a key holds), raised with any change to the functions that derive a key and held by a test of
+pinned key bytes; and the name and version of every ICU crate in the collator's
 dependency tree. Each of those crates is a direct dependency
 required exactly (`=`), which `cargo xtask` holds to the lockfile and to the stamp's list, so a consumer of the Rust
 crate resolves the same versions or fails to resolve. The build refuses `ICU4X_DATA_DIR`. A `[patch]` or a vendored
@@ -246,9 +254,9 @@ and one under the wrong sort key, each by name. Under another stamp it compares 
 hold, says the sort keys were filed by another collator and were not compared, which is what `elmdb-cli` of another
 build meets. `indexStatus()` and the wait for index builds cover an order as they cover an index.
 
-**What it costs**, by the fourth reading. A write that repeats a string another entity holds: nothing, where a
-second place for every entity would by that reading's enum have paid some 19 to 22 µs again for a status, an
-estimate, since no reading filed an enum twice. A write that gives an entity a string no other holds: the marker
+**What it costs**, by the fourth reading. A write that repeats a string another entity holds: the marker read, a
+key every such write of the unit reads, and no key written, where a second place for every entity would have paid
+19.6 µs again for a status, 56% of its change. A write that gives an entity a string no other holds: the marker
 read, one sort key and one key put, and one deleted when the string it had goes with it. A title's sort key is
 775 ns by the first reading; a long string's is cut as it is made, 21 µs for 10,000 bytes by the third, though a
 string of characters the collation ignores is read to its end. The key is a leaf written and another when one is
@@ -266,13 +274,14 @@ each distinct string it hands on.
   sorted arm's (2,534 ms in the reading of 2026-11-13, `../evidence/million-notes.md`). If the seeks to `d/x` are
   more than a third of it, a string one entity holds keeps that entity's place as its key's value: written with
   the key, replaced by nothing when a second entity takes the string, and written again when the second-last
-  leaves. A read then seeks only for a string several hold. Those are two more writes that read the marker, and a
-  writer without them would take both for repeats: it is the format's, and is in or out before the freeze.
-- *The writes.* The fourth reading's program is run with the order and without, in one run, the two runs above
+  leaves. A read then seeks only for a string several hold. It is a layout of three states for a string, no
+  holder, one and several, with a write as the second holder comes and as it goes, and gates of its own. Being a
+  layout it is under the stamp's number: it can be taken up after the freeze, by a build in the background.
+- *The writes.* The fourth reading's program is run with the order and without, in one run, the runs above
   differing by as much as a fifth between them. The unit that changes a thousand statuses costs no more than a
-  tenth over what it costs without the order, and what the order adds to the unit that changes a thousand names is
-  no more than half as much again as what a second index adds. Past either, something files that this design says
-  doesn't, and it is found before anything else is built.
+  tenth over what it costs without the order, the marker's read being all it adds, and what the order adds to the
+  unit that changes a thousand names is no more than half as much again as what a second index adds. Past either,
+  something files that this design says doesn't, and it is found before anything else is built.
 - *The file.* More than a tenth larger at a million notes, and the keys are made smaller before the freeze.
 
 ## What was set aside
@@ -286,8 +295,20 @@ each distinct string it hands on.
   written where a `d/x` entry first appears and last goes, and a second read for each string.
 - **A second place for every entity**, `d/x` again with a sort key where the string was. The fourth draft, and
   simpler: one function derives every family from an entity alone. The fourth reading priced it at 42 to 48% of a
-  change of an indexed string against its own limit of a tenth, and by the enum's reading it would cost a change
-  of a status about as much again, which nobody orders by and which is among the commonest writes a program makes.
+  change of an indexed string against its own limit of a tenth, and at 56% of a change of a status, which nobody
+  orders by and which is among the commonest writes a program makes. What it had that this draft took from it is
+  the layout under the stamp's number and one rule for every write.
+- **The layout as the format's**, as this draft first had it: `d/xl` holding every unplaced string, and a write
+  reading the marker only where this layout files a key. A later layout that files something for a string another
+  entity holds would have had its builds left whole and lacking by a writer of this one, so the layout would have
+  been frozen with format 1, the place kept in a key's value with it.
+- **An order whole from the unit that declares its index**, and filled as the index is. A write files into an index
+  whether or not it is built, `rebuild()` files what it can of one it can't build, and `check()` compares only
+  built indexes: an order beside an unbuilt index would have been outside every check that could see it lacking.
+- **The order's keys filed by each caller that files entries in bulk**, seven of them. They all file through one
+  function, which is where the keys are made.
+- **The builder told by an ordered read** that found no whole marker of its stamp. Every write of a string reads
+  the marker now, so a process that writes is told by its writes, and one that doesn't is told when it opens.
 - **A field type for identifiers, ordered by its bytes from `d/x`**, which the fourth draft's decision named, and a
   collation of bytes declared for a field. Another session drafted the first on 2026-11-14 and a reader found seven
   defects in it against the code; the reader of this draft found the same of the second. The sorted arm orders a
@@ -316,8 +337,6 @@ each distinct string it hands on.
   cut shorter.
 - **The longest part `d/x` can hold taken out of every room.** `d/x` holds a string of 256 bytes whatever its zero
   bytes make of its part, as far as its key fits, and that part leaves a sort key no room at all.
-- **An order built only once its `d/x` is.** The functions that fill `d/x` file the order as they go, so an index's
-  order is whole from the unit that leaves its `d/x` empty.
 - **The unplaced strings read from their rows and merged into every walk.** A page of ten would read the row of
   every long string the index holds.
 - **The marker's state in the index's own built marker (`d/xb`).** The third draft. That key's presence is what says
@@ -352,10 +371,19 @@ each distinct string it hands on.
   the index's order to. The harness's strings are made of `a`, `b` and `c` today and its model sorts by the
   collator alone: it can't see a tie of other bytes or a key past the room until phase 2 gives it both.
 - **An invariant no one entity derives.** A `d/xo` key is there because of every entity holding its string, so a
-  site that writes `d/x` and not `d/xo` loses an entity from an order with no error. The sites are named above and
-  each is a gate below; the harness has six entities, so none of its entries is ever in blocks, and the first and
-  last place of an entry in blocks is tested apart.
-- **The seek for each string**, on a read that hands on every entity. The first decision above answers it.
+  first or last place that goes unseen hides every holder of the string from the order, with no error, until the
+  string empties and is held again, where a second place for every entity would have lost one. The two functions
+  that file are named above and each is a gate below; the harness has six entities, so none of its entries is ever
+  in blocks, and the first and last place of an entry in blocks is tested apart.
+- **The seek for each string**, on a read that hands on every entity, each of which already costs a get of its id
+  by its place. The first decision above reads it.
+- **A list's strings.** Each distinct element of a list has an entry, so a field of tags files and deletes an
+  order's key at each tag's first and last holder, for an order no read takes while a list is there. The layout
+  being the stamp's, a later one can leave them out.
+- **Long names and leading values.** The string in the key leaves a compound index's order about 165 bytes for its
+  names and the values before its last field, where the fourth draft left about 420; past them the tuple's order
+  is read from the rows. `indexStatus()` says so of names alone, and EXPLAIN says of a plan that its order was
+  sorted for want of room.
 - **Half the fourth draft's room**, the string being in the key: more runs are cut. A cut run of placed strings is
   ordered from its keys, and reads a row only for an unplaced string.
 - **A change of an indexed string no other entity holds** costs what a second index would. By the readings the
@@ -371,11 +399,12 @@ each distinct string it hands on.
 1. **The readings.** Taken on 2026-11-13 and 2026-11-14 and recorded in `../evidence/million-notes.md` (A string's
    order, before an index reads it): the four reads of the names' order as the sorted arm answers them, each
    index's bytes, the time of a unit that changes each, and the fourth reading above.
-2. **The keys, the stamp and the order.** The families in `format`'s table; the keys
-   filed by the two functions and at each bulk site; the marker's rules, the stamp, the exact requirements and their
-   `xtask` check; the tie by bytes in both arms; `orderBy`, `after`, `least` and `greatest` reading it. Done when:
+2. **The keys, the stamp and the order.** The families in `format`'s table; the keys filed by the two functions
+   that file entries; the marker's rules, the stamp, the exact requirements and their `xtask` check; the tie by
+   bytes in both arms; `orderBy`, `after`, `least` and `greatest` reading it. Done when:
    - the readings are recorded again, the first ten of a million reading ten keys and ten entries where no entry is
-     trashed, with both indexes' sizes and both units' times, and the three decisions above are made on them;
+     trashed, with both indexes' sizes and both units' times, what the marker's read adds to a unit that repeats
+     strings, and the three decisions above are made on them;
    - a property test holds the sign of the collator's comparison, then the bytes', to the order of the keys as they
      are filed, cut and whole, and the cut to the whole key's first bytes and to exactly the room's length, with no
      zero byte in any sort key, over random strings in the collations of the third reading; and holds every key to
@@ -395,12 +424,13 @@ each distinct string it hands on.
      numbers and strings, a list of strings, strings past 256 bytes and strings of zero bytes, a savepoint rolled
      back over a write that ended a build, and a read inside a unit;
    - `check()` reports a `d/xo` key removed, one added and one moved, each by hand; and a copy of the code in which
-     each of these in turn writes `d/x` alone fails it: a write, the builder, `rebuild()` of one index and of all,
-     `renameType`, a database replaced and a changed index. `check()` can't see the other three, so each has its
-     own: after a dropped index no key is left under its `d/xo`, `d/xob`, `d/xl` and `d/xlp`; and after `reset()`,
-     and after an index is declared on an empty type, entities are made with strings and ordered before the
-     builder can run, in the unit that made them, and the read visits as many entities as its limit, which a copy
-     that writes no marker there fails;
+     each of the two functions in turn files an entry and no key of the order fails it, after a write and after a
+     `rebuild()`. After a dropped index and after `reset()` no key is left under the index's `d/xo`, `d/xob`,
+     `d/xl` and `d/xlp`;
+   - an index that isn't built has no marker and no `d/xo` key, whatever was written to its type: one declared over
+     a type that holds entities, written to while its builder fills it, has neither until its build ends, and then
+     an order the rows agree with and a clean `check()`; and one `rebuild()` can't build, two entities holding one
+     value of a unique index, is left with neither;
    - a database filed under another collation with its stamp forged to this one's is shown ordered wrongly, which
      proves the test's keys differ; with its true stamp it orders from the rows until the builder ends and from the
      index after, as does a database whose collation changed, one copied by a backup in the middle of a build, and
@@ -412,8 +442,8 @@ each distinct string it hands on.
      takes a string it read, and when a write of another stamp ends the build it read;
    - a write of another stamp ends the build when it changes an unplaced string to one of the same cut sort key,
      and when it changes a field before the last of a compound index for an entity holding an unplaced string; one
-     that gives an entity a placed string another holds doesn't, the order read after it being right; and a
-     process whose writes only repeat strings has an order another stamp ended built again after an ordered read.
+     that gives an entity a placed string another holds ends it too, and files nothing; and a process whose writes
+     only repeat strings finds an order another stamp ended, and builds it again.
 3. **Ranges.** A string `range` reads `d/xo`, alone and before an order. Done when the model harness holds it to the
    rows for bounds on either side, inclusive and exclusive, a bound equal to the collator and of other bytes than a
    string held, and a bound whose key is cut; and the benchmark's range reads no entity outside its bounds but those
