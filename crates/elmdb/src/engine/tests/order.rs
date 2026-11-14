@@ -235,6 +235,12 @@ fn a_string_with_no_key_of_its_own_is_filed_by_the_place_of_each_entity_holding_
     assert_eq!(after.1, before.1);
     assert!(after.0.as_ref().unwrap().whole && after.0.unwrap().build > before.0.unwrap().build);
     clean(&db);
+    // A builder's units, each taking one key or one place of the work, file the same: an entry of many places and
+    // the long strings' one key are gone on with from the place a unit left off at
+    unit(&db, |t| order::clear(t, "Item", "byTag"));
+    assert!(build(&db, "byTag", 1) > 3);
+    assert_eq!(stored(&db, "byTag").1, before.1);
+    clean(&db);
     // An entity's key goes when its string does, and comes for the one it takes
     write(
         &db,
@@ -250,6 +256,41 @@ fn a_string_with_no_key_of_its_own_is_filed_by_the_place_of_each_entity_holding_
         [vec![Part::Bool(true), Part::Number(2.0)], vec![Part::Bool(false), Part::String("b".into())]]
     );
     clean(&db);
+}
+
+#[test]
+fn a_build_left_before_it_deleted_another_build_s_keys_is_gone_on_with_at_the_next_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_at(&dir, schema_json());
+    db.wait_for_index_builds().unwrap();
+    write(&db, (0..30).map(|i| item(&format!("{i:02}"), json!({ "tag": format!("s{i:02}") }))).collect()).unwrap();
+    // A build whole under a new number, the keys of the one before it still there: a builder stopped before its
+    // last units
+    let old = stored(&db, "byTag").0.unwrap();
+    unit(&db, |t| t.del(&keys::order_marker("Item", "byTag")));
+    let mut step = Step::Begin;
+    while !matches!(step, Step::Sweep { .. }) {
+        step = unit(&db, |t| order::build_unit(t, "Item", "byTag", step.clone(), true, 7)).0;
+    }
+    let all = |db: &Database| db.snapshot(|s| Ok(s.scan(&keys::order_of("Item", "byTag"))?.len())).unwrap();
+    let new = stored(&db, "byTag").0.unwrap();
+    assert!(new.whole && new.build > old.build);
+    assert!(all(&db) > 30 && db.snapshot(|s| order::stale(s, "Item", "byTag", new.build)).unwrap());
+    // A read trusts the new build, and a check compares no key of the old
+    assert_eq!(read(&db, by_tag(1), None), (ids(&["00"]), 1));
+    clean(&db);
+    // Opened again, the builder is told of it, and deletes them
+    drop(db);
+    let db = open_at(&dir, schema_json());
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(all(&db), 30);
+    assert_eq!(stored(&db, "byTag").0, Some(new));
+    // And an order that needs nothing costs no unit: the sequence stays where the last commit left it
+    let sequence = db.sequence().unwrap();
+    drop(db);
+    let db = open_at(&dir, schema_json());
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(db.sequence().unwrap(), sequence);
 }
 
 #[test]
@@ -445,6 +486,11 @@ fn a_write_of_another_stamp_ends_an_order_s_build_files_nothing_and_leaves_it_ow
     order::forge(0);
     assert_eq!(readable(&db), None);
     clean(&db);
+    // Which it says, of that order alone
+    assert_eq!(
+        db.check().unwrap().notes,
+        ["The order of Item.byTag's strings was filed under another stamp, and was not compared"]
+    );
     // This elmdb's write ends that build in its turn, and its builder builds its own: the keys of the other's
     // build are deleted, and the order is this one's to read again
     unit(&db, |t| entities::put_field(t, "Item-1", "tag", &"d".into()));
@@ -486,10 +532,12 @@ fn a_build_goes_on_with_one_it_finds_unfinished_beside_the_writes_that_keep_it()
         ],
     )
     .unwrap();
+    assert_eq!(db.check().unwrap().notes, ["The order of Item.byTag's strings is being built, and was not compared"]);
     // A builder that finds it goes on from the index's first key, puts what isn't there, and marks it whole
     build(&db, "byTag", 7);
     let whole = stored(&db, "byTag").0.unwrap();
     assert!(whole.whole && whole.build == begun.build);
+    assert!(db.check().unwrap().notes.is_empty());
     assert_eq!(strings(&db, "byTag").len(), 41);
     clean(&db);
 }

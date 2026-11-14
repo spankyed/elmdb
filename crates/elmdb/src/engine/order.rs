@@ -212,9 +212,27 @@ impl Marker {
     }
 }
 
-/// The marker of an index's order, when it has one
+/// The marker of an index's order, when it has one. One that doesn't read is no elmdb's this one knows: it is
+/// answered as a marker of no stamp, which no read trusts, a write deletes and the builder builds over, so bytes
+/// another layout or a damaged page left there cost an order a build and nothing else
 pub fn marker(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<Marker>> {
-    r.get(&keys::order_marker(entity_type, index))?.map(|stored| Marker::decode(&stored)).transpose()
+    let unread = Marker { stamp: [0; 32], build: 0, whole: false };
+    Ok(r.get(&keys::order_marker(entity_type, index))?.map(|stored| Marker::decode(&stored).unwrap_or(unread)))
+}
+
+/// Whether an index's order holds a key under a build other than `build`: what a build that ended before its
+/// last unit left, or one that was replaced. Two seeks, the keys being in the order of their builds
+pub fn stale(r: &impl Read, entity_type: &str, index: &str, build: u64) -> Result<bool> {
+    let (low, high) = crate::format::key::prefix_range(&keys::order_of(entity_type, index));
+    let (first, past) = crate::format::key::prefix_range(&keys::order_range(entity_type, index, build, &[]));
+    let mut found = false;
+    for (from, to) in [(&low, &first), (&past, &high)] {
+        r.visit_within(from, to, |_, _| {
+            found = true;
+            false
+        })?;
+    }
+    Ok(found)
 }
 
 /// The build a read takes an index's order from: its marker's, when that is this elmdb's stamp and whole
@@ -230,7 +248,7 @@ pub fn readable(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<
 pub fn filing(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<Option<u64>> {
     let stamp = stamp(&t.schema.collation)?;
     let own = keys::order_marker(entity_type, index);
-    match t.get(&own)?.map(|stored| Marker::decode(&stored)).transpose()? {
+    match marker(t, entity_type, index)? {
         Some(marker) if marker.stamp == stamp => Ok(Some(marker.build)),
         found => {
             if found.is_some() {
@@ -303,10 +321,12 @@ pub fn begin_whole(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Resul
 pub enum Step {
     /// Not begun: the marker says what there is to do
     Begin,
-    /// The index's entries read as far as the key `after`, each string's key put where there was none
-    Entries { build: u64, after: Option<Vec<u8>> },
+    /// The index's entries read as far as the key `after`, each string's key put where there was none; with
+    /// `past`, as far as that place among those the key holds, an entry of a string with no key of its own having
+    /// one for each
+    Entries { build: u64, after: Option<Vec<u8>>, past: Option<u64> },
     /// And so the entities holding long strings, by the keys their places are under
-    Long { build: u64, after: Option<Vec<u8>> },
+    Long { build: u64, after: Option<Vec<u8>>, past: Option<u64> },
     /// Whole. What is left under any other build is deleted
     Sweep { build: u64 },
     /// Nothing more to do
@@ -381,53 +401,62 @@ fn build_step(
         Step::Done | Step::PutOff => Ok((step, false)),
         Step::Begin => match held {
             Some(m) if m.stamp == running.stamp && m.whole => Ok((Step::Sweep { build: m.build }, false)),
-            Some(m) if m.stamp == running.stamp => Ok((Step::Entries { build: m.build, after: None }, false)),
+            Some(m) if m.stamp == running.stamp => {
+                Ok((Step::Entries { build: m.build, after: None, past: None }, false))
+            }
             _ if !may_begin => Ok((Step::PutOff, false)),
             _ => {
                 let build = super::mirror::stored_sequence(t)? + 1;
                 let begun = Marker { stamp: running.stamp, build, whole: false };
                 t.put(&keys::order_marker(entity_type, index), &begun.encode())?;
-                Ok((Step::Entries { build, after: None }, true))
+                Ok((Step::Entries { build, after: None, past: None }, true))
             }
         },
-        Step::Entries { build, after } => {
+        Step::Entries { build, after, past } => {
             if !under(build, false) {
                 return Ok((Step::Begin, false));
             }
             let filing = Filing { build, running };
             let entries = keys::index_range(entity_type, index, &[]);
-            let from = after.map_or_else(
-                || entries.clone(),
-                |mut key| {
-                    key.push(0);
-                    key
-                },
-            );
-            let mut read: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            t.visit_from(&entries, &from, |key, stored| {
-                read.push((key.to_vec(), stored.to_vec()));
-                read.len() < limit
-            })?;
-            for (own, stored) in &read {
-                put(t, filing.of_entry(own))?;
+            let read = keys_from(t, &entries, None, &after, past, limit)?;
+            let mut left = limit;
+            for (own, _) in &read {
+                // An entry part done has its own key already, and its places as far as `past`
+                let resumed = if after.as_ref() == Some(own) { past } else { None };
+                if resumed.is_none() {
+                    put(t, filing.of_entry(own))?;
+                    left = left.saturating_sub(1);
+                }
                 // A string with no key of its own has one for each entity its entry holds
                 let parts = crate::format::key::decode(own)?;
                 if let Some((Part::String(string), leading)) = parts.get(3..).and_then(<[Part]>::split_last)
                     && !placed(string)
                 {
-                    for place in super::places::held(t, own, stored)? {
+                    let places = places_past(t, own, resumed, left.max(1))?;
+                    for place in &places {
                         let key =
-                            place_key(&filing.running.collator, entity_type, index, build, leading, string, place);
+                            place_key(&filing.running.collator, entity_type, index, build, leading, string, *place);
                         put(t, key)?;
                     }
+                    left = left.saturating_sub(places.len());
+                    if left == 0
+                        && let Some(last) = places.last()
+                    {
+                        return Ok((Step::Entries { build, after: Some(own.clone()), past: Some(*last) }, false));
+                    }
+                }
+                if left == 0 {
+                    return Ok((Step::Entries { build, after: Some(own.clone()), past: None }, false));
                 }
             }
             match read.len() < limit {
-                true => Ok((Step::Long { build, after: None }, false)),
-                false => Ok((Step::Entries { build, after: read.pop().map(|(key, _)| key) }, false)),
+                true => Ok((Step::Long { build, after: None, past: None }, false)),
+                false => {
+                    Ok((Step::Entries { build, after: read.last().map(|(key, _)| key.clone()), past: None }, false))
+                }
             }
         }
-        Step::Long { build, after } => {
+        Step::Long { build, after, past } => {
             if !under(build, false) {
                 return Ok((Step::Begin, false));
             }
@@ -435,38 +464,36 @@ fn build_step(
             // The keys the entities holding a long string are under: the range's own, for an index on one field,
             // and one for each tuple under it
             let range = keys::index_others(crate::format::Prefix::IndexLong, entity_type, index, &[]);
-            let mut read: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-            let from = match after {
-                None => {
-                    read.extend(t.get(&range)?.map(|stored| (range.clone(), stored)));
-                    range.clone()
-                }
-                Some(mut key) => {
-                    key.push(0);
-                    key
-                }
-            };
-            t.visit_from(&range, &from, |key, stored| {
-                read.push((key.to_vec(), stored.to_vec()));
-                read.len() < limit
-            })?;
+            let read = keys_from(t, &range, Some(&range), &after, past, limit)?;
             let last = found.fields.last().map(String::as_str).unwrap_or_default();
-            for (own, stored) in &read {
+            let mut left = limit;
+            for (own, _) in &read {
+                let resumed = if after.as_ref() == Some(own) { past } else { None };
                 let parts = crate::format::key::decode(own)?;
                 let leading = parts.get(3..).unwrap_or_default();
-                for place in super::places::held(t, own, stored)? {
-                    let Some((id, _)) = super::entities::at_place(t, entity_type, place)? else { continue };
+                let asked = left.max(1);
+                let places = places_past(t, own, resumed, asked)?;
+                for place in &places {
+                    let Some((id, _)) = super::entities::at_place(t, entity_type, *place)? else { continue };
                     if let Some(Value::String(string)) = super::entities::get(t, &id, last)?
                         && let Some(string) = string.as_str()
                     {
                         let key =
-                            place_key(&filing.running.collator, entity_type, index, build, leading, string, place);
+                            place_key(&filing.running.collator, entity_type, index, build, leading, string, *place);
                         put(t, key)?;
                     }
                 }
+                left = left.saturating_sub(places.len().max(1));
+                // As many places as were asked for may not be all the key holds: the next unit goes on past them
+                if places.len() == asked {
+                    return Ok((Step::Long { build, after: Some(own.clone()), past: places.last().copied() }, false));
+                }
+                if left == 0 {
+                    return Ok((Step::Long { build, after: Some(own.clone()), past: None }, false));
+                }
             }
             if read.len() >= limit {
-                return Ok((Step::Long { build, after: read.pop().map(|(key, _)| key) }, false));
+                return Ok((Step::Long { build, after: read.last().map(|(key, _)| key.clone()), past: None }, false));
             }
             let whole = Marker { stamp: filing.running.stamp, build, whole: true };
             t.put(&keys::order_marker(entity_type, index), &whole.encode())?;
@@ -492,6 +519,87 @@ fn build_step(
             Ok((if stale.len() < limit { Step::Done } else { Step::Sweep { build } }, false))
         }
     }
+}
+
+/// The keys under `under` a build's step reads next, `limit` of them at most, each with what it holds: from the
+/// first, past the key `after`, or from `after` itself when the step left off among its places (`past`). With
+/// `own`, the range's own key is the first, which no key under it is
+fn keys_from(
+    t: &Txn<'_, '_>,
+    under: &[u8],
+    own: Option<&Vec<u8>>,
+    after: &Option<Vec<u8>>,
+    past: Option<u64>,
+    limit: usize,
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    let mut read: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let from = match (after, past) {
+        (None, _) => {
+            if let Some(own) = own {
+                read.extend(t.get(own)?.map(|stored| (own.clone(), stored)));
+            }
+            under.to_vec()
+        }
+        // The range's own key again, which a walk of what is under it doesn't come to
+        (Some(key), Some(_)) if own == Some(key) => {
+            read.extend(t.get(key)?.map(|stored| (key.clone(), stored)));
+            under.to_vec()
+        }
+        (Some(key), Some(_)) => key.clone(),
+        (Some(key), None) => {
+            let mut next = key.clone();
+            next.push(0);
+            next
+        }
+    };
+    if read.len() < limit {
+        t.visit_from(under, &from, |key, stored| {
+            read.push((key.to_vec(), stored.to_vec()));
+            read.len() < limit
+        })?;
+    }
+    Ok(read)
+}
+
+/// The places filed under the key `own` past the place `past`, or all of them, `limit` at most, in order
+fn places_past(t: &Txn<'_, '_>, own: &[u8], past: Option<u64>, limit: usize) -> Result<Vec<u64>> {
+    let from = match past {
+        Some(place) => match place.checked_add(1) {
+            Some(from) => from,
+            None => return Ok(Vec::new()),
+        },
+        None => 0,
+    };
+    let mut sought = super::text::postings::Sought::new(super::places::term(own.to_vec()));
+    let mut places = Vec::new();
+    super::places::from(t, &mut sought, from, &mut |place| {
+        places.push(place);
+        Ok(places.len() < limit)
+    })?;
+    Ok(places)
+}
+
+/// Where a unit of a build would leave it having written nothing, when that is so, read without a unit: an index
+/// that keeps no order, an order whole with nothing under another build, and one that may not begin yet. A unit
+/// commits whatever it wrote, and a commit is heard by every handle on the database: one that says nothing is
+/// not made
+pub fn settled(r: &impl Read, entity_type: &str, index: &str, step: &Step, may_begin: bool) -> Result<Option<Step>> {
+    if kept(r, entity_type, index)?.is_none() {
+        return Ok(Some(Step::Done));
+    }
+    let stamp = stamp(&r.schema().collation)?;
+    let held = marker(r, entity_type, index)?.filter(|marker| marker.stamp == stamp);
+    Ok(match (step, held) {
+        (Step::Done | Step::PutOff, _) => Some(step.clone()),
+        (Step::Begin, None) if !may_begin => Some(Step::PutOff),
+        (Step::Begin, Some(marker)) if marker.whole && !stale(r, entity_type, index, marker.build)? => Some(Step::Done),
+        (Step::Sweep { build }, Some(marker))
+            if marker.whole && marker.build == *build && !stale(r, entity_type, index, marker.build)? =>
+        {
+            Some(Step::Done)
+        }
+        _ => None,
+    })
 }
 
 /// Removes an index's order: its keys under every build, and its marker

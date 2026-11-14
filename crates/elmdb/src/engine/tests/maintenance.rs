@@ -549,9 +549,9 @@ fn a_report_is_clean_only_without_differences_and_violations() {
     use crate::engine::derive::{CheckReport, Difference, Violation};
     assert!(CheckReport::default().is_clean());
     let differences = vec![Difference { key: "k".into(), kind: "missing".into() }];
-    assert!(!CheckReport { differences, violations: Vec::new() }.is_clean());
+    assert!(!CheckReport { differences, violations: Vec::new(), notes: Vec::new() }.is_clean());
     let violations = vec![Violation { subject: "Task-1".into(), message: "m".into() }];
-    assert!(!CheckReport { differences: Vec::new(), violations }.is_clean());
+    assert!(!CheckReport { differences: Vec::new(), violations, notes: Vec::new() }.is_clean());
 }
 
 #[test]

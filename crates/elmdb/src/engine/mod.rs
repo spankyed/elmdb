@@ -360,8 +360,13 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
         // A built value index's order that no read of this elmdb's trusts is the builder's to build
         for index in entities::value_indexes(r.schema(), entity_type).into_iter().filter(entities::ValueIndex::accounts)
         {
-            if derive::is_built(r, entity_type, &index.name)? && order::readable(r, entity_type, &index.name)?.is_none()
-            {
+            // And so is one it does trust that holds keys under another build, which a build stopped before its
+            // last unit left
+            let owed = match order::readable(r, entity_type, &index.name)? {
+                Some(build) => order::stale(r, entity_type, &index.name, build)?,
+                None => true,
+            };
+            if owed && derive::is_built(r, entity_type, &index.name)? {
                 unbuilt.push(Work::Order { entity_type: entity_type.clone(), index: index.name });
             }
         }

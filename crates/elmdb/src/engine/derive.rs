@@ -361,6 +361,10 @@ pub struct Violation {
 pub struct CheckReport {
     pub differences: Vec<Difference>,
     pub violations: Vec<Violation>,
+    /// What the check did not compare, and why: the order a value index keeps of its strings, where this elmdb
+    /// did not file it or it is not whole. Nothing is wrong with what a note names; the report is clean with them
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 impl CheckReport {
@@ -442,7 +446,29 @@ pub fn check(r: &impl Read) -> Result<CheckReport> {
     // A rank index's bits depend on the order of the commits that made it, so it is held to what it promises rather
     // than compared with keys derived again
     violations.extend(super::ranks::violations(r)?);
-    Ok(CheckReport { differences, violations })
+    Ok(CheckReport { differences, violations, notes: uncompared(r)? })
+}
+
+/// Each order of a built value index that `check` compared no key of, with why: one filed under another stamp,
+/// whose keys are that elmdb's to lay out, one being built, and one not begun
+fn uncompared(r: &impl Read) -> Result<Vec<String>> {
+    let stamp = super::order::stamp(&r.schema().collation)?;
+    let mut notes = Vec::new();
+    for entity_type in r.schema().types.keys() {
+        for index in value_indexes(r.schema(), entity_type).into_iter().filter(ValueIndex::accounts) {
+            if !is_built(r, entity_type, &index.name)? {
+                continue;
+            }
+            let why = match super::order::marker(r, entity_type, &index.name)? {
+                Some(marker) if marker.stamp != stamp => "was filed under another stamp",
+                Some(marker) if !marker.whole => "is being built",
+                Some(_) => continue,
+                None => "is not built yet",
+            };
+            notes.push(format!("The order of {entity_type}.{}'s strings {why}, and was not compared", index.name));
+        }
+    }
+    Ok(notes)
 }
 
 /// Deletes every compared derived key, and with `index` only that index's entries, then writes what primary data

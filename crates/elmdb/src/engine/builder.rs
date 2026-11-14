@@ -275,7 +275,7 @@ impl Builder {
                             Ok(())
                         }
                         Work::Order { entity_type, index } => {
-                            build_order(&store, &commits, &core, work, entity_type, index, stopping)
+                            build_order(&store, &schema, &commits, &core, work, entity_type, index, stopping)
                         }
                         Work::Rank { name } => {
                             build_rank(&store, &schema, &commits, name, stopping, &|| core.await_quiet(name))
@@ -300,7 +300,8 @@ impl Builder {
     /// Work left after stop joins the worker, including an interrupted chunk's index.
     pub fn pending(&self) -> Vec<Work> {
         let state = self.core.lock();
-        state.active.iter().chain(state.queue.iter()).cloned().collect()
+        let put_off = state.later.iter().map(|(_, work)| work);
+        state.active.iter().chain(state.queue.iter()).chain(put_off).cloned().collect()
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
@@ -404,8 +405,10 @@ fn build_index(
 /// Builds the order a value index keeps of its strings (`order::build_unit`), a chunk of its entries at a time, each
 /// a unit: nothing for an index that keeps none, or isn't built. A build this builder has begun before and finds
 /// ended is put off, and begins when its wait is over
+#[allow(clippy::too_many_arguments)]
 fn build_order(
     store: &Store,
+    schema: &EngineSchema,
     commits: &Commits,
     core: &Core,
     work: &Work,
@@ -413,15 +416,23 @@ fn build_order(
     index: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
-    use super::order::{Step, build_unit};
+    use super::order::{Step, build_unit, settled};
     let mut step = Step::Begin;
     chunks(store, stopping, || {
-        // Where the build is moves on only once its unit commits
-        let (may_begin, mut next) = (core.may_begin(work), None);
-        commits(&mut |t| {
-            next = Some(build_unit(t, entity_type, index, step.clone(), may_begin, CHUNK)?);
-            Ok(true)
+        let may_begin = core.may_begin(work);
+        // A unit that would write nothing isn't made: its commit would be heard, and say nothing
+        let nothing = store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            settled(&super::unit::Snapshot { txn, db, schema }, entity_type, index, &step, may_begin)
         })?;
+        // Where the build is moves on only once its unit commits
+        let mut next = nothing.map(|reached| (reached, false));
+        if next.is_none() {
+            commits(&mut |t| {
+                next = Some(build_unit(t, entity_type, index, step.clone(), may_begin, CHUNK)?);
+                Ok(true)
+            })?;
+        }
         let (reached, began) = next.expect("the unit ran");
         if began {
             core.began(work);
