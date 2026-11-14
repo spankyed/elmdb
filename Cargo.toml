@@ -20,8 +20,21 @@ sha2 = "0.11.1"
 rmp-serde = "1.3.1"
 rmpv = { version = "1.3.1", features = ["with-serde"] }
 getrandom = "0.4.3"
-icu_collator = "2.4.0"
-icu_locale_core = "2.4.0"
+# The collator, and every crate its code and data are, each required exactly: a sort key is the collator's output, and
+# stored ones are stale under any other version (`engine/order.rs`, the stamp). Those the engine names nothing of are
+# dependencies only to hold their versions, which `cargo xtask check-icu-exact` holds to the lockfile.
+# `unstable` is the sink a sort key is cut by as it is made
+icu_collator = { version = "=2.4.0", features = ["unstable"] }
+icu_collator_data = { version = "=2.4.0", default-features = false }
+icu_collections = { version = "=2.4.0", default-features = false }
+icu_locale_core = "=2.4.0"
+icu_locale_fallback = { version = "=2.4.0", default-features = false }
+icu_locale_fallback_data = { version = "=2.4.0", default-features = false }
+icu_normalizer = { version = "=2.4.0", default-features = false }
+icu_normalizer_data = { version = "=2.4.0", default-features = false }
+icu_properties = { version = "=2.4.0", default-features = false }
+icu_properties_data = { version = "=2.4.0", default-features = false }
+icu_provider = { version = "=2.4.0", default-features = false }
 ryu-js = "1.0.3"
 parking_lot = { version = "0.13.0", features = ["arc_lock"] }
 rmp = "0.8.15"

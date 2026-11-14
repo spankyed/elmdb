@@ -3,6 +3,8 @@
 //! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`.
 //! - `check-generated`: fails when what `generate` would write differs from what is committed.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
+//! - `check-icu-exact`: fails unless every ICU crate the lockfile holds is a dependency of `elmdb` required at exactly
+//!   the locked version, so whoever builds elmdb builds the collator its stored sort keys are stamped with.
 //! - `check-diagnostics-off`: fails when a default build of the workspace has `elmdb` depend on `tracing` itself,
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
@@ -39,6 +41,7 @@ fn main() -> ExitCode {
         Some("compare") => compare::compare(&workspace_root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         Some("check-generated") => check_generated(),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
+        Some("check-icu-exact") => check_icu_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => sweep(&workspace_root()),
@@ -53,6 +56,7 @@ fn main() -> ExitCode {
                 &[
                     ("generated protocol", &check_generated),
                     ("one LMDB", &|| check_one_lmdb(&root)),
+                    ("exact ICU crates", &|| check_icu_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("crate::sync", &|| check_sync(&root)),
@@ -61,7 +65,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
                 .to_owned(),
         ),
     };
@@ -114,6 +118,7 @@ const UNMODELLED: &[(&str, &str)] = &[
     ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
     ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
     ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
+    ("engine/order.rs", "a per-thread cache of each collation's collator and its stamp, no shared state"),
     ("engine/values.rs", "a per-thread decompression buffer, no shared state"),
     ("engine/watch.rs", "the schema read lock; the tracks and their delivery go through crate::sync"),
     ("failpoints.rs", "test-only failure points, armed per thread"),
@@ -332,6 +337,20 @@ fn stale_exclusions(committed: &[String], skips: &[Skip], mutants: &[&str]) -> R
         }
     }
     for skip in skips {
+        // A comment excuses mutants of the line under it. One whose pattern matches a mutant of any other line
+        // holds an operator where it meant a character, a `|` above all, which with nothing on one side of it
+        // matches every mutant there is: no mutant is then tested, and nothing fails
+        let own = skip.pattern.splitn(3, ':').take(2).collect::<Vec<_>>().join(":") + ":";
+        let pattern = regex::Regex::new(&skip.pattern).map_err(|e| format!("exclusion {:?}: {e}", skip.pattern))?;
+        if let Some(other) = mutants.iter().find(|mutant| pattern.is_match(mutant) && !mutant.starts_with(&own)) {
+            stale.push(format!(
+                "{}:{}: this `// mutant-skip:` excuses {:?}, which matches a mutant of another line, {other:?}: a \
+                 character of the mutant's name that is an operator in a pattern, such as `|`, `(` or `+`, takes a \
+                 backslash before it",
+                skip.path, skip.line, skip.pattern
+            ));
+            continue;
+        }
         if matches_none(&skip.pattern)? {
             stale.push(format!(
                 "{}:{}: this `// mutant-skip:` excuses {:?}, which matches none of the {} mutants listed: the line \
@@ -444,6 +463,52 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
             found.join("\n  ")
         )),
     }
+}
+
+/// Every ICU crate the lockfile holds, required by the workspace at exactly its locked version and named among
+/// `elmdb`'s dependencies. A sort key is the collator's output: one stored under the stamp of these versions
+/// (`engine/order.rs`) is read as this collator's, so a build that resolved another version of any of them would read
+/// stale keys with no error. Required exactly, a consumer of the crate resolves these or fails to resolve
+fn check_icu_exact(root: &Path) -> Result<(), String> {
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"));
+    let (lock, workspace, elmdb) = (read("Cargo.lock")?, read("Cargo.toml")?, read("crates/elmdb/Cargo.toml")?);
+    let mut problems = Vec::new();
+    let mut lines = lock.lines();
+    while let Some(line) = lines.next() {
+        let Some(name) = line.strip_prefix("name = \"").and_then(|rest| rest.strip_suffix('"')) else { continue };
+        if !name.starts_with("icu_") {
+            continue;
+        }
+        let version = lines.next().and_then(|line| line.strip_prefix("version = \"")).unwrap_or_default();
+        let version = version.trim_end_matches('"');
+        // From the registry, where a version is one thing: a path or a git source under the version is another crate
+        if !lines.next().is_some_and(|line| line.starts_with("source = \"registry+")) {
+            problems.push(format!("Cargo.lock doesn't take {name} from the registry"));
+        }
+        // Each in the table a build of the crate reads: one under a table of development or a target's
+        // dependencies would hold no one who depends on elmdb
+        let required =
+            table(&workspace, "[workspace.dependencies]").find(|line| line.starts_with(&format!("{name} = ")));
+        if !required.is_some_and(|line| line.contains(&format!("\"={version}\""))) {
+            problems.push(format!("Cargo.toml's [workspace.dependencies] doesn't require {name} at exactly {version}"));
+        }
+        if !table(&elmdb, "[dependencies]").any(|line| line.trim() == format!("{name}.workspace = true")) {
+            problems.push(format!("crates/elmdb/Cargo.toml's [dependencies] doesn't name {name}"));
+        }
+    }
+    match problems.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "An ICU crate the collator is built from isn't required exactly, so a build may resolve another and \
+             read stored sort keys as its own:\n  {}",
+            problems.join("\n  ")
+        )),
+    }
+}
+
+/// The lines of one table of a manifest: those after its header, up to the next table's
+fn table<'a>(manifest: &'a str, header: &'a str) -> impl Iterator<Item = &'a str> {
+    manifest.lines().skip_while(move |line| line.trim() != header).skip(1).take_while(|line| !line.starts_with('['))
 }
 
 /// The workspace's crates at their default features and what they build with, one `<name> v<version>` a line;
@@ -629,6 +694,14 @@ fn a() {
             assert!(named.len() == 1 && named[0].contains("names a line"), "{named:?}");
         }
         assert!(stale_exclusions(&["(".to_owned()], &[], &mutants).is_err());
+        // A comment whose mutant's name holds `||` unescaped is a pattern with nothing on one side of a `|`, which
+        // matches every mutant: refused for the mutants of other lines it excuses, and taken once it is escaped
+        let ors =
+            ["crates/x/src/a.rs:6:10: replace && with || in a", "crates/x/src/b.rs:3:5: replace b -> bool with true"];
+        let all = stale_exclusions(&[], &[skip(5, "crates/x/src/a.rs:6:.*replace && with || in a")], &ors).unwrap();
+        assert!(all.len() == 1 && all[0].contains("another line"), "{all:?}");
+        let one = stale_exclusions(&[], &[skip(5, "crates/x/src/a.rs:6:.*replace && with \\|\\| in a")], &ors);
+        assert_eq!(one.unwrap(), [""; 0]);
     }
 
     #[test]

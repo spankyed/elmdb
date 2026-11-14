@@ -408,11 +408,12 @@ fn least_and_greatest_read_from_an_index_answer_what_reading_the_set_answers() {
     }
     // Of the 288 reads, those of a set an index orders by the field were read from it: live and with the trash, of
     // `price` under no filter, each of the five equalities on `qty`, the three ranges and the equality with a range
-    // (ten sets, two answers, two scopes), and of `rank`, which holds booleans and numbers, under no filter. A name
-    // is a string, which no index reads in the collation's order, and no index's last field is `qty`
-    assert_eq!(read_from_an_index, 40 + 4);
-    // A value an index files and doesn't order, a list, a map or a string too long for a key, sorts past every number:
-    // while one entity holds one, the field's order isn't the index's, and the set is read
+    // (ten sets, two answers, two scopes), of `rank`, which holds booleans and numbers, under no filter, and of
+    // `name`, whose strings its index keeps the collation's order of, under none. No index's last field is `qty`
+    assert_eq!(read_from_an_index, 40 + 4 + 4);
+    // A value an index files and doesn't order, a list or a map, sorts past every number: while one entity holds
+    // one, the field's order isn't the index's, and the set is read. A string too long for an entry is past every
+    // number too, and is read where the index's order has it
     let unordered = [json!([1, 2]), json!({ "a": 1 }), json!("z".repeat(300))];
     for (i, rank) in unordered.into_iter().enumerate() {
         let held =
@@ -424,7 +425,8 @@ fn least_and_greatest_read_from_an_index_answer_what_reading_the_set_answers() {
             let asked = plan("live", json!([]), json!({ "answer": answer, "field": "rank" }));
             let from_set = read(&plain, asked.clone()).unwrap();
             assert_eq!(read(&indexed, asked.clone()).unwrap(), from_set, "{asked}");
-            assert_eq!(stages(&indexed, asked).pop().unwrap().get("index"), None, "{rank} is in no index's order");
+            let from_index = stages(&indexed, asked).pop().unwrap().get("index").is_some();
+            assert_eq!(from_index, rank.is_string(), "{rank}: only a string is in an index's order");
         }
         assert_eq!(
             read(&indexed, plan("live", json!([]), json!({ "answer": "greatest", "field": "rank" }))).unwrap()["id"],

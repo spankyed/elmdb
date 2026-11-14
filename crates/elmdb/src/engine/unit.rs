@@ -48,6 +48,10 @@ pub struct UnitState {
     /// Whether each rank index the unit changed owed pushes as the unit began: a savepoint rolled back keeps this, since
     /// what it restores is the same state
     pub(super) rank_owed_before: rustc_hash::FxHashMap<String, bool>,
+    /// The orders of value indexes the unit found without a marker of this elmdb's stamp as it wrote a string to
+    /// them, each by its type and index: its commit asks the builder for them. A savepoint rolled back keeps them,
+    /// and the builder then finds an order that needs nothing
+    pub(super) orders_owed: std::collections::BTreeSet<(String, String)>,
     /// The edge mirror a drain reads its graph through, when the unit is one of the builder's
     pub(crate) mirror: Option<Arc<PlainMutex<super::mirror::EdgeMirror>>>,
     /// Every key the unit wrote, while tracked reads are filed for a commit to be matched against; `None` when none

@@ -20,13 +20,13 @@ pub fn term(own: Vec<u8>) -> Term {
     Term::places(own, blocks)
 }
 
-/// Files the entity at `place` under the key `own`
-pub fn file(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<()> {
+/// Files the entity at `place` under the key `own`. True when the key held no place until now
+pub fn file(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<bool> {
     postings::put(t, &term(own), place, &[])
 }
 
-/// Takes the entity at `place` out from under the key `own`
-pub fn unfile(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<()> {
+/// Takes the entity at `place` out from under the key `own`. True when it was the key's last
+pub fn unfile(t: &mut Txn<'_, '_>, own: Vec<u8>, place: u64) -> Result<bool> {
     postings::remove(t, &term(own), place)
 }
 
@@ -116,11 +116,20 @@ pub fn visit(
 /// are sorted on disk, where one handed over twice under a key is kept once, and each key's are laid out in turn
 pub struct Sorting {
     rows: super::derive::sorted::Scratch,
+    /// The build an index's order is filed under and the collator that orders it, when its keys are made here
+    order: Option<super::order::Filing>,
 }
 
 impl Sorting {
     pub fn new() -> Result<Self> {
-        Ok(Sorting { rows: super::derive::sorted::Scratch::new()? })
+        Ok(Sorting { rows: super::derive::sorted::Scratch::new()?, order: None })
+    }
+
+    /// The same, making with each entry of a string the key the index's order has for it (`order::string_key`), so
+    /// whatever files an index's entries from sorted places has its order's keys from those entries and nowhere else
+    pub fn ordered(mut self, order: Option<super::order::Filing>) -> Self {
+        self.order = order;
+        self
     }
 
     /// Files `place` under the key `own`
@@ -146,6 +155,9 @@ impl Sorting {
             if filing.as_ref().is_none_or(|(of, _)| *of != own) {
                 if let Some((_, done)) = filing.take() {
                     done.finish(&mut emit)?;
+                }
+                if let Some(key) = self.order.as_ref().and_then(|order| order.of_entry(&own)) {
+                    emit(key, Vec::new())?;
                 }
                 filing = Some((own.clone(), postings::Filing::new(term(own))));
             }

@@ -438,9 +438,10 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     let first = |db: &Database, status: &Json| {
         same(db, "live", N, |field| json!([status, order(field, false), limit(2)])).1 as usize
     };
-    // A string under one value of the equality: that value's tasks are sorted, the other's still read in order
+    // A string under one value of the equality is read where the index's order has it, as the other value's
+    // tasks are read
     write(&db, vec![set(0, "n", json!("text"))]);
-    assert_eq!((first(&db, &open), first(&db, &done)), (holding("open"), 2));
+    assert_eq!((first(&db, &open), first(&db, &done)), (2, 2));
     same(&db, "live", N, |field| json!([open, order(field, true)]));
     clean(&db);
     write(&db, vec![set(0, "n", json!(3))]);
@@ -457,6 +458,20 @@ fn a_value_the_index_does_not_order_has_the_order_sorted() {
     clean(&db);
     write(&db, vec![set(1, "n", json!(1))]);
     assert_eq!(first(&db, &done), 2, "gone, the index is read");
+
+    // A long string in the ordered field is among the strings under its status, one the index has no entry for:
+    // the tasks there are read in order as with any string, and a range of numbers is read from the index's entries
+    write(&db, vec![set(1, "n", json!("x".repeat(300)))]);
+    assert_eq!(filed(&db, Prefix::IndexLong, "statusN"), [id(1)]);
+    assert!(filed(&db, Prefix::IndexUnordered, "statusN").is_empty());
+    assert_eq!((first(&db, &open), first(&db, &done)), (2, 2));
+    same(&db, "live", N, |field| json!([done, order(field, true)]));
+    let ranged = |field: &str| json!([done, { "step": "range", "field": field, "atLeast": 0 }]);
+    let (held, visits) = same(&db, "live", N, ranged);
+    assert!(!held.contains(&id(1)) && visits as usize == held.len(), "{held:?} of {visits} read");
+    clean(&db);
+    write(&db, vec![set(1, "n", json!(1))]);
+    assert!(filed(&db, Prefix::IndexLong, "statusN").is_empty());
 
     // What no index holds, in the equality's field, is nothing an equality the index answers can ask for: the task
     // is under what else its list holds, or under nothing, and every status is read in order as before
@@ -1021,8 +1036,8 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     // An index that is there wants nothing, whether or not it is what the order was read from
     assert_eq!(ordering(json!([open, order("n", false), limit(3)])), (json!("statusN"), Json::Null, json!(3)));
     assert_eq!(ordering(json!([order("k", false), limit(3)])).1, Json::Null);
-    // Nor does an index that holds a string where its field is declared a number, which a load may bring: its
-    // order is sorted, and it is not wanted again
+    // Nor does an index that holds a string where its field is declared a number, which a load may bring: the
+    // string is read where the index's order has it
     let odd = crate::engine::maintenance::Load::Entity {
         id: "Task-odd".into(),
         fields: [("owner".to_owned(), rmpv::Value::from(7)), ("rank".to_owned(), rmpv::Value::from("text"))].into(),
@@ -1030,10 +1045,11 @@ fn explain_names_the_index_that_would_read_a_sorted_order() {
     };
     db.bulk_load(&[odd]).unwrap();
     let ranked = ordering(json!([is("owner", json!(7)), order("rank", false), limit(2)]));
-    assert_eq!(ranked, (Json::Null, Json::Null, json!(4)));
-    // And none is named where an index wouldn't have the order: a string's is the collation's, an `any` field holds
-    // what it holds, and a filter that is no equality is no part of an index
-    assert_eq!(ordering(json!([open, order("note", false)])).1, Json::Null);
+    assert_eq!(ranked, (json!("ownerRank"), Json::Null, json!(2)));
+    // A string's order is one an index keeps too
+    assert_eq!(ordering(json!([open, order("note", false)])).1, "status, note");
+    // And none is named where an index wouldn't have the order: an `any` field holds what it holds, and a filter
+    // that is no equality is no part of an index
     assert_eq!(ordering(json!([open, order("m", false)])).1, Json::Null);
     assert_eq!(ordering(json!([{ "step": "has", "field": "note" }, order("rank", false)])).1, Json::Null);
     let trash =

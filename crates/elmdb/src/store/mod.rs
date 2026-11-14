@@ -984,7 +984,7 @@ impl Store {
         // LMDB's meta page, the commit's point, is written with O_DSYNC, which on Apple doesn't flush the drive's cache: a
         // full sync (F_FULLFSYNC, which LMDB's own sync makes of its data file on Apple) does, and a commit that returned
         // is then on disk. Elsewhere LMDB's sync of the meta page is the flush
-        // mutant-skip: replace && with || in Store::committed
+        // mutant-skip: replace && with \|\| in Store::committed
         // Off Apple the extra sync adds a flush and changes no answer, and no test observes a flush's count
         if self.sync_each_commit && cfg!(target_os = "macos") {
             self.env.force_sync()?;

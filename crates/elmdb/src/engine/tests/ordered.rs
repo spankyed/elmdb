@@ -209,8 +209,6 @@ fn an_order_is_read_from_the_index_as_the_sort_has_it() {
 fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
     let ext = Value::Ext(-1, 1_700_000_000u32.to_be_bytes().to_vec());
     let unordered: Vec<(&str, Value)> = vec![
-        ("a string", "pear".into()),
-        ("a string past what an index holds", "p".repeat(300).into()),
         ("a list", Value::Array(vec![1.into()])),
         ("an empty list", Value::Array(vec![])),
         ("a map", Value::Map(vec![("k".into(), 1.into())])),
@@ -236,6 +234,205 @@ fn a_value_the_index_does_not_order_has_the_order_sorted_until_it_goes() {
         assert_eq!(first, of(&all, &[2, 3, 11]), "{what}");
         clean(&db);
     }
+}
+
+#[test]
+fn a_string_is_read_where_the_index_s_order_has_it_after_every_number() {
+    // One the index has an entry for, one past what it holds an entry for, and one whose zero bytes leave it no key
+    // of its own in the order: each is read from the order, in as many entries as the page takes
+    let strings: Vec<(&str, Value)> = vec![
+        ("a string", "pear".into()),
+        ("a string past what an index holds", "p".repeat(300).into()),
+        ("a string of zero bytes", "\0".repeat(200).into()),
+    ];
+    for (what, value) in strings {
+        let (_dir, db) = open();
+        let all = load(&db, "Item", &mixed());
+        write(&db, vec![create("Item", "Item-odd", Some(value.clone()), &[])]);
+        db.wait_for_index_builds().unwrap();
+        for descending in [false, true] {
+            let (_, visits) = same(&db, "live", |field| json!([order(field, descending), limit(3)]));
+            assert_eq!(visits, 3, "{what}: three entries are read for the first three");
+            let (every, _) = same(&db, "live", |field| json!([order(field, descending)]));
+            assert_eq!(every.len(), all.len() + 1, "{what}");
+            // And a page goes on from it, and from the entity before it
+            for cursor in ["Item-odd", every[every.iter().position(|id| id == "Item-odd").unwrap() - 1].as_str()] {
+                same(
+                    &db,
+                    "live",
+                    |field| json!([order(field, descending), { "step": "after", "id": cursor }, limit(2)]),
+                );
+            }
+        }
+        clean(&db);
+    }
+}
+
+/// Strings whose order by the collation isn't their bytes': capitals, accents composed and combining, one another's
+/// beginning, a pair the collator holds equal, one of zero bytes with no key of its own in an order, long ones that
+/// agree past where a sort key is cut, and beside them numbers, a boolean and entities without a value
+fn worded() -> Vec<Option<Value>> {
+    let long = |end: &str| Value::from(format!("{}{end}", "long ".repeat(70)));
+    vec![
+        Some("pear".into()),
+        Some("Apple".into()),
+        Some(3.into()),
+        Some("apple".into()),
+        Some("é".into()),
+        Some("e\u{301}".into()),
+        None,
+        Some("eb".into()),
+        Some("e".into()),
+        Some(long("b")),
+        Some("Pear".into()),
+        Some(long("a")),
+        Some(true.into()),
+        Some(format!("ea{}", "\0".repeat(260)).into()),
+        Some("pear".into()),
+        Some(Value::Nil),
+        Some("zebra".into()),
+        Some(long("a")),
+    ]
+}
+
+#[test]
+fn a_range_of_strings_is_read_from_the_index_s_order_alone_and_before_an_order() {
+    let (_dir, db) = open();
+    let all = load(&db, "Item", &worded());
+    db.wait_for_index_builds().unwrap();
+    let strings = worded().iter().flatten().filter(|value| value.is_str()).count() as u64;
+    let range = |field: &str, bounds: &Json| {
+        let mut step = bounds.clone();
+        step["step"] = json!("range");
+        step["field"] = json!(field);
+        step
+    };
+    let long = format!("{}a", "long ".repeat(70));
+    let bounds = [
+        // A bound on either side, within and without; one equal to the collator and of other bytes than a string
+        // held; one no string holds; one whose sort key is cut where the long strings' are; and ones that keep none
+        json!({ "atLeast": "e" }),
+        json!({ "above": "e" }),
+        json!({ "atMost": "e\u{301}" }),
+        json!({ "below": "é" }),
+        json!({ "atLeast": "apple", "atMost": "Pear" }),
+        json!({ "above": "Apple", "below": "pear" }),
+        json!({ "atLeast": "b", "below": "f" }),
+        json!({ "atLeast": long }),
+        json!({ "above": long }),
+        json!({ "atMost": long }),
+        json!({ "below": long }),
+        json!({ "atLeast": format!("{long}a") }),
+        json!({ "above": "zebra" }),
+        json!({ "below": "a" }),
+        json!({ "atLeast": "" }),
+    ];
+    for bound in &bounds {
+        // Alone: the entities within it, in creation order, and no entity read but those and what else is in the
+        // run at each bound
+        let (kept, visits) = same(&db, "live", |field| json!([range(field, bound)]));
+        assert!(visits <= kept.len() as u64 + 4, "{bound}: {visits} read for {}", kept.len());
+        assert!(visits < strings || kept.len() as u64 >= strings - 1, "{bound}: {visits} of {strings} strings read");
+        // Counted, which reads no entity's row but an unplaced string's in a run at a bound
+        let counted = |field: &str| {
+            let mut asked = plan("live", &["Item"], json!([range(field, bound)]));
+            asked["terminal"] = json!({ "answer": "count" });
+            read(&db, json!({ "read": "query", "plan": asked })).unwrap()["n"].as_u64().unwrap()
+        };
+        assert_eq!((counted("n"), counted("m")), (kept.len() as u64, kept.len() as u64), "{bound}");
+        // Before an order, either way, a page of it and a page after each entity it keeps
+        for descending in [false, true] {
+            let (ordered, _) = same(&db, "live", |field| json!([range(field, bound), order(field, descending)]));
+            assert_eq!(ordered.len(), kept.len(), "{bound}");
+            let (_, visits) =
+                same(&db, "live", |field| json!([range(field, bound), order(field, descending), limit(2)]));
+            assert!(visits <= 2 + 4, "{bound}, descending {descending}: {visits} read for a page of two");
+            for cursor in &ordered {
+                same(&db, "live", |field| {
+                    json!([range(field, bound), order(field, descending), after(cursor), limit(2)])
+                });
+            }
+        }
+    }
+    // A range of strings holds no number, and one of numbers no string
+    let (kept, _) = same(&db, "live", |field| json!([range(field, &json!({ "atLeast": 0 }))]));
+    assert_eq!(kept, of(&all, &[2]));
+    clean(&db);
+    // With the trash, and of the trash alone, which no index is read for
+    write(&db, vec![op(json!({ "op": "trash", "id": all[0] })), op(json!({ "op": "trash", "id": all[4] }))]);
+    for scope in ["live", "withTrashed", "trashed"] {
+        for bound in &bounds {
+            same(&db, scope, |field| json!([range(field, bound)]));
+            same(&db, scope, |field| json!([range(field, bound), order(field, true), limit(3)]));
+        }
+    }
+}
+
+#[test]
+fn a_whole_order_is_resolved_in_the_order_of_its_keys_as_one_handed_on_an_entity_at_a_time_is() {
+    let (_dir, db) = open();
+    // More strings than are each sought, in no order: some shared, capitals among them, with numbers, entities
+    // without a value, one filed by its place and some in the trash
+    let mut values: Vec<Option<Value>> = (0..700usize)
+        .map(|i| match i % 9 {
+            0 => Some(((i * 37) % 50).into()),
+            1 => None,
+            2 => Some(format!("shared {}", i % 4).into()),
+            _ => {
+                let word = format!("w{:03}", (i * 131) % 997);
+                Some(if i % 2 == 0 { word.to_uppercase() } else { word }.into())
+            }
+        })
+        .collect();
+    values.push(Some("z".repeat(300).into()));
+    let all = load(&db, "Item", &values);
+    db.wait_for_index_builds().unwrap();
+    write(&db, (0..all.len()).step_by(13).map(|at| op(json!({ "op": "trash", "id": all[at] }))).collect());
+    for scope in ["live", "withTrashed"] {
+        for descending in [false, true] {
+            // Every entity, each visited once: the same ids in the same order as the sorted arm, and as the
+            // order handed on an entity at a time, which a limit past them all reads
+            let (whole, visits) = same(&db, scope, |field| json!([order(field, descending)]));
+            let (limited, _) = same(&db, scope, |field| json!([order(field, descending), limit(10_000)]));
+            assert_eq!(whole, limited, "{scope}, descending {descending}");
+            assert_eq!(visits as usize, all.len(), "{scope}: each place is read once");
+            // A page with no limit goes on past its cursor: one of a shared string, one of a string of its own,
+            // the long one, a number and an entity without a value
+            for at in [2usize, 3, 0, 1, all.len() - 1, 11] {
+                let (rest, _) = same(&db, scope, |field| json!([order(field, descending), after(&all[at])]));
+                let expected = match whole.iter().position(|id| *id == all[at]) {
+                    Some(found) => &whole[found + 1..],
+                    None => &[],
+                };
+                assert_eq!(rest, expected, "{scope}, descending {descending}, after {}", all[at]);
+            }
+            // And a filter after it is of every entity too
+            same(&db, scope, |field| json!([order(field, descending), { "step": "has", "field": "k" }]));
+        }
+    }
+    // Few of a type's entities, which a range keeps, are each sought
+    let (few, visits) = same(
+        &db,
+        "live",
+        |field| json!([{ "step": "range", "field": field, "atLeast": "w100", "below": "w110" }, order(field, false)]),
+    );
+    assert!(!few.is_empty() && visits <= few.len() as u64 + 4, "{visits} read for {}", few.len());
+    clean(&db);
+}
+
+#[test]
+fn a_long_string_leaves_a_range_of_its_field_s_numbers_to_the_index() {
+    let (_dir, db) = open();
+    let all = load(&db, "Item", &mixed());
+    write(&db, vec![create("Item", "Item-long", Some("p".repeat(300).into()), &[])]);
+    // A string is no number, so the range holds none of it: its entries are read, and no entity besides
+    let range = |field: &str| json!({ "step": "range", "field": field, "atLeast": 1, "below": 3 });
+    let (held, visits) = same(&db, "live", |field| json!([range(field)]));
+    assert_eq!((held, visits), (of(&all, &[1, 4, 6, 13]), 4));
+    // And the range's order is the index's
+    let (first, visits) = same(&db, "live", |field| json!([range(field), order(field, true), limit(2)]));
+    assert_eq!((first, visits), (of(&all, &[4, 1]), 2));
+    clean(&db);
 }
 
 #[test]
@@ -780,6 +977,8 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
         assert_eq!(unordered(db), odd, "not ordered: {what}");
         clean(db);
     };
+    // The entities holding a long string, which are apart from those the index doesn't order
+    let long = |db: &Database| filed(db, Prefix::IndexLong, "Item", "byN");
     write(
         &db,
         vec![
@@ -792,7 +991,8 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
             create("Item", "Item-flag", Some(false.into()), &[]),
         ],
     );
-    expect(&db, &["Item-none", "Item-null"], &["Item-list", "Item-long"], "as created");
+    expect(&db, &["Item-none", "Item-null"], &["Item-list"], "as created");
+    assert_eq!(long(&db), ["Item-long"]);
     // Each other index of the type files each entity by its own field, the times every entity holds leaving none
     // without a value; and the short code's and the roles' file none
     assert_eq!(filed(&db, Prefix::IndexWithout, "Item", "byTag").len(), 7);
@@ -801,17 +1001,27 @@ fn an_index_accounts_for_every_entity_of_its_type_through_every_write() {
     assert_eq!(every, 2 + 7, "byN's two and byTag's seven");
 
     write(&db, vec![set("Item-none", 1.into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a value given");
+    expect(&db, &["Item-null"], &["Item-list"], "a value given");
     write(&db, vec![set("Item-none", 2.into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a number for a number");
+    expect(&db, &["Item-null"], &["Item-list"], "a number for a number");
     write(&db, vec![set("Item-none", Value::Nil)]);
-    expect(&db, &["Item-none", "Item-null"], &["Item-list", "Item-long"], "null for a number");
+    expect(&db, &["Item-none", "Item-null"], &["Item-list"], "null for a number");
     write(&db, vec![set("Item-none", Value::Array(vec![]))]);
-    expect(&db, &["Item-null"], &["Item-none", "Item-list", "Item-long"], "a list for null");
+    expect(&db, &["Item-null"], &["Item-none", "Item-list"], "a list for null");
+    // A string no longer than an index has an entry for is in its entry and not among the long ones, whatever its
+    // zero bytes make of its key; one a byte past that length is among them, with no entry
+    write(&db, vec![set("Item-none", "\0".repeat(200).into())]);
+    expect(&db, &["Item-null"], &["Item-list"], "a string of zero bytes for a list");
+    assert_eq!(long(&db), ["Item-long"]);
+    write(&db, vec![set("Item-none", "n".repeat(257).into())]);
+    expect(&db, &["Item-null"], &["Item-list"], "a string a byte longer");
+    assert_eq!(long(&db), ["Item-none", "Item-long"]);
     write(&db, vec![set("Item-none", "text".into())]);
-    expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a string for a list");
+    expect(&db, &["Item-null"], &["Item-list"], "a string for a long one");
+    assert_eq!(long(&db), ["Item-long"]);
     write(&db, vec![set("Item-long", Value::Map(vec![]))]);
     expect(&db, &["Item-null"], &["Item-list", "Item-long"], "a map for a long string");
+    assert!(long(&db).is_empty());
     write(&db, vec![set("Item-long", true.into())]);
     expect(&db, &["Item-null"], &["Item-list"], "a boolean for a map");
     write(&db, vec![op(json!({ "op": "delete", "id": "Item-list", "field": "n" }))]);
@@ -1113,10 +1323,11 @@ fn a_range_is_counted_in_the_index_without_reading_an_entity() {
     assert_eq!(count("live", &["Item", "Other"], "n", from_one.clone()), (8, 10));
     assert_eq!(count("live", &["Item"], "n", json!({ "above": 1, "below": 3 })), (1, 1));
     assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": 50 })), (0, 0));
-    // The twin with no index, strings, and two types of which one has no index are walked
+    // The twin with no index, and two types of which one has no index, are walked
     assert_eq!(count("live", &["Item"], "m", from_one.clone()), (6, 15));
     assert_eq!(count("live", &["Item", "Other"], "m", from_one.clone()), (8, 17));
-    assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": "a" })), (0, 15));
+    // A range of strings is counted in the index's order of them, which holds none here
+    assert_eq!(count("live", &["Item"], "n", json!({ "atLeast": "a" })), (0, 0));
     // An index that holds no number has no entry to count
     assert_eq!(count("live", &["Item"], "tag", from_one), (0, 0));
     // As is an index holding a list, whose entries are its elements'

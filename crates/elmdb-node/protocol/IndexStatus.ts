@@ -11,4 +11,11 @@ type: string | null, index: string, built: boolean,
 /**
  * Why its build failed, such as a unique index over rows holding the same values
  */
-failure: string | null, };
+failure: string | null, 
+/**
+ * Whether the order a value index keeps of its strings is one a read of this database takes an `orderBy` or a
+ * string `range` from: filed by this elmdb and whole. False while it is built, and for one another elmdb
+ * filed, whose orders are sorted as they are read until this one's builder has built them. None for an index
+ * that keeps no order: a rank index, and a type's own indexes of short codes and roles
+ */
+ordered: boolean | null, };

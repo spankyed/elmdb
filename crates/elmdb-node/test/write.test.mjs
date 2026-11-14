@@ -107,7 +107,7 @@ test('admin: stats, check, a backup that opens on its own, reset, and a load the
   const db = open(t);
   write(db, [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }]);
   assert.equal(db.stats().types.Note.live, 1);
-  assert.deepEqual(db.checkSync(), { differences: [], violations: [] });
+  assert.deepEqual(db.checkSync(), { differences: [], violations: [], notes: [] });
   assert.ok(db.indexStatus().every((s) => s.built));
   const target = mkdtempSync(join(tmpdir(), 'elmdb-backup-'));
   t.after(() => rmSync(target, { recursive: true, force: true }));

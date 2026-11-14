@@ -19,6 +19,7 @@ mod keys;
 pub mod maintenance;
 pub(crate) mod mirror;
 mod numbering;
+mod order;
 mod places;
 pub mod plan;
 mod ranks;
@@ -170,6 +171,11 @@ pub struct IndexStatus {
     pub built: bool,
     /// Why its build failed, such as a unique index over rows holding the same values
     pub failure: Option<String>,
+    /// Whether the order a value index keeps of its strings is one a read of this database takes an `orderBy` or a
+    /// string `range` from: filed by this elmdb and whole. False while it is built, and for one another elmdb
+    /// filed, whose orders are sorted as they are read until this one's builder has built them. None for an index
+    /// that keeps no order: a rank index, and a type's own indexes of short codes and roles
+    pub ordered: Option<bool>,
 }
 
 /// Deletes the data of every index a schema change drops or rebuilds, with its marker, in the unit that stores the
@@ -252,6 +258,15 @@ pub(crate) fn drop_index_data(
                 }
                 db.delete(txn, &keys::vector_graph(entity_type, index))?;
             }
+            // A value index's order goes with it: its keys under every build, and its marker
+            let (low, high) = crate::format::key::prefix_range(&keys::order_of(entity_type, index));
+            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+            let doomed: Vec<Vec<u8>> =
+                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+            for key in doomed {
+                db.delete(txn, &key)?;
+            }
+            db.delete(txn, &keys::order_marker(entity_type, index))?;
             db.delete(txn, &keys::index_built(entity_type, index))?;
         }
     }
@@ -317,6 +332,15 @@ pub(crate) fn held_in(
 
 type IndexList = Vec<Work>;
 
+/// What a unit leaves the builder as it commits: the rank indexes it left pushes for, and the orders of value
+/// indexes it found without a marker of this elmdb's as it wrote a string to them
+fn work_at_commit(t: &mut Txn<'_, '_>) -> Result<IndexList> {
+    let mut work: IndexList = ranks::push_at_commit(t)?.into_iter().map(|name| Work::Rank { name }).collect();
+    let owed = std::mem::take(&mut t.state.orders_owed);
+    work.extend(owed.into_iter().map(|(entity_type, index)| Work::Order { entity_type, index }));
+    Ok(work)
+}
+
 fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
     let mut empty = Vec::new();
     let mut unbuilt = Vec::new();
@@ -336,6 +360,22 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
             if !derive::is_built(r, entity_type, &index)? {
                 let work = Work::Index { entity_type: entity_type.clone(), index };
                 if held { &mut unbuilt } else { &mut empty }.push(work);
+            }
+        }
+        // A built value index's order that no read of this elmdb's trusts is the builder's to build
+        for index in entities::value_indexes(r.schema(), entity_type).into_iter().filter(entities::ValueIndex::accounts)
+        {
+            // And so is one it does trust that holds keys under another build, which a build stopped before its
+            // last unit left
+            if !derive::is_built(r, entity_type, &index.name)? {
+                continue;
+            }
+            let owed = match order::readable(r, entity_type, &index.name)? {
+                Some(build) => order::stale(r, entity_type, &index.name, build)?,
+                None => true,
+            };
+            if owed {
+                unbuilt.push(Work::Order { entity_type: entity_type.clone(), index: index.name });
             }
         }
     }
@@ -359,8 +399,15 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     for work in empty {
         match work {
             Work::Index { entity_type, index } => {
-                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?
+                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+                // Built with nothing in it, a value index's order is whole with it, of no key: the writes that
+                // fill the one keep the other from here
+                let declared = entities::value_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);
+                if declared.is_some_and(|found| found.accounts()) {
+                    order::begin_whole(t, &entity_type, &index)?;
+                }
             }
+            Work::Order { .. } => {}
             Work::Rank { name } => ranks::rebuild(t, &name)?,
         }
     }
@@ -547,7 +594,7 @@ impl Database {
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
                 vector::flush(&mut t)?;
-                let waiting = ranks::push_at_commit(&mut t)?;
+                let waiting = work_at_commit(&mut t)?;
                 store.deposit_touched(changed::Touched::of(&state.events, &schema));
                 Ok(waiting)
             },
@@ -563,7 +610,7 @@ impl Database {
         // As in `write`: queued before a failed sync is reported, the commit having landed
         let landed = self.finish_admin_commit(&store, commit);
         if let Some(builders) = builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         landed
     }
@@ -632,6 +679,9 @@ impl Database {
             .iter()
             .map(|f| match &f.work {
                 Work::Index { entity_type, index } => format!("{entity_type}'s index {index}: {}", f.message),
+                Work::Order { entity_type, index } => {
+                    format!("the order of {entity_type}'s index {index}: {}", f.message)
+                }
                 Work::Rank { name } => format!("the rank index {name}: {}", f.message),
             })
             .collect();
@@ -653,11 +703,16 @@ impl Database {
                     let failure = failures.iter().find(|f| {
                         matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
                     });
+                    let ordered = match index.accounts() {
+                        true => Some(order::readable(&s, entity_type, &index.name)?.is_some()),
+                        false => None,
+                    };
                     out.push(IndexStatus {
                         entity_type: Some(entity_type.clone()),
                         index: index.name.clone(),
                         built: derive::is_built(&s, entity_type, &index.name)?,
                         failure: failure.map(|f| f.message.clone()),
+                        ordered,
                     });
                 }
             }
@@ -668,6 +723,7 @@ impl Database {
                     index: name.clone(),
                     built: ranks::is_built(&s, name)?,
                     failure: failure.map(|f| f.message.clone()),
+                    ordered: None,
                 });
             }
             Ok(out)
@@ -739,7 +795,7 @@ impl Database {
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
-                let waiting = ranks::push_at_commit(&mut t)?;
+                let waiting = work_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
                 let changes = ChangeSet::of(&state.events);
                 store.deposit_touched(changed::Touched::of(&state.events, &schema));
@@ -751,7 +807,7 @@ impl Database {
         // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
         let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
         if let Some(builders) = builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         Ok((results, landed?))
     }
@@ -1009,7 +1065,7 @@ impl Unit {
         let checked = self.view(0.0).and_then(|mut t| {
             run_checks(&t)?;
             vector::flush(&mut t)?;
-            ranks::push_at_commit(&mut t)
+            work_at_commit(&mut t)
         });
         let waiting = match checked {
             Ok(waiting) => waiting,
@@ -1040,7 +1096,7 @@ impl Unit {
             Commit { sequence, synced },
         );
         if let Some(builders) = &self.builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         landed
     }

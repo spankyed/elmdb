@@ -173,6 +173,12 @@ pub fn holds(stored: &Value, probe: &Value) -> bool {
     strict_equal(stored, probe) || matches!(stored, Value::Array(items) if items.iter().any(|v| strict_equal(v, probe)))
 }
 
+/// Whether a string is longer than a value index has an entry for: more than `MAX_INDEXED_STRING` bytes. An index
+/// says which entities hold one (`entities::Other::Long`)
+pub fn long(string: &str) -> bool {
+    string.len() > MAX_INDEXED_STRING
+}
+
 /// The key part an index files a scalar under, or `None` for a value no index holds (a map, a list, bytes, a
 /// timestamp, a string of more than `MAX_INDEXED_STRING` bytes)
 pub fn index_part(value: &Value) -> Option<Part> {

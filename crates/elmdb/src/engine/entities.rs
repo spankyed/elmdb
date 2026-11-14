@@ -18,7 +18,7 @@
 //! among them.
 
 use rmpv::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::Prefix;
@@ -325,14 +325,15 @@ impl ValueIndex {
     ///
     /// An index on one field has an entry for the field's value, or for each distinct element of its list; an
     /// index that accounts for its entities also files the entity among those without a value when the field is
-    /// missing or null, and among those it doesn't order when it holds a list or a value no index holds.
+    /// missing or null, among those holding a long string when it holds one (`values::long`), and among those it
+    /// doesn't order when it holds a list or any other value no index holds.
     ///
     /// An index on several fields files the entity under each tuple its fields before the last name
     /// (`leading_of`), which is each tuple of values that equalities on those fields can ask for: an entry there
     /// when the last field holds a boolean, a number or a string the index holds; among those without a value
-    /// when the last is missing or null; among those it doesn't order when the last holds anything else. Under a
-    /// tuple it files the entity in one of those places, so what one entity holds decides only how its own tuples are
-    /// read.
+    /// when the last is missing or null; among those holding a long string when it is one; among those it doesn't
+    /// order when the last holds anything else. Under a tuple it files the entity in one of those places, so what
+    /// one entity holds decides only how its own tuples are read.
     ///
     /// A unique index on several fields holds an entity to one tuple of values (`unique_keys`), and that tuple is
     /// its one entry, a null among its parts: so a list before the last, which is no one tuple, leaves the entity
@@ -344,10 +345,12 @@ impl ValueIndex {
             None | Some(Value::Nil) => Place::Without,
             Some(held) => values::index_part(held).map_or(Place::Unordered, Place::Entry),
         };
+        let long = matches!(last, Some(Value::String(string)) if string.as_str().is_some_and(values::long));
         if before.is_empty() {
             filed.entries = values::index_parts(last.as_ref()).into_iter().map(|part| vec![part]).collect();
             match place(last) {
                 Place::Without => filed.others.push(Other::Without(Vec::new())),
+                Place::Unordered if long => filed.others.push(Other::Long(Vec::new())),
                 Place::Unordered => filed.others.push(Other::Unordered(Vec::new())),
                 Place::Entry(_) => {}
             }
@@ -361,6 +364,7 @@ impl ValueIndex {
                 match place(last) {
                     _ if self.unique && listed => filed.others.push(Other::Unordered(tuple)),
                     Place::Without => filed.others.push(Other::Without(tuple)),
+                    Place::Unordered if long => filed.others.push(Other::Long(tuple)),
                     Place::Unordered => filed.others.push(Other::Unordered(tuple)),
                     // A unique index's one entry is its tuple, filed above
                     Place::Entry(part) => {
@@ -374,6 +378,24 @@ impl ValueIndex {
         }
         if !self.accounts() {
             filed.others.clear();
+            return filed;
+        }
+        // The strings it holds that an order has no key of their own for: one with an entry, and a long one
+        let unplaced = |parts: &Vec<Part>| match parts.split_last() {
+            Some((Part::String(string), leading)) if !super::order::placed(string) => {
+                Some((leading.to_vec(), string.clone()))
+            }
+            _ => None,
+        };
+        filed.unplaced = filed.entries.iter().filter_map(unplaced).collect();
+        if let Some(Value::String(string)) = last
+            && let Some(string) = string.as_str()
+        {
+            let under = |other: &Other| match other {
+                Other::Long(leading) => Some((leading.clone(), string.to_owned())),
+                _ => None,
+            };
+            filed.unplaced.extend(filed.others.iter().filter_map(under));
         }
         filed
     }
@@ -386,6 +408,10 @@ pub struct Filed {
     pub entries: Vec<Vec<Part>>,
     /// Where an index that accounts for its entities files it besides
     pub others: Vec<Other>,
+    /// The strings it holds that the index's order has no key of their own for (`order::placed`), each with the
+    /// parts the index's fields before the last hold: the order files the entity's place for each, where the
+    /// string's sort key puts it. One the index has an entry for, and one it has none for (`Other::Long`)
+    pub unplaced: Vec<(Vec<Part>, String)>,
 }
 
 impl Filed {
@@ -416,8 +442,13 @@ pub enum Other {
     /// Among those without a value in the index's last field, under the parts its fields before that one hold
     Without(Vec<Part>),
     /// Among those the index doesn't order, under the parts its fields before the last hold: its last field holds
-    /// a list or a value no index holds, or it is a unique index and a field before the last holds a list
+    /// a list or a value no index holds but a long string, or it is a unique index and a field before the last
+    /// holds a list
     Unordered(Vec<Part>),
+    /// Among those whose last field holds a long string (`values::long`), which the index has no entry for, under
+    /// the parts its fields before the last hold: a string is ordered among strings, so an order of the field's
+    /// numbers reads past it
+    Long(Vec<Part>),
 }
 
 impl Other {
@@ -426,6 +457,7 @@ impl Other {
         match self {
             Other::Without(leading) => keys::index_others(Prefix::IndexWithout, entity_type, index, leading),
             Other::Unordered(leading) => keys::index_others(Prefix::IndexUnordered, entity_type, index, leading),
+            Other::Long(leading) => keys::index_others(Prefix::IndexLong, entity_type, index, leading),
         }
     }
 }
@@ -666,13 +698,61 @@ fn reindex(
         let (had, has) = (was.entry_keys(&entity_type, &index.name), now.entry_keys(&entity_type, &index.name));
         let (had_others, has_others) =
             (was.other_keys(&entity_type, &index.name), now.other_keys(&entity_type, &index.name));
+        // The order the index keeps of its strings (`order.rs`) has a key for each string an entry is for, there
+        // while the entry holds a place, and one for the entity under each string with no key of its own. So the
+        // entries of strings this write files the entity under or takes it out from, by their keys
+        let strings = |filed: &Filed, other: &BTreeSet<Vec<u8>>| -> BTreeMap<Vec<u8>, Vec<Part>> {
+            let of_strings = filed.entries.iter().filter(|parts| matches!(parts.last(), Some(Part::String(_))));
+            let keyed = of_strings.map(|parts| (keys::index_range(&entity_type, &index.name, parts), parts.clone()));
+            keyed.filter(|(key, _)| !other.contains(key)).collect()
+        };
+        let (lost, gained) = match index.accounts() {
+            true => (strings(&was, &has), strings(&now, &had)),
+            false => Default::default(),
+        };
+        // A write that files a string or takes one out reads the order's marker, and files under it or ends it
+        let order = match lost.is_empty() && gained.is_empty() && was.unplaced == now.unplaced {
+            true => None,
+            false => match super::order::filing(t, &entity_type, &index.name)? {
+                Some(build) => Some((build, super::order::running(&t.schema.collation)?)),
+                None => None,
+            },
+        };
+        let key_of = |order: &Option<(u64, std::rc::Rc<super::order::Running>)>, parts: Option<&Vec<Part>>| {
+            let (build, running) = order.as_ref()?;
+            super::order::string_key(&running.collator, &entity_type, &index.name, *build, parts?)
+        };
         for key in had.difference(&has).chain(had_others.difference(&has_others)) {
-            places::unfile(t, key.clone(), seq)?;
+            // The string's key goes with the last place its entry held. What it held is known without a read: a
+            // unit that rolls this back has the entry again, and so the key, whether or not a build had put it yet
+            if places::unfile(t, key.clone(), seq)?
+                && let Some(gone) = key_of(&order, lost.get(key))
+            {
+                t.del_over(&gone, Some(&[]))?;
+            }
         }
         for key in has.difference(&had).chain(has_others.difference(&had_others)) {
             // What makes a key too long is a value the index holds
             key_fits(key, id, &entity_type, &index.name)?;
-            places::file(t, key.clone(), seq)?;
+            // And comes with the first: there was none, the entry having held no place
+            if places::file(t, key.clone(), seq)?
+                && let Some(came) = key_of(&order, gained.get(key))
+            {
+                t.put_over(&came, &[], None)?;
+            }
+        }
+        if let Some((build, running)) = &order {
+            let filing = super::order::Filing { build: *build, running: std::rc::Rc::clone(running) };
+            let places_of = |filed: &Filed| -> BTreeSet<Vec<u8>> {
+                filing.of_places(&entity_type, &index.name, &filed.unplaced, seq).collect()
+            };
+            let (had_places, has_places) = (places_of(&was), places_of(&now));
+            for key in had_places.difference(&has_places) {
+                t.del(key)?;
+            }
+            for key in has_places.difference(&had_places) {
+                t.put(key, &[])?;
+            }
         }
     }
     Ok(())
