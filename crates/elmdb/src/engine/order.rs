@@ -8,6 +8,7 @@
 //! keys were cut and are the same bytes, which differ past the cut if they differ.
 
 use icu_collator::{CollationKeySink, CollatorBorrowed};
+use sha2::{Digest, Sha256};
 
 /// A sort key as far as it was kept, and whether more of it was cut off
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -54,6 +55,61 @@ pub fn sort_key(collator: &CollatorBorrowed<'static>, string: &str, room: usize)
     let mut kept = Kept { bytes: Vec::with_capacity(room.min(2 * string.len() + 8)), room };
     let cut = collator.write_sort_key_to(string, &mut kept).is_err();
     SortKey { bytes: kept.bytes, cut }
+}
+
+/// What says which collator made a sort key: the stamp an order's keys are filed under. Sort keys of one stamp
+/// compare with each other, and one of another stamp may not, since a sort key is the collator's output and changes
+/// with its data, its code and how it is asked. So a stamp is everything a key's bytes follow from: the collation,
+/// how the key is made, each crate the collator is built from at the version it is built at, and, should one of those
+/// be patched under its version, the keys the running collator gives some strings
+pub type Stamp = [u8; 32];
+
+/// How a sort key is made: the collator's options and the sink that cuts it. Raised with any change to either
+const MAKING: u32 = 1;
+
+/// The crates a collator's code and data are, each at the version this elmdb is built with: every ICU crate the
+/// lockfile holds, which a test holds this list to
+const CRATES: [(&str, &str); 11] = [
+    ("icu_collator", "2.4.0"),
+    ("icu_collator_data", "2.4.0"),
+    ("icu_collections", "2.4.0"),
+    ("icu_locale_core", "2.4.0"),
+    ("icu_locale_fallback", "2.4.0"),
+    ("icu_locale_fallback_data", "2.4.0"),
+    ("icu_normalizer", "2.4.0"),
+    ("icu_normalizer_data", "2.4.0"),
+    ("icu_properties", "2.4.0"),
+    ("icu_properties_data", "2.4.0"),
+    ("icu_provider", "2.4.0"),
+];
+
+/// Strings whose sort keys a stamp takes as the running collator makes them: letters with and without case and
+/// accents, composed and combining, digits, punctuation and a space, and several scripts, a few characters of each.
+/// They are a sample of the collator's data, and catch a change to it that no version records
+const PROBES: [&str; 24] = [
+    "", "a", "A", "b", "z", "ab", "a b", "a-b", "é", "e\u{301}", "ö", "å", "ß", "ı", "İ", "10", "9", "α", "я", "あ",
+    "カ", "中", "한", "ก",
+];
+
+/// The stamp of the keys this elmdb files for a schema's `collation`
+pub fn stamp(collation: &str) -> crate::error::Result<Stamp> {
+    let collator = super::collator(collation)?;
+    let mut hash = Sha256::new();
+    // Each part ended, so no two lists of parts are the same bytes
+    let mut part = |bytes: &[u8]| {
+        hash.update((bytes.len() as u64).to_be_bytes());
+        hash.update(bytes);
+    };
+    part(collation.as_bytes());
+    part(&MAKING.to_be_bytes());
+    for (name, version) in CRATES {
+        part(name.as_bytes());
+        part(version.as_bytes());
+    }
+    for probe in PROBES {
+        part(&sort_key(&collator, probe, usize::MAX).bytes);
+    }
+    Ok(hash.finalize().into())
 }
 
 #[cfg(test)]
@@ -129,6 +185,40 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_stamp_is_one_collation_s_and_holds_the_crates_the_lockfile_does() {
+        // The same for the same collation, and another's for another, a locale whose order is the root's among them:
+        // the collation is in the stamp, not only what it makes of the probes
+        assert_eq!(stamp("root").unwrap(), stamp("root").unwrap());
+        let stamps: Vec<Stamp> = ["root", "sv", "en", "de-u-co-phonebk"].iter().map(|c| stamp(c).unwrap()).collect();
+        for (at, one) in stamps.iter().enumerate() {
+            assert!(stamps[at + 1..].iter().all(|other| other != one), "{at}");
+        }
+        assert!(stamp("no locale").is_err());
+        // Every ICU crate the workspace builds with, at its version: a crate updated or added is a stamp to change
+        let lock = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"));
+        let mut locked: Vec<(&str, &str)> = Vec::new();
+        let mut lines = lock.lines();
+        while let Some(line) = lines.next() {
+            if let Some(name) = line.strip_prefix("name = \"icu_").and_then(|rest| rest.strip_suffix('"')) {
+                let version = lines.next().unwrap().strip_prefix("version = \"").unwrap().trim_end_matches('"');
+                locked.push((&line[8..8 + 4 + name.len()], version));
+            }
+        }
+        assert_eq!(locked, CRATES);
+    }
+
+    #[test]
+    fn a_sort_key_s_bytes_are_those_the_stamp_was_made_for() {
+        // The root collation's keys for a few strings, as this stamp's collator makes them. A change here is a
+        // change to what is stored under the stamp: `MAKING` or `CRATES` moves with it, or the stored keys are stale
+        let root = collator("root").unwrap();
+        let key = |string: &str| sort_key(&root, string, usize::MAX).bytes;
+        assert_eq!(key("a"), [0x2b, 0x01, 0x05, 0x01, 0x05]);
+        assert_eq!(key("Ab"), [0x2b, 0x2d, 0x01, 0x06, 0x01, 0xdc, 0x05]);
+        assert_eq!(key("é"), [0x33, 0x01, 0x45, 0x88, 0x01, 0x06]);
     }
 
     #[test]
