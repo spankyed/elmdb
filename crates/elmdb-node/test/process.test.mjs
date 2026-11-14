@@ -180,6 +180,23 @@ if (process.platform !== 'win32') {
   });
 }
 
+/**
+ * Waits for `promise` with the event loop held open, for half a minute at most. A listener for other processes'
+ * commits doesn't hold the loop, so a wait for its wake alone would let the loop, and the test, end before the wake
+ * comes; and a wake that never comes fails the test here, not when its job is given up on
+ */
+async function held(promise) {
+  let late;
+  const never = new Promise((_, reject) => {
+    late = setTimeout(() => reject(new Error('no wake came in thirty seconds')), 30_000);
+  });
+  try {
+    return await Promise.race([promise, never]);
+  } finally {
+    clearTimeout(late);
+  }
+}
+
 test('a commit from another process wakes a listener, and a killed writer leaves it listening', async (t) => {
   const { Database } = require(loader);
   const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
@@ -197,25 +214,41 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   });
   assert.throws(() => db.hearCommitsElsewhere(() => {}), { code: 'ALREADY_LISTENING' });
 
-  /** Writes a row from a process of its own, which then does `then`, and waits for the wake */
-  const writeElsewhere = async (id, then) => {
+  /** Writes a row from a process of its own, which then does `then`, and waits for the wake and for the process's end */
+  const writeElsewhere = async (id, then, { killed = false } = {}) => {
     const source = `
       const { Database } = require(${JSON.stringify(loader)});
       const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
       const other = Database.open(${JSON.stringify(dir)}, { syncs: false, schema: ${JSON.stringify(schema)} });
-      other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
+      other.writeSync(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
       ${then}
     `;
     const heard = new Promise((resolve) => (woken = resolve));
     const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'ignore', 'pipe'] });
     let errors = '';
     child.stderr.on('data', (chunk) => (errors += chunk));
+    // Its end, once its error stream has closed: how it ended, by a code or by a signal
+    const ended = new Promise((resolve) => child.on('close', (code, signal) => resolve(code ?? signal)));
+    // How a child told to kill itself ends: by the signal, or on Windows with the code a killed process leaves
+    const asAsked = (how) => (killed ? how === 'SIGKILL' || (process.platform === 'win32' && how === 1) : how === 0);
+    // An end that was not asked for wrote nothing to wait for a wake of. Only that settles this: a wait for the wake
+    // ends by the wake, never by the child ending as it was asked to
     const refused = new Promise((_, reject) => {
-      child.on('exit', (code) => {
-        if (code) reject(new Error(errors));
+      ended.then((how) => {
+        if (!asAsked(how)) reject(new Error(`the child ended by ${how}: ${errors}`));
       });
     });
-    await Promise.race([heard, refused]);
+    try {
+      await held(Promise.race([heard, refused]));
+    } catch (error) {
+      // One still running when the wait gave up would keep this process, and its job, from ending
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      throw error;
+    }
+    // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
+    // commits, before it closes, and Windows removes no file a process holds open
+    const how = await ended;
+    assert.ok(asAsked(how), `the child ended by ${how}: ${errors}`);
   };
 
   await writeElsewhere('Task-a', 'other.close();');
@@ -223,7 +256,7 @@ test('a commit from another process wakes a listener, and a killed writer leaves
   assert.ok(first > 0);
   assert.equal(db.committedElsewhere(), true, 'the other process committed');
   assert.equal(db.committedElsewhere(), false, 'and nothing since this asked');
-  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");');
+  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");', { killed: true });
   assert.ok(wakes > first, 'heard the commit of a process that was then killed');
   await writeElsewhere('Task-c', 'other.close();');
 });
@@ -239,7 +272,7 @@ test('a reset from another process wakes a listener, refuses commits here until 
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const write = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  const write = (id) => db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
   write('Task-a');
   const woken = new Promise((resolve) => db.hearCommitsElsewhere(resolve));
 
@@ -249,7 +282,7 @@ test('a reset from another process wakes a listener, refuses commits here until 
     other.reset();
     other.close();
   `);
-  await woken;
+  await held(woken);
   const epoch = db.replacedElsewhere();
   assert.equal(typeof epoch, 'number');
   assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
@@ -271,7 +304,7 @@ test('a reader reads what another process changed since its position, and a unit
     db.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  const create = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
+  const create = (id) => db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
   create('Task-mine');
   const read = (from) => packr.unpack(db.changedSince(['Task'], packr.pack(from), 100));
   const cursor = read({ sequence: 0 }).next;
@@ -280,7 +313,7 @@ test('a reader reads what another process changed since its position, and a unit
     const { Database } = require(${JSON.stringify(loader)});
     const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
     const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
-    other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
+    other.writeSync(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
     other.close();
   `);
   const changed = read(cursor);

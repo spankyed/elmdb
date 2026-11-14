@@ -1,21 +1,37 @@
 # One plan algebra
 
-Status: designed, 2026-10-28. The first part, the planner's three fixes and EXPLAIN, is built (goal-elmdb-next's
-Phase 4, `../evidence/next-phase-4.md`). The rest is designed here and waits for its trigger: at apack's scale no plan
-intersects sets large enough for it to pay (`../evidence/next-phase-10.md`, Plan algebra).
+Status: built, 2026-11-11: elmdb #107, #108 and #110. Designed 2026-10-28, when the
+planner's three fixes and EXPLAIN were built (goal-elmdb-next's Phase 4, `../../evidence/next-phase-4.md`) and the
+rest waited for a plan over large sets (`../../evidence/next-phase-10.md`, Plan algebra). How it reads now is in
+`../../architecture/engine.md`, Reads: plans. Where the build differs from the design below:
+
+- **No count is kept.** The first phase's `d/xn`, a count for each value, is not built: the filters' lists are read
+  as the places they hold in common, one walked and sought in the others, which is bounded by the shortest
+  whichever is written first and counts nothing to choose.
+- **Blocks of places, not bitmaps.** A value's places are in its own key while 256 or fewer and in blocks of no
+  more than that past it, each as its distance from the one before, the text index's layout: a roaring bitmap
+  saved under a megabyte of a million entities' indexes (Where it stands, below).
+- **Lists, not a bitmap a step.** A plan's steps still pull ids. The filters a type start begins with are read as
+  lists of places; a `lacks` of a field with an index reads the list of the entities the index files without a
+  value; and a search after filters every one of which a list reads runs within the places they keep, a set made
+  without reading an entity. `has`, `unlinkedTo` and a walk are not sets, and a filter after any other step
+  filters what reaches it.
+- **What EXPLAIN says.** A stage's input and output were its `visited` and `kept` already. A stage that reads
+  lists adds the `places` they were handed and `set: "and"` when it read several in common, and a search the
+  places `within` which it ran. There is no `or` or `minus`.
 
 ## Where it stands
 
-A plan is a start, steps and a terminal, run by pulling ids through closures (`../architecture/engine.md`, Reads). Since
+A plan is a start, steps and a terminal, run by pulling ids through closures (`../../architecture/engine.md`, Reads). Since
 Phase 4, a type start's first indexed `where` or `withRole` among its leading filters drives, the filters before it are
 checked per match, an index lookup visits its matches in place order and stops at a `limit`, `orderBy` with `limit`
 holds only the first `limit`, and EXPLAIN answers each stage's index, visits, kept ids and time. A search, a vector
 query and a trigram search each answer a set the steps after them filter.
 
-Since the road to 1.0's fifth change (`../roadmap.md`), an `orderBy` of one type reads a value index on the field in
+Since the road to 1.0's fifth change (`../../roadmap.md`), an `orderBy` of one type reads a value index on the field in
 order, a `range` of numbers reads the entries between its bounds, and an `after` has the stage before it seek to its
 cursor: each index on one field accounts for every entity of its type, so an order read from it leaves none out
-(`../architecture/engine.md`, Reads: plans). A search has the stage's part in a page too: before an `after` it hands
+(`../../architecture/engine.md`, Reads: plans). A search has the stage's part in a page too: before an `after` it hands
 on the matches ranked past the cursor, and a `limit`, `first` or `exists` asks it for no more than the answer takes.
 
 An order or a range under equalities is read from an index on the equalities' fields and then its own, and with no
@@ -25,7 +41,7 @@ what they keep, which it learns by counting the entries the filters would read a
 Since then a type start's leading filters are read as the places their indexes hold in common, each index's
 entries for a value a list in place order: one list is walked and its places sought in the others, so what is read
 is bounded by the shortest whichever filter is written first, and nothing is counted to choose among them
-(`../architecture/engine.md`, Reads: plans). That answers what the first phase below was for without its `d/xn` key.
+(`../../architecture/engine.md`, Reads: plans). That answers what the first phase below was for without its `d/xn` key.
 
 The reading of The measurements below, taken again as a disposable program through `Database::read_bytes`: 100,000
 tasks, `status` `open` for every second, `prio` `high` for every fifth, so every tenth holds both, each field in an
@@ -47,7 +63,7 @@ the smaller alone, a place sought in the other list for each of its twenty thous
 bitmaps are for. No row here reads a range, the trash, three lists or lists whose places come in runs.
 
 Since then a value index holds a value's places together, in its own key while they are 256 or fewer and in blocks
-of no more than that past it, where it held a key for each entity (`../architecture/format.md`, `d/x`): the second
+of no more than that past it, where it held a key for each entity (`../../architecture/format.md`, `d/x`): the second
 phase below, with a block of places as their distances one from the next, the text index's layout, in place of a
 roaring bitmap. A list is asked a place at a time and a key is read only for a place the one last read doesn't
 answer for, so places close together cost one key between them, and a place carries no id: the entity at a place the
@@ -85,9 +101,8 @@ block already held. A first costs two keys more than it did, the value's own and
 what the blocks cost: a hundred places a thousand apart are each sought in a block of their own, which is read and
 its 256 places decoded for the one, 1.8 µs where a key sought was 0.6.
 
-What the planner still does not do: run a search inside a filter's set when the filter comes first, or read `lacks`
-from the list an index keeps of the entities without a value. A walked entity is tested by reading its record and the
-filters' fields.
+Since then a `lacks` of a field with an index reads the list the index keeps of the entities without a value, and
+a search after filters their indexes read runs within the places those filters keep.
 
 ## The measurements
 
@@ -100,10 +115,10 @@ filters' fields.
   26.2 ms; the `prio` lookup alone 12.9 ms. The same answer from two roaring bitmaps (16 KB each) decoded and
   intersected takes 5 µs, and turning its 10,000 places into ids 4.4 ms.
 - **The store's layout**, measured by Phase 9 on the trigram index: one key per value and entity tripled G8's file
-  where a bitmap per value and block of 2^16 places added an eighth (`../evidence/next-phase-9.md`). A value index
+  where a bitmap per value and block of 2^16 places added an eighth (`../../evidence/next-phase-9.md`). A value index
   stored per entry pays the same per-key cost.
 - **Ranking**: a common word searched exactly over 50,000 messages takes 21 ms (apack's text bench, Phase 9's G4), every
-  holder scored; block-max scores are the answer when that is too slow (`text-index-at-scale.md`).
+  holder scored; block-max scores are the answer when that is too slow (`../../roadmap/text-index-at-scale.md`).
 
 So the first gain at scale is the order of the filters, which needs only each index's size; bitmaps are the second, and
 both are worth building only when a plan over large sets is measured slow.

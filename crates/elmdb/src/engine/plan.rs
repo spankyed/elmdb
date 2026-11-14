@@ -602,6 +602,20 @@ pub enum Terminal {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         counts: bool,
     },
+    /// The entity whose field is least in the order `orderBy` sorts it in, among the entities holding a value for it: the
+    /// first of equal values in the plan's order. Its `id` and `value`, both `null` when none holds one.
+    Least {
+        field: String,
+    },
+    /// As `Least`, for the greatest
+    Greatest {
+        field: String,
+    },
+    /// The sum of the numbers the field holds over the set, and how many entities hold one. A value that isn't a number
+    /// refuses the plan (`VALUE_INVALID`)
+    Sum {
+        field: String,
+    },
     /// Each entity with what a search found in it: its score, the index's terms it matched, and with `highlights`
     /// where they are in each field, `[element, start, end]` in UTF-16 units; with `fields`, its id and those fields
     Hits {

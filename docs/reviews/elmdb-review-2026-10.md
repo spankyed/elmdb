@@ -236,7 +236,7 @@ or failed-sync finalization.
 
 Specific design corrections to resolve in P10:
 
-- **Bitmap algebra:** [plan-algebra.md](../roadmap/plan-algebra.md) proposes final-stage ordering and limits, but
+- **Bitmap algebra:** [plan-algebra.md](../archive/roadmap/plan-algebra.md) proposes final-stage ordering and limits, but
   `limit(5).where(...)` differs from `where(...).limit(5)`. Define reorderable regions, ordering/multiplicity properties,
   and semantic barriers. Use bitmap membership within those boundaries rather than treating every plan as an unordered set.
 - **Incremental views:** [incremental-views.md](../roadmap/incremental-views.md) needs a successor-access mechanism

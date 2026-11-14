@@ -34,9 +34,14 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync
+   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
+   * the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
+   * order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
+   * is refused while a unit is open
    */
-  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  write(batch: Buffer, durable?: boolean | undefined | null): Promise<Buffer>
+  /** `write` on this thread, held until the batch is applied */
+  writeSync(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
    * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
    * answer per read
@@ -76,10 +81,17 @@ export declare class Database {
    * (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
-  /** Compares derived data with primary data and every row with the schema's rules */
-  check(): CheckReport
-  /** Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's */
-  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
+  /** Compares derived data with primary data and every row with the schema's rules, on a thread of the pool */
+  check(): Promise<CheckReport>
+  /** `check` on this thread */
+  checkSync(): CheckReport
+  /**
+   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
+   * thread of the pool and in its turn among the writes asked for, as a write is
+   */
+  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
+  /** `rebuild` on this thread */
+  rebuildSync(entityType?: string | undefined | null, index?: string | undefined | null): void
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
@@ -102,13 +114,21 @@ export declare class Database {
   renameType(from: string, to: string): void
   renameField(entityType: string, from: string, to: string): void
   renameRelation(from: string, to: string): void
-  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
-  backup(target: string): void
+  /**
+   * A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
+   * the pool
+   */
+  backup(target: string): Promise<void>
+  /** `backup` on this thread */
+  backupSync(target: string): void
   /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
   replaceWith(source: string): void
   /** Every entry removed but the database's format and schema */
   reset(): void
-  /** What the database holds: entities per type and field, relations per kind, entries per index, its sizes */
+  /**
+   * What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+   * each value index, its sizes
+   */
   stats(): Stats
   /**
    * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
@@ -176,6 +196,12 @@ export interface OpenOptions {
   schema?: Schema
   /** Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory */
   syncs?: boolean
+  /**
+   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
+   * sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
+   * commits are synced in groups, a moment after they return
+   */
+  syncEachCommit?: boolean
   syncIdleMs?: number
   syncIntervalMs?: number
   mapSizeBytes?: number

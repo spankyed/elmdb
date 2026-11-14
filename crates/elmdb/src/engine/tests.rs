@@ -1,6 +1,7 @@
 //! The write protocol's rules, case by case: ported from apack's `tests/engine/{writes,relations,transact}.spec.ts`,
 //! each translated to batches. What reads answer (queries, walks) is Phase 5's; these read the store back directly.
 
+mod aggregates;
 mod catalog;
 mod changed;
 mod checkpoints;
@@ -16,6 +17,7 @@ mod maintenance;
 mod model;
 mod ordered;
 mod plans;
+mod power_loss;
 mod rank_bound;
 mod rank_index;
 mod ranks;

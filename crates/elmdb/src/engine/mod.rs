@@ -24,6 +24,7 @@ pub mod plan;
 mod ranks;
 mod reads;
 mod relations;
+mod sum;
 mod text;
 pub mod tracking;
 mod trigram;
@@ -418,6 +419,22 @@ pub struct Written<'a> {
     pub sequence: u64,
 }
 
+/// A write that has committed and is owed a sync. Dropped without a wait, nothing says whether it became durable
+pub struct Unsynced {
+    sequence: u64,
+    store: Arc<Store>,
+}
+
+impl Unsynced {
+    /// Asks for a sync and waits for it, answering as a durable write does: `NOT_DURABLE` when it failed. The sync is
+    /// asked for here and not as the write commits, and covers every commit made before this call: of several writes
+    /// waited for after the last of them, the first wait's sync is the others' too
+    pub fn wait(self) -> Result<()> {
+        let synced = self.store.durable().map_or(Ok(()), crate::store::sync::Durable::wait);
+        Commit { sequence: self.sequence, synced }.finish()
+    }
+}
+
 impl Database {
     /// `write` with the batch as msgpack bytes and the answer as msgpack bytes (`Written`), as the binding takes them
     pub fn write_bytes(&self, batch: &[u8], durable: bool) -> Result<Vec<u8>> {
@@ -429,6 +446,20 @@ impl Database {
             sequence: changes.sequence,
         })
         .expect("an answer serializes"))
+    }
+
+    /// `write_bytes`, answered once the commit has landed and before its sync, with the sync to wait for
+    /// (`Unsynced::wait`): a caller with several writes in hand makes them all and waits once, where each made
+    /// durable would wait for a sync of its own. Its watches and tracked reads are told as the commit lands, before
+    /// the sync, where a durable write tells them after it
+    pub fn write_bytes_unsynced(&self, batch: &[u8]) -> Result<(Vec<u8>, Unsynced)> {
+        let batch = decode_batch(batch)?;
+        // The store the write goes to, held until its sync is waited for: a close waits for it, as for a durable write
+        let store = self.store()?;
+        let (results, changes) = self.write(&batch, false)?;
+        let answer = Written { results: &results.results, changes: &changes, sequence: changes.sequence };
+        let answer = rmp_serde::to_vec_named(&answer).expect("an answer serializes");
+        Ok((answer, Unsynced { sequence: changes.sequence, store }))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
@@ -507,6 +538,7 @@ impl Database {
     ) -> Result<()> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = now_ms();
         let (waiting, mut commit) = store.write_committed(
             |txn, db| {
@@ -528,11 +560,12 @@ impl Database {
             commit.synced = store.committed(true);
         }
         drop(schema);
-        self.finish_admin_commit(&store, commit)?;
-        if let Some(builders) = self.builders()? {
+        // As in `write`: queued before a failed sync is reported, the commit having landed
+        let landed = self.finish_admin_commit(&store, commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(())
+        landed
     }
 
     pub(crate) fn finish_admin_commit(&self, store: &Store, commit: Commit) -> Result<()> {
@@ -695,6 +728,7 @@ impl Database {
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
         let schema = self.schema_guard();
         let store = self.store()?;
+        let builders = self.builders_of(Arc::clone(&store))?;
         let now = batch.now.unwrap_or_else(now_ms);
         let logging = !self.tracks.lock().is_empty();
         let ((results, changes, written, waiting), commit) = store.write_committed(
@@ -714,11 +748,12 @@ impl Database {
             durable,
         )?;
         drop(schema);
-        let changes = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit)?;
-        if let Some(builders) = self.builders()? {
+        // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
+        let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
+        if let Some(builders) = builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok((results, changes))
+        Ok((results, landed?))
     }
 
     /// Runs `f` on a read snapshot of the last commit
@@ -738,33 +773,67 @@ impl Database {
         // Held until the unit is open, so a schema change either finishes first or is refused for the open unit
         let held = self.schema_guard();
         let store = self.store()?;
+        // The unit's place is let go if no unit comes of it, refused or panicking, once the transaction and its
+        // holds, declared after it, have gone
+        let mut place = Place { store: &store, taken: false };
         let (txn, gate, writer) = store.begin()?;
+        // Declared so that an unwind drops the transaction first, then the gate, as the unit's own end does
+        let (writer, gate, txn) = (writer, gate, txn);
+        place.taken = true;
+        run_point!(UNIT_HELD);
         if let Err(error) = held.validate(&txn, store.db()) {
             drop(txn);
             drop(gate);
             writer.release();
-            store.end_unit();
             return Err(error);
         }
         let schema = Arc::clone(&held);
         drop(held);
+        let builders = match self.builders() {
+            Ok(builders) => builders,
+            Err(error) => {
+                drop(txn);
+                drop(gate);
+                writer.release();
+                return Err(error);
+            }
+        };
         // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
         // the transaction's, so the transaction is dropped first and the environment outlives it
         let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
         let logging = !self.tracks.lock().is_empty();
+        let (tracks, schemas) = (Arc::clone(&self.tracks), self.observing_schema());
+        // From here the unit holds the place, and ends it
+        place.taken = false;
+        drop(place);
         Ok(Unit {
             txn: Some(txn),
             state: UnitState::new(logging),
-            tracks: Arc::clone(&self.tracks),
-            schemas: self.observing_schema(),
+            tracks,
+            schemas,
             poisoned: None,
             gate: Some(gate),
             writer: Some(writer),
             schema,
             store,
-            builders: self.builders()?,
+            builders,
+            ended: false,
             _thread: PhantomData,
         })
+    }
+}
+
+/// A unit's place in the store while the unit is being made: ended when dropped while taken
+struct Place<'a> {
+    store: &'a Store,
+    taken: bool,
+}
+
+impl Drop for Place<'_> {
+    fn drop(&mut self) {
+        if self.taken {
+            self.store.end_unit();
+        }
     }
 }
 
@@ -778,7 +847,8 @@ pub struct Unit {
     poisoned: Option<Error>,
     /// The store's gate, held while the transaction is: a map growth waits for the unit to end
     gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
-    /// The writer's hold on the write transaction, let go once the transaction has ended (`store/writers.rs`)
+    /// The writer's hold on the write transaction, let go once the transaction has ended and the store has accounted
+    /// for its commit (`store/writers.rs`)
     writer: Option<crate::store::WriterLock>,
     schema: Arc<EngineSchema>,
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
@@ -786,6 +856,8 @@ pub struct Unit {
     tracks: watch::SharedTracks,
     /// The builder the rank indexes' pushes its commit leaves go to
     builders: Option<crate::database::Builders>,
+    /// Whether the store has been told the unit ended: once, however it ends
+    ended: bool,
     _thread: PhantomData<*const ()>,
 }
 
@@ -948,33 +1020,40 @@ impl Unit {
         };
         let changes = ChangeSet::of(&self.state.events);
         let txn = self.txn.take().expect("an open unit has its transaction");
+        run_point!(UNIT_COMMITTING);
         self.store.deposit(std::mem::take(&mut self.state.edges));
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
         let committed = self.store.commit_txn(txn);
         self.gate = None;
         self.writer = None;
+        self.ended = true;
         self.store.end_unit();
         let sequence = committed?;
         let synced = self.store.committed(durable);
-        let changes = finish_commit(
+        // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
+        let landed = finish_commit(
             &self.tracks,
             &self.store,
             &self.schemas,
             changes,
             self.state.written.as_ref(),
             Commit { sequence, synced },
-        )?;
+        );
         if let Some(builders) = &self.builders {
             builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
         }
-        Ok(changes)
+        landed
     }
 
     /// Ends the unit, keeping nothing of it
     pub fn abort(&mut self) {
-        if self.txn.take().is_some() {
+        // The transaction first, and then its holds. A commit that panicked once it had taken the transaction has
+        // not told the store, which is told here as the unit is dropped
+        self.txn = None;
+        if !self.ended {
             self.gate = None;
             self.writer = None;
+            self.ended = true;
             self.store.end_unit();
         }
     }

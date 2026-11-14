@@ -110,7 +110,9 @@ snapshot as a search when it needs to say that search is incomplete.
   it reads no key of its own; a phrase's candidates read their documents for positions, and a recency decay reads
   its field of every match.
 - **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
-  other steps it searches among the entities they reached, in which a type with no text index holds no match. Every
+  other steps it searches among the entities they reached, in which a type with no text index holds no match;
+  after a type start's filters that their indexes read, within the places those keep, with no entity read to say
+  which (`engine.md`, Reads: plans). Every
   match is scored, and an entity is read only as the step hands it on, best first: a `limit` straight after the step
   keeps its best matches as they are scored and reads that many entities, as `first` and `firstRow` keep and read
   the one. A `count` straight after it counts the matches as the index holds them, scoring and reading none, and an

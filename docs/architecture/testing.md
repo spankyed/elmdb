@@ -25,6 +25,25 @@ unit, a savepoint and a refused commit roll back with it. A workload also rebuil
 show that code wrong. Ranking is checked separately, against fixed corpora (`engine/text/tests.rs`,
 `engine/vector/tests.rs`).
 
+Each commit's change set is checked too: the entities it made, destroyed, trashed or restored, the fields and roles it
+wrote (whether or not the value changed), and its relations: each link, unlink, rekey and move, by kind and ends, with a
+relation unlinked after the commit made it or rekeyed it one entry, as the engine reports it. A unit's members are
+replayed one at a time, so a write a later member reverts is still named, as the engine names it. After every step,
+`changedSince` from the start must name each entity still there with the sequence of its last change, the ends of a
+changed edge included, and the entities destroyed and not made again; a commit's sequence must increase.
+
+The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
+set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
+from the commit before the first after it reads what changed since, checked against the model. The boundary itself, the
+reader one sequence below the reset, is checked by a deterministic test. It renames a relation kind to another now and
+then: its edges move, each end stamped with the rename's sequence. A rename onto an edge of the new kind with the same
+ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
+it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
+and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
+held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
+`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
+relation kinds and roles have none.
+
 It runs in two places:
 
 - in Rust, against the engine directly;
@@ -69,6 +88,34 @@ the parent's cleanup removes it. The
 failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock
 advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
 waited on failed.
+
+## Power loss
+
+`engine/tests/power_loss.rs` replays what a power loss can leave on the data file, without a disk: after each commit of a
+workload the file is copied, the pages that differ from one copy to the next are what that commit wrote, and the files a
+loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
+meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
+before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
+pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
+only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
+that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
+itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
+such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
+they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
+LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. Other
+processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
+that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
+landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
+only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
+torn file that is refused counts as a file that didn't survive.
+
+A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
+2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
+such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
+reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
+to half its pages shows it stopping, and on a child that says nothing and ended any other way.
 
 ## Failpoints
 
@@ -293,6 +340,19 @@ Each must apply or throw: an error carrying an elmdb code when the payload reach
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
+A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
+factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
+without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
+a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
+panic was raised in the unit or in the database; and the
+database opened again holds what was committed before and none of what the unit or the call wrote, takes a write,
+and passes `check()`. The variable is read once, as the addon first runs an export; a value naming no export asks
+for nothing; and nothing but that test sets it. That panic is raised at the export's door. One raised inside the
+engine, with the write transaction held, a unit's place reserved, a unit half begun, or a unit's commit under
+way, is the engine's
+own test (`engine/tests/lifecycle.rs`): after each the database takes a unit and a write, and closes.
+
 An answer in bytes reaches JavaScript as a Buffer V8 allocated, copied from elmdb's bytes, never as an external buffer
 over them. V8 frees an external buffer's bytes on a thread of its collector, where Node wakes the environment to run
 the finalizer, and an environment that is ending closes what that wakes before it stops waking it: Node 24.22.2 on
@@ -302,6 +362,18 @@ external buffer's memory so that it is never transferred to another thread. `exi
 V8 is still freeing answers they dropped, which only Windows can fail: with external buffers 24 of 200 such processes
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
+
+`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
+promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
+refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
+after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
+threads, random bytes asked of the pool are answered before the rebuild ends. Forty durable writes asked for behind a
+rebuild are answered by one sync, ten awaited in turn by one each, and one with a rebuild behind it before the
+rebuild. Writes asked for in the turn a database is closed reject as closed, the ones behind none that landed.
+`exit.test.mjs` asks a rebuild and forty writes behind it of a child process that then calls `process.exit()`: all
+forty are there and the rebuild ran to its end; and of a child that drops its handle with a rebuild and a durable
+write in flight, that the write is answered after the handle is collected, the child saying it was. Each
+`…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms
 
@@ -491,15 +563,21 @@ node crates/elmdb-node/bench/against-sqlite.mjs --json > report.json   # a milli
 ```
 
 One workload on elmdb, through the binding, and on SQLite, through Node's built-in `node:sqlite` with FTS5 and WAL:
-notes of a title, a number and a status, the title in a text index and the other two in value indexes, loaded in units
-of 5,000 with neither engine syncing. It reads what the road to 1.0 tracks per release (`../roadmap.md`): bytes per note
-as loaded and compacted; a create's commit at a twentieth of the notes and at all of them, for a note of three terms
-and a message of thirty, as a median of wall time and as the process's CPU per commit; the best ten and the count for
-a word every note holds and one a twelfth hold, ten of the first word's matches past a cursor near the end of them,
-and whether it has a match; a misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest
-of the half of the notes a status keeps, the count of the last 500 of it, and a page of fifty near the end of creation
-order and one near the end of the number's order; a check, a rebuild and a compaction. For elmdb it also reads how
-many entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine.
+notes of a title, a name, a number and a status, the title in a text index and the other three in value indexes, the
+name a string no other note holds and the status one of two, loaded in units of 5,000 with neither engine syncing. It
+reads what the road to 1.0 tracks per release (`../roadmap.md`): bytes per note as loaded and compacted; a create's
+commit at a twentieth of the notes and at all of them, for a note of three terms and a message of thirty, as a median
+of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
+twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
+misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
+status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
+end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
+count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
+to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
+SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
+entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the
+bytes of each value index in every key family it is filed in (`stats()`).
 
 Each engine answers its reads before they are timed, and the run fails when the two answered differently. A search's
 best ten are compared as ids for a word ten notes of one length hold from once to ten times, which any ranking

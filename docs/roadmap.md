@@ -9,11 +9,11 @@ waiting on a trigger below, which add to them and reorder nothing.
 
 | # | Change | Done when | State |
 |---|---|---|---|
-| 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince` and the admin calls | fixed, `79f646f`; the model harness's part is open |
-| 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | open |
-| 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | open |
-| 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | open |
-| 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers and the engine's times: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end (`evidence/million-notes.md`). A string's order is still sorted, the collation's order not being its index's |
+| 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField`; `renameType` and `replaceWith` have deterministic engine tests, and purge has them for types and fields | fixed, `79f646f`; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField` (#117, #118, #119, #121, #122); the gate was amended to this coverage, by the author's decision. Built |
+| 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | built: `PANICKED` (`architecture/engine.md`, Errors; `architecture/testing.md`, The binding) |
+| 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | built: `syncEachCommit` (`architecture/engine.md`, Durability; `architecture/testing.md`, Power loss); the README states the trade |
+| 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | built (#113); the quiet reading holds the loop under 3 ms for a 200,000-note rebuild on the pool (`evidence/million-notes.md`, off the calling thread) |
+| 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers and the engine's times: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end (`evidence/million-notes.md`). A string's order is still sorted, the collation's order not being its index's: designed, not built, in `roadmap/string-order.md` |
 | 6 | Vector builds off the commit path | one embedding a commit costs within twice a batch's; a commit of one takes under 2 ms at 100,000 vectors | open |
 | 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | open |
 | 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | open |
@@ -33,7 +33,7 @@ Of milestone 0.2, compound indexes are read for an order or a range under equali
 walked while that is cheaper than sorting the filter's matches (`evidence/million-notes.md`, A filter before an
 order). The smaller filter first is built as the places the filters' indexes hold in common, a read bounded by the
 shortest of them whichever is written first, equalities on every field of a compound index among
-them as one list (`architecture/engine.md`, Reads: plans); least, greatest and sum are open.
+them as one list (`architecture/engine.md`, Reads: plans). Least, greatest and sum are the plan's terminals `least`, `greatest` and `sum` (`architecture/engine.md`, Reads: plans).
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the
@@ -53,6 +53,7 @@ with its journal, since a vector index's journal outliving its commit is the sam
 | Call counts, bounded watches, EXPLAIN, field types, compressed values, trigram search | `evidence/next-phase-3.md` to `next-phase-9.md` |
 | Graph algorithms, and their weights | [graph-algorithms](archive/roadmap/graph-algorithms.md), [rank-weights](archive/roadmap/rank-weights.md) |
 | Rank indexes | [rank-index](archive/roadmap/rank-index.md), `evidence/rank-index.md` |
+| Filters read as the places their indexes hold in common, a value index's places in blocks, a search within a filter's set | [plan-algebra](archive/roadmap/plan-algebra.md), `evidence/million-notes.md` |
 
 Other built directions are in `archive/roadmap/`.
 
@@ -61,8 +62,6 @@ Other built directions are in `archive/roadmap/`.
 Each is a design in `roadmap/` with its measurements (`evidence/next-phase-10.md`), built when the reading it names calls
 for it:
 
-- **The smaller filter first, then value indexes as bitmaps** (`roadmap/plan-algebra.md`): when a plan over value
-  indexes is measured slow in apack.
 - **Incremental backup as the fields changed since a sequence** (`roadmap/change-log.md`): when apack's backup screen
   takes incremental backups.
 - **Maintained views** (`roadmap/incremental-views.md`): when a view's re-run is a measurable share of a user action.

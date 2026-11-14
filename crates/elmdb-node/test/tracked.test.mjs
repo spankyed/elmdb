@@ -18,7 +18,7 @@ test('reads tracked under a token cross the binding, and a commit names the toke
     types: { Task: { fields: { title: { type: 'any', optional: true } } }, Note: { fields: {} } },
   } });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  const write = (ops) => packr.unpack(db.write(packr.pack({ ops, now: 1000 })));
+  const write = (ops) => packr.unpack(db.writeSync(packr.pack({ ops, now: 1000 })));
   const tasks = { read: 'query', plan: { start: { from: 'types', types: ['Task'] }, terminal: { answer: 'ids' } } };
 
   db.readSync(packr.pack({ reads: [tasks], track: 4 }));
@@ -56,7 +56,7 @@ test('pooled reads keep query results coherent while an index changes fields', a
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  db.write(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
+  db.writeSync(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
     op: 'create', type: 'Task', id: `Task-${i}`,
     fields: { a: i === 0 ? 'match' : 'other', b: i === 1 ? 'match' : 'other' },
   })) }));
@@ -85,7 +85,7 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  db.write(packr.pack({ ops: [
+  db.writeSync(packr.pack({ ops: [
     { op: 'create', type: 'Task', id: 'Task-0', fields: { a: 'match', b: 'other' } },
     { op: 'create', type: 'Task', id: 'Task-1', fields: { a: 'other', b: 'match' } },
   ] }));
@@ -103,7 +103,7 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   await assert.rejects(db.read(packr.pack(reads)), { code: 'SCHEMA_CHANGED' });
   await assert.rejects(db.read(packr.pack({ ...reads, track: 1 })), { code: 'SCHEMA_CHANGED' });
   db.untrack(1);
-  assert.throws(() => db.write(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
+  assert.throws(() => db.writeSync(packr.pack({ ops: [] })), { code: 'SCHEMA_CHANGED' });
   assert.throws(() => db.begin(), { code: 'SCHEMA_CHANGED' });
   for (const field of ['a', 'b']) {
     assert.throws(() => db.setSchema(schema(field)), { code: 'SCHEMA_CHANGED' });
@@ -123,7 +123,7 @@ test('the index builder\'s commits reach a listener with the tokens they wrote i
     ranks: { docRank: { types: ['Doc'], relations: ['refs'] } },
   } });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-  const write = (ops) => db.write(packr.pack({ ops, now: 1000 }));
+  const write = (ops) => db.writeSync(packr.pack({ ops, now: 1000 }));
   const ids = Array.from({ length: 500 }, (_, at) => `Doc-${at}`);
   write(ids.map((id) => ({ op: 'create', type: 'Doc', id })));
   db.waitForIndexBuilds();

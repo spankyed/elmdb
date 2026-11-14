@@ -12,6 +12,7 @@
 
 mod backup;
 mod idle_reads;
+mod reach;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
@@ -22,6 +23,7 @@ mod writers;
 pub(crate) use writers::WriterLock;
 
 use std::collections::HashSet;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -67,6 +69,9 @@ pub struct StoreOptions {
     pub read_only: bool,
     /// Group commit's syncs; off, nothing is synced and `durable()` resolves at once
     pub syncs: bool,
+    /// Each commit synced by LMDB as it is made, its pages before the meta page that names them: a commit that
+    /// returned is on disk, and no group commit runs
+    pub sync_each_commit: bool,
     pub sync_idle: Duration,
     pub sync_interval: Duration,
     /// The map's size at open; by default `initial_map_size` of the file
@@ -78,11 +83,101 @@ impl Default for StoreOptions {
         Self {
             read_only: false,
             syncs: true,
+            sync_each_commit: false,
             sync_idle: Duration::from_millis(100),
             sync_interval: Duration::from_millis(1000),
             map_size_bytes: None,
         }
     }
+}
+
+// The offset `page_size_of` reads is for a 64-bit host; every target this crate ships for is one.
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "the meta page offset in page_size_of is for 64-bit hosts");
+
+/// The page size LMDB wrote a file with, which it reads from the file and not from the host: a file written on a host with
+/// 4 KiB pages opens with 4 KiB pages on one with 16 KiB. It is `mm_psize`, in the first meta page: the page header (16
+/// bytes), then `mm_magic`, `mm_version`, `mm_address` and `mm_mapsize` (24 bytes on a 64-bit host), then the free tree's
+/// `md_pad`. It is read by seeking, so the file is never mapped to find it
+fn page_size_of(file: &mut std::fs::File, path: &std::path::Path) -> Result<usize> {
+    const AT: u64 = 16 + 24;
+    file.seek(SeekFrom::Start(AT))?;
+    let mut bytes = [0u8; 4];
+    file.read_exact(&mut bytes).map_err(|_| {
+        Error::new(ErrorCode::Corrupted, format!("{} is too short to hold a meta page", path.display()))
+    })?;
+    let page = u32::from_ne_bytes(bytes) as usize;
+    if !page.is_power_of_two() || !(512..=32768).contains(&page) {
+        return Err(Error::new(
+            ErrorCode::Corrupted,
+            format!("{}'s meta page names a page size of {page}, which LMDB does not write", path.display()),
+        ));
+    }
+    Ok(page)
+}
+
+/// Whether the data file is shorter than the pages its last commit names, having read the trees to see that they reach
+/// none of the pages it lacks; a file whose trees do is refused as torn.
+///
+/// The trees are read as one commit left them, which a read transaction holds for the walk: other processes may be
+/// committing, and LMDB gives no page a held snapshot reaches to a later commit. The commit's meta page is read from the
+/// file, where the commit after the next writes over it: when it has gone by the time it is read, two commits landed
+/// since the snapshot was taken, and the walk starts again from a later one
+fn short_of_its_pages(env: &Env<WithoutTls>, file: &mut std::fs::File, page: usize, data: &Path) -> Result<bool> {
+    loop {
+        let snapshot = read_txn(env)?;
+        run_point!(OPEN_SNAPSHOT);
+        let Some(meta) = reach::meta(file, page, &snapshot) else {
+            if env.info().last_txn_id > snapshot.id() {
+                continue;
+            }
+            // LMDB took the snapshot from a meta page of this file, and no commit has written over it
+            return Err(reach::refused(
+                data,
+                "holds no meta page of the commit LMDB opened it at, and no commit has landed since: something other \
+                 than a database handle changed the file as it was opened. Open it again once nothing else writes it",
+            ));
+        };
+        // Read once the snapshot is held: a commit writes its pages before its meta page, and a file only grows under
+        // other processes' commits, so every page this commit wrote to the file is in the length read here
+        let held = file.metadata()?.len();
+        if held >= (meta.last_page + 1) * page as u64 {
+            return Ok(false);
+        }
+        let reached = reach::reach(file, page, held / page as u64, &meta, data)?;
+        if let Some(missing) = reached.missing {
+            return Err(Error::new(
+                ErrorCode::Corrupted,
+                format!(
+                    "{} is {held} bytes, and page {missing} of its trees is past its end: a power loss may have left it \
+                     unwritten. Restore the database from a backup, or from a copy of the file that holds it",
+                    data.display()
+                ),
+            ));
+        }
+        debug_assert!(reached.highest < held / page as u64, "a clean walk reaches only pages in the file");
+        return Ok(true);
+    }
+}
+
+/// Extends the data file with zeros to the pages its last commit names. Under the environment's write lock, which every
+/// commit of every process lands under: the file's length and the last commit's pages are read where neither changes,
+/// so the file is only ever made longer, and never cut where another process has written since it was found short
+fn extend_to_its_pages(
+    env: &Env<WithoutTls>,
+    writers: &writers::Writers,
+    file: &std::fs::File,
+    page: usize,
+) -> Result<()> {
+    let _writer = writers.hold()?;
+    let txn = env.write_txn()?;
+    let needed = (env.info().last_page_number as u64 + 1) * page as u64;
+    // mutant-skip: replace < with <= in extend_to_its_pages
+    // A file of exactly those pages would be set to the length it has
+    if file.metadata()?.len() < needed {
+        file.set_len(needed)?;
+    }
+    txn.abort();
+    Ok(())
 }
 
 /// The map grows in steps of this, and starts at it at least. LMDB needs a multiple of the OS page size, which this is
@@ -92,6 +187,15 @@ pub const MAP_STEP: usize = 64 << 20;
 /// fails the test at it, as `MAP_FULL`, rather than filling the disk
 #[cfg(test)]
 const TEST_MAP_LIMIT: usize = 1 << 30;
+
+/// A unit's place, reserved while the unit is begun: let go when dropped, which a unit that began forgets it for
+struct Reserved<'a>(&'a Store);
+
+impl Drop for Reserved<'_> {
+    fn drop(&mut self) {
+        self.0.end_unit();
+    }
+}
 
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
@@ -145,6 +249,8 @@ pub(crate) struct RankPlans {
 pub struct Store {
     path: PathBuf,
     read_only: bool,
+    /// Each commit is synced as it is made, with no group commit (`StoreOptions::sync_each_commit`)
+    sync_each_commit: bool,
     env: Env<WithoutTls>,
     db: Db,
     gate: Arc<RecursiveRwLock<()>>,
@@ -162,7 +268,8 @@ pub struct Store {
     replacing: AtomicU64,
     /// Tells other processes of commits here, and this one of theirs
     pub(crate) wake: wake::Wake,
-    /// What a writer takes before LMDB's write lock, so one a dead writer left held is let go
+    /// What a writer takes before LMDB's write lock: its turn among this process's writers, kept until its commit is
+    /// accounted for, and on macOS a file lock, so a write lock a dead writer left held is let go
     writers: writers::Writers,
     /// What rank drains read of the graph, kept between them by the commits that change it (`engine::mirror`)
     mirror: Arc<PlainMutex<EdgeMirror>>,
@@ -284,8 +391,10 @@ impl Store {
             let map_size =
                 if options.read_only { read_only_map_size(file_bytes, options.map_size_bytes) } else { map_size };
             builder.max_dbs(8).map_size(map_size);
-            // SAFETY: the flags change when LMDB writes and flushes, which the binding doesn't rely on: commits are
-            // flushed by group commit's syncs, and a read-only environment is never written
+            // SAFETY: the flags say when LMDB syncs, and nothing else about its files: with NO_SYNC and NO_META_SYNC off,
+            // LMDB syncs a commit's pages before writing the meta page that names them, which is what the sync-each-commit
+            // mode relies on, and with NO_SYNC on, group commit's syncs are what flush a commit (`committed`). A read-only
+            // environment is never written, so its flags are none of these
             unsafe {
                 builder.flags(flags);
             }
@@ -294,7 +403,13 @@ impl Store {
             unsafe { builder.open(&canonical) }
         };
         let env =
-            open(if options.read_only { EnvFlags::READ_ONLY } else { EnvFlags::NO_SYNC }).map_err(|e| match e {
+            open(match (options.read_only, options.sync_each_commit) {
+                (true, _) => EnvFlags::READ_ONLY,
+                // LMDB's own order: a commit's pages, a sync, then the meta page that names them, synced as written
+                (false, true) => EnvFlags::empty(),
+                (false, false) => EnvFlags::NO_SYNC,
+            })
+            .map_err(|e| match e {
                 heed::Error::Io(ref io) if options.read_only && io.kind() == std::io::ErrorKind::PermissionDenied => {
                     Error::new(
                         ErrorCode::Io,
@@ -315,13 +430,26 @@ impl Store {
                 e => e.into(),
             })?;
 
+        // A read of a page past the end of the file is a SIGBUS (on Windows, an access violation) that ends the process, so
+        // a file shorter than its meta page's pages is read first, by seeks, to see whether the trees reach any of them. LMDB
+        // may leave its last free pages out of the file, and then the file is healthy: a writable open extends it with zeros,
+        // as LMDB's write map would, and a read-only open goes on, since it touches no page the trees don't reach. A page the
+        // trees reach past the end, or that fails the walk's checks of a page, is a torn file, refused whichever way it is opened
+        let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
+        let page = page_size_of(&mut file, &data)?;
         if options.read_only {
+            // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
             require_registered_reader(&env, &canonical)?;
         }
+        let short = short_of_its_pages(&env, &mut file, page, &data)?;
+        run_point!(OPEN_WALKED);
         let writers = writers::Writers::open(&canonical, options.read_only)?;
+        if short && !options.read_only {
+            extend_to_its_pages(&env, &writers, &file, page)?;
+        }
         let db = Self::open_db(&env, &canonical, options.read_only, &writers)?;
         let gate = Arc::new(RecursiveRwLock::new(()));
-        let commit = (!options.read_only && options.syncs).then(|| {
+        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
                 Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
@@ -345,6 +473,8 @@ impl Store {
         Ok(Self {
             path: canonical,
             read_only: options.read_only,
+            // A read-only store makes no commit, so the mode is none of its concern
+            sync_each_commit: options.sync_each_commit,
             env,
             db,
             gate,
@@ -574,6 +704,7 @@ impl Store {
             *self.deposited.lock() = None;
             *self.touched.lock() = None;
             self.replacing.store(0, Ordering::Release);
+            run_point!(WRITE_HELD);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
             match outcome {
@@ -637,7 +768,9 @@ impl Store {
         drop(accounted);
         self.epoch.store(epoch, Ordering::Release);
         self.sequence.fetch_max(next, Ordering::AcqRel);
-        // Still this process's one writer, so commits reach the mirror in their order
+        run_point!(COMMIT_LANDED);
+        // LMDB's lock went with the commit, and the writer's hold is kept until this returns (`writers.rs`): still
+        // this process's one writer, so commits reach the mirror in their order, each with the edges it deposited
         let entries = self.deposited.lock().take();
         self.mirror.lock().commit(last, next, entries.as_deref());
         // The wake another process sent for what this commit skipped may have been lost, or never sent by one that died
@@ -779,6 +912,14 @@ impl Store {
                 commit.durable().wait()?;
             }
         }
+        // LMDB's meta page, the commit's point, is written with O_DSYNC, which on Apple doesn't flush the drive's cache: a
+        // full sync (F_FULLFSYNC, which LMDB's own sync makes of its data file on Apple) does, and a commit that returned
+        // is then on disk. Elsewhere LMDB's sync of the meta page is the flush
+        // mutant-skip: replace && with || in Store::committed
+        // Off Apple the extra sync adds a flush and changes no answer, and no test observes a flush's count
+        if self.sync_each_commit && cfg!(target_os = "macos") {
+            self.env.force_sync()?;
+        }
         Ok(())
     }
 
@@ -788,13 +929,21 @@ impl Store {
     /// Rewrite the sequence read inside this transaction, so an intervening writer's sequence is preserved too.
     pub(crate) fn recycle_reset_pages(&self) -> Result<()> {
         self.check_writable()?;
-        if self.unit_is_open() {
-            return Err(Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"));
-        }
-        let _guard = self.gate();
-        let _writer = self.writers.hold()?;
-        self.drop_idle();
-        let mut txn = self.env.write_txn()?;
+        // Claimed under the unit's lock, as a write claims its own: a unit that began between a check and the claim
+        // would keep the writer's turn for as long as it is open, and this would wait for it with the gate held
+        let (txn, held) = self
+            .unit
+            .claim_writer(|| {
+                let guard = self.gate();
+                let writer = self.writers.hold()?;
+                run_point!(RESET_CLAIMING);
+                self.drop_idle();
+                Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
+            })
+            .map_err(|_| Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"))??;
+        // Declared after its holds, so it ends before they are let go
+        let _held = held;
+        let mut txn = txn;
         let key = meta_key(meta::SEQUENCE);
         let value = self
             .db
@@ -822,32 +971,42 @@ impl Store {
     ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
         self.unit.reserve()?;
+        // Let go when the unit doesn't begin, whether it is refused or what begins it panics
+        let reserved = Reserved(self);
         let begun = (|| {
             if self.map_half_used() {
                 self.grow()?;
             }
+            run_point!(UNIT_RESERVED);
             loop {
                 let guard = self.gate.read_arc();
                 let writer = self.writers.hold()?;
                 match self.env.write_txn() {
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
-                        // A replacement that failed before committing can't vouch for this unit
+                        // A unit's commit adds what it touched to whatever is deposited then, so what a refused or
+                        // failed write left is dropped here, as a write's start drops it; the edges one left are
+                        // replaced by the unit's own at its commit. Nor can a replacement that failed before
+                        // committing vouch for this unit
+                        *self.touched.lock() = None;
                         self.replacing.store(0, Ordering::Release);
                         return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first
+                    // transaction's hold on it goes first, and the writer's turn with it: adopting waits for this
+                    // process's reads to end, and on macOS the turn keeps the file lock other processes' writers
+                    // wait for
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        drop(guard);
+                        drop((guard, writer));
+                        run_point!(UNIT_MAP_GROWN);
                         self.adopt_map_size()?;
                     }
                     Err(e) => return Err(e.into()),
                 }
             }
         })();
-        if begun.is_err() {
-            self.end_unit();
+        if begun.is_ok() {
+            std::mem::forget(reserved);
         }
         begun
     }
@@ -855,6 +1014,19 @@ impl Store {
     /// Whether more than half the map is used, which a unit about to open grows it for
     fn map_half_used(&self) -> bool {
         self.map_short_of(2)
+    }
+
+    /// The flags the environment was opened with, which say when LMDB syncs (`EnvFlags`)
+    #[cfg(test)]
+    pub(crate) fn env_flags(&self) -> u32 {
+        self.env.get_flags().expect("the environment's flags read")
+    }
+
+    /// The size of a page of the data file, which LMDB writes whole
+    #[cfg(test)]
+    pub(crate) fn page_size(&self) -> usize {
+        let _gate = self.gate();
+        self.env.unnamed_database_stat().page_size as usize
     }
 
     /// Whether `times` what the map has in use is more than the map

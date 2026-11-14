@@ -66,6 +66,10 @@ pub struct Stats {
     pub relations: BTreeMap<String, u64>,
     /// Per type and index, its entries
     pub indexes: BTreeMap<String, u64>,
+    /// Per type and value index, the bytes of its keys and their values, in every key family it is filed in: its
+    /// values' places, those of the entities without a value and of those it doesn't order, and the blocks of each.
+    /// The engine's own indexes of a type, of short codes and roles, are among them
+    pub index_bytes: BTreeMap<String, u64>,
     pub entries: u64,
     pub file_bytes: u64,
     pub map_bytes: u64,
@@ -282,6 +286,25 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
             *stats.indexes.entry(format!("{t}.{i}")).or_default() += super::places::count(r, &key, &stored)?;
         }
     }
+    // A value index's keys: its values' places, the places of the entities without a value and of those it doesn't
+    // order, and the blocks of each
+    let filed = [
+        Prefix::Index,
+        Prefix::IndexPlaces,
+        Prefix::IndexWithout,
+        Prefix::IndexWithoutPlaces,
+        Prefix::IndexUnordered,
+        Prefix::IndexUnorderedPlaces,
+    ];
+    for prefix in filed {
+        r.try_visit(&prefix.key().to_vec(), |key, stored| {
+            let parts = decode_key(key)?;
+            if let (Some(Part::String(t)), Some(Part::String(i))) = (parts.get(1), parts.get(2)) {
+                *stats.index_bytes.entry(format!("{t}.{i}")).or_default() += (key.len() + stored.len()) as u64;
+            }
+            Ok(())
+        })?;
+    }
     for prefix in Prefix::ALL {
         let mut n = 0;
         r.visit(&prefix.key().to_vec(), |_, _| {
@@ -339,8 +362,12 @@ impl Database {
         if !store.adopt_replacement(epoch)? {
             return Ok(false);
         }
-        if let Some(builders) = self.builders()? {
-            builders.queue(super::remaining_indexes(&store, &self.schema_guard())?);
+        // The schema's guard is let go before the builders take their own read of it: a second read on one thread waits
+        // for a writer that is parked, which would be this thread's own wait. A read-only handle has no builders, and
+        // what it would have queued is none of its business
+        if let Some(builders) = self.builders_of(std::sync::Arc::clone(&store))? {
+            let owed = super::remaining_indexes(&store, &self.schema_guard())?;
+            builders.queue(owed);
         }
         Ok(true)
     }
@@ -407,7 +434,8 @@ impl Database {
         result
     }
 
-    /// What the database holds: entities per type and field, relations per kind, entries per index, and its sizes
+    /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
+    /// each value index, and its sizes
     pub fn stats(&self) -> Result<Stats> {
         let store = self.store()?;
         let schema = self.schema_guard();

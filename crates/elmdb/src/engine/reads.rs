@@ -571,6 +571,9 @@ struct Asks<'a> {
     tested: &'a [usize],
     /// How many entries the read may have read before it pauses
     pause_at: u64,
+    /// Where the places are kept, for a read that takes them as a set: no entity is read at one, and none is
+    /// handed on
+    kept: Option<&'a RefCell<RoaringTreemap>>,
 }
 
 /// How a read of the places some lists hold in common left off (`Query::common`)
@@ -743,6 +746,15 @@ impl Best {
 type Fixed = rustc_hash::FxBuildHasher;
 
 impl<R: Read> Query<'_, R> {
+    /// The leading filters were handed this many places more, each walked or sought: counted for the plan, and for
+    /// the stage running when the read is explained
+    fn handed(&self, places: u64) {
+        self.places.set(self.places.get() + places);
+        if let Some(stages) = self.stages {
+            stages.handed(places);
+        }
+    }
+
     /// One entity read from the store, by the start or by a step reading an index or walking a type
     fn count_visit(&self) {
         self.visited.set(self.visited.get() + 1);
@@ -1450,7 +1462,15 @@ impl<R: Read> Query<'_, R> {
     ) -> Result<bool> {
         let raw = text::search::parse(query);
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
-        let (types, among) = self.searched(before)?;
+        // The filters a type start begins with are the set it searches within, where their indexes read them all
+        let sets = self.filtered_sets(before)?;
+        let (types, among) = match &sets {
+            Some(sets) => (sets.iter().map(|(entity_type, _)| entity_type.clone()).collect(), None),
+            None => self.searched(before)?,
+        };
+        let set_of = |entity_type: &str| {
+            sets.as_ref().and_then(|sets| sets.iter().find(|(of, _)| of == entity_type).map(|(_, set)| set))
+        };
         // Before an `after` it hands on only its matches past the cursor, and says so once the stages before it have
         // run: one of those that sought to a cursor of its own said so of itself
         if cursor.is_some() {
@@ -1464,7 +1484,7 @@ impl<R: Read> Query<'_, R> {
                 Ok(found) => indexes.push((entity_type, found)),
                 // Among a set, a type with no text index holds no match; one with several, none named, is refused
                 Err(_)
-                    if among.is_some()
+                    if (among.is_some() || sets.is_some())
                         && index.is_none()
                         && text::text_indexes(self.r.schema(), entity_type).is_empty() => {}
                 Err(e) => return Err(e),
@@ -1480,7 +1500,8 @@ impl<R: Read> Query<'_, R> {
             // Whichever match comes first is the answer, so none is scored and each index is read only if those
             // before it matched nothing
             for (entity_type, text_index) in &indexes {
-                let (matches, ids) = self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?;
+                let (matches, ids) =
+                    self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?;
                 for seq in &matches.found {
                     self.count_visit();
                     let Some(id) = self.matched_entity(entity_type, ids.as_ref(), seq)? else { continue };
@@ -1507,7 +1528,8 @@ impl<R: Read> Query<'_, R> {
         let mut own = None;
         if let Some((slot, seq)) = at {
             let (entity_type, text_index) = &indexes[slot];
-            let held = self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?;
+            let held =
+                self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?;
             if !held.0.found.contains(seq) {
                 return Ok(true);
             }
@@ -1517,7 +1539,9 @@ impl<R: Read> Query<'_, R> {
         for (slot, (entity_type, text_index)) in indexes.iter().enumerate() {
             searched.push(match own.take_if(|(of, _)| *of == slot) {
                 Some((_, held)) => held,
-                None => self.matches_in(among.as_deref(), entity_type, text_index, &raw, options)?,
+                None => {
+                    self.matches_in(among.as_deref(), set_of(entity_type), entity_type, text_index, &raw, options)?
+                }
             });
         }
         // A tie is broken by the set's own order, or by the types' and then by creation's
@@ -1571,11 +1595,12 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// What a query matches in one of the indexes a search reads, with the id at each place of the set searched among
-    /// that is of the index's type. From a type the matches are among the places the plan's scope holds, and no ids
-    /// are read
+    /// that is of the index's type. From a type the matches are among the places the plan's scope holds, or those
+    /// of them in `set`, and no ids are read
     fn matches_in<'a>(
         &self,
         among: Option<&[String]>,
+        set: Option<&RoaringTreemap>,
         entity_type: &'a str,
         text_index: &'a TextIndex,
         raw: &[RawClause],
@@ -1588,11 +1613,21 @@ impl<R: Read> Query<'_, R> {
             }
             None => None,
         };
-        let (within, live) = match &ids {
-            Some(ids) => (Some(ids.keys().copied().collect::<RoaringTreemap>()), false),
-            None => self.searched_places(entity_type)?,
+        let held;
+        let (within, live) = match (&ids, set) {
+            (Some(ids), _) => {
+                held = Some(ids.keys().copied().collect::<RoaringTreemap>());
+                (held.as_ref(), false)
+            }
+            // A set is of the scope's places already
+            (None, Some(set)) => (Some(set), false),
+            (None, None) => {
+                let (places, live) = self.searched_places(entity_type)?;
+                held = places;
+                (held.as_ref(), live)
+            }
         };
-        let matches = text::search::matches(self.r, entity_type, text_index, raw, options, within.as_ref(), live)?;
+        let matches = text::search::matches(self.r, entity_type, text_index, raw, options, within, live)?;
         Ok((matches, ids))
     }
 
@@ -1607,6 +1642,91 @@ impl<R: Read> Query<'_, R> {
             Some(ids) => Ok(ids.get(&seq).cloned()),
             None => self.at_place(entity_type, seq),
         }
+    }
+
+    /// The places the plan's first `before` steps keep, for each of a type start's types that has any, when those
+    /// steps are the filters the start begins with and an index reads every one of them in every type: the places
+    /// their lists hold in common (`common`), of the entities the scope reaches. No entity is read to make them. None
+    /// when a filter has no list in some type, which is then tested against each entity as the set is collected
+    fn filtered_sets(&self, before: usize) -> Result<Option<Vec<(String, RoaringTreemap)>>> {
+        let Some(types) = self.start_types() else { return Ok(None) };
+        if before == 0 || before != self.filters {
+            return Ok(None);
+        }
+        self.filters_taken(before)?;
+        // A type named twice is searched once, as a set holds its entities once
+        let mut once: Vec<&String> = Vec::new();
+        for entity_type in types {
+            if !once.contains(&entity_type) {
+                once.push(entity_type);
+            }
+        }
+        // Nothing is read until every type is known to have a list for every filter
+        for entity_type in &once {
+            if !self.lists_cover(before, entity_type)? {
+                return Ok(None);
+            }
+        }
+        let mut sets = Vec::new();
+        for entity_type in once {
+            let mut set = self.filtered_places(before, entity_type)?;
+            if self.plan.scope != Scope::WithTrashed {
+                let mut trashed = RoaringTreemap::new();
+                self.r.visit(&keys::type_range(true, entity_type), |key, _| {
+                    trashed.extend(keys::place_of(key));
+                    true
+                })?;
+                if self.plan.scope == Scope::Live {
+                    set -= trashed;
+                } else {
+                    set &= trashed;
+                }
+            }
+            if let Some(stages) = self.stages {
+                stages.ran_within(set.len());
+            }
+            if !set.is_empty() {
+                sets.push((entity_type.clone(), set));
+            }
+        }
+        Ok(Some(sets))
+    }
+
+    /// Whether a list of a type's places, or a range's index, reads every one of the plan's first `upto` steps:
+    /// asked before any of them is read
+    fn lists_cover(&self, upto: usize, entity_type: &str) -> Result<bool> {
+        let lists = self.listed(upto, entity_type)?;
+        let ranged = self.ranges_of(upto, entity_type)?;
+        let covers = |at: &usize| {
+            lists.iter().any(|list| list.covers.contains(at)) || ranged.iter().any(|range| range.covers.contains(at))
+        };
+        Ok((0..upto).all(|at| covers(&at)))
+    }
+
+    /// The places of a type every one of the plan's first `upto` steps keeps, read from their lists and from the
+    /// ranges among them, each read whole: for a type whose lists cover every step (`lists_cover`)
+    fn filtered_places(&self, upto: usize, entity_type: &str) -> Result<RoaringTreemap> {
+        let mut lists = self.listed(upto, entity_type)?;
+        for ranged in self.ranges_of(upto, entity_type)? {
+            let list = self.read_range(ranged)?;
+            lists
+                .retain(|other| other.covers.is_empty() || !other.covers.iter().all(|step| list.covers.contains(step)));
+            lists.push(list);
+        }
+        let kept = RefCell::new(RoaringTreemap::new());
+        let asks = Asks { entity_type, tested: &[], pause_at: u64::MAX, kept: Some(&kept) };
+        let (mut next, mut read) = (0, 0);
+        if let Some(stages) = self.stages {
+            for index in lists.iter().filter_map(|list| list.index.as_deref()) {
+                stages.reads_index(index);
+            }
+            if lists.len() > 1 {
+                stages.read_in_common();
+            }
+        }
+        self.common(&mut lists, &asks, &mut next, &mut read, &mut |_| Ok(true))?;
+        self.handed(read);
+        Ok(kept.into_inner())
     }
 
     /// The places of a type a search from it reads, as those to search among and whether its trash is left out: all
@@ -1953,7 +2073,7 @@ impl<R: Read> Query<'_, R> {
     fn filtered_of(&self, upto: usize, entity_type: &str, after: Option<u64>, visit: &mut Visit<'_>) -> Result<bool> {
         let mut read = 0u64;
         let ended = self.filtered_from(upto, entity_type, after, &mut read, visit);
-        self.places.set(self.places.get() + read);
+        self.handed(read);
         ended
     }
 
@@ -1999,6 +2119,9 @@ impl<R: Read> Query<'_, R> {
                 for index in lists.iter().filter_map(|list| list.index.as_deref()) {
                     stages.reads_index(index);
                 }
+                if lists.len() > 1 {
+                    stages.read_in_common();
+                }
             }
             let pause_at = if ranged.is_empty() { u64::MAX } else { ask_at };
             if lists.is_empty() {
@@ -2021,7 +2144,7 @@ impl<R: Read> Query<'_, R> {
                 let Some(place) = paused else { return Ok(true) };
                 next = place + 1;
             } else {
-                let asks = Asks { entity_type, tested: &tested, pause_at };
+                let asks = Asks { entity_type, tested: &tested, pause_at, kept: None };
                 match self.common(&mut lists, &asks, &mut next, read, visit)? {
                     Left::Stopped => return Ok(false),
                     Left::Ended => return Ok(true),
@@ -2067,7 +2190,8 @@ impl<R: Read> Query<'_, R> {
     /// its field alone, and a `withRole` its role's in the role index: one value's places are held in order, so
     /// they are in creation order, an entity once. Equalities on every field of an index on several read its
     /// entries for those values as one list (`equal_index`), which stands for them all in place of their own: its
-    /// places are among each of theirs
+    /// places are among each of theirs. A `lacks` of a field with an index of its own reads the entities the index
+    /// files as without a value
     fn listed(&self, upto: usize, entity_type: &str) -> Result<Vec<Listed>> {
         let mut lists = Vec::new();
         let mut equals: Vec<(usize, &str, Part)> = Vec::new();
@@ -2081,6 +2205,16 @@ impl<R: Read> Query<'_, R> {
                     None => continue,
                 },
                 Step::WithRole { role } => (field::ROLE, Part::String(role.clone())),
+                Step::Lacks { field } => {
+                    // The entities an index on the field files as without a value are those it is missing in and
+                    // those it is null in, so the list narrows the read and the filter is still tested: it stands
+                    // for no step
+                    if let Some(index) = index_on(self.r, entity_type, field).filter(|_| accounted(field)) {
+                        let own = keys::index_others(Prefix::IndexWithout, entity_type, &index, &[]);
+                        lists.push(Listed::new(Places::filed(own), Some(index), Vec::new()));
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             let Some(index) = index_on(self.r, entity_type, name) else { continue };
@@ -2088,7 +2222,9 @@ impl<R: Read> Query<'_, R> {
             lists.push(Listed::new(Places::filed(under), Some(index), vec![at]));
         }
         if let Some(together) = self.equal_index(entity_type, &equals)? {
-            lists.retain(|list| !list.covers.iter().all(|step| together.covers.contains(step)));
+            lists.retain(|list| {
+                list.covers.is_empty() || !list.covers.iter().all(|step| together.covers.contains(step))
+            });
             lists.push(together);
         }
         Ok(lists)
@@ -2276,6 +2412,10 @@ impl<R: Read> Query<'_, R> {
                     }
                 }
                 *next = place + 1;
+                if let Some(kept) = asks.kept {
+                    kept.borrow_mut().insert(place);
+                    return Ok(true);
+                }
                 // The entity at the place, where the scope reaches one there: its type's rows say, and one they
                 // name is an entity read
                 let found = self.at_place(asks.entity_type, place)?;
@@ -2598,6 +2738,27 @@ impl<R: Read> Query<'_, R> {
         };
         // By value from the greatest, and one value's in place order, as an order that keeps ties has them
         super::places::visit(self.r, &ordered.from, &before, true, &mut |_, place| each(place))
+    }
+
+    /// The entity an ordered read's index files first among those holding a value, or (`greatest`) the first in place
+    /// order of those under its greatest value: what `least` and `greatest` answer of the set, read by the terminal,
+    /// the stage `stage` and the one running. An entry of an entity the scope doesn't reach is passed over, so the
+    /// read is of one entry more for each of those before the answer
+    fn extreme(&self, ordered: &Ordered<'_>, greatest: bool, stage: usize) -> Result<Option<String>> {
+        if let Some(stages) = self.stages {
+            stages.reads_index(&ordered.index);
+        }
+        let mut found = None;
+        // By value from the least or from the greatest, and one value's entities in place order either way
+        super::places::visit(self.r, &ordered.from, &ordered.to, greatest, &mut |_, place| {
+            self.count_visit();
+            found = self.at_place(ordered.entity_type, place)?;
+            Ok(found.is_none())
+        })?;
+        if let (Some(stages), Some(_)) = (self.stages, &found) {
+            stages.kept(stage);
+        }
+        Ok(found)
     }
 
     /// The places filed under the key `own`, in order, all of them or those past the place `after`, sought and
@@ -3473,6 +3634,11 @@ struct Stages {
     wants: RefCell<Vec<Option<String>>>,
     /// Per `search` stage: how many of its matches it held at once to rank them
     held: RefCell<Vec<Option<u64>>>,
+    /// Per stage that read lists of places: how many places it was handed, each walked or sought; whether it read
+    /// the places several lists hold in common; and for a search, how many places the set it ran within holds
+    places: Vec<Cell<u64>>,
+    common: RefCell<Vec<bool>>,
+    within: RefCell<Vec<Option<u64>>>,
     running: Cell<usize>,
     since: Cell<std::time::Instant>,
     started: std::time::Instant,
@@ -3515,6 +3681,9 @@ impl Stages {
             building: RefCell::new(vec![false; n]),
             wants: RefCell::new(vec![None; n]),
             held: RefCell::new(vec![None; n]),
+            places: (0..n).map(|_| Cell::new(0)).collect(),
+            common: RefCell::new(vec![false; n]),
+            within: RefCell::new(vec![None; n]),
             // Before any step pulls, the terminal is what runs
             running: Cell::new(n - 1),
             since: Cell::new(now),
@@ -3582,6 +3751,23 @@ impl Stages {
         self.held.borrow_mut()[self.running.get()] = Some(matches as u64);
     }
 
+    /// The stage running was handed this many places of lists more
+    fn handed(&self, places: u64) {
+        let at = self.running.get();
+        self.places[at].set(self.places[at].get() + places);
+    }
+
+    /// The stage running read the places several lists hold in common
+    fn read_in_common(&self) {
+        self.common.borrow_mut()[self.running.get()] = true;
+    }
+
+    /// The stage running, a search, ran within a set of this many places more
+    fn ran_within(&self, places: u64) {
+        let within = &mut self.within.borrow_mut()[self.running.get()];
+        *within = Some(within.unwrap_or(0) + places);
+    }
+
     fn rank_error(&self, stage: usize, error: f64) {
         self.errors.borrow_mut()[stage] = Some(error);
     }
@@ -3614,6 +3800,8 @@ impl Stages {
         let building = self.building.borrow();
         let wants = self.wants.borrow();
         let held = self.held.borrow();
+        let common = self.common.borrow();
+        let within = self.within.borrow();
         for at in 0..n {
             let name = match at {
                 0 => start_name(&plan.start),
@@ -3634,7 +3822,10 @@ impl Stages {
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
-                + u32::from(held[at].is_some());
+                + u32::from(held[at].is_some())
+                + u32::from(self.places[at].get() > 0)
+                + u32::from(common[at])
+                + u32::from(within[at].is_some());
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -3678,6 +3869,18 @@ impl Stages {
                 w.str("held");
                 w.uint(held);
             }
+            if common[at] {
+                w.str("set");
+                w.str("and");
+            }
+            if self.places[at].get() > 0 {
+                w.str("places");
+                w.uint(self.places[at].get());
+            }
+            if let Some(within) = within[at] {
+                w.str("within");
+                w.uint(within);
+            }
             if let Some((neighbours, candidates, edges)) = compared[at] {
                 w.str("neighbours");
                 w.uint(neighbours as u64);
@@ -3689,8 +3892,9 @@ impl Stages {
             w.str("visited");
             w.uint(received + self.read[at].get());
             w.str("kept");
-            // The terminal keeps what it answers: what the last step handed it
-            w.uint(if at == n - 1 { received } else { self.kept[at].get() });
+            // The terminal keeps what it answers: what the last step handed it, and what it read from the store
+            // itself, the entity `least` or `greatest` found in an index
+            w.uint(if at == n - 1 { received + self.kept[at].get() } else { self.kept[at].get() });
             w.str("ms");
             rmp::encode::write_f64(w.0, ms(self.nanos[at].get())).expect("a Vec");
         }
@@ -3758,6 +3962,9 @@ fn terminal_name(terminal: &Terminal) -> &'static str {
         Terminal::StrongComponents { .. } => "strongComponents",
         Terminal::Communities { .. } => "communities",
         Terminal::GroupBy { .. } => "groupBy",
+        Terminal::Least { .. } => "least",
+        Terminal::Greatest { .. } => "greatest",
+        Terminal::Sum { .. } => "sum",
         Terminal::Hits { .. } => "hits",
     }
 }
@@ -4027,6 +4234,12 @@ fn of_types(id: &str, types: Option<&[String]>) -> bool {
     })
 }
 
+/// Whether an index on this field alone accounts for every entity of its type, filing those without a value: any but
+/// the short code's and the roles', which hold only what their lookups read (`entities::ValueIndex::accounts`)
+fn accounted(name: &str) -> bool {
+    name != field::ROLE && name != field::SHORT_CODE
+}
+
 /// The built value index of the type a lookup of `name` reads: the built-in one for roles and short codes, or a
 /// declared one on that field alone. An index not yet built isn't read: the lookup walks the type's rows
 fn index_on(r: &impl Read, entity_type: &str, name: &str) -> Option<String> {
@@ -4082,13 +4295,18 @@ fn sort_key(value: Option<&Value>) -> SortKey {
     }
 }
 
+/// How an order has two values: by their kinds, then booleans and numbers by their value, strings by the collation
+/// and, where it holds two equal, by their bytes, and anything else by the collation of its JSON. So two strings are
+/// equal here only when they are the same bytes, and an order of strings doesn't depend on the order they came in
+/// but for those
 fn compare(collator: &icu_collator::CollatorBorrowed<'static>, a: &SortKey, b: &SortKey) -> Ordering {
     a.rank().cmp(&b.rank()).then_with(|| match (a, b) {
         (SortKey::Bool(x), SortKey::Bool(y)) => x.cmp(y),
         (SortKey::Number(x), SortKey::Number(y)) | (SortKey::Time(x), SortKey::Time(y)) => {
             x.partial_cmp(y).unwrap_or(Ordering::Equal)
         }
-        (SortKey::Text(x), SortKey::Text(y)) | (SortKey::Json(x), SortKey::Json(y)) => collator.compare(x, y),
+        (SortKey::Text(x), SortKey::Text(y)) => collator.compare(x, y).then_with(|| x.as_bytes().cmp(y.as_bytes())),
+        (SortKey::Json(x), SortKey::Json(y)) => collator.compare(x, y),
         _ => Ordering::Equal,
     })
 }
@@ -4105,6 +4323,21 @@ pub fn collator(collation: &str) -> Result<icu_collator::CollatorBorrowed<'stati
     };
     icu_collator::CollatorBorrowed::try_new(prefs, icu_collator::options::CollatorOptions::default())
         .map_err(|e| Error::new(ErrorCode::SchemaInvalid, format!("No collation for \"{collation}\": {e}")))
+}
+
+/// What kind of value `v` is, in words a message can name it by
+fn value_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "null",
+        Value::Boolean(_) => "boolean",
+        Value::Integer(_) | Value::F32(_) | Value::F64(_) => "number",
+        Value::String(_) => "string",
+        Value::Binary(_) => "binary",
+        Value::Array(_) => "list",
+        Value::Map(_) => "map",
+        Value::Ext(t, _) if *t == TIMESTAMP_EXTENSION => "timestamp",
+        Value::Ext(..) => "extension value",
+    }
 }
 
 /// A value's JSON text as JavaScript's `JSON.stringify` writes it, keys in their stored order
@@ -4393,6 +4626,86 @@ fn query_with(
             let (ids, graph) = q.project(last, last + 1, kinds, Direction::Out, *weights)?;
             let groups = algorithms::communities(&graph, *resolution, u64::from(*seed), *iterations);
             write_groups("communities", &ids, &groups, false, &mut w);
+        }
+        Terminal::Least { field: name } | Terminal::Greatest { field: name } => {
+            let greatest = matches!(plan.terminal, Terminal::Greatest { .. });
+            // A set an index reads in the field's order, as an `orderBy` of it would be read, is answered by the
+            // first entry under the index's least value or under its greatest, and nothing else of the set is read.
+            // Any other set is read whole
+            let best = match q.ordered(last, name)? {
+                Some(ordered) => match q.extreme(&ordered, greatest, last + 1)? {
+                    Some(id) => get_value(r, &id, name)?.map(|value| (id, value)),
+                    None => None,
+                },
+                None => {
+                    let ids = q.collect(last)?;
+                    let collator = collator(&r.schema().collation)?;
+                    // The first of equal values in the plan's order stays: a value replaces the best only when it is
+                    // past it
+                    let mut best: Option<(SortKey, String, Value)> = None;
+                    for id in ids {
+                        let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                        let key = sort_key(Some(&value));
+                        let past = match &best {
+                            None => true,
+                            Some((held, _, _)) => {
+                                let order = compare(&collator, &key, held);
+                                if greatest { order == Ordering::Greater } else { order == Ordering::Less }
+                            }
+                        };
+                        if past {
+                            best = Some((key, id, value));
+                        }
+                    }
+                    best.map(|(_, id, value)| (id, value))
+                }
+            };
+            w.map(3);
+            w.kind(if greatest { "greatest" } else { "least" });
+            w.str("id");
+            match &best {
+                Some((id, _)) => w.str(id),
+                None => w.nil(),
+            }
+            w.str("value");
+            match &best {
+                Some((_, value)) => w.raw(&values::encode(value)),
+                None => w.nil(),
+            }
+        }
+        Terminal::Sum { field: name } => {
+            let ids = q.collect(last)?;
+            // Kept exactly and rounded once (`sum.rs`): the nearest number to the sum, whatever the set's order
+            let (mut sum, mut n, mut within) = (super::sum::Sum::default(), 0u64, true);
+            for id in ids {
+                let Some(value) = get_value(r, &id, name)?.filter(|value| !value.is_nil()) else { continue };
+                let Some(number) = values::as_number(&value) else {
+                    return Err(Error::new(
+                        ErrorCode::ValueInvalid,
+                        format!(
+                            "sum({name}) needs numbers, and {id} holds a {}: change its field or sum another field",
+                            value_kind(&value)
+                        ),
+                    ));
+                };
+                // Once an addition has passed what a number holds there is nothing to add to: the rest are read for
+                // a value that is no number, which is refused first, and the sum is refused after them
+                within = within && sum.add(number);
+                n += 1;
+            }
+            if !within {
+                return Err(Error::new(
+                    ErrorCode::ValueInvalid,
+                    format!("sum({name}) passes what a number holds: sum fewer or smaller values of {name}"),
+                ));
+            }
+            let sum = sum.total();
+            w.map(3);
+            w.kind("sum");
+            w.str("sum");
+            rmp::encode::write_f64(w.0, sum).expect("a Vec");
+            w.str("n");
+            w.uint(n);
         }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;

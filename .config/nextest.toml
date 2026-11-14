@@ -17,6 +17,11 @@ slow-timeout = { period = "60s", terminate-after = 15 }
 filter = "test(/^engine::tests::tracked::/)"
 slow-timeout = { period = "10s", terminate-after = 1 }
 
+# An open that asks again and again for a meta page no commit will bring never ends: the test takes under a second
+[[profile.default.overrides]]
+filter = "test(=store::tests::an_open_refuses_a_file_that_lost_its_commit_s_meta_page_to_no_commit)"
+slow-timeout = { period = "10s", terminate-after = 1 }
+
 # Reader saturation children must reach their barrier or fail promptly, never hang a job.
 [[profile.default.overrides]]
 filter = "test(/^store::tests::(a_read_refuses_live_reader|a_read_only_open_recovers|reader_recovery_)/)"

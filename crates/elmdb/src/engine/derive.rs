@@ -31,6 +31,12 @@ struct Entity {
     changed: u64,
 }
 
+/// Each row the schema's rules refuse, read from primary data alone: what `check()` reports of rows, for an operation
+/// that holds what it leaves to them before its derived data is rebuilt
+pub(super) fn rule_violations(r: &impl Read) -> Result<Vec<Violation>> {
+    audit::violations(r)
+}
+
 /// Every entity the store holds, from `p/i`
 fn entities_of(r: &impl Read) -> Result<Vec<Entity>> {
     let mut out = Vec::new();
@@ -323,7 +329,7 @@ impl CheckReport {
     }
 }
 
-fn key_text(key: &[u8]) -> String {
+pub(super) fn key_text(key: &[u8]) -> String {
     match decode_key(key) {
         Ok(parts) => parts
             .iter()
