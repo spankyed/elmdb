@@ -225,12 +225,11 @@ mod tests {
         ) {
             let most = crate::engine::values::MAX_KEY_BYTES;
             let Some(room) = keys::order_room(&entity_type, &index, &leading) else {
-                // Under these names and values a sort key of the least room wouldn't fit before a string
+                // Under these names and values a key with no byte of a sort key wouldn't fit its longest string
                 let begins = keys::order_range(&entity_type, &index, build, &leading).len();
-                prop_assert!(begins + 2 + keys::LEAST_ORDER_ROOM + 1 + 258 > most);
+                prop_assert!(begins + 2 + 1 + PLACED_PART > most);
                 return Ok(());
             };
-            prop_assert!(room >= keys::LEAST_ORDER_ROOM);
             // A sort key holds no zero byte, and is no longer than its room
             let sort_key = SortKey { bytes: vec![0x2b; filled.min(room)], cut };
             let of_place = keys::order_place(&entity_type, &index, build, &leading, &sort_key, place);

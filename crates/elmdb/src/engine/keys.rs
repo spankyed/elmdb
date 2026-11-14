@@ -176,9 +176,6 @@ pub fn index_blocks(own: &[u8]) -> Vec<u8> {
     unreachable!("a value index's key")
 }
 
-/// The least room a sort key is filed in: under values that leave it less, an index keeps no order of its strings
-pub const LEAST_ORDER_ROOM: usize = 64;
-
 /// What the keys of an index's order begin with, under one build and these leading parts
 pub fn order_range(entity_type: &str, index: &str, build: u64, leading: &[crate::format::key::Part]) -> Vec<u8> {
     with(Prefix::IndexOrder, |w| {
@@ -199,11 +196,12 @@ pub fn order_of(entity_type: &str, index: &str) -> Vec<u8> {
 /// How many bytes of a sort key a key of an index's order holds under these leading parts: what a key's length
 /// leaves after what the key begins with, the sort key's tag and its end, the part saying whether it was cut, and
 /// the longest string that has a key of this kind after them (`order::placed`). It is one room for every string under the
-/// parts, since keys cut at different lengths can't be ordered by their bytes. None when it is under
-/// `LEAST_ORDER_ROOM`: long names or long leading values, under which no order is kept
+/// parts, since keys cut at different lengths can't be ordered by their bytes. In little room more keys are cut,
+/// and are ordered by their strings as they are read; in none every key is. None when the names and the leading
+/// values leave a key no room at all, under which no order is kept
 pub fn order_room(entity_type: &str, index: &str, leading: &[crate::format::key::Part]) -> Option<usize> {
     let taken = order_range(entity_type, index, 0, leading).len() + 2 + 1 + super::order::PLACED_PART;
-    super::values::MAX_KEY_BYTES.checked_sub(taken).filter(|room| *room >= LEAST_ORDER_ROOM)
+    super::values::MAX_KEY_BYTES.checked_sub(taken)
 }
 
 /// The key that says an index has an entry for `string` under these leading parts, where `sort_key` orders it
