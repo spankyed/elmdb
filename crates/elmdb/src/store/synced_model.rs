@@ -15,7 +15,8 @@ use std::collections::HashSet;
 
 const PROCESSES: usize = 2;
 const PAGES: usize = 6;
-/// Commits are numbered from 0, the one a new database is at, to one less than this
+/// Commits are numbered from 0, the one a new database is at, to one less than this at most: a run's bound says
+/// how many of them it makes
 const COMMITS: usize = 6;
 /// No commit, no page's version, no process
 const NONE: u8 = u8::MAX;
@@ -135,6 +136,8 @@ const DESIGN: Rules = Rules {
 /// How far a run goes
 #[derive(Clone, Copy, Debug)]
 struct Bounds {
+    /// The last commit a run makes, less than `COMMITS`
+    commits: u8,
     deaths: u8,
     losses: u8,
     opens: u8,
@@ -227,6 +230,8 @@ type Broken = (&'static str, Vec<String>);
 struct Search {
     rules: Rules,
     bounds: Bounds,
+    /// The most worlds a run goes through before it stops, having found nothing
+    cap: usize,
     seen: HashSet<World>,
     path: Vec<String>,
 }
@@ -290,7 +295,7 @@ impl Search {
         };
         let owes = |p: &Process| p.last != NONE && (p.remembered == NONE || p.last > p.remembered);
         let write = match process.write {
-            At::Idle if world.newest != NONE && usize::from(world.newest) + 1 < COMMITS => {
+            At::Idle if world.newest != NONE && world.newest < self.bounds.commits => {
                 step("begins a write", &|_, p| {
                     p.write = if rules.pin_before_write { At::WritePin } else { At::WriteLock };
                     Ok(())
@@ -454,7 +459,7 @@ impl Search {
         let before = world.newest.min(world.oldest_reader());
         let freed = (0..PAGES).filter(|page| snapshot.free[*page] < before).min_by_key(|page| snapshot.free[*page]);
         let fresh = (0..PAGES).find(|page| snapshot.free[*page] == FRESH);
-        let Some(written) = freed.or(fresh).filter(|_| usize::from(commit) < COMMITS) else {
+        let Some(written) = freed.or(fresh).filter(|_| commit <= self.bounds.commits) else {
             // No page to write, or no commit left within the model's bound: the write is given up
             let mut after = world.clone();
             after.writer = NONE;
@@ -575,7 +580,7 @@ impl Search {
 
     /// Every world the first leads to, depth first, or the first thing broken
     fn run(&mut self, world: World) -> Result<(), Broken> {
-        if !self.seen.insert(world.clone()) {
+        if self.seen.len() >= self.cap || !self.seen.insert(world.clone()) {
             return Ok(());
         }
         for (name, after) in self.steps(&world)? {
@@ -601,12 +606,23 @@ fn write_page(world: &mut World, page: u8, version: u8) -> Result<(), &'static s
 /// Runs the model under `rules` from a new database two processes may open, and says what it found broken, if
 /// anything, with how many worlds it went through
 fn explore(rules: Rules, bounds: Bounds) -> (Result<(), Broken>, usize) {
-    let mut search = Search { rules, bounds, seen: HashSet::new(), path: Vec::new() };
+    explore_up_to(rules, bounds, usize::MAX)
+}
+
+/// `explore`, stopping after `cap` worlds: a run that reaches it went through no more than those
+fn explore_up_to(rules: Rules, bounds: Bounds, cap: usize) -> (Result<(), Broken>, usize) {
+    let mut search = Search { rules, bounds, cap, seen: HashSet::new(), path: Vec::new() };
     let found = search.run(World::new());
     (found, search.seen.len())
 }
 
-const BOUNDS: Bounds = Bounds { deaths: 1, losses: 1, opens: 4, spills: true };
+/// The bounds the suite runs the design at: two commits, two opens, a death and a loss, some two hundred thousand
+/// worlds, a second or two built with optimizations. A larger run is `the_model_s_readings`, by hand
+const BOUNDS: Bounds = Bounds { commits: 2, deaths: 1, losses: 1, opens: 2, spills: true };
+
+/// The bounds the suite looks for each rule's absence at: five commits find each in under a tenth of a second,
+/// the search meeting a failing order early, where it would take far longer to go through every order that holds
+const MUTATION_BOUNDS: Bounds = Bounds { commits: 5, deaths: 1, losses: 1, opens: 4, spills: true };
 
 #[test]
 fn the_design_s_rules_hold_through_every_order_of_steps_within_the_bounds() {
@@ -616,12 +632,12 @@ fn the_design_s_rules_hold_through_every_order_of_steps_within_the_bounds() {
         panic!("{what}, after {} steps, the last:\n  {}", path.len(), path[from..].join("\n  "));
     }
     // A run that went nowhere would hold anything
-    assert!(worlds > 10_000, "{worlds} worlds");
+    assert!(worlds > 100_000, "{worlds} worlds");
 }
 
 /// The model without one rule: what it then finds broken
-fn without(rules: Rules) -> &'static str {
-    match explore(rules, BOUNDS).0 {
+fn without(rules: Rules, bounds: Bounds) -> &'static str {
+    match explore(rules, bounds).0 {
         Ok(()) => "nothing",
         Err((what, _)) => what,
     }
@@ -636,6 +652,7 @@ const WRITTEN_OVER: [&str; 2] = [
 
 #[test]
 fn each_rule_s_absence_is_found() {
+    let without = |rules| without(rules, MUTATION_BOUNDS);
     // A write that takes its pin at its commit has by then written pages, where it is too large for its memory
     assert!(WRITTEN_OVER.contains(&without(Rules { pin_before_write: false, ..DESIGN })));
     // With the old pin ended before the record names the new one, the commit the record on disk still names is
@@ -661,40 +678,22 @@ fn each_rule_s_absence_is_found() {
         without(Rules { slot: Slot::OtherNotLater, ..DESIGN }),
         "a sync that reads its meta page again and again, and never takes it"
     );
-    // A meta page read beside the commit that writes over it names that commit's trees under the pin's number
-    assert_eq!(
-        without(Rules { slot: Slot::Unchecked, ..DESIGN }),
-        "an open at a meta page that names one commit's trees under another's number"
-    );
 }
 
-/// What the model finds without each rule, and how many worlds the design's run goes through: printed, for whoever
-/// changes the model or its bounds
+/// The design at three commits, which goes through some ninety-four million worlds, and the two rules the suite
+/// doesn't look for: a meta page taken without checking it is of one commit, found at three commits after some
+/// thirty million worlds; and a pin kept for a write of the process that is beginning, whose absence no run has
+/// found, through 104 million worlds at three commits and forty million at four with two deaths (2026-11-14, Apple
+/// M1 Pro, built with optimizations, load 60 to 110). That one is a rule the model holds the design to and does not
+/// show needed: either another rule already covers it, or what it guards against lies past the bounds
 #[test]
-#[ignore = "a reading, run by hand: cargo nextest run -p elmdb --run-ignored only -E 'test(the_model_s_readings)' --no-capture"]
-fn the_model_s_readings() {
-    let began = std::time::Instant::now();
-    let (found, worlds) = explore(DESIGN, BOUNDS);
-    println!(
-        "design: {:?}, {worlds} worlds, {:.1?}",
-        found.map_err(|(what, path)| (what, path.len())),
-        began.elapsed()
+#[ignore = "about half an hour built with optimizations: rustc -O --edition 2024 --test crates/elmdb/src/store/synced_model.rs -o model && ./model --ignored"]
+fn the_larger_run() {
+    let three = Bounds { commits: 3, opens: 4, ..BOUNDS };
+    assert_eq!(explore(DESIGN, three).0.map_err(|(what, _)| what), Ok(()));
+    assert_eq!(
+        without(Rules { slot: Slot::Unchecked, ..DESIGN }, three),
+        "an open at a meta page that names one commit's trees under another's number"
     );
-    let mutations: [(&str, Rules); 9] = [
-        ("pin at the commit", Rules { pin_before_write: false, ..DESIGN }),
-        ("record may go back", Rules { record_never_back: false, ..DESIGN }),
-        ("old pin ended early", Rules { old_pin_until_record: false, ..DESIGN }),
-        ("record before data", Rules { data_before_record: false, ..DESIGN }),
-        ("unsynced record relied on", Rules { record_synced_by_reader: false, ..DESIGN }),
-        ("no pin kept for a write", Rules { pin_kept_for_a_write: false, ..DESIGN }),
-        ("other page earlier", Rules { slot: Slot::OtherEarlier, ..DESIGN }),
-        ("other page not later", Rules { slot: Slot::OtherNotLater, ..DESIGN }),
-        ("page unchecked", Rules { slot: Slot::Unchecked, ..DESIGN }),
-    ];
-    for (name, rules) in mutations {
-        let began = std::time::Instant::now();
-        let (found, worlds) = explore(rules, BOUNDS);
-        let found = found.map_err(|(what, path)| (what, path.len()));
-        println!("{name}: {found:?}, {worlds} worlds, {:.1?}", began.elapsed());
-    }
+    assert_eq!(without(Rules { pin_kept_for_a_write: false, ..DESIGN }, three), "nothing");
 }
