@@ -171,6 +171,11 @@ pub struct IndexStatus {
     pub built: bool,
     /// Why its build failed, such as a unique index over rows holding the same values
     pub failure: Option<String>,
+    /// Whether the order a value index keeps of its strings is one a read of this database takes an `orderBy` or a
+    /// string `range` from: filed by this elmdb and whole. False while it is built, and for one another elmdb
+    /// filed, whose orders are sorted as they are read until this one's builder has built them. None for an index
+    /// that keeps no order: a rank index, and a type's own indexes of short codes and roles
+    pub ordered: Option<bool>,
 }
 
 /// Deletes the data of every index a schema change drops or rebuilds, with its marker, in the unit that stores the
@@ -695,11 +700,16 @@ impl Database {
                     let failure = failures.iter().find(|f| {
                         matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
                     });
+                    let ordered = match index.accounts() {
+                        true => Some(order::readable(&s, entity_type, &index.name)?.is_some()),
+                        false => None,
+                    };
                     out.push(IndexStatus {
                         entity_type: Some(entity_type.clone()),
                         index: index.name.clone(),
                         built: derive::is_built(&s, entity_type, &index.name)?,
                         failure: failure.map(|f| f.message.clone()),
+                        ordered,
                     });
                 }
             }
@@ -710,6 +720,7 @@ impl Database {
                     index: name.clone(),
                     built: ranks::is_built(&s, name)?,
                     failure: failure.map(|f| f.message.clone()),
+                    ordered: None,
                 });
             }
             Ok(out)

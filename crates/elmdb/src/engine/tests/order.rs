@@ -521,6 +521,11 @@ fn a_build_goes_on_with_one_it_finds_unfinished_beside_the_writes_that_keep_it()
     assert!(matches!(step, Step::Entries { .. }), "{step:?}");
     let begun = stored(&db, "byTag").0.unwrap();
     assert!(!begun.whole);
+    let ordered = |db: &Database| {
+        let all = db.index_status().unwrap();
+        all.into_iter().find(|status| status.index == "byTag").unwrap().ordered
+    };
+    assert_eq!(ordered(&db), Some(false));
     assert_eq!(db.snapshot(|s| order::readable(s, "Item", "byTag")).unwrap(), None);
     // Writes of this stamp file under it, behind where the build is and ahead of it
     write(
@@ -538,6 +543,9 @@ fn a_build_goes_on_with_one_it_finds_unfinished_beside_the_writes_that_keep_it()
     let whole = stored(&db, "byTag").0.unwrap();
     assert!(whole.whole && whole.build == begun.build);
     assert!(db.check().unwrap().notes.is_empty());
+    assert_eq!(ordered(&db), Some(true));
+    let own = db.index_status().unwrap().into_iter().find(|status| status.index == "shortCode").unwrap();
+    assert_eq!(own.ordered, None);
     assert_eq!(strings(&db, "byTag").len(), 41);
     clean(&db);
 }
