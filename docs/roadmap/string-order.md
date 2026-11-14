@@ -177,7 +177,7 @@ alone.
 - **A directory of distinct strings, each pointing back to its `d/x` entry.** The second draft: nothing to pay for a
   write that repeats a string. It needed a second read for each string, a merge by place of the strings the collator
   holds equal, a key for each string made unique by a hash, entries written where a `d/x` key first appears and last
-  goes, and unbounded values for cut keys. Both readers of the third draft held it rightly set aside.
+  goes, and unbounded values for cut keys. The reader of the third draft held it rightly set aside.
 - **The order built when a plan first wants it.** It costs nothing for an index never ordered, and the second reader
   held it the one rival worth weighing again at the decision above. Against it: what is stored would depend on which
   plans ran and not on the rows and the schema, a database opened read-only could never have it, and a caller's
