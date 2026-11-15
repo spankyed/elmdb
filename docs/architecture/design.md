@@ -37,6 +37,16 @@ This document is what every "should elmdb do X?" is checked against. The others:
    upgrade is a Rust function from one format to the next, run on a copy, never on open (`format.md`, Versions).
 8. **The engine owns collation.** String order is declared once (icu4x's root collation), so a sort means the same
    wherever it runs.
+9. **Reads and writes block; a promise is for work measured to hold the event loop.** A write answers at the call: what
+   it made and what it refused are known there, and a read after it sees it, which a caller's code depends on. A write
+   costs tens of microseconds and its sync already runs on the store's own thread, so no write needs one. An operation
+   gets a form on a thread of the pool, answering a promise, only where its blocking form holds the event loop past
+   10 ms: a check and a rebuild of a large database take seconds (`../evidence/million-notes.md`), a backup copies the
+   whole file, and the largest read measured took 266 ms (`../roadmap/javascript-boundary.md`). Such a form that
+   writes, and whose order among the caller's own writes matters (a load, a replacement), takes its turn among them in
+   the order asked, by a turn every write takes as it is asked for; a rebuild needs none, deriving from whatever is
+   committed when it begins. An everyday write never gets a promise form: a caller that needs its writes off the
+   event loop makes all of them on another thread.
 
 ## Built on
 
