@@ -434,8 +434,10 @@ A read pays one seek for each distinct string it hands on.
 ## Risks
 
 - **The two arms must agree.** The sorted arm stays, for sets no index orders, and is what the model harness holds
-  the index's order to. The harness's strings are made of `a`, `b` and `c` today and its model sorts by the
-  collator alone: it can't see a tie of other bytes or a key past the room until phase 2 gives it both.
+  the index's order to. The harness's strings are words of `a`, `b` and `c`, some accented, small, capitalised or
+  in capitals, and an accent composed or after its letter, and its model sorts by the collator and then the bytes:
+  it sees the collation's order apart from the bytes' and a tie of two spellings the collator holds equal. Its
+  strings of 2,100 digits have sort keys past the room, and are ordered in cut runs.
 - **An invariant no one entity derives.** A `d/xo` key is there because of every entity holding its string, so a
   first or last place that goes unseen hides every holder of the string from the order, with no error, until the
   string empties and is held again, where a second place for every entity would have lost one. The two functions

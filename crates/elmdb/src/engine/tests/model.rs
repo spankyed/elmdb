@@ -180,7 +180,11 @@ const RENAMES: [(&str, &str); 6] = [
 
 fn value() -> impl Strategy<Value = Json> {
     prop_oneof![
-        4 => "[a-c]{0,8}".prop_map(Json::from),
+        // Words of a few letters, accented or not, small, capitalised or in capitals, an accent composed or after its
+        // letter: the collation orders them apart from their bytes and holds a composed word equal to the same word
+        // decomposed, and the text index holds each as the one word it folds to (`folded`)
+        4 => ("[a-cáäåç]{0,8}", 0u8..3, any::<bool>())
+            .prop_map(|(word, case, apart)| Json::from(spelled(&cased(&word, case), apart))),
         // Numbers from as small a pool as a list's elements, so an index lookup finds one often
         4 => (0i64..10).prop_map(Json::from),
         4 => prop::collection::vec(0i64..10, 0..4).prop_map(|v| json!(v)),
@@ -190,6 +194,47 @@ fn value() -> impl Strategy<Value = Json> {
         // Maps, which a merge combines and a removeValue matches by their fields
         2 => prop::collection::btree_map("[k-m]", 0i64..3, 0..3).prop_map(|m| json!(m)),
     ]
+}
+
+/// A word small, with its first letter a capital, or in capitals: never a capital after a small letter, where the text
+/// index's analyzer would split it in two
+fn cased(word: &str, case: u8) -> String {
+    match case {
+        0 => word.to_owned(),
+        1 => {
+            let mut chars = word.chars();
+            chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+        }
+        _ => word.to_uppercase(),
+    }
+}
+
+/// The accents the workload writes, as the marks that follow their letter decomposed, and the letters they compose with
+const ACCENTS: [(char, char, char, char); 4] =
+    [('á', 'Á', 'a', '\u{301}'), ('ä', 'Ä', 'a', '\u{308}'), ('å', 'Å', 'a', '\u{30a}'), ('ç', 'Ç', 'c', '\u{327}')];
+
+/// A word with each accented letter composed, as it was generated, or `apart`: its letter and then its mark
+fn spelled(word: &str, apart: bool) -> String {
+    let mut out = String::new();
+    for c in word.chars() {
+        match ACCENTS.iter().find(|(small, capital, ..)| apart && (c == *small || c == *capital)) {
+            Some((small, _, letter, mark)) => {
+                out.push(if c == *small { *letter } else { letter.to_ascii_uppercase() });
+                out.push(*mark);
+            }
+            None => out.push(c),
+        }
+    }
+    out
+}
+
+/// A word the workload writes as the text index holds it: small, its accents dropped, composed or apart
+fn folded(word: &str) -> String {
+    word.to_lowercase()
+        .chars()
+        .filter(|c| !ACCENTS.iter().any(|(.., mark)| c == mark))
+        .map(|c| ACCENTS.iter().find(|(small, ..)| c == *small).map_or(c, |(_, _, letter, _)| *letter))
+        .collect()
 }
 
 fn id() -> impl Strategy<Value = &'static str> {
@@ -1411,15 +1456,18 @@ fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                 ["trashed"] => json!(of_type().filter(|(_, e)| e.trashed).map(|(id, _)| id).collect::<Vec<_>>()),
                 ["with", "trashed"] => json!(of_type().map(|(id, _)| id).collect::<Vec<_>>()),
                 ["count"] => json!(of_type().filter(|(_, e)| !e.trashed).count()),
-                // A field's text is a string or a list's strings; the workload's strings are one word each. Ranking
-                // is the corpora specs' (`text/tests.rs`): a match set is ordered here as the engine's ties are
+                // A field's text is a string or a list's strings; the workload's strings are one word each, held as
+                // the word they fold to. Ranking is the corpora specs' (`text/tests.rs`): a match set is ordered here
+                // as the engine's ties are
                 ["search", word] => {
                     let mut found: Vec<&String> = of_type()
                         .filter(|(_, e)| {
                             !e.trashed
                                 && ["a", "b"].iter().any(|f| match e.fields.get(*f) {
-                                    Some(Json::String(s)) => s == word,
-                                    Some(Json::Array(items)) => items.iter().any(|v| v.as_str() == Some(*word)),
+                                    Some(Json::String(s)) => folded(s) == *word,
+                                    Some(Json::Array(items)) => {
+                                        items.iter().filter_map(Json::as_str).any(|s| folded(s) == *word)
+                                    }
                                     _ => false,
                                 })
                         })
