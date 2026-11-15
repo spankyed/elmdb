@@ -135,7 +135,7 @@ try {
       decode.push(Number(process.hrtime.bigint() - t));
     }
     measurements.push({ workload: name, answerBytes: checkedAnswer.length, answerSha256: createHash('sha256').update(checkedAnswer).digest('hex'), readSyncNs: read, decodeNs: decode });
-    if (!json) console.log(`${name}: readSync_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
+    if (!json) console.log(`${name}: read_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
   }
   if (json) {
     console.log(JSON.stringify({

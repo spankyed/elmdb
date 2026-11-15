@@ -468,7 +468,7 @@ begins. Every other call that takes the write lock waits for it the same way, ho
 `setSchema`, a purge, a rename, a load, `reset`, `replaceWith` and `close`. Rebuilds asked together run one after
 another. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is: which of a unit begun and a
 rebuild asked for in the same turn takes the write lock first is the pool's timing, and the other waits or is
-refused. Call a rebuild with no unit open and await it before writing, or make the writes on another thread. A process
+refused. Call a rebuild with no unit open and await a `rebuildAsync` before writing, or make the writes on another thread. A process
 that exits by `process.exit()` runs the pool to its end first, so what was asked for
 is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that has panicked) throws at
 the call in every form; a call on a closed database throws in the blocking forms and rejects the promise in the

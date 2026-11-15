@@ -38,8 +38,8 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-   * once it has committed. `durable` commits it with
-   * a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
+   * once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
+   * through the unit then
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**

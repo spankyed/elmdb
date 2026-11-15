@@ -101,9 +101,9 @@ loop. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindl
 **Writes block; long maintenance doesn't have to.** A write runs on the calling thread and answers there, so what it
 created and what it refused are known at the call, and a read after it sees it. `db.checkAsync`, `db.rebuildAsync`,
 `db.backupAsync` and `db.readAsync` run on a thread of the pool and answer a promise, so a large rebuild doesn't hold
-the event loop; the plain name is always the blocking form. A rebuild holds the database's write lock
-until it commits, so a write, a unit or a schema change made while one runs waits for it, holding the event loop:
-await a rebuild before writing. A close waits for an operation that is running, so one made during a long rebuild
+the event loop; each one's plain name is its blocking form (`durable()` is a wait, and has none). A rebuild holds the
+database's write lock until it commits, so a write, a unit or a schema change made while one runs waits for it, holding
+the event loop: await a `rebuildAsync` before writing. A close waits for an operation that is running, so one made during a long rebuild
 holds the event loop until it ends.
 
 **Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while

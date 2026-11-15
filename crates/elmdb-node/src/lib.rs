@@ -274,8 +274,8 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-    /// once it has committed. `durable` commits it with
-    /// a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
+    /// once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
+    /// through the unit then
     #[napi]
     pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.write", || {
@@ -602,7 +602,7 @@ impl Database {
     }
 }
 
-/// `read()`'s promise, answered on a thread of the pool; a failure becomes an error with elmdb's code on the JS thread
+/// `readAsync()`'s promise, answered on a thread of the pool; a failure becomes an error with elmdb's code on the JS thread
 pub struct ReadTask {
     db: Held,
     health: Health,
