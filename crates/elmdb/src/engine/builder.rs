@@ -359,7 +359,12 @@ impl Drop for Builder {
     }
 }
 
-/// Runs `chunk` as units until it says it's done, waiting out a unit the app holds open; `Ok` once done or stopping
+/// How long the builder waits before it tries again a chunk refused while a sync is behind (`SYNC_BEHIND`): the chunk
+/// asks for the next sync itself, which may fail at once as the last did
+const SYNC_BEHIND_WAIT: Duration = Duration::from_millis(100);
+
+/// Runs `chunk` as units until it says it's done, waiting out a unit the app holds open, and a sync that failed while
+/// the pin was past its bound; `Ok` once done or stopping
 fn chunks(
     store: &Store,
     stopping: &dyn Fn() -> bool,
@@ -374,6 +379,10 @@ fn chunks(
             Ok(false) => {}
             // A unit held open by the app has the write transaction: try again once it ends
             Err(e) if e.code == ErrorCode::UnitOpen => store.wait_while_unit_open(stopping),
+            // Nothing of the chunk was made, and it goes on once a sync succeeds: what failed is the sync's, not the
+            // build's, and a build marked failed would stay so until the database is opened again. A stop asked for
+            // meanwhile is heard once the wait ends
+            Err(e) if e.code == ErrorCode::SyncBehind => std::thread::sleep(SYNC_BEHIND_WAIT),
             Err(e) => return Err(e),
         }
     }
@@ -559,6 +568,29 @@ mod tests {
         fn now(&self) -> Instant {
             self.0
         }
+    }
+
+    #[test]
+    fn a_chunk_refused_while_a_sync_is_behind_is_tried_again_and_any_other_failure_ends_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), crate::store::StoreOptions::default()).unwrap();
+        let mut tries = 0;
+        chunks(&store, &|| false, || {
+            tries += 1;
+            if tries < 3 { Err(crate::Error::new(ErrorCode::SyncBehind, "behind")) } else { Ok(true) }
+        })
+        .unwrap();
+        assert_eq!(tries, 3);
+        let ended = chunks(&store, &|| false, || Err(crate::Error::new(ErrorCode::Io, "failed")));
+        assert_eq!(ended.unwrap_err().code, ErrorCode::Io);
+        // A builder told to stop while it waits stops once the wait ends
+        let tries = std::cell::Cell::new(0);
+        let stopped = chunks(&store, &|| tries.get() > 0, || {
+            tries.set(tries.get() + 1);
+            Err(crate::Error::new(ErrorCode::SyncBehind, "behind"))
+        });
+        assert!(stopped.is_ok());
+        store.close().unwrap();
     }
 
     #[test]
