@@ -85,7 +85,8 @@ in it. So:
   which the sweep bounds with the rest, where a target in a copy's own directory would be left behind with it.
 - **A run that builds is refused below 20 GB free:** `pre-push` once it has swept, and `scripts/mutants-in-diff.py`,
   whose copies build from cold in the system's temporary directory. Started with less, a run fills the disk part way
-  through, and the builds and tests running beside it with it.
+  through, and the builds and tests running beside it with it. A CI runner, whose disk is its run's alone and holds
+  less than that, isn't held to it (`CI` set).
 - **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
   reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
   of locals.

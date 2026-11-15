@@ -174,9 +174,10 @@ assert crates, "the workspace names no crate"
 
 # Each job's copy builds the workspace from cold in the system's temporary directory: below the floor `cargo xtask
 # pre-push` holds a run to (`xtask/src/build_dir.rs`, FLOOR) the disk would fill part way through, and the copies with
-# it. Nothing is run when nothing is in scope, so nothing is asked of the disk then
+# it, and whatever else the machine runs. Nothing is run when nothing is in scope, so nothing is asked of the disk then.
+# A CI runner's disk is its run's alone, which a full disk ends and nothing more, and holds less than the floor
 FLOOR = 20 << 30
-if scope != []:
+if scope != [] and not os.environ.get("CI"):
     import tempfile
     free = shutil.disk_usage(tempfile.gettempdir()).free
     if free < FLOOR:
