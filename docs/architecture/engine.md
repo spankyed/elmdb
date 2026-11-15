@@ -65,7 +65,10 @@ other targets refuse process-claim acquisition as unsupported.
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
 process killed by a signal, or one ending with a unit open, leaves them in the system's table until a later open of
-the same path, taking the lock first, replaces them and a close removes them.
+the same path, taking the lock first, replaces them and a close removes them. A close as the process ends waits no
+longer than its deadline for what another thread holds, an operation keeping the store or the schema a write holds
+while it waits for its sync, since on Windows that thread may already have been ended; given up on, it syncs what is
+owed and leaves the database open.
 
 ## Schema
 
