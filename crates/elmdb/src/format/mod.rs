@@ -68,6 +68,21 @@ pub enum Prefix {
     IndexUnordered,
     /// `d/xup type index values start` → a block of those places
     IndexUnorderedPlaces,
+    /// `d/xl type index values` → the places of the type's entities whose last field in a value index is a string
+    /// longer than the index has an entry for (`engine::values::long`), under what its fields before the last hold.
+    /// Laid out as `d/x` is
+    IndexLong,
+    /// `d/xlp type index values start` → a block of those places
+    IndexLongPlaces,
+    /// `d/xo type index build values sortkey cut string` → nothing: that a value index has an entry for the string
+    /// under these values, filed where the schema's collation orders it, by its sort key as far as the key has room
+    /// for it and whether that is all of it (`engine/order.rs`). `d/xo type index build values sortkey cut place`
+    /// → nothing: that the entity at the place holds a string there that has no key of the first kind. What is
+    /// filed under a build is its stamp's to lay out
+    IndexOrder,
+    /// `d/xob type index` → the stamp of the collator an index's `d/xo` keys were made by, the build they are
+    /// under, and whether that build is whole
+    IndexOrderBuilt,
     /// `d/o entity kind seq` → an entity's outgoing edges
     Out,
     /// `d/n entity kind seq` → an entity's incoming edges
@@ -122,7 +137,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 41] = [
+    pub const ALL: [Prefix; 45] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -140,6 +155,10 @@ impl Prefix {
         Prefix::IndexWithoutPlaces,
         Prefix::IndexUnordered,
         Prefix::IndexUnorderedPlaces,
+        Prefix::IndexLong,
+        Prefix::IndexLongPlaces,
+        Prefix::IndexOrder,
+        Prefix::IndexOrderBuilt,
         Prefix::Out,
         Prefix::In,
         Prefix::Between,
@@ -186,6 +205,10 @@ impl Prefix {
             Prefix::IndexWithoutPlaces => "d/xwp",
             Prefix::IndexUnordered => "d/xu",
             Prefix::IndexUnorderedPlaces => "d/xup",
+            Prefix::IndexLong => "d/xl",
+            Prefix::IndexLongPlaces => "d/xlp",
+            Prefix::IndexOrder => "d/xo",
+            Prefix::IndexOrderBuilt => "d/xob",
             Prefix::Out => "d/o",
             Prefix::In => "d/n",
             Prefix::Between => "d/b",

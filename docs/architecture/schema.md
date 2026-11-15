@@ -221,10 +221,11 @@ when the type has more than one.
 - A `unique` index on several fields holds an entity to its tuple of values once each field has one, a null among
   them: two entities with the same values and a null in the same field are refused as any two are.
 - An index on one field accounts for every entity of its type: besides its entries, it holds which entities are without
-  a value (the field missing or null) and which hold a value it doesn't order (a list, a map, bytes, a timestamp, a
-  string past 256 bytes). That is what lets a plan read the type in the field's order, or a range of it, from the
-  index alone and leave no entity out. Numbers and booleans are read in order; strings are held, and sorted by the
-  schema's collation when a plan orders by them. A number field that every entity holds costs nothing more for it; an
+  a value (the field missing or null), which hold a long string (one past 256 bytes) and which hold a value it
+  doesn't order (a list, a map, bytes, a timestamp). That is what lets a
+  plan read the type in the field's order, or a range of it, from the index alone and leave no entity out. A long
+  string is a string: it leaves a range and an order of the field's numbers to the index. Numbers and booleans are read in order from the index's entries, and strings from the order the
+  index keeps of them by the schema's collation (`engine.md`, An order of strings), whatever the field is declared. A number field that every entity holds costs nothing more for it; an
   optional one costs a key for each entity without it. An index on several fields accounts the same way for the
   entities an equality on each field but the last can name: those whose fields before the last each hold a value,
   filed without a value under what those fields hold when the last is missing or null.
@@ -304,7 +305,7 @@ stored one.
 | A type, field, relation kind, role or index added | applied. A new index builds in the background; plans walk the rows until it's built, and a text index, which has no rows to walk in its place, refuses its reads until then (`INDEX_BUILDING`) |
 | A required field added to a type with rows, or a type or relation kind declared again over the data its removal kept | enforced, as a tightened rule is: `check()` reports the rows that break it |
 | An index's definition changed | rebuilt in the background under its name; a text index is searched again once it is built, and refused (`INDEX_BUILDING`) until then |
-| The collation changed | applied: an index holds its values as written, and the collation orders `orderBy` as a query runs |
+| The collation changed | builds: an index holds its values as written, and the order it keeps of its strings is built again in the background, an `orderBy` of them being sorted as it is read until then |
 | An index removed | dropped |
 | A rank index added, changed or removed | added, built in the background, a `ranked` read answering from `rank` over its graph until it is, or refusing if it asked to; changed, rebuilt; removed, dropped |
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
