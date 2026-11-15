@@ -417,8 +417,9 @@ impl Database {
                     return closed.map(|()| true);
                 }
                 Err(shared) => {
-                    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                        let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
+                    if let Some(deadline) = deadline.filter(|deadline| std::time::Instant::now() >= *deadline) {
+                        // The caller's wait is spent: the record's locks are tried, and not waited for
+                        let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         synced?;
                         // The database stays open with its builder stopped: what is left to build is queued again,

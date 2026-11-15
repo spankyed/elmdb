@@ -218,6 +218,29 @@ fn a_sync_that_fails_before_its_data_fails_its_own_waits_and_the_next_sync_goes_
 }
 
 #[test]
+fn syncs_that_fail_short_of_a_flush_too_many_times_in_a_row_refuse_the_process_s_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
+    // One short of them, and a sync that doesn't fail: the count starts again
+    for _ in 1..super::kept::FAILURES_IN_A_ROW {
+        put(&store, "a", b"0").unwrap();
+        assert!(store.durable().unwrap().wait().is_err());
+    }
+    drop(failing);
+    store.durable().unwrap().wait().unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
+    for n in 1..=super::kept::FAILURES_IN_A_ROW {
+        put(&store, "a", &n.to_le_bytes()).unwrap();
+        assert!(store.durable().unwrap().wait().is_err());
+        assert_eq!(kept(&store).refused().is_some(), n == super::kept::FAILURES_IN_A_ROW, "after {n} failures");
+    }
+    assert!(put(&store, "b", b"1").is_err(), "a commit after them");
+    drop(failing);
+    assert!(store.close().is_err());
+}
+
+#[test]
 fn a_failed_record_the_file_does_not_bear_out_is_refused() {
     let (one, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let store = Store::open(one.path(), grouped()).unwrap();

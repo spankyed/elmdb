@@ -189,12 +189,16 @@ makes it again from the same record. LMDB then opens at the record's commit. The
 record's notice is written first, the rest of the record as it was: a restore stopped once the meta pages are written
 leaves the next open nothing to restore, and it still says one was made.
 
-**A sync whose data or record fails** writes the record `failed`. From then the process refuses every commit, as it
-refuses every wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does
-the same, as does one whose sync before a write fails: only a restore writes over it. If the record can't be written
-either, the database goes on as it does today, which the error says. A sync that fails before it syncs the data, as a
-full reader table fails it, or as it reads the root pages after, has written nothing to rely on: it fails the waits on
-it alone, and the next sync tries again.
+**A sync whose data's flush or record's write fails** writes the record `failed`. From then the process refuses every
+commit, as it refuses every wait today, and keeps its pin until it ends; a process that finds the record `failed` at its
+own sync does the same, as does one whose sync before a write fails so: only a restore writes over it. If the record
+can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
+its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
+nothing. One that fails short of a flush, as its read transaction begins, which a full reader table fails, or as it
+reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it alone, and the
+timer tries again the sync interval after it, a second by default, whether or not anything is committed since. Eight of
+those in a row are final, though they write no record: until then the pin doesn't move, the file grows, and a write past
+the bound waits on each.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.

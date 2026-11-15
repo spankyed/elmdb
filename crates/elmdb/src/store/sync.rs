@@ -2,9 +2,10 @@
 //! pause for the idle time, and at the latest the cap after the first unsynced commit, so a steady stream of writes
 //! can't hold a sync off. `durable()` waits for a sync that began after the last commit, and fails when that sync does.
 //!
-//! A failed sync is final for the open database: an OS may mark the pages it couldn't write clean and drop them, so a
-//! later sync that succeeds proves nothing about them, and every later commit is built on them. Every wait after a
-//! failure fails with it, until the database is reopened.
+//! A failed flush is final for the open database: an OS may mark the pages it couldn't write clean and drop them, so a
+//! later sync that succeeds proves nothing about them, and every later commit is built on them. Every wait after it
+//! fails with it, until the database is reopened. A sync that failed before it flushed anything, which its `Syncer`
+//! says, fails the waits on it alone, and the next is tried by the timer, whether or not anything is committed since.
 //!
 //! When a sync is due is `Policy`'s, a pure function of the instants it is told; the clock and the flush are behind
 //! `Clock` and `Syncer`, so a test drives both.
@@ -25,11 +26,16 @@ pub struct Policy {
     last_commit: Option<Instant>,
     /// A sync was asked for now, whatever the time: what the pin holds back passed its bound
     forced: Option<Instant>,
+    /// A sync failed without being final, and the next is due then, whether or not anything is committed since
+    retry: Option<Instant>,
 }
+
+/// The least time between a sync that failed without being final and the next, however short the cap
+const RETRY_FLOOR: Duration = Duration::from_millis(100);
 
 impl Policy {
     pub fn new(idle: Duration, cap: Duration) -> Self {
-        Self { idle, cap, first_unsynced: None, last_commit: None, forced: None }
+        Self { idle, cap, first_unsynced: None, last_commit: None, forced: None, retry: None }
     }
 
     pub fn on_commit(&mut self, now: Instant) {
@@ -42,17 +48,30 @@ impl Policy {
         self.forced = Some(now);
     }
 
+    /// A sync failed without being final: the commits it was to sync are owed still, and the next is due the cap from
+    /// now, or the floor where the cap is shorter, so that a sync failing at once isn't tried again at once
+    pub fn on_retry(&mut self, now: Instant) {
+        self.retry = Some(now + self.cap.max(RETRY_FLOOR));
+    }
+
     /// A sync began: the commits before it are its, and the next commit starts the timers again
     pub fn on_sync_started(&mut self) {
         self.first_unsynced = None;
         self.last_commit = None;
         self.forced = None;
+        self.retry = None;
     }
 
-    /// When the next sync is due, or `None` while nothing was committed since the last began
+    /// When the next sync is due, or `None` while nothing was committed since the last began and none failed to retry
     pub fn due_at(&self) -> Option<Instant> {
-        let timed = (self.last_commit? + self.idle).min(self.first_unsynced? + self.cap);
-        Some(self.forced.map_or(timed, |forced| forced.min(timed)))
+        let timed = self.last_commit.zip(self.first_unsynced).map(|(last, first)| {
+            let timed = (last + self.idle).min(first + self.cap);
+            self.forced.map_or(timed, |forced| forced.min(timed))
+        });
+        match (timed, self.retry) {
+            (Some(timed), Some(retry)) => Some(timed.min(retry)),
+            (timed, retry) => timed.or(retry),
+        }
     }
 }
 
@@ -60,12 +79,11 @@ impl Policy {
 pub trait Syncer: Send + Sync + 'static {
     fn sync(&self) -> Result<()>;
 
-    /// Whether a failure `sync` answered is final: one of the flush, after which the OS may have dropped what it
-    /// couldn't write, so that no later sync proves anything of it. One that failed before it wrote anything fails the
-    /// waits on its own attempt, and the next sync tries again
-    fn is_final(&self, _failure: &Error) -> bool {
-        true
-    }
+    /// What every wait fails with from now on, where a failure `sync` answered is final: one of the flush, after which
+    /// the OS may have dropped what it couldn't write, so that no later sync proves anything of it. `None` for one that
+    /// failed before it flushed anything, which fails the waits on its own attempt, the next sync trying again. The
+    /// failure named may be another's than `failure`, as one a write met while this sync ran
+    fn final_failure(&self, failure: &Error) -> Option<Error>;
 }
 
 /// What the worker reads time from
@@ -109,7 +127,7 @@ struct State {
     closing: bool,
     /// Attempts that ran, failed ones included
     syncs: u64,
-    /// The first sync that failed, which every wait after it fails with
+    /// The first failure that was final, which every wait after it fails with
     failed: Option<Error>,
 }
 
@@ -378,13 +396,13 @@ fn run(shared: &Shared) {
                 };
             }
         };
-        let (outcome, is_final) = match &*shared.syncer.lock().expect("the syncer's lock is never poisoned") {
+        let (outcome, final_failure) = match &*shared.syncer.lock().expect("the syncer's lock is never poisoned") {
             Some(syncer) => {
                 let outcome = syncer.sync();
-                let is_final = outcome.as_ref().err().is_some_and(|failure| syncer.is_final(failure));
-                (outcome, is_final)
+                let final_failure = outcome.as_ref().err().and_then(|failure| syncer.final_failure(failure));
+                (outcome, final_failure)
             }
-            None => (Ok(()), false),
+            None => (Ok(()), None),
         };
         let mut state = shared.lock();
         state.running = None;
@@ -396,11 +414,20 @@ fn run(shared: &Shared) {
                 Ok(())
             }
             (Ok(()), Some(failed)) => Err(after_failure(failed)),
-            (Err(e), _) if is_final => {
-                state.failed.get_or_insert_with(|| e.clone());
+            (Err(e), _) => {
+                match final_failure {
+                    Some(failure) => {
+                        state.failed.get_or_insert(failure);
+                    }
+                    // What it was to sync is owed still, since only a sync that succeeds moves `synced`, and the timer
+                    // tries again though nothing is committed after it
+                    None => {
+                        let now = shared.clock.now();
+                        state.policy.on_retry(now);
+                    }
+                }
                 Err(e)
             }
-            (Err(e), _) => Err(e),
         };
         if let Some((_, slot)) = state.waiting.get_mut(&attempt.id) {
             *slot = Some(outcome);
