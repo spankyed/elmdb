@@ -435,8 +435,13 @@ Active reads and open units keep their snapshots until they finish. The worker o
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
 The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
 same answer, so a large read doesn't block the event loop. Its snapshot is the last commit as the read begins there,
-not as it is asked for, so a write made after the call may be in its answer: holding a snapshot from the call to the
-pool's thread would hold the store's gate across threads, and the gate is held by the thread that takes it.
+not as it is asked for, so a write made after the call may be in its answer. A snapshot taken at the call would be
+held until a thread of the pool runs the read, and with it the gate a growth of the map waits on: a write that must
+grow the map waits for every read transaction of the process to end (`Store::grow_beside_units`), so one made on the
+event loop would wait on the pool's queue as well as on the read, and hold the event loop while it did. A close would
+also have to take back the snapshot of a read not yet begun, and a tracked read, which reads again on a newer snapshot
+when a commit lands between its read and its filing (`watch::read_tracked`), would have none to read on. A caller who
+needs the snapshot of the call reads with `read`.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
