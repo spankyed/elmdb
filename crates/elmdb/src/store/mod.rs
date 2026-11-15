@@ -952,7 +952,8 @@ impl Store {
                     "Nothing of this write was made: what the last synced commit of the database at {} keeps from \
                      reuse is past its bound, and the sync that would let it go failed before it wrote anything ({}). \
                      Try the write again, after a pause: it goes on once a sync succeeds. A sync that keeps failing \
-                     for a full reader table is let through by ending read transactions held long",
+                     for a full reader table goes on once other processes, or threads of this one, end the read \
+                     transactions they hold",
                     self.path.display(),
                     failure.message
                 ),

@@ -631,8 +631,8 @@ mod tests {
         OpenOptions { syncs: false, ..Default::default() }
     }
 
-    // Each gives a margin of most of a second past its wait, for the flush of the data the exit makes: a full flush
-    // of the drive on Apple, slow on a loaded machine
+    // Each gives a margin past its wait, 800 ms and 1.5 s, for the flush of the data the exit makes: a full flush of
+    // the drive on Apple, slow on a loaded machine
     #[test]
     fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_and_is_over_within_its_wait() {
         let dir = tempfile::tempdir().unwrap();
