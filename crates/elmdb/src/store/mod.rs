@@ -937,7 +937,7 @@ impl Store {
     /// it, with `SYNC_BEHIND`, which the caller may try again. The pin doesn't move until a sync succeeds, so a write
     /// that went on would grow the file past the bound, without end while the failure lasted; and since a refused write
     /// frees nothing, every write is refused until then, each after a sync of its own
-    fn hold_to_the_bound(&self) -> Result<()> {
+    pub(crate) fn hold_to_the_bound(&self) -> Result<()> {
         if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
             && kept.past_bound()
             && let Err(failure) = commit.durable().wait()

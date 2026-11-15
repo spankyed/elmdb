@@ -93,7 +93,8 @@ It uses N-API, so a Node or Electron upgrade needs no rebuild.
 
 **Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` resolves once its
 sync is done, and `db.writeSync(batch, true)` returns then. `NOT_DURABLE` means the commit landed but its sync failed, so
-don't blindly retry it.
+don't blindly retry it. `SYNC_BEHIND` means nothing was written, as the syncs that let the file be reused are failing
+for now: try it again after a pause.
 
 **Off the calling thread:** `db.write`, `db.check`, `db.rebuild` and `db.backup` run on a thread of the pool and answer a
 promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and

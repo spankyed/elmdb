@@ -198,10 +198,12 @@ nothing. One that fails short of a flush, as its read transaction begins, which 
 reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin
 doesn't move until a sync succeeds, so while what it keeps is past the bound every write is refused before it begins,
 once a sync it asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again
-after a pause, ending read transactions it holds long where a full reader table is the cause; the index builder waits
-and tries its chunk again. A write that went on would grow the file past the bound, without end while the failure
-lasted. The next sync is tried at once by a `durable` wait or a write past the bound, and by the timer the sync interval
-after the failure, a second by default and 100 ms at the least, whether or not anything is committed since.
+after a pause, where a full reader table is the cause, until other processes, or threads of its own, end the read
+transactions they hold; the index builder waits it out, a second at a time, and runs its work again only once a write
+would go on, and `waitForIndexBuilds` meanwhile answers `SYNC_BEHIND` rather than waiting on it. A write that went on
+would grow the file past the bound, without end while the failure lasted. The next sync is tried at once by a `durable`
+wait or a write past the bound, and by the timer the sync interval after the failure, a second by default and 100 ms at
+the least, whether or not anything is committed since.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.
