@@ -70,9 +70,26 @@ fn a_writable_open_records_its_newest_commit_and_a_sync_moves_the_record_to_the_
     assert_eq!(store.remembered(), Some(moved.commit));
     assert!(!store.kept.as_ref().unwrap().pinned(), "the sync ended the pin, nothing being owed");
     store.close().unwrap();
-    // Opened again with nothing since, the open writes no record
+    // Opened again with nothing since, the open writes no record, and syncs nothing: it relies on the record's commit,
+    // the file's newest
     let store = Store::open(dir.path(), grouped()).unwrap();
     assert_eq!(record_in(dir.path()).unwrap().count, moved.count);
+    assert_eq!(store.remembered(), Some(moved.commit));
+    assert_eq!(store.record_syncs(), 0, "the open synced what it could rely on");
+    store.close().unwrap();
+}
+
+#[test]
+fn an_open_of_another_mode_than_the_record_s_writes_its_own_and_one_of_the_same_writes_none() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), grouped()).unwrap().close().unwrap();
+    let ordered = StoreOptions { sync_each_commit: true, ..grouped() };
+    let store = Store::open(dir.path(), ordered.clone()).unwrap();
+    let written = record_in(dir.path()).unwrap();
+    assert_eq!(written.mode, Mode::Ordered, "the record of the grouped mode was kept");
+    store.close().unwrap();
+    let store = Store::open(dir.path(), ordered).unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().count, written.count, "the record of its own mode was written again");
     store.close().unwrap();
 }
 
@@ -732,13 +749,31 @@ fn a_process_ended_at_each_step_of_a_restore_leaves_it_to_the_next_open() {
         let store = Store::open(dir.path(), grouped()).unwrap();
         put(&store, "a", b"1").unwrap();
         synced(&store);
+        // Two commits after the record's, so that neither meta page is its: the restore writes over each
         put(&store, "b", b"2").unwrap();
+        put(&store, "c", b"3").unwrap();
         let lost = copied(dir.path(), true);
         store.close().unwrap();
+        let (data, saved) = (lost.path().join("data.mdb"), lost.path().join(record::RESTORED));
+        let page = page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
+        let metas = |file: &Path| std::fs::read(file).unwrap()[..2 * page].to_vec();
+        let (before, body) = (metas(&data), record_in(lost.path()).unwrap().body);
+        // A save another death cut short, one byte shy of whole: made again, and not taken for the file's
+        std::fs::write(&saved, &before[1..]).unwrap();
         assert_eq!(child(lost.path(), &format!("restore-dies-at-{point}")), "dying", "{point}");
+        assert_eq!(std::fs::read(&saved).unwrap(), before, "{point}: the meta pages as they were, saved whole");
+        if point == "restore-half" {
+            // The first meta page written, from the map's size on, and the second as it was
+            let from = reach::PAGE_HEADER + record::WRITTEN_FROM;
+            let now = metas(&data);
+            assert_eq!(now[from..reach::PAGE_HEADER + body.len()], body[record::WRITTEN_FROM..], "the first");
+            assert_eq!(now[page..], before[page..], "the second was written before the restore was half done");
+        }
         let store = Store::open(lost.path(), grouped()).unwrap();
         assert_eq!((get(&store, "a").is_some(), get(&store, "b")), (true, None), "{point}");
         assert!(store.restored().is_some(), "{point}");
+        // The restore made again kept the save of the meta pages as they were before any restore
+        assert_eq!(std::fs::read(&saved).unwrap(), before, "{point}: saved again over the first");
         store.close().unwrap();
     }
 }
