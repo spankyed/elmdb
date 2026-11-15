@@ -263,18 +263,10 @@ impl Database {
     /// restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
     /// last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
     /// `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
-    #[napi(
-        getter,
-        ts_return_type = "{ schemaChanges: SchemaChange[]; restored: Restore | null; notBorneOut: boolean }"
-    )]
+    #[napi(getter, ts_return_type = "OpenReport")]
     pub fn open_report(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.openReport", || {
-            let report = self.inner.open_report();
-            Ok(serde_json::json!({
-                "schemaChanges": report.schema_changes,
-                "restored": report.restored,
-                "notBorneOut": report.not_borne_out,
-            }))
+            Ok(serde_json::to_value(self.inner.open_report()).expect("an open's report serializes"))
         })
     }
 

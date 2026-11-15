@@ -48,7 +48,9 @@ impl Default for OpenOptions {
 }
 
 /// What opening did
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct OpenReport {
     /// The schema's changes, each with what opening did about it; every addition when the database is new
     pub schema_changes: Vec<SchemaChange>,
