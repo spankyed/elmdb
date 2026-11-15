@@ -24,7 +24,8 @@ A good fit for knowledge tools, document libraries and other desktop apps with c
 import { Database } from 'elmdb';
 import { Packr } from 'msgpackr';
 
-const msgpack = new Packr({ useRecords: false, mapsAsObjects: true });
+// A sequence past 2^32 crosses as a 64-bit integer, which `int64AsType: 'number'` keeps a number
+const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'number' });
 
 const db = Database.open('./notes', {
   schema: {

@@ -4,7 +4,7 @@ import type { OpResult } from "./OpResult.js";
 
 /**
  * What a write's caller gets back across the binding: each operation's answer, the commit's change set and its
- * sequence (`protocol/Written.ts`)
+ * sequence
  */
 export type Written = { results: Array<OpResult>, changes: ChangeSet, 
 /**

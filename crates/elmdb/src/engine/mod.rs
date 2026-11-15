@@ -462,7 +462,7 @@ fn position(bytes: &[u8]) -> Result<changed::Position> {
 }
 
 /// What a write's caller gets back across the binding: each operation's answer, the commit's change set and its
-/// sequence (`protocol/Written.ts`)
+/// sequence
 #[derive(Debug, Clone, serde::Serialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]

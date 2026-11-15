@@ -550,8 +550,9 @@ Every commit produces a change set: the entities created, changed, trashed, rest
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
 had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
-checkpoint does not raise it). A batch's result carries
-the change set and the sequence (`Written`, generated as `protocol/Written.ts`), and so does a unit's commit, so a caller can tell whether a result it was handed
+checkpoint does not raise it). A database's write answers each operation's result, the change set and the
+sequence (`Written`, generated as `protocol/Written.ts`); a unit's commit answers its change set, whose `sequence` is
+the commit's, and a unit's write its results alone (`BatchResult`). So a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
 

@@ -2,6 +2,7 @@
 import type { OpResult } from "./OpResult.js";
 
 /**
- * What each operation answered, in the batch's order, and what the batch changed
+ * What each operation answered, in the batch's order: a unit's write answers it, and a database's write answers it
+ * inside `Written`, with the commit's change set and sequence
  */
 export type BatchResult = { results: Array<OpResult>, };
