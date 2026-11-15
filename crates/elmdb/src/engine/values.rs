@@ -237,7 +237,10 @@ fn describe(t: &ValueType) -> String {
         }
         ValueType::Ref { to } => format!("an id of {}", to.join(" or ")),
         ValueType::List { of } => format!("a list of {}", describe(of)),
-        other => format!("a {}", other.name()),
+        // Bytes and any take no article where a value is described: "is bytes", "a list of anything"
+        ValueType::Bytes => "bytes".to_owned(),
+        ValueType::Any => "anything".to_owned(),
+        other => other.named(),
     }
 }
 
@@ -248,7 +251,19 @@ fn takes(t: &ValueType, v: &Value) -> std::result::Result<(), String> {
         ValueType::Any => true,
         ValueType::String => v.is_str(),
         ValueType::Number => as_number(v).is_some_and(f64::is_finite),
-        ValueType::Integer => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
+        // Within ±2^53, compared exactly: 2^53 + 1 rounds to the bound as a float
+        ValueType::Integer => {
+            // A whole number, and whether it is within the bound; a fraction, NaN or an infinity is none
+            let within = match v {
+                Value::Integer(i) => Some(i.as_i64().is_some_and(|n| n.unsigned_abs() <= 1 << 53)),
+                _ => as_number(v).filter(|n| n.fract() == 0.0).map(|n| n.abs() <= 9_007_199_254_740_992.0),
+            };
+            match within {
+                Some(true) => true,
+                Some(false) => return Err("it is past ±2^53, which a number field holds".to_owned()),
+                None => false,
+            }
+        }
         ValueType::Boolean => v.is_bool(),
         ValueType::Bytes => matches!(v, Value::Binary(_)),
         ValueType::Object => v.is_map(),
@@ -375,6 +390,31 @@ mod tests {
         assert!(ok(ValueType::String, "a".into()).is_ok());
         assert!(ok(ValueType::Integer, Value::from(3.0)).is_ok(), "a float holding a whole number is an integer");
         assert!(ok(ValueType::Integer, Value::from(3.5)).is_err());
+        // ±2^53 is the bound, held exactly where a float would round the integer past it down to it
+        for n in [1i64 << 53, -(1i64 << 53)] {
+            assert!(ok(ValueType::Integer, Value::from(n)).is_ok(), "{n}");
+        }
+        let reason = |v: Value| ok(ValueType::Integer, v).unwrap_err().message;
+        for past in [
+            Value::from((1i64 << 53) + 1),
+            Value::from(-(1i64 << 53) - 1),
+            Value::from(i64::MIN),
+            Value::from(u64::MAX),
+            Value::from(9_007_199_254_740_994.0),
+            Value::from(-1e300),
+        ] {
+            let refused = reason(past.clone());
+            assert!(refused.contains("is an integer: it is past ±2^53"), "{past}: {refused}");
+        }
+        // No whole number: refused for what it is, not for the bound
+        for none in [Value::from(3.5), Value::from(f64::NAN), Value::from(f64::INFINITY)] {
+            let refused = reason(none.clone());
+            assert!(refused.contains("it got a number"), "{none}: {refused}");
+        }
+        assert!(ok(ValueType::Object, Value::from(1)).unwrap_err().message.contains("an object"));
+        assert!(ok(ValueType::Bytes, "a".into()).unwrap_err().message.contains("is bytes:"));
+        let list_of_any = ValueType::List { of: Box::new(ValueType::Any) };
+        assert!(ok(list_of_any, "x".into()).unwrap_err().message.contains("a list of anything"));
         assert!(
             ok(ValueType::Enum { values: vec!["a".into()] }, "b".into())
                 .unwrap_err()

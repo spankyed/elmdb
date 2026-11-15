@@ -461,8 +461,10 @@ fn position(bytes: &[u8]) -> Result<changed::Position> {
         .map_err(|error| Error::new(ErrorCode::BatchInvalid, format!("A position to read what changed from: {error}")))
 }
 
-/// What a write's caller gets back across the binding: each operation's answer, and the commit's change set
+/// What a write's caller gets back across the binding: each operation's answer, the commit's change set and its
+/// sequence
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Written<'a> {
     pub results: &'a [batch::OpResult],
