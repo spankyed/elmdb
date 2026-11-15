@@ -505,6 +505,59 @@ mod tests {
         assert_eq!(freed_from(&mut file, psize, 1, 0), 0, "the child past 2^32 pages, which the file doesn't hold");
     }
 
+    /// A file of `pages`, each at its number, and the directory that holds it
+    fn file_of(pages: &[Vec<u8>]) -> (tempfile::TempDir, File) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("free");
+        std::fs::write(&path, pages.concat()).unwrap();
+        let file = File::open(&path).unwrap();
+        (dir, file)
+    }
+
+    /// A branch page whose nodes are at the offsets given, each naming the child its low word holds
+    fn branch(psize: usize, nodes: &[(usize, u16)]) -> Vec<u8> {
+        let mut page = vec![0u8; psize];
+        page[10..12].copy_from_slice(&P_BRANCH.to_ne_bytes());
+        page[12..14].copy_from_slice(&((PAGE_HEADER + 2 * nodes.len()) as u16).to_ne_bytes());
+        for (i, (at, child)) in nodes.iter().enumerate() {
+            page[PAGE_HEADER + 2 * i..PAGE_HEADER + 2 * i + 2].copy_from_slice(&(*at as u16).to_ne_bytes());
+            page[*at..*at + 2].copy_from_slice(&child.to_ne_bytes());
+        }
+        page
+    }
+
+    /// A leaf at page 2 holding commit 5's record of seven pages freed
+    fn leaf_of_seven(psize: usize) -> Vec<u8> {
+        let list = [7u64.to_ne_bytes(), 1u64.to_ne_bytes()].concat();
+        page_with_a_node(psize, 2, P_LEAF, 16, 0, &5u64.to_ne_bytes(), &list)
+    }
+
+    #[test]
+    fn a_free_tree_a_torn_page_made_a_cycle_of_is_read_no_further_than_the_file_has_pages() {
+        let psize = 512;
+        // Page 1 a branch naming itself and the leaf: the stack holds two pages at most, and each turn of the cycle
+        // reads the branch and the leaf
+        let pages = vec![vec![0u8; psize], branch(psize, &[(100, 1), (200, 2)]), leaf_of_seven(psize)];
+        // On a thread of its own and waited for a while: a budget that never ran out would read the cycle for good
+        let (answered, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (_dir, mut file) = file_of(&pages);
+            let _ = answered.send(freed_from(&mut file, psize, 1, 0));
+        });
+        // Three pages read, the file's: the branch, the leaf, the branch again; the leaf once
+        let freed = answer.recv_timeout(std::time::Duration::from_secs(10)).expect("the cycle was read without end");
+        assert_eq!(freed, 7);
+    }
+
+    #[test]
+    fn a_branch_node_whose_head_runs_past_its_page_names_no_child() {
+        let psize = 512;
+        // Its pointer six bytes before the page's end, where its low word, within the page, names the leaf
+        let pages = vec![vec![0u8; psize], branch(psize, &[(psize - 6, 2)]), leaf_of_seven(psize)];
+        let (_dir, mut file) = file_of(&pages);
+        assert_eq!(freed_from(&mut file, psize, 1, 0), 0);
+    }
+
     #[test]
     fn a_leaf_of_the_main_tree_names_its_databases_roots_and_a_branch_names_none() {
         assert_eq!(named_roots(&page_with_a_named_root(P_LEAF, 42)), vec![42], "a plain value is no database");

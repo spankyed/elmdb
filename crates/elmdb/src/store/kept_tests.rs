@@ -716,7 +716,9 @@ fn a_write_past_the_bound_waits_for_its_sync_and_the_file_grows_by_the_bound_alo
     let (paused, held) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     failpoints::run_once_at(points::SYNC_DATA, &store.path, move || {
-        paused.send(()).unwrap();
+        // Not unwrapped: a test that failed before it heard this has dropped the receiver, and the sync its store's
+        // close makes comes here again, where a panic would leave the close waiting on a sync that never ends
+        let _ = paused.send(());
         let _ = released.recv_timeout(Duration::from_secs(30));
     });
     let writing = std::sync::Arc::clone(&store);

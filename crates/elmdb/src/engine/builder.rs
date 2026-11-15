@@ -395,6 +395,8 @@ fn wait_out(
     core.hold(Some(refused));
     let waited = loop {
         let until = Instant::now() + HELD_WAIT;
+        // mutant-skip: replace < with <= in wait_out
+        // The two differ only for an instant that lands on the deadline itself, which no test can arrange
         while Instant::now() < until && !stopping() {
             std::thread::sleep(Duration::from_millis(10));
         }

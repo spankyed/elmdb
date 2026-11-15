@@ -661,7 +661,7 @@ mod tests {
         let (paused, held) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
         failpoints::run_once_at(points::SYNC_DATA, &store.path, move || {
-            paused.send(()).unwrap();
+            let _ = paused.send(());
             let _ = released.recv_timeout(std::time::Duration::from_secs(5));
         });
         assert_eq!(store.begin().err().map(|error| error.code), Some(ErrorCode::UnitOpen));
