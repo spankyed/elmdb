@@ -1,7 +1,7 @@
 # A power loss that tears no file
 
-Status: designed, 2026-11-14; phases 1 to 4 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
-`store/record.rs`, `store/restore.rs`), 5 not. It is the answer to the one defect of the review of `ed20979` that was
+Status: designed, 2026-11-14; phases 1 to 5 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
+`store/record.rs`, `store/restore.rs`), but for phase 5's steps by hand on each platform. It is the answer to the one defect of the review of `ed20979` that was
 left for a design (`../roadmap.md`, change 1): in the grouped mode a power loss can leave a file that is no commit's,
 which reads wrongly or ends the process that reads it. This is the fifth draft. One reader read the four before it
 against the store and LMDB's source: the first, a marker of commits not yet synced, did not hold; the others were
