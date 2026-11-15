@@ -93,7 +93,7 @@ if (mode === 'seed') {
           ops.push({ op: 'link', source: `Note-${i}`, target: `Note-${previous}`, kind: 'refs' });
         }
       }
-      db.writeSync(packr.pack({ ops, now: 1000 }));
+      db.write(packr.pack({ ops, now: 1000 }));
     }
     if (workload.vectorDims) {
       let embedded = 0;
@@ -108,7 +108,7 @@ if (mode === 'seed') {
             model: 'synthetic-recovery', vector: Array.from({ length: workload.vectorDims }, (_, j) =>
               Math.sin(ordinal * (j + 1) * 0.001)) };
         });
-        const result = packr.unpack(db.writeSync(packr.pack({ ops, now: 1000 })));
+        const result = packr.unpack(db.write(packr.pack({ ops, now: 1000 })));
         if (result.results.some(row => row.kind !== 'done')) throw new Error('Synthetic embedding refused');
       }
       workload.embeddings = embedded;
