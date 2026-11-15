@@ -591,10 +591,10 @@ commit at a twentieth of the notes and at all of them, for a note of three terms
 of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
 twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
 misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
-status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
-end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
-count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
-to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+status keeps, the count of the last 500 of it, a page of fifty near the end of creation order and one near the
+end of the number's order, and every note in the number's order; of the names' order, its first ten, a page of fifty
+near the end of the loaded notes', the count by a range of the loaded notes' last (200 at a million notes), and every
+note in it; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
 elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
 SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
 entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the
